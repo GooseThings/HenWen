@@ -1,16 +1,28 @@
-## !!! Warning - There are known issues with rpt.conf !!!
-It's currently not saving with proper permissions. If you want to help throw a PR out there.
-## !!! Use at your own risk. !!!
-At least it looks really cool, right?
 # ASL3-EZ - AllStarLink 3 Node Manager
 
 A browser-based web interface for managing your AllStarLink 3 nodes:
 - Edit `rpt.conf` with field-by-field or raw text editing
+- Field-by-field editing validates values against the official ASL3 docs (dropdowns for fixed-choice settings, numeric inputs with min/max for timers) so you can't save an invalid value
 - Connect, disconnect, and monitor nodes via AMI (Asterisk Manager Interface)
 - Automatic backups on every save
 - Dashboard with system status and verbose debug logging
 - Node lookup from local astdb and AllStarLink stats API
-- Restart Asterisk from the Dashboard
+- Restart Asterisk, or just reload `rpt.conf` live, from the Dashboard
+- Settings page to rotate the app's Flask `SECRET_KEY` without hand-editing the service file
+
+> **Note:** ASL3-EZ has no login/authentication yet — anyone who can reach the configured port has full control (rpt.conf edits, Asterisk restart, node connect/disconnect). Authentication is planned for a future release; until then, only run this on a trusted network and don't expose it to the internet.
+
+---
+
+## Recent Changes
+
+- **Fixed: rpt.conf changes via the web UI not taking effect.** The "Reload rpt.conf" action was calling `asterisk -rx "rpt reload"`, which is not a real app_rpt CLI command — Asterisk's `-rx` exits 0 even for unknown commands, so the app reported success while silently doing nothing. Changes only ever took effect after a full Asterisk restart. Now uses the real command, `rpt restart`, and the endpoint checks the actual output instead of trusting the exit code.
+- **Fixed: a parser bug that invented fake settings.** Stock `rpt.conf` documents `node_lookup_method`'s valid values as indented comment lines (e.g. `;both = dns lookup first...`). The parser was reading these as real (disabled) settings named `both`, `dns`, and `file`. The General Settings page no longer shows these phantom entries.
+- **Fixed: toggling a setting on/off could blank its value.** The enable/disable switch and the value field were saved independently, so flipping just the switch (without touching the text field) could save an empty value, and vice versa. Both are now captured together.
+- **Added: server- and client-side validation for rpt.conf settings**, sourced from the official [AllStarLink rpt.conf documentation](https://allstarlink.github.io/config/rpt_conf/). Fixed-choice settings (`duplex`, `archiveformat`, `telemdefault`, etc.) now render as dropdowns instead of free text, and timer/numeric settings get range-checked number inputs. The same rules are enforced again on the backend (`/api/save`), so a request that bypasses the UI can't write an invalid value either. Several setting descriptions were also corrected against the docs (e.g. `duplex` mode meanings were wrong; an unverified "illegal in US" claim on `beaconing` was removed).
+- **Added: a Settings page** to rotate the Flask `SECRET_KEY` from the UI — generates a strong random key (or accepts a custom one, 16+ characters), writes it into the systemd unit file, and restarts the service to apply it. The Dashboard warns if you're still on the default key.
+- **Fixed: AMI command injection.** `/api/ami/connect`, `/api/ami/disconnect`, and `/api/ami/perm_connect` build raw AMI protocol commands from request fields. `local_node`/`remote_node` are now required to be numeric and `mode` is restricted to the documented `ilink` function numbers (1, 2, 3, 6, 12, 13) on every endpoint — previously some fields were unvalidated, which could let a request smuggle extra AMI actions (including system-level ones, since the AMI user typically has `command`/`system` permissions).
+- **Fixed: a DOM-XSS gap** in the frontend's `esc()` helper — it escaped `&`, `<`, `>`, and `"` but not `'`, which mattered for any value rendered inside a single-quoted `onclick` attribute. Now escapes all five.
 
 ---
 
@@ -86,6 +98,14 @@ Go to **AMI Diagnostics** in the web UI and click **Run Test**. You should see a
 
 ---
 
+## Changing the Flask Secret Key
+
+ASL3-EZ ships with a generic default `SECRET_KEY` so it works out of the box. It isn't currently used to protect anything sensitive (there's no login/session yet), but changing it is good hygiene and will matter once authentication is added.
+
+Go to **Settings** in the web UI and click **Generate & Apply New Key** (or enter your own, 16+ characters). This writes the new key into the systemd unit file and restarts ASL3-EZ to apply it — the page will briefly disconnect, then reload it. The Dashboard shows a warning banner if you're still on the default key.
+
+---
+
 ## Troubleshooting
 
 **Service won't start:**
@@ -97,6 +117,10 @@ systemctl status ASL3-EZ
 **Permission denied saving rpt.conf:**
 - The service must run as root. Verify `User=root` is in the service file.
 - Check: `ls -la /etc/asterisk/rpt.conf`
+
+**Saved rpt.conf changes don't seem to take effect:**
+- Use **Reload rpt.conf** on the Dashboard (runs `rpt restart`, which re-reads rpt.conf without a full Asterisk restart) after saving.
+- If that still doesn't help, fall back to a full **Restart Asterisk**.
 
 **AMI login failed:**
 - Check `AMI_USER` and `AMI_SECRET` in the service file match exactly what is in manager.conf.
@@ -119,18 +143,20 @@ systemctl status ASL3-EZ
 
 All settings can be overridden in the service file:
 
-| Variable        | Default                       | Description                          |
-|-----------------|-------------------------------|--------------------------------------|
-| `AMI_USER`      | (none)                        | AMI username — MUST be set           |
-| `AMI_SECRET`    | (none)                        | AMI password — MUST be set           |
-| `AMI_HOST`      | `127.0.0.1`                   | Asterisk host                        |
-| `AMI_PORT`      | `5038`                        | AMI TCP port                         |
-| `RPT_CONF_PATH` | `/etc/asterisk/rpt.conf`      | Path to rpt.conf                     |
-| `MANAGER_CONF`  | `/etc/asterisk/manager.conf`  | Path to manager.conf                 |
-| `BACKUP_DIR`    | `/etc/asterisk/rpt_backups`   | Backup directory                     |
-| `PORT`          | `5000`                        | Web server port                      |
-| `HOST`          | `0.0.0.0`                     | Bind address                         |
-| `SECRET_KEY`    | `asl3-ez-change-me`           | Flask session key (change this!)     |
+| Variable           | Default                                       | Description                                   |
+|--------------------|------------------------------------------------|------------------------------------------------|
+| `AMI_USER`         | (none)                                          | AMI username — MUST be set                    |
+| `AMI_SECRET`        | (none)                                          | AMI password — MUST be set                    |
+| `AMI_HOST`          | `127.0.0.1`                                    | Asterisk host                                  |
+| `AMI_PORT`          | `5038`                                          | AMI TCP port                                   |
+| `RPT_CONF_PATH`     | `/etc/asterisk/rpt.conf`                       | Path to rpt.conf                               |
+| `MANAGER_CONF`      | `/etc/asterisk/manager.conf`                   | Path to manager.conf                           |
+| `BACKUP_DIR`        | `/etc/asterisk/rpt_backups`                    | Backup directory                               |
+| `PORT`              | `5000`                                          | Web server port                                |
+| `HOST`              | `0.0.0.0`                                      | Bind address                                   |
+| `SECRET_KEY`        | `asl3-ez-change-me`                            | Flask session key — change via the Settings page |
+| `SERVICE_NAME`      | `ASL3-EZ`                                      | systemd unit name, used when applying a new SECRET_KEY |
+| `SERVICE_FILE_PATH` | `/etc/systemd/system/<SERVICE_NAME>.service`   | Path to the systemd unit file the Settings page edits |
 
 ---
 
@@ -144,7 +170,7 @@ ASL3-EZ/
 ├── requirements.txt        # Python deps (flask, gunicorn)
 ├── ASL3-EZ.service         # systemd unit file
 ├── install.sh              # Installer
-├── uninstall.sh            # Uninstaller
+├── uninstall.sh             # Uninstaller
 ├── sample-rpt.conf         # Sample for testing
 └── README.md
 ```

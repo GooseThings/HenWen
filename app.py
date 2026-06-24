@@ -39,6 +39,7 @@ import tempfile
 import sys
 import pwd
 import grp
+import secrets
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify
 
@@ -61,6 +62,13 @@ HOST            = os.environ.get("HOST",             "0.0.0.0")
 DB_PATH         = os.environ.get("DB_PATH",          "/etc/asterisk/asl3ez.db")
 AMI_HOST        = os.environ.get("AMI_HOST",         "127.0.0.1")
 AMI_PORT        = int(os.environ.get("AMI_PORT",     5038))
+SERVICE_NAME    = os.environ.get("SERVICE_NAME",     "ASL3-EZ")
+SERVICE_FILE_PATH = os.environ.get("SERVICE_FILE_PATH",
+                                    f"/etc/systemd/system/{SERVICE_NAME}.service")
+
+# SECRET_KEY values that ship with the app/installer — used to warn the user
+# in the dashboard that they're still on the default and should change it.
+DEFAULT_SECRET_KEYS = {"", "asl3-ez-change-me", "asl3-ez-change-me-in-production"}
 
 # Persistent AMI poller settings (tunable via service file env vars)
 # 3s poll matches Allmon's update rate; 30s TTL avoids false "stale" warnings
@@ -780,6 +788,15 @@ def parse_stanza_settings(content, stanza_name):
             stripped  = line.strip()
             commented = stripped.startswith(";")
             if commented:
+                # Heavily-indented comment-only lines are wrapped documentation
+                # (e.g. stock rpt.conf explains node_lookup_method's "both"/
+                # "dns"/"file" values as indented comment lines under the
+                # directive), not a real disabled setting — those are
+                # conventionally flush-left. Without this, "both"/"dns"/"file"
+                # get parsed as bogus settings of their own.
+                indent = len(line) - len(line.lstrip(" \t"))
+                if indent > 8:
+                    continue
                 stripped = stripped[1:].strip()
             m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([^;]*?)(?:\s*;.*)?$', stripped)
             if m:
@@ -872,6 +889,117 @@ def update_setting_in_content(content, section, key, value, enable=True):
         result = new_lines
 
     return "".join(result)
+
+
+# ---------------------------------------------------------------------------
+# rpt.conf setting validation
+#
+# Mirrors the GENERAL_META / NODE_SECS metadata in templates/index.html
+# (sourced from https://allstarlink.github.io/config/rpt_conf/). The web UI
+# already restricts these fields to dropdowns/number inputs, but a request
+# can bypass the UI entirely, so the same constraints are enforced here
+# before anything is written to rpt.conf. Keys not listed are free-form
+# (paths, stanza names, etc.) and are not validated.
+# ---------------------------------------------------------------------------
+SETTINGS_SCHEMA = {
+    # [general]
+    "node_lookup_method": {"type": "enum", "options": ["both", "dns", "file"]},
+    "max_dns_node_length": {"type": "number", "min": 1},
+
+    # Basic / Required
+    "duplex":              {"type": "enum", "options": ["0", "1", "2", "3", "4"]},
+
+    # Station Identification
+    "idtime":              {"type": "number", "min": 0},
+    "politeid":            {"type": "number", "min": 0},
+    "beaconing":           {"type": "enum", "options": ["0", "1"]},
+
+    # Timers
+    "hangtime":            {"type": "number", "min": 0},
+    "althangtime":         {"type": "number", "min": 0},
+    "totime":              {"type": "number", "min": 0, "max": 9999999},
+    "time_out_reset_unkey_interval":    {"type": "number", "min": 0, "max": 10000},
+    "time_out_reset_kerchunk_interval": {"type": "number", "min": 0},
+    "sleeptime":           {"type": "number", "min": 0},
+
+    # Telemetry
+    "telemdefault":        {"type": "enum", "options": ["0", "1", "2"]},
+    "telemdynamic":        {"type": "enum", "options": ["0", "1"]},
+    "holdofftelem":        {"type": "enum", "options": ["0", "1"]},
+    "telemduckdb":         {"type": "number"},
+    "telemnomdb":          {"type": "number"},
+    "nounkeyct":           {"type": "enum", "options": ["yes", "no"]},
+    "nolocallinkct":       {"type": "enum", "options": ["0", "1"]},
+
+    # DTMF & Functions
+    "dtmfkey":             {"type": "enum", "options": ["0", "1"]},
+    "propagate_dtmf":      {"type": "enum", "options": ["yes", "no"]},
+    "linktolink":          {"type": "enum", "options": ["yes", "no"]},
+
+    # Node Connections
+    "lnkactenable":        {"type": "enum", "options": ["0", "1"]},
+    "lnkacttime":          {"type": "number", "min": 0},
+
+    # Audio
+    "linkmongain":         {"type": "number"},
+    "erxgain":             {"type": "number"},
+    "etxgain":             {"type": "number"},
+
+    # Tail & Scheduler
+    "tailmessagetime":     {"type": "number", "min": 0, "max": 200000000},
+    "tailsquashedtime":    {"type": "number", "min": 0},
+
+    # Parrot / Echo
+    "parrot":              {"type": "enum", "options": ["0", "1"]},
+    "parrottime":          {"type": "number", "min": 0},
+
+    # EchoLink
+    "eannmode":            {"type": "enum", "options": ["0", "1", "2", "3"]},
+    "echolinkdefault":     {"type": "enum", "options": ["0", "1", "2", "3"]},
+    "echolinkdynamic":     {"type": "enum", "options": ["0", "1"]},
+
+    # Archiving & Stats
+    "archiveformat":       {"type": "enum", "options": ["wav49", "wav", "gsm"]},
+    "archiveaudio":        {"type": "enum", "options": ["yes", "no"]},
+
+    # Stanza Name Overrides (telemetry-mode keys despite the section name)
+    "guilinkdefault":      {"type": "enum", "options": ["0", "1", "2", "3"]},
+    "guilinkdynamic":      {"type": "enum", "options": ["0", "1"]},
+    "phonelinkdefault":    {"type": "enum", "options": ["0", "1", "2", "3"]},
+    "phonelinkdynamic":    {"type": "enum", "options": ["0", "1"]},
+    "tlbdefault":          {"type": "enum", "options": ["0", "1", "2", "3"]},
+    "tlbdynamic":          {"type": "enum", "options": ["0", "1"]},
+
+    # Voting
+    "votermode":           {"type": "enum", "options": ["0", "1", "2"]},
+    "votertype":           {"type": "enum", "options": ["0", "1", "2"]},
+    "votermargin":         {"type": "number"},
+}
+
+
+def validate_setting(key, value):
+    """
+    Return None if `value` is acceptable for `key`, otherwise an error string.
+    Keys with no schema entry are free-form and always pass.
+    """
+    schema = SETTINGS_SCHEMA.get(key)
+    if schema is None or value == "":
+        return None
+
+    if schema["type"] == "enum":
+        if value not in schema["options"]:
+            return f"{key}: {value!r} is not valid. Must be one of {schema['options']}"
+    elif schema["type"] == "number":
+        try:
+            num = float(value)
+        except ValueError:
+            return f"{key}: {value!r} is not a number"
+        if "min" in schema and num < schema["min"]:
+            return f"{key}: {value!r} is below the minimum of {schema['min']}"
+        if "max" in schema and num > schema["max"]:
+            return f"{key}: {value!r} is above the maximum of {schema['max']}"
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1126,6 +1254,16 @@ def api_save():
     changes = data.get("changes", {})
     log("INFO", f"[API] /api/save section={section!r} changes={list(changes.keys())}")
 
+    errors = []
+    for key, info in changes.items():
+        if info.get("enabled", True):
+            err = validate_setting(key, info.get("value", ""))
+            if err:
+                errors.append(err)
+    if errors:
+        log("WARN", f"[API] /api/save rejected invalid value(s): {errors}")
+        return jsonify({"error": "Invalid setting value(s)", "details": errors}), 400
+
     for key, info in changes.items():
         content = update_setting_in_content(
             content, section, key,
@@ -1175,20 +1313,30 @@ def api_restart():
 def api_reload():
     """
     Reload rpt.conf without restarting Asterisk.
-    'rpt reload' re-reads rpt.conf and applies changes live.
-    This is what you want after editing rpt.conf — much faster than
-    a full restart and does not drop active connections.
+
+    'rpt reload' is NOT a real app_rpt CLI command (verified against
+    `core show help rpt` — app_rpt only registers 'rpt restart'). Asterisk's
+    `-rx` always exits 0 even for an unknown command, so the previous
+    "rpt reload" call silently did nothing while the API still reported
+    success — saved changes never actually took effect until a full
+    Asterisk restart. 'rpt restart' re-reads rpt.conf and applies changes
+    live without restarting all of Asterisk.
     """
     log("INFO", "[API] /api/reload called")
+    cmd = "rpt restart"
     try:
         r = subprocess.run(
-            [ASTERISK_PATH, "-rx", "rpt reload"],
+            [ASTERISK_PATH, "-rx", cmd],
             capture_output=True, text=True, timeout=15
         )
-        log("INFO", f"[API] asterisk -rx rpt reload -> rc={r.returncode} out={r.stdout!r}")
+        out = r.stdout.strip()
+        log("INFO", f"[API] asterisk -rx '{cmd}' -> rc={r.returncode} out={out!r}")
+        if r.returncode != 0 or "No such command" in out:
+            return jsonify({"error": out or f"asterisk returned code {r.returncode}",
+                            "command": f"{ASTERISK_PATH} -rx '{cmd}'"}), 500
         return jsonify({"success": True,
-                        "output":  r.stdout.strip() or "rpt.conf reloaded.",
-                        "command": f"{ASTERISK_PATH} -rx 'rpt reload'"})
+                        "output":  out or "rpt.conf reloaded.",
+                        "command": f"{ASTERISK_PATH} -rx '{cmd}'"})
     except Exception as e:
         log("ERROR", f"[API] /api/reload exception: {e}")
         return jsonify({"error": str(e)}), 500
@@ -1318,6 +1466,17 @@ def api_nodestats_batch():
 
 # ── AMI node control API ──────────────────────────────────────────────────────
 
+# ilink function numbers accepted from API callers (see AMIClient.rpt_cmd docstring).
+# local_node/remote_node/mode are interpolated directly into the AMI Command: line,
+# so every field must be validated before it reaches rpt_cmd() — an unvalidated
+# field containing \r\n could smuggle extra AMI actions into the connection.
+VALID_ILINK_MODES = {"1", "2", "3", "6", "12", "13"}
+
+
+def _valid_node(node: str) -> bool:
+    return bool(node) and node.isdigit()
+
+
 @app.route("/api/ami/status")
 def api_ami_status():
     """
@@ -1350,10 +1509,10 @@ def api_ami_connect():
     mode        = str(data.get("mode", "3"))
     disc_first  = data.get("disconnect_first", False)
 
-    if not local_node or not remote_node:
-        return jsonify({"error": "local_node and remote_node required"}), 400
-    if not local_node.isdigit() or not remote_node.isdigit():
-        return jsonify({"error": "Node numbers must be numeric"}), 400
+    if not _valid_node(local_node) or not _valid_node(remote_node):
+        return jsonify({"error": "local_node and remote_node must be numeric"}), 400
+    if mode not in VALID_ILINK_MODES:
+        return jsonify({"error": f"Invalid mode {mode!r}. Must be one of {sorted(VALID_ILINK_MODES)}"}), 400
 
     log("INFO", f"[API] /api/ami/connect local={local_node} remote={remote_node} mode={mode} disc_first={disc_first}")
 
@@ -1386,8 +1545,10 @@ def api_ami_disconnect():
     local_node  = str(data.get("local_node",  "")).strip()
     remote_node = str(data.get("remote_node", "")).strip()
 
-    if not local_node:
-        return jsonify({"error": "local_node required"}), 400
+    if not _valid_node(local_node):
+        return jsonify({"error": "local_node must be numeric"}), 400
+    if remote_node and not _valid_node(remote_node):
+        return jsonify({"error": "remote_node must be numeric"}), 400
 
     log("INFO", f"[API] /api/ami/disconnect local={local_node} remote={remote_node or '(all)'}")
 
@@ -1412,8 +1573,10 @@ def api_ami_perm_connect():
     remote_node = str(data.get("remote_node", "")).strip()
     mode        = str(data.get("mode", "13"))
 
-    if not local_node or not remote_node:
-        return jsonify({"error": "local_node and remote_node required"}), 400
+    if not _valid_node(local_node) or not _valid_node(remote_node):
+        return jsonify({"error": "local_node and remote_node must be numeric"}), 400
+    if mode not in VALID_ILINK_MODES:
+        return jsonify({"error": f"Invalid mode {mode!r}. Must be one of {sorted(VALID_ILINK_MODES)}"}), 400
 
     log("INFO", f"[API] /api/ami/perm_connect local={local_node} remote={remote_node} mode={mode}")
 
@@ -1450,7 +1613,90 @@ def api_sysinfo():
         "rpt_conf_path":     RPT_CONF_PATH,
         "rpt_conf_exists":   os.path.exists(RPT_CONF_PATH),
         "rpt_conf_writable": os.access(RPT_CONF_PATH, os.W_OK),
+        "secret_key_is_default": SECRET_KEY in DEFAULT_SECRET_KEYS,
     })
+
+
+# ── App settings (SECRET_KEY) ─────────────────────────────────────────────────
+#
+# SECRET_KEY ships with a well-known default ("asl3-ez-change-me-in-production")
+# so the app works out of the box. It's not currently used to protect anything
+# sensitive (no sessions/auth yet), but changing it is still good hygiene and
+# will matter once auth is added. These routes let the user change it from the
+# UI instead of hand-editing the systemd unit file.
+
+@app.route("/api/settings/secret_key")
+def api_get_secret_key():
+    return jsonify({
+        "is_default":         SECRET_KEY in DEFAULT_SECRET_KEYS,
+        "service_file":       SERVICE_FILE_PATH,
+        "service_file_exists": os.path.exists(SERVICE_FILE_PATH),
+    })
+
+
+@app.route("/api/settings/secret_key", methods=["POST"])
+def api_set_secret_key():
+    """
+    Write a new SECRET_KEY into the systemd unit file's Environment line,
+    then reload+restart the service so it takes effect. The response is
+    sent before the restart is triggered (from a background thread) so the
+    browser actually receives it before the worker process is replaced.
+    """
+    data    = request.json or {}
+    new_key = str(data.get("secret_key", "")).strip()
+
+    if new_key and len(new_key) < 16:
+        return jsonify({"error": "Secret key must be at least 16 characters"}), 400
+    if not new_key:
+        new_key = secrets.token_hex(32)
+        log("INFO", "[SETTINGS] Generated a new random SECRET_KEY")
+
+    if not os.path.exists(SERVICE_FILE_PATH):
+        return jsonify({"error": f"Service file not found: {SERVICE_FILE_PATH}",
+                        "hint": "Set SERVICE_FILE_PATH if the unit file lives elsewhere."}), 404
+
+    try:
+        with open(SERVICE_FILE_PATH) as f:
+            content = f.read()
+
+        # Matches both quoted (Environment="SECRET_KEY=...") and unquoted
+        # (Environment=SECRET_KEY=...) forms used across this project's files.
+        pattern  = re.compile(r'^Environment="?SECRET_KEY=[^"\n]*"?[ \t]*$', re.MULTILINE)
+        new_line = f'Environment="SECRET_KEY={new_key}"'
+        if pattern.search(content):
+            content = pattern.sub(new_line, content, count=1)
+        else:
+            content = re.sub(r'(\[Service\]\s*\n)', r'\1' + new_line + "\n", content, count=1)
+
+        fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(SERVICE_FILE_PATH), prefix=".asl3ez_svc_")
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp_path, SERVICE_FILE_PATH)
+        log("INFO", f"[SETTINGS] SECRET_KEY updated in {SERVICE_FILE_PATH}")
+
+        subprocess.run([SYSTEMCTL_PATH, "daemon-reload"], capture_output=True, text=True, timeout=15)
+
+        def _delayed_restart():
+            time.sleep(1.0)
+            log("INFO", f"[SETTINGS] Restarting {SERVICE_NAME} to apply new SECRET_KEY")
+            subprocess.run([SYSTEMCTL_PATH, "restart", SERVICE_NAME], capture_output=True, text=True, timeout=30)
+
+        threading.Thread(target=_delayed_restart, daemon=True).start()
+
+        return jsonify({
+            "success": True,
+            "message": f"SECRET_KEY updated. Restarting {SERVICE_NAME} now — "
+                       "the page will briefly disconnect, then reload it.",
+        })
+    except PermissionError as e:
+        log("ERROR", f"[SETTINGS] Permission denied writing {SERVICE_FILE_PATH}: {e}")
+        return jsonify({"error": str(e),
+                        "hint": "Service must run as root to edit the systemd unit file."}), 403
+    except Exception as e:
+        log("ERROR", f"[SETTINGS] secret_key update failed: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/lookup/<node>")

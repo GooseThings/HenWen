@@ -227,6 +227,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     <button class="nav-item" onclick="showPage('raw-editor')">Raw Editor</button>
     <button class="nav-item" onclick="showPage('backups')">Backups</button>
     <button class="nav-item" onclick="showPage('ami-diag')">AMI Diagnostics</button>
+    <button class="nav-item" onclick="showPage('settings')">Settings</button>
   </nav>
 </aside>
 
@@ -248,6 +249,8 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
       System overview &mdash; <span id="dash-ts" class="muted">loading...</span>
       <button class="btn btn-sm" style="margin-left:10px" onclick="refreshDashboard()">Refresh</button>
     </div>
+
+    <div id="dash-secret-warn"></div>
 
     <div class="stat-grid" style="margin-bottom:20px">
       <div class="stat-box"><div class="stat-label">Asterisk</div><div class="stat-value" id="s-ast">...</div></div>
@@ -498,6 +501,37 @@ sudo asterisk -rx "module reload manager"</pre>
     </div>
   </section>
 
+  <!-- Settings -->
+  <section class="page" id="page-settings">
+    <div class="page-title">Settings</div>
+    <div class="page-sub">App-level configuration for ASL3-EZ itself.</div>
+
+    <div class="card">
+      <div class="card-header"><h2>Flask Secret Key</h2></div>
+      <div class="card-body">
+        <p class="muted" style="margin-bottom:14px">
+          SECRET_KEY is a Flask app setting. It ships with a generic default so the app
+          works out of the box; changing it is good practice, especially once login/session
+          features are added. It's stored as an Environment line in the systemd unit file.
+        </p>
+        <div id="secret-key-status" style="margin-bottom:14px"><span class="muted">Loading...</span></div>
+
+        <div class="form-group">
+          <label class="form-label">Custom secret key (optional &mdash; leave blank to auto-generate a strong random one)</label>
+          <input type="text" id="secret-key-input" placeholder="Leave blank to auto-generate" autocomplete="off">
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-primary" onclick="applySecretKey()">Generate &amp; Apply New Key</button>
+        </div>
+        <div id="secret-key-result" style="margin-top:14px"></div>
+        <p class="muted" style="margin-top:10px">
+          Applying restarts the ASL3-EZ service to load the new key. This briefly disconnects
+          the web UI; reload the page after a couple of seconds.
+        </p>
+      </div>
+    </div>
+  </section>
+
 </main>
 </div>
 
@@ -543,7 +577,8 @@ function clearLog(id) {
 function esc(s) {
   return String(s)
     .replace(/&/g,'&amp;').replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
 }
 
 /* ── API ────────────────────────────────────────────────────────────────── */
@@ -588,6 +623,7 @@ function showPage(id) {
   else if (id === 'raw-editor')   rawLoad();
   else if (id === 'backups')      loadBackups();
   else if (id === 'ami-diag')     loadSysInfo();
+  else if (id === 'settings')     loadSecretKeyStatus();
   else if (id === 'general')      loadGeneralEditor();
   else {
     var m = id.match(/^node-(\d+)$/);
@@ -632,6 +668,12 @@ async function refreshDashboard() {
     (d.rpt_conf_exists && d.rpt_conf_writable) ? 'ok' : d.rpt_conf_exists ? 'warn' : 'error');
 
   document.getElementById('dash-ts').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+
+  var secretWarnEl = document.getElementById('dash-secret-warn');
+  secretWarnEl.innerHTML = d.secret_key_is_default
+    ? '<div class="alert alert-warn">Still using the default SECRET_KEY. '
+      + '<a href="javascript:void(0)" onclick="showPage(\'settings\')" style="color:inherit;text-decoration:underline">Change it in Settings</a>.</div>'
+    : '';
 
   log('Asterisk=' + (d.asterisk_active ? 'running' : 'stopped')
     + ' | ASL=' + d.asl_version
@@ -678,7 +720,38 @@ async function fetchConf() {
   return r.data;
 }
 
-function makeToggleRow(key, value, commented, desc) {
+// Builds the value input for a setting row. meta.type selects the widget:
+//   'enum'   -> <select> restricted to meta.options (limits input to valid values)
+//   'number' -> <input type=number> with meta.min/meta.max
+//   (none)   -> free-text <input type=text> (paths, stanza names, etc.)
+function buildValueInput(key, value, meta) {
+  meta = meta || {};
+  var common = 'style="width:240px;font-family:var(--mono);font-size:0.85rem" '
+             + 'onchange="markChange(\'' + esc(key) + '\',this)"';
+
+  if (meta.type === 'enum' && meta.options) {
+    var hasCurrent = meta.options.some(function(o) { return o.value === value; });
+    var optHtml = '';
+    if (value !== '' && !hasCurrent) {
+      optHtml += '<option value="' + esc(value) + '" selected>' + esc(value) + ' (current — non-standard)</option>';
+    }
+    meta.options.forEach(function(o) {
+      optHtml += '<option value="' + esc(o.value) + '"' + (o.value === value ? ' selected' : '') + '>'
+               + esc(o.value) + ' — ' + esc(o.label) + '</option>';
+    });
+    return '<select ' + common + '>' + optHtml + '</select>';
+  }
+
+  if (meta.type === 'number') {
+    var minAttr = (meta.min != null) ? ' min="' + meta.min + '"' : '';
+    var maxAttr = (meta.max != null) ? ' max="' + meta.max + '"' : '';
+    return '<input type="number" value="' + esc(value) + '"' + minAttr + maxAttr + ' ' + common + '>';
+  }
+
+  return '<input type="text" value="' + esc(value) + '" ' + common + '>';
+}
+
+function makeToggleRow(key, value, commented, desc, meta) {
   var checked = commented ? '' : 'checked';
   return '<div class="toggle-row">'
     + '<div class="toggle-info">'
@@ -686,9 +759,7 @@ function makeToggleRow(key, value, commented, desc) {
     + (desc ? '<div class="toggle-desc">' + esc(desc) + '</div>' : '')
     + '</div>'
     + '<div style="display:flex;align-items:center;gap:12px;flex-shrink:0">'
-    + '<input type="text" value="' + esc(value) + '" '
-    + 'style="width:220px;font-family:var(--mono);font-size:0.85rem" '
-    + 'onchange="markChange(\'' + esc(key) + '\',this.value)">'
+    + buildValueInput(key, value, meta)
     + '<label class="switch">'
     + '<input type="checkbox" ' + checked + ' onchange="markToggle(\'' + esc(key) + '\',this)">'
     + '<span class="slider"></span>'
@@ -696,17 +767,27 @@ function makeToggleRow(key, value, commented, desc) {
     + '</div></div>';
 }
 
-function markChange(key, val) {
+// markChange/markToggle both capture the row's full state (value + enabled)
+// so toggling the switch without touching the value field — or vice versa —
+// never sends a half-filled change that would blank out the other field.
+function markChange(key, inputEl) {
+  var val = inputEl.value;
+  var row = inputEl.closest('.toggle-row');
+  var cb  = row ? row.querySelector('input[type=checkbox]') : null;
   if (!pendingChanges[currentSection]) pendingChanges[currentSection] = {};
   if (!pendingChanges[currentSection][key]) pendingChanges[currentSection][key] = {};
-  pendingChanges[currentSection][key].value = val;
+  pendingChanges[currentSection][key].value   = val;
+  pendingChanges[currentSection][key].enabled = cb ? cb.checked : true;
   showUnsaved('Change pending: ' + key + ' = ' + val);
 }
 
 function markToggle(key, cb) {
+  var row   = cb.closest('.toggle-row');
+  var input = row ? row.querySelector('input[type=text], input[type=number], select') : null;
   if (!pendingChanges[currentSection]) pendingChanges[currentSection] = {};
   if (!pendingChanges[currentSection][key]) pendingChanges[currentSection][key] = {};
   pendingChanges[currentSection][key].enabled = cb.checked;
+  if (input) pendingChanges[currentSection][key].value = input.value;
   showUnsaved('Toggle: ' + key + ' -> ' + (cb.checked ? 'enabled' : 'commented'));
 }
 
@@ -736,6 +817,7 @@ async function saveChanges() {
     hideUnsaved();
   } else {
     log('Save failed: ' + (r.data.error || r.status), 'ERROR');
+    (r.data.details || []).forEach(function(d) { log('  ' + d, 'ERROR'); });
     if (r.data.hint) log(r.data.hint, 'WARN');
   }
 }
@@ -751,11 +833,18 @@ function discardChanges() {
 }
 
 /* ── General editor ─────────────────────────────────────────────────────── */
-// Settings from the [general] stanza per the official ASL3 rpt.conf docs
+// Settings from the [general] stanza — verified against
+// https://allstarlink.github.io/config/rpt_conf/
 var GENERAL_META = [
-  {key:'node_lookup_method', desc:'Node lookup method: both (default) | dns | file'},
-  {key:'dns_node_domain',    desc:'DNS domain for node lookups (default: nodes.allstarlink.org)'},
-  {key:'max_dns_node_length',desc:'Max node number length for DNS queries (default 6)'},
+  {key:'node_lookup_method', desc:'Method used to look up node info: both (default), dns, or file only.',
+   type:'enum', options:[
+     {value:'both', label:'Try DNS, then local file (default)'},
+     {value:'dns',  label:'DNS only'},
+     {value:'file', label:'Local file only'},
+   ]},
+  {key:'dns_node_domain',    desc:'DNS domain used for node lookups (default: nodes.allstarlink.org).'},
+  {key:'max_dns_node_length',desc:'Maximum node-number length to attempt a DNS query for (default 6).',
+   type:'number', min:1},
 ];
 
 async function loadGeneralEditor() {
@@ -772,7 +861,7 @@ async function loadGeneralEditor() {
   var html = '<div class="card"><div class="card-body">';
   GENERAL_META.forEach(function(m) {
     var st = s[m.key] || {};
-    html += makeToggleRow(m.key, st.value || '', st.commented !== false, m.desc);
+    html += makeToggleRow(m.key, st.value || '', st.commented !== false, m.desc, m);
   });
   // Show any other keys present in [general] not in our known list
   var knownGen = {node_lookup_method:1, dns_node_domain:1, max_dns_node_length:1};
@@ -789,109 +878,167 @@ async function loadGeneralEditor() {
 /* ── Node editor ────────────────────────────────────────────────────────── */
 // Settings sourced directly from https://allstarlink.github.io/config/rpt_conf/
 // Organised to match the official documentation sections.
+// Telemetry-mode settings (telemdefault, echolinkdefault, guilinkdefault,
+// phonelinkdefault, tlbdefault) all share the same 0-3 meaning per the docs:
+// 0=off, 1=on, 2=timed (on during/after a command, then off), 3=follow local
+// telemetry mode. telemdefault itself only goes 0-2 (no "follow local" — it
+// IS local). Built as a function so each picker still gets its own default.
+function telemModeOptions(extra3) {
+  var opts = [
+    {value:'0', label:'Off'},
+    {value:'1', label:'On'},
+    {value:'2', label:'Timed (on during/after a command, then off)'},
+  ];
+  if (extra3) opts.push({value:'3', label:'Follow local telemetry mode'});
+  return opts;
+}
+var YES_NO_OPTS = [{value:'yes', label:'Yes'}, {value:'no', label:'No'}];
+var ZERO_ONE_OPTS = [{value:'0', label:'0 — disabled (default)'}, {value:'1', label:'1 — enabled'}];
+
 var NODE_SECS = [
   {title:'Basic / Required', keys:[
-    {key:'rxchannel',      desc:'Radio interface: dahdi/pseudo (hub), SimpleUSB/XXXX, Radio/XXXX'},
-    {key:'duplex',         desc:'0=half no telem, 1=half with telem, 2=full duplex repeater, 3=full no repeat, 4=full patch only'},
-    {key:'context',        desc:'Asterisk dialplan context (default: radio)'},
-    {key:'callerid',       desc:'Autopatch caller ID — "Repeater" <0000000000>'},
-    {key:'accountcode',    desc:'Asterisk CDR account code (optional)'},
-    {key:'linktolink',     desc:'Full duplex in duplex=0 mode for multiport repeater controllers (yes/no)'},
+    {key:'rxchannel',      desc:'Radio interface driver, e.g. dahdi/pseudo (hub node), SimpleUSB/usbradio, Radio/usbradio.'},
+    {key:'duplex',         desc:'Duplex/repeat mode for this node. Default is 2.',
+     type:'enum', options:[
+       {value:'0', label:'Half duplex, no telemetry tones or hang time'},
+       {value:'1', label:'Half duplex, with telemetry tones and hang time'},
+       {value:'2', label:'Full duplex, with telemetry tones and hang time (default)'},
+       {value:'3', label:'Full duplex, telemetry/hang time, but audio is not repeated'},
+       {value:'4', label:'Full duplex, telemetry/hang time, repeats audio only when autopatch is down'},
+     ]},
+    {key:'context',        desc:'Asterisk dialplan context for this node (default: radio).'},
+    {key:'callerid',       desc:'Autopatch caller ID, e.g. "Repeater" <0000000000>.'},
+    {key:'accountcode',    desc:'Asterisk CDR account code (optional).'},
+    {key:'linktolink',     desc:'In duplex=0 mode, forces the radio interface into full duplex while keeping all other duplex-0 behavior.',
+     type:'enum', options: YES_NO_OPTS},
   ]},
   {title:'Station Identification', keys:[
-    {key:'idrecording',    desc:'Voice or CW ID — e.g. |iWB6NIL for CW, or sound filename (no extension)'},
-    {key:'idtalkover',     desc:'Alternate ID played over a transmission (shorter/CW version)'},
-    {key:'idtime',         desc:'ID interval in ms (default 300000 = 5 min)'},
-    {key:'politeid',       desc:'ms before ID cycle end to attempt tail ID (default 30000)'},
-    {key:'beaconing',      desc:'1 = beacon ID regardless of activity (required in some regions, illegal in US)'},
+    {key:'idrecording',    desc:'Voice or CW ID — e.g. |iWB6NIL for CW, or a sound filename (no extension).'},
+    {key:'idtalkover',     desc:'Alternate (usually shorter/CW) ID played over an in-progress transmission.'},
+    {key:'idtime',         desc:'Milliseconds between ID announcements (default 300000 = 5 min).', type:'number', min:0},
+    {key:'politeid',       desc:'Milliseconds before the ID interval ends to attempt a polite tail ID (default 30000).', type:'number', min:0},
+    {key:'beaconing',      desc:'When enabled, sends the repeater ID at the idtime interval regardless of activity. Check your local regulations before enabling.',
+     type:'enum', options: ZERO_ONE_OPTS},
   ]},
   {title:'Timers', keys:[
-    {key:'hangtime',       desc:'Squelch tail hang time in ms (default 5000)'},
-    {key:'althangtime',    desc:'Alternate hang time in ms, selected by COP 19/20'},
-    {key:'totime',         desc:'Transmit timeout in ms (default 180000 = 3 min)'},
-    {key:'time_out_reset_unkey_interval', desc:'ms receiver must be unkeyed to reset TX timeout (default 0 = disabled)'},
-    {key:'time_out_reset_kerchunk_interval', desc:'ms for kerchunk to reset TX timeout (default 250)'},
-    {key:'sleeptime',      desc:'Inactivity seconds before sleep mode (see sleep mode docs)'},
+    {key:'hangtime',       desc:'Squelch tail hang time in ms (default 5000).', type:'number', min:0},
+    {key:'althangtime',    desc:'Alternate hang time in ms, selected via a COP command.', type:'number', min:0},
+    {key:'totime',         desc:'Transmit timeout in ms (default 180000 = 3 min, max 9999999).', type:'number', min:0, max:9999999},
+    {key:'time_out_reset_unkey_interval', desc:'Milliseconds the receiver must stay unkeyed to reset the TX timeout (default 0 = disabled, max 10000).', type:'number', min:0, max:10000},
+    {key:'time_out_reset_kerchunk_interval', desc:'Milliseconds of a kerchunk (brief keyup) needed to reset the TX timeout (default 250).', type:'number', min:0},
+    {key:'sleeptime',      desc:'Seconds of inactivity before sleep mode engages.', type:'number', min:0},
   ]},
   {title:'Telemetry', keys:[
-    {key:'telemdefault',   desc:'0=off, 1=on (default), 2=timed after command'},
-    {key:'telemdynamic',   desc:'1=allow users to change telemetry via COP (default), 0=lock it'},
-    {key:'holdofftelem',   desc:'1=hold all telem until local/remote unkeys (default 0)'},
-    {key:'telemduckdb',    desc:'Reduce telemetry level in dB during voice e.g. -15'},
-    {key:'telemnomdb',     desc:'Fine-tune nominal telemetry level in dB'},
-    {key:'unlinkedct',     desc:'Courtesy tone when no nodes connected e.g. ct2'},
-    {key:'remotect',       desc:'Courtesy tone when remote base connected e.g. ct3'},
-    {key:'linkunkeyct',    desc:'Courtesy tone when a linked node unkeys e.g. ct8'},
-    {key:'nounkeyct',      desc:'yes = disable all courtesy tones (strongly discouraged)'},
-    {key:'nolocallinkct',  desc:'1 = use unlinkedct when another local node is connected'},
+    {key:'telemdefault',   desc:'Whether telemetry tones are on by default (default 1 = on).', type:'enum', options: telemModeOptions(false)},
+    {key:'telemdynamic',   desc:'Whether users may change the local telemetry setting with a COP command (default 1 = allowed).',
+     type:'enum', options:[{value:'0', label:'0 — disallow'}, {value:'1', label:'1 — allow (default)'}]},
+    {key:'holdofftelem',   desc:'Holds off all telemetry until a local receiver user or a linked-node user unkeys (default 0 = disabled).',
+     type:'enum', options: ZERO_ONE_OPTS},
+    {key:'telemduckdb',    desc:'How far (in dB, typically negative) to duck telemetry level during voice, e.g. -15.', type:'number'},
+    {key:'telemnomdb',     desc:'Fine-tune the nominal telemetry level in dB (can be positive or negative).', type:'number'},
+    {key:'unlinkedct',     desc:'Courtesy tone to play when no nodes are connected, e.g. ct2.'},
+    {key:'remotect',       desc:'Courtesy tone to play when a remote base is connected, e.g. ct3.'},
+    {key:'linkunkeyct',    desc:'Courtesy tone to play when a linked node unkeys, e.g. ct8.'},
+    {key:'nounkeyct',      desc:'Completely disables the courtesy tone.', type:'enum', options: YES_NO_OPTS},
+    {key:'nolocallinkct',  desc:'Plays unlinkedct instead, if another local node (hosted on the same machine) is connected (default 0).',
+     type:'enum', options: ZERO_ONE_OPTS},
   ]},
   {title:'DTMF & Functions', keys:[
-    {key:'funcchar',       desc:'DTMF function start character (default *)'},
-    {key:'endchar',        desc:'DTMF end character (default #)'},
-    {key:'functions',      desc:'Functions stanza name (default: functions)'},
-    {key:'link_functions', desc:'Link functions stanza name (default: functions)'},
-    {key:'phone_functions',desc:'Phone functions stanza name (default: functions)'},
-    {key:'dtmfkey',        desc:'1 = require DTMF key sequence to key up (default 0)'},
-    {key:'dtmfkeys',       desc:'dtmfkeys stanza name (used with dtmfkey=1)'},
-    {key:'propagate_dtmf', desc:'yes = regenerate DTMF to links (use with linktolink)'},
+    {key:'funcchar',       desc:'DTMF function start character (default *).'},
+    {key:'endchar',        desc:'DTMF command end character (default #).'},
+    {key:'functions',      desc:'Name of the functions stanza to use (default: functions).'},
+    {key:'link_functions', desc:'Name of the functions stanza used by linked nodes (default: functions).'},
+    {key:'phone_functions',desc:'Name of the functions stanza used by phone/autopatch access (default: functions).'},
+    {key:'dtmfkey',        desc:'Requires a DTMF key sequence before this node will key up on every transmission (default 0 = normal access).',
+     type:'enum', options:[{value:'0', label:'0 — normal access (default)'}, {value:'1', label:'1 — require DTMF access'}]},
+    {key:'dtmfkeys',       desc:'Name of the dtmfkeys stanza (used together with dtmfkey=1).'},
+    {key:'propagate_dtmf', desc:'When yes, DTMF is regenerated from out-of-band signalling or the receiver decoder whenever a function start character is NOT detected (default no).',
+     type:'enum', options: YES_NO_OPTS},
   ]},
   {title:'Node Connections', keys:[
-    {key:'extnodefile',    desc:'External node file path (default /var/lib/asterisk/rpt_extnodes)'},
-    {key:'nodes',          desc:'nodes stanza name override (default: nodes)'},
-    {key:'nodenames',      desc:'Custom node name sound directory path'},
-    {key:'startup_macro',  desc:'DTMF commands to run at startup e.g. *31000 *31001'},
-    {key:'connpgm',        desc:'Script to run on node connect (args: local_node remote_node)'},
-    {key:'discpgm',        desc:'Script to run on node disconnect (args: local_node remote_node)'},
-    {key:'lnkactenable',   desc:'1 = enable link activity timer (default 0)'},
-    {key:'lnkacttime',     desc:'Link activity timer in seconds'},
-    {key:'lnkactmacro',    desc:'Macro to execute when link activity timer expires'},
-    {key:'lnkacttimerwarn',desc:'Sound file to play when 30s remain on link timer'},
+    {key:'extnodefile',    desc:'Path to the external node list file (default /var/lib/asterisk/rpt_extnodes).'},
+    {key:'nodes',          desc:'Name of the nodes stanza to use (default: nodes).'},
+    {key:'nodenames',      desc:'Directory of custom node-name sound files (default rpt/nodenames).'},
+    {key:'startup_macro',  desc:'DTMF command string to run automatically at startup, e.g. *31000*31001.'},
+    {key:'connpgm',        desc:'Script to run on node connect (called with args: local_node remote_node).'},
+    {key:'discpgm',        desc:'Script to run on node disconnect (called with args: local_node remote_node).'},
+    {key:'lnkactenable',   desc:'Enables the link activity timer (default 0 = disabled).', type:'enum', options: ZERO_ONE_OPTS},
+    {key:'lnkacttime',     desc:'Link activity timer duration in seconds.', type:'number', min:0},
+    {key:'lnkactmacro',    desc:'DTMF macro to execute when the link activity timer expires.'},
+    {key:'lnkacttimerwarn',desc:'Sound file played as a warning before the link activity timer expires.'},
   ]},
   {title:'Audio', keys:[
-    {key:'linkmongain',    desc:'Monitor audio level adjustment in dB (default 0)'},
-    {key:'erxgain',        desc:'EchoLink receive gain +/- dB'},
-    {key:'etxgain',        desc:'EchoLink transmit gain +/- dB'},
-    {key:'rxnotch',        desc:'Notch filter: freq,bandwidth e.g. 1065,40 (high CPU, not recommended on Pi)'},
-    {key:'outstreamcmd',   desc:'Command for Broadcastify/streaming audio output'},
+    {key:'linkmongain',    desc:'Monitor-mode audio level adjustment in dB (default 0).', type:'number'},
+    {key:'erxgain',        desc:'EchoLink receive gain adjustment in dB (positive or negative).', type:'number'},
+    {key:'etxgain',        desc:'EchoLink transmit gain adjustment in dB (positive or negative).', type:'number'},
+    {key:'rxnotch',        desc:'Notch filter as freq,bandwidth (e.g. 1065,40). CPU-intensive — not recommended on a Raspberry Pi.'},
+    {key:'outstreamcmd',   desc:'Command pipeline used to stream audio out, e.g. to Broadcastify.'},
   ]},
   {title:'Tail & Scheduler', keys:[
-    {key:'tailmessagelist',desc:'Comma-separated list of sound files to rotate as tail messages'},
-    {key:'tailmessagetime',desc:'ms between tail messages (max 200000000)'},
-    {key:'tailsquashedtime',desc:'ms to retry after a tail message is squashed'},
-    {key:'scheduler',      desc:'Schedule stanza name (default: schedule)'},
+    {key:'tailmessagelist',desc:'Comma-separated list of sound files rotated as tail messages.'},
+    {key:'tailmessagetime',desc:'Milliseconds between tail messages (max 200000000).', type:'number', min:0, max:200000000},
+    {key:'tailsquashedtime',desc:'Milliseconds to wait before retrying a tail message that was squashed by activity.', type:'number', min:0},
+    {key:'scheduler',      desc:'Name of the schedule stanza to use (default: schedule).'},
   ]},
   {title:'Parrot / Echo', keys:[
-    {key:'parrot',         desc:'0=off/COP controlled (default), 1=always on'},
-    {key:'parrottime',     desc:'ms delay before playing back parrot audio (default 1000)'},
+    {key:'parrot',         desc:'The "parrot" repeats back everything it hears. Default 0 = off (can still be enabled via a COP command); 1 = always on.',
+     type:'enum', options: ZERO_ONE_OPTS},
+    {key:'parrottime',     desc:'Milliseconds to delay before playing back parrot audio (default 1000).', type:'number', min:0},
   ]},
   {title:'EchoLink', keys:[
-    {key:'eannmode',       desc:'0=no announce, 1=node# only (default), 2=callsign, 3=callsign+node#'},
-    {key:'echolinkdefault',desc:'0=off, 1=on, 2=timed, 3=follow local (default)'},
-    {key:'echolinkdynamic',desc:'1=allow users to change EchoLink telem via COP'},
-    {key:'elke',           desc:'Elke link timer value (FFF units) — sets node as Elke link'},
+    {key:'eannmode',       desc:'How to announce an EchoLink connection (default 1 = node number only).',
+     type:'enum', options:[
+       {value:'0', label:'Do not announce'},
+       {value:'1', label:'Say node number only (default)'},
+       {value:'2', label:'Say phonetic call sign only'},
+       {value:'3', label:'Say phonetic call sign and node number'},
+     ]},
+    {key:'echolinkdefault',desc:'Default telemetry mode for EchoLink connections (default 3 = follow local).', type:'enum', options: telemModeOptions(true)},
+    {key:'echolinkdynamic',desc:'Whether users may change EchoLink telemetry with a COP command.', type:'enum', options: ZERO_ONE_OPTS},
+    {key:'elke',           desc:'Elke link sleep timer value (FFF system units) — marks this node as an Elke link.'},
   ]},
   {title:'Archiving & Stats', keys:[
-    {key:'archivedir',     desc:'Directory for audio/activity recordings (e.g. /var/spool/asterisk/monitor)'},
-    {key:'archiveformat',  desc:'Audio format: wav49 (default), wav, gsm'},
-    {key:'archivedatefmt', desc:'Filename date format e.g. %Y%m%d%H%M%S%2q'},
-    {key:'archiveaudio',   desc:'yes=save audio recordings (default), no=activity log only'},
-    {key:'statpost_url',   desc:'Uncomment to report stats: http://stats.allstarlink.org/uhandler'},
-    {key:'statpost_program',desc:'Stats POST program (generally no longer required)'},
+    {key:'archivedir',     desc:'Directory for activity logs and audio recordings, e.g. /var/spool/asterisk/monitor.'},
+    {key:'archiveformat',  desc:'Audio format for recordings (default wav49 = GSM in a .wav container).',
+     type:'enum', options:[
+       {value:'wav49', label:'wav49 — GSM in a .wav container (default)'},
+       {value:'wav',   label:'wav — uncompressed SLIN .wav'},
+       {value:'gsm',   label:'gsm — raw GSM format'},
+     ]},
+    {key:'archivedatefmt', desc:'strftime-style filename date format for archived files, e.g. %Y%m%d%H%M%S.'},
+    {key:'archiveaudio',   desc:'Whether audio is saved with activity logs (default yes).', type:'enum', options: YES_NO_OPTS},
+    {key:'statpost_url',   desc:'URL to POST node statistics to, e.g. http://stats.allstarlink.org/uhandler.'},
+    {key:'statpost_program',desc:'External program used to post stats (rarely needed on modern installs).'},
+  ]},
+  {title:'Voting', keys:[
+    {key:'votermode',      desc:'Simple Voter mode for this node (default 0 = no voting).',
+     type:'enum', options:[
+       {value:'0', label:'0 — no voting (default)'},
+       {value:'1', label:'1 — voter one-shot'},
+       {value:'2', label:'2 — voter continuous'},
+     ]},
+    {key:'votertype',      desc:'Simple Voter site type for this node (default 0 = no voting).',
+     type:'enum', options:[
+       {value:'0', label:'0 — no voting (default)'},
+       {value:'1', label:'1 — voter repeater'},
+       {value:'2', label:'2 — voter receiver'},
+     ]},
+    {key:'votermargin',    desc:'RSSI difference (dB) required before the voter switches receivers (default 10).', type:'number'},
   ]},
   {title:'Stanza Name Overrides', keys:[
-    {key:'controlstates',  desc:'Control states stanza name (default: controlstates)'},
-    {key:'macro',          desc:'Macro stanza name (default: macro)'},
-    {key:'telemetry',      desc:'Telemetry stanza name (default: telemetry)'},
-    {key:'morse',          desc:'Morse parameters stanza name (default: morse)'},
-    {key:'tonemacro',      desc:'Tone macro stanza name'},
-    {key:'events',         desc:'Events stanza name (default: events)'},
-    {key:'wait-times',     desc:'Wait times stanza name (default: wait-times)'},
-    {key:'guilinkdefault', desc:'0=off, 1=on (default), 2=timed, 3=follow local — IAXRpt/VoIP telem'},
-    {key:'guilinkdynamic', desc:'1=allow users to change GUI telem via COP'},
-    {key:'phonelinkdefault',desc:'0=off, 1=on (default), 2=timed, 3=follow local — autopatch/phone telem'},
-    {key:'phonelinkdynamic',desc:'1=allow users to change phone telem via COP'},
-    {key:'tlbdefault',     desc:'TheLinkBox telem: 0=off, 1=on, 2=timed, 3=follow local'},
-    {key:'tlbdynamic',     desc:'1=allow users to change TLB telem via COP'},
+    {key:'controlstates',  desc:'Name of the control states stanza (default: controlstates).'},
+    {key:'macro',          desc:'Name of the macro definitions stanza (default: macro).'},
+    {key:'telemetry',      desc:'Name of the telemetry tones stanza (default: telemetry).'},
+    {key:'morse',          desc:'Name of the Morse code parameters stanza (default: morse).'},
+    {key:'tonemacro',      desc:'Name of the CTCSS-triggered tone macro stanza.'},
+    {key:'events',         desc:'Name of the event management stanza (default: events).'},
+    {key:'wait-times',     desc:'Name of the wait-times stanza (default: wait-times).'},
+    {key:'guilinkdefault', desc:'Default telemetry mode for IAXRpt/SIP/VoIP client connections (default 1 = on).', type:'enum', options: telemModeOptions(true)},
+    {key:'guilinkdynamic', desc:'Whether users may change GUI/VoIP client telemetry with a COP command.', type:'enum', options: ZERO_ONE_OPTS},
+    {key:'phonelinkdefault',desc:'Default telemetry mode for autopatch / Phone Portal connections (default 1 = on).', type:'enum', options: telemModeOptions(true)},
+    {key:'phonelinkdynamic',desc:'Whether users may change phone/autopatch telemetry with a COP command.', type:'enum', options: ZERO_ONE_OPTS},
+    {key:'tlbdefault',     desc:'Default telemetry mode for TheLinkBox connections (default 3 = follow local).', type:'enum', options: telemModeOptions(true)},
+    {key:'tlbdynamic',     desc:'Whether users may change TheLinkBox telemetry with a COP command.', type:'enum', options: ZERO_ONE_OPTS},
   ]},
 ];
 
@@ -926,7 +1073,7 @@ async function loadNodeEditor(node) {
           + '<div class="sec-body' + open + '">';
     sec.keys.forEach(function(m) {
       var st = s[m.key] || {};
-      html += makeToggleRow(m.key, st.value || '', st.commented !== false, m.desc);
+      html += makeToggleRow(m.key, st.value || '', st.commented !== false, m.desc, m);
     });
     html += '</div></div>';
   });
@@ -1402,6 +1549,52 @@ async function loadSysInfo() {
       + (d.disk ? d.disk.used + ' used / ' + d.disk.total + ' total (' + d.disk.pct + ')' : 'N/A')
       + '</td></tr>'
     + '</table>';
+}
+
+/* ── Settings ───────────────────────────────────────────────────────────── */
+async function loadSecretKeyStatus() {
+  var el = document.getElementById('secret-key-status');
+  el.innerHTML = '<span class="muted">Loading...</span>';
+  var r = await api('/api/settings/secret_key');
+  if (!r.ok) {
+    el.innerHTML = '<div class="alert alert-danger">Failed to load status.</div>';
+    return;
+  }
+  if (r.data.is_default) {
+    el.innerHTML = '<div class="alert alert-warn">Still using the default SECRET_KEY shipped with the app. '
+                  + 'Recommended: generate a new one below.</div>';
+  } else {
+    el.innerHTML = '<div class="alert alert-success">A custom SECRET_KEY is set.</div>';
+  }
+}
+
+async function applySecretKey() {
+  var input = document.getElementById('secret-key-input');
+  var resEl = document.getElementById('secret-key-result');
+  var key   = input.value.trim();
+
+  if (key && key.length < 16) {
+    resEl.innerHTML = '<div class="alert alert-danger">Custom key must be at least 16 characters, or leave blank to auto-generate.</div>';
+    return;
+  }
+
+  resEl.innerHTML = '<span class="muted"><span class="spinner"></span> Applying...</span>';
+  log('Applying new SECRET_KEY...', 'INFO');
+  var r = await api('/api/settings/secret_key', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({secret_key: key})
+  });
+  if (r.ok) {
+    resEl.innerHTML = '<div class="alert alert-success">' + esc(r.data.message || 'Applied.') + '</div>';
+    log('SECRET_KEY applied: ' + (r.data.message || ''), 'OK');
+    input.value = '';
+    loadSecretKeyStatus();
+  } else {
+    resEl.innerHTML = '<div class="alert alert-danger">' + esc(r.data.error || 'Failed to apply key') + '</div>';
+    if (r.data.hint) resEl.innerHTML += '<div class="alert alert-warn">' + esc(r.data.hint) + '</div>';
+    log('SECRET_KEY apply failed: ' + (r.data.error || r.status), 'ERROR');
+  }
 }
 
 /* ── Init ────────────────────────────────────────────────────────────────── */
