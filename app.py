@@ -403,7 +403,17 @@ class AMIClient:
         )
         self._send(action)
 
-        raw = self._recv_until("--END COMMAND--", timeout=self.timeout)
+        # This Asterisk build's AMI (banner reports protocol 11.0.0) never
+        # emits "--END COMMAND--" — every Command response, with or without
+        # output, is terminated the same way as any other AMI packet: a
+        # blank line. Waiting on "--END COMMAND--" meant every call here
+        # silently burned the full internal timeout before returning,
+        # compounding badly for sequences like disconnect-then-connect and
+        # for the background poller (which issues several of these per
+        # cycle), eventually exceeding gunicorn's request timeout. Verified
+        # directly against this AMI instance: responses arrive in <1ms and
+        # are always closed by "\r\n\r\n", matching the Login flow above.
+        raw = self._recv_until("\r\n\r\n", timeout=self.timeout)
         log("DEBUG", f"[AMI] CMD raw ({len(raw)} bytes): {raw[:300]!r}")
 
         output = []
@@ -451,31 +461,26 @@ class AMIClient:
         """
         Return keyed state and connected node list for `node`.
 
-        ASL3 keyed detection:
-          'rpt show nodes <node>' outputs a line like:
-            Node 64393, Conn=2, Rx=1, Tx=1, ...
-          Rx=1 means the node is currently receiving (keyed).
-          The old approach of parsing RPT_RXKEYED from 'rpt show variables'
-          is unreliable in ASL3 — the variable format changed and the field
-          is often absent or formatted differently.
+        Keyed detection uses 'rpt show variables <node>' and the
+        RPT_RXKEYED=0/1 variable. The previous implementation called
+        'rpt show nodes <node>' for this, but that CLI command does not
+        exist in this app_rpt build (confirmed via `core show help rpt`
+        and a live "No such command" response) — it always errored, so
+        `keyed` was never actually set. RPT_RXKEYED is confirmed present
+        and correct via 'rpt show variables' on this build.
 
         Connected nodes come from 'rpt lstats <node>' which gives one line
         per connected node containing the remote node number.
         """
         status = {"keyed": False, "connected": [], "raw": [], "lstats": []}
 
-        # Primary: rpt show nodes — reliable Rx/Tx keyed state in ASL3
-        lines = self.command(f"rpt show nodes {node}")
+        # Primary: rpt show variables — RPT_RXKEYED gives keyed state
+        lines = self.command(f"rpt show variables {node}")
         status["raw"] = lines
-        log("DEBUG", f"[AMI] rpt show nodes {node} -> {lines}")
+        log("DEBUG", f"[AMI] rpt show variables {node} -> {lines}")
         for line in lines:
-            # Match "Rx=1" anywhere on the line (case-insensitive for safety)
-            if re.search(r'\bRx=1\b', line, re.IGNORECASE):
+            if re.search(r'\bRPT_RXKEYED\s*=\s*1\b', line, re.IGNORECASE):
                 status["keyed"] = True
-            # Pick up any node numbers on this line (connected nodes appear here too)
-            for n in re.findall(r'\b(\d{4,7})\b', line):
-                if n != str(node) and n not in status["connected"]:
-                    status["connected"].append(n)
 
         # Secondary: rpt lstats — definitive connected node list
         lstats = self.command(f"rpt lstats {node}")
