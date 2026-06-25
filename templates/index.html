@@ -393,6 +393,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
 
     <div class="nav-section">Tools</div>
     <button class="nav-item" onclick="showPage('announcements')">Announcements</button>
+    <button class="nav-item" onclick="showPage('smart-connector')">Smart Connector</button>
     <button class="nav-item" onclick="showPage('raw-editor')">Raw Editor</button>
     <button class="nav-item" onclick="showPage('backups')">Backups</button>
     <button class="nav-item" onclick="showPage('ami-diag')">AMI Diagnostics</button>
@@ -782,6 +783,62 @@ sudo asterisk -rx "module reload manager"</pre>
     </div>
   </section>
 
+  <!-- Smart Connector -->
+  <section class="page" id="page-smart-connector">
+    <div class="page-title">Smart Connector</div>
+    <div class="page-sub">Automatically connect to a node on a schedule and disconnect when idle.</div>
+
+    <!-- Add connector -->
+    <div class="card">
+      <div class="card-header"><h2>Add Connector</h2></div>
+      <div class="card-body">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 18px">
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Name</label>
+            <input type="text" id="sc-name" class="val-input" placeholder="e.g. Wednesday Night Net" style="width:100%">
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:0 10px">
+            <div>
+              <label class="toggle-label" style="display:block;margin-bottom:3px">Local Node</label>
+              <select id="sc-local" class="val-input" style="width:100%"></select>
+            </div>
+            <div>
+              <label class="toggle-label" style="display:block;margin-bottom:3px">Target Node</label>
+              <input type="text" id="sc-target" class="val-input" placeholder="666380" style="width:100%">
+            </div>
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Auto-connect time <span class="muted">(leave blank for manual only)</span></label>
+            <input type="time" id="sc-time" class="val-input" style="width:100%">
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:0 10px">
+            <div>
+              <label class="toggle-label" style="display:block;margin-bottom:3px">Idle timeout (sec)</label>
+              <input type="number" id="sc-idle" class="val-input" value="180" min="30" style="width:100%">
+            </div>
+            <div>
+              <label class="toggle-label" style="display:block;margin-bottom:3px">Settle period (sec)</label>
+              <input type="number" id="sc-settle" class="val-input" value="300" min="0" style="width:100%">
+            </div>
+          </div>
+        </div>
+        <div id="sc-create-result" style="margin-top:10px"></div>
+        <button class="btn btn-primary" style="margin-top:12px" onclick="createConnector()">Add Connector</button>
+      </div>
+    </div>
+
+    <!-- List -->
+    <div class="card">
+      <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+        <h2>Connectors</h2>
+        <button class="btn btn-sm" onclick="loadConnectors()">Refresh</button>
+      </div>
+      <div class="card-body">
+        <div id="sc-list"><span class="muted">Loading...</span></div>
+      </div>
+    </div>
+  </section>
+
   <!-- Announcements -->
   <section class="page" id="page-announcements">
     <div class="page-title">Announcements</div>
@@ -1142,7 +1199,8 @@ function showPage(id) {
   else if (id === 'backups')      loadBackups();
   else if (id === 'ami-diag')     loadSysInfo();
   else if (id === 'settings')       { loadSecretKeyStatus(); syncThemePicker(); }
-  else if (id === 'announcements')  { loadAnnouncements(); populateAnnNodeSelect(); }
+  else if (id === 'announcements')    { loadAnnouncements(); populateAnnNodeSelect(); }
+  else if (id === 'smart-connector') { loadConnectors(); populateConnNodeSelects(); }
   else if (id === 'general')        loadGeneralEditor();
   else {
     var m  = id.match(/^node-(\d+)$/);
@@ -2575,6 +2633,194 @@ async function annSaveEdit(id) {
   } catch(e) {
     res.innerHTML = '<span style="color:var(--danger)">Error: ' + esc(String(e)) + '</span>';
   }
+}
+
+// ---------------------------------------------------------------------------
+// Smart Connector
+// ---------------------------------------------------------------------------
+
+var _scPollTimer = null;
+
+function populateConnNodeSelects() {
+  var nodes = [];
+  document.querySelectorAll('[id^="page-node-"]').forEach(function(el) {
+    var m = el.id.match(/^page-node-(\d+)$/);
+    if (m) nodes.push(m[1]);
+  });
+  ['sc-local'].forEach(function(selId) {
+    var sel = document.getElementById(selId);
+    if (!sel) return;
+    sel.innerHTML = '';
+    nodes.forEach(function(n) {
+      var o = document.createElement('option'); o.value = n; o.textContent = n; sel.appendChild(o);
+    });
+    if (!nodes.length) { var o = document.createElement('option'); o.value=''; o.textContent='(none)'; sel.appendChild(o); }
+  });
+}
+
+async function loadConnectors() {
+  var el = document.getElementById('sc-list');
+  if (!el) return;
+  try {
+    var r = await fetch('/api/connectors');
+    var list = await r.json();
+    if (!list.length) { el.innerHTML = '<span class="muted">No connectors yet. Add one above.</span>'; return; }
+    el.innerHTML = list.map(connCard).join('');
+    // Auto-refresh if any connector is waiting or connected
+    var needsPoll = list.some(function(c) { return c.state === 'waiting' || c.state === 'connected'; });
+    clearTimeout(_scPollTimer);
+    if (needsPoll) _scPollTimer = setTimeout(loadConnectors, 5000);
+  } catch(e) {
+    el.innerHTML = '<span style="color:var(--danger)">Error loading connectors.</span>';
+  }
+}
+
+function connStateLabel(state) {
+  if (state === 'idle')      return '<span style="color:var(--text2)">Idle</span>';
+  if (state === 'waiting')   return '<span style="color:#e3b341">Waiting for idle node...</span>';
+  if (state === 'connected') return '<span style="color:var(--green)">Connected</span>';
+  if (state === 'error')     return '<span style="color:var(--danger)">Error</span>';
+  return '<span class="muted">' + esc(state) + '</span>';
+}
+
+function connCard(c) {
+  var schedule = c.connect_time ? 'Daily at ' + esc(c.connect_time) : 'Manual only';
+  var details = '';
+  if (c.connected_at)   details += '<div><span class="muted">Connected at:</span> ' + esc(c.connected_at) + '</div>';
+  if (c.last_activity)  details += '<div><span class="muted">Last activity:</span> ' + esc(c.last_activity) + '</div>';
+  if (c.state_msg)      details += '<div><span class="muted">Status:</span> ' + esc(c.state_msg) + '</div>';
+  var editDiv = '<div id="sc-edit-' + c.id + '" style="display:none;margin-top:14px;border-top:1px solid var(--border);padding-top:12px">' + connEditForm(c) + '</div>';
+  return '<div class="card" style="margin-bottom:10px" id="sc-card-' + c.id + '">' +
+    '<div class="card-header" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">' +
+      '<span style="font-weight:600;flex:1">' + esc(c.name) + '</span>' +
+      '<span class="muted" style="font-size:0.82rem">' + esc(c.local_node) + ' → ' + esc(c.target_node) + '</span>' +
+      '<span style="font-size:0.82rem">' + (c.enabled ? '' : '<span style="color:var(--text2)">Disabled &nbsp;</span>') + connStateLabel(c.state) + '</span>' +
+    '</div>' +
+    '<div class="card-body" style="font-size:0.88rem">' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:4px 18px;margin-bottom:10px">' +
+        '<div><span class="muted">Schedule:</span> ' + schedule + '</div>' +
+        '<div><span class="muted">Idle timeout:</span> ' + esc(String(c.idle_limit_sec)) + 's</div>' +
+        '<div><span class="muted">Settle:</span> ' + esc(String(c.settle_sec)) + 's</div>' +
+        details +
+      '</div>' +
+      '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+        '<button class="btn btn-sm" onclick="connToggle(' + c.id + ')">' + (c.enabled ? 'Disable' : 'Enable') + '</button>' +
+        (c.state === 'idle' || c.state === 'error'
+          ? '<button class="btn btn-sm" onclick="connConnect(' + c.id + ')">Connect Now</button>'
+          : '') +
+        (c.state === 'connected' || c.state === 'waiting'
+          ? '<button class="btn btn-sm" onclick="connDisconnect(' + c.id + ')">Disconnect</button>'
+          : '') +
+        (c.state === 'error'
+          ? '<button class="btn btn-sm" onclick="connReset(' + c.id + ')">Clear Error</button>'
+          : '') +
+        '<button class="btn btn-sm" onclick="connEditShow(' + c.id + ')">Edit</button>' +
+        '<button class="btn btn-sm" style="color:var(--danger);border-color:var(--danger)" onclick="connDelete(' + c.id + ',' + JSON.stringify(c.name) + ')">Delete</button>' +
+      '</div>' +
+      editDiv +
+    '</div>' +
+  '</div>';
+}
+
+function connEditForm(c) {
+  return '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 18px">' +
+    '<div><label class="toggle-label" style="display:block;margin-bottom:3px">Name</label>' +
+      '<input type="text" id="sce-name-' + c.id + '" class="val-input" value="' + esc(c.name) + '" style="width:100%"></div>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 8px">' +
+      '<div><label class="toggle-label" style="display:block;margin-bottom:3px">Local Node</label>' +
+        '<input type="text" id="sce-local-' + c.id + '" class="val-input" value="' + esc(c.local_node) + '" style="width:100%"></div>' +
+      '<div><label class="toggle-label" style="display:block;margin-bottom:3px">Target Node</label>' +
+        '<input type="text" id="sce-target-' + c.id + '" class="val-input" value="' + esc(c.target_node) + '" style="width:100%"></div>' +
+    '</div>' +
+    '<div><label class="toggle-label" style="display:block;margin-bottom:3px">Auto-connect time</label>' +
+      '<input type="time" id="sce-time-' + c.id + '" class="val-input" value="' + esc(c.connect_time||'') + '" style="width:100%"></div>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 8px">' +
+      '<div><label class="toggle-label" style="display:block;margin-bottom:3px">Idle timeout (s)</label>' +
+        '<input type="number" id="sce-idle-' + c.id + '" class="val-input" value="' + c.idle_limit_sec + '" min="30" style="width:100%"></div>' +
+      '<div><label class="toggle-label" style="display:block;margin-bottom:3px">Settle (s)</label>' +
+        '<input type="number" id="sce-settle-' + c.id + '" class="val-input" value="' + c.settle_sec + '" min="0" style="width:100%"></div>' +
+    '</div>' +
+  '</div>' +
+  '<div id="sce-result-' + c.id + '" style="margin-top:8px"></div>' +
+  '<div style="margin-top:10px;display:flex;gap:8px">' +
+    '<button class="btn btn-primary btn-sm" onclick="connSaveEdit(' + c.id + ')">Save</button>' +
+    '<button class="btn btn-sm" onclick="connEditHide(' + c.id + ')">Cancel</button>' +
+  '</div>';
+}
+
+function connEditShow(id) { var el = document.getElementById('sc-edit-' + id); if (el) el.style.display='block'; }
+function connEditHide(id) { var el = document.getElementById('sc-edit-' + id); if (el) el.style.display='none'; }
+
+async function connToggle(id) {
+  await fetch('/api/connectors/' + id + '/toggle', { method: 'POST' });
+  loadConnectors();
+}
+
+async function connConnect(id) {
+  var r = await fetch('/api/connectors/' + id + '/connect', { method: 'POST' });
+  if (r.ok) loadConnectors();
+  else { var d = await r.json(); alert('Error: ' + (d.error || r.status)); }
+}
+
+async function connDisconnect(id) {
+  var r = await fetch('/api/connectors/' + id + '/disconnect', { method: 'POST' });
+  if (r.ok) loadConnectors();
+  else { var d = await r.json(); alert('Disconnect error: ' + (d.error || r.status)); }
+}
+
+async function connReset(id) {
+  await fetch('/api/connectors/' + id + '/reset', { method: 'POST' });
+  loadConnectors();
+}
+
+async function connDelete(id, name) {
+  if (!confirm('Delete connector "' + name + '"?')) return;
+  var r = await fetch('/api/connectors/' + id, { method: 'DELETE' });
+  if (r.ok) loadConnectors();
+  else { var d = await r.json(); alert('Error: ' + (d.error || r.status)); }
+}
+
+async function connSaveEdit(id) {
+  var res  = document.getElementById('sce-result-' + id);
+  var body = {
+    name:           document.getElementById('sce-name-'   + id).value.trim(),
+    local_node:     document.getElementById('sce-local-'  + id).value.trim(),
+    target_node:    document.getElementById('sce-target-' + id).value.trim(),
+    connect_time:   document.getElementById('sce-time-'   + id).value || null,
+    idle_limit_sec: parseInt(document.getElementById('sce-idle-'   + id).value, 10),
+    settle_sec:     parseInt(document.getElementById('sce-settle-' + id).value, 10),
+  };
+  var r = await fetch('/api/connectors/' + id, {
+    method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
+  });
+  var d = await r.json();
+  if (!r.ok) { res.innerHTML = '<span style="color:var(--danger)">' + esc(d.error||'Error') + '</span>'; return; }
+  loadConnectors();
+}
+
+async function createConnector() {
+  var res = document.getElementById('sc-create-result');
+  var body = {
+    name:           document.getElementById('sc-name').value.trim(),
+    local_node:     document.getElementById('sc-local').value.trim(),
+    target_node:    document.getElementById('sc-target').value.trim(),
+    connect_time:   document.getElementById('sc-time').value || null,
+    idle_limit_sec: parseInt(document.getElementById('sc-idle').value, 10),
+    settle_sec:     parseInt(document.getElementById('sc-settle').value, 10),
+  };
+  if (!body.name)        { res.innerHTML = '<span style="color:var(--danger)">Name is required.</span>'; return; }
+  if (!body.target_node) { res.innerHTML = '<span style="color:var(--danger)">Target node is required.</span>'; return; }
+  res.innerHTML = '<span class="muted">Saving...</span>';
+  var r = await fetch('/api/connectors', {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
+  });
+  var d = await r.json();
+  if (!r.ok) { res.innerHTML = '<span style="color:var(--danger)">' + esc(d.error||'Error') + '</span>'; return; }
+  res.innerHTML = '<span style="color:var(--green)">Saved: ' + esc(d.name) + '</span>';
+  document.getElementById('sc-name').value = '';
+  document.getElementById('sc-target').value = '';
+  document.getElementById('sc-time').value = '';
+  loadConnectors();
 }
 
 async function uploadAnnouncement() {

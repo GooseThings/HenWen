@@ -170,6 +170,22 @@ def get_db():
         source_type   TEXT    NOT NULL DEFAULT 'upload',
         created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
     )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS connectors (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        name            TEXT    NOT NULL,
+        local_node      TEXT    NOT NULL,
+        target_node     TEXT    NOT NULL,
+        enabled         INTEGER NOT NULL DEFAULT 1,
+        connect_time    TEXT,
+        idle_limit_sec  INTEGER NOT NULL DEFAULT 180,
+        settle_sec      INTEGER NOT NULL DEFAULT 300,
+        state           TEXT    NOT NULL DEFAULT 'idle',
+        state_msg       TEXT    NOT NULL DEFAULT '',
+        state_updated   TEXT,
+        connected_at    TEXT,
+        last_activity   TEXT,
+        created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+    )""")
     conn.commit()
     return conn
 
@@ -2782,6 +2798,285 @@ def api_ann_play(ann_id):
 
 
 # ---------------------------------------------------------------------------
+# Smart Connector — scheduled node connect/disconnect with idle monitoring
+# ---------------------------------------------------------------------------
+
+def _node_active(node: str) -> bool:
+    """Return True if the node is keyed (RX or any linked TX) per AMI cache."""
+    cached = _ami_cache.get(node, {})
+    if cached.get("keyed", False):
+        return True
+    return any(l.get("keyed", False) for l in cached.get("links", {}).values())
+
+
+def _connector_do_connect(local: str, target: str):
+    def _cmd(ami, ln=local, tn=target):
+        return ami.rpt_cmd(ln, f"ilink 3 {tn}")
+    return ami_send_command(_cmd)
+
+
+def _connector_do_disconnect(local: str, target: str):
+    def _cmd(ami, ln=local, tn=target):
+        return ami.rpt_cmd(ln, f"ilink 1 {tn}")
+    return ami_send_command(_cmd)
+
+
+def _run_connectors():
+    now     = datetime.now()
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    now_hm  = now.strftime("%H:%M")
+
+    db   = get_db()
+    rows = db.execute("SELECT * FROM connectors WHERE enabled=1").fetchall()
+
+    for row in rows:
+        cid   = row["id"]
+        state = row["state"]
+
+        # idle → check if scheduled connect_time has arrived
+        if state == "idle" and row["connect_time"] and now_hm == row["connect_time"]:
+            db.execute(
+                "UPDATE connectors SET state='waiting', state_msg='Waiting for node to be idle', "
+                "state_updated=? WHERE id=?", (now_str, cid)
+            )
+            db.commit()
+            state = "waiting"
+            log("INFO", f"[CONNECTOR] '{row['name']}' entered waiting state at {now_hm}")
+
+        # waiting → connect when node is idle (or force after 2 min)
+        if state == "waiting":
+            idle   = not _node_active(row["local_node"])
+            forced = False
+            if row["state_updated"]:
+                try:
+                    su = datetime.strptime(row["state_updated"], "%Y-%m-%d %H:%M:%S")
+                    forced = (now - su).total_seconds() > 120
+                except Exception:
+                    pass
+
+            if idle or forced:
+                label = "forced" if forced else "node idle"
+                try:
+                    _connector_do_connect(row["local_node"], row["target_node"])
+                    db.execute(
+                        "UPDATE connectors SET state='connected', state_msg='Connected', "
+                        "state_updated=?, connected_at=?, last_activity=? WHERE id=?",
+                        (now_str, now_str, now_str, cid)
+                    )
+                    db.commit()
+                    log("INFO", f"[CONNECTOR] '{row['name']}' connected ({label})")
+                except Exception as e:
+                    db.execute(
+                        "UPDATE connectors SET state='error', state_msg=?, state_updated=? WHERE id=?",
+                        (str(e)[:200], now_str, cid)
+                    )
+                    db.commit()
+                    log("ERROR", f"[CONNECTOR] Connect failed for '{row['name']}': {e}")
+
+        # connected → settle then monitor idle time
+        elif state == "connected":
+            try:
+                connected_at = datetime.strptime(row["connected_at"], "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                connected_at = now
+
+            if (now - connected_at).total_seconds() < row["settle_sec"]:
+                continue  # still in settle window
+
+            if _node_active(row["local_node"]):
+                db.execute("UPDATE connectors SET last_activity=? WHERE id=?", (now_str, cid))
+                db.commit()
+            else:
+                try:
+                    last_act = datetime.strptime(row["last_activity"], "%Y-%m-%d %H:%M:%S")
+                    idle_sec = (now - last_act).total_seconds()
+                except Exception:
+                    idle_sec = 0
+
+                if idle_sec >= row["idle_limit_sec"]:
+                    try:
+                        _connector_do_disconnect(row["local_node"], row["target_node"])
+                        db.execute(
+                            "UPDATE connectors SET state='idle', "
+                            "state_msg='Auto-disconnected after idle timeout', "
+                            "state_updated=?, connected_at=NULL, last_activity=NULL WHERE id=?",
+                            (now_str, cid)
+                        )
+                        db.commit()
+                        log("INFO", f"[CONNECTOR] '{row['name']}' auto-disconnected after {idle_sec:.0f}s idle")
+                    except Exception as e:
+                        log("ERROR", f"[CONNECTOR] Disconnect failed for '{row['name']}': {e}")
+
+
+def _connector_loop():
+    log("INFO", "[CONNECTOR] Scheduler started (15s interval)")
+    while True:
+        time.sleep(15)
+        try:
+            _run_connectors()
+        except Exception as e:
+            log("ERROR", f"[CONNECTOR] Scheduler error: {e}")
+
+
+def start_connector_scheduler():
+    t = threading.Thread(target=_connector_loop, name="connector", daemon=True)
+    t.start()
+
+
+# ---------------------------------------------------------------------------
+# Connector API routes
+# ---------------------------------------------------------------------------
+
+@app.route("/api/connectors")
+def api_conn_list():
+    db   = get_db()
+    rows = db.execute("SELECT * FROM connectors ORDER BY name COLLATE NOCASE").fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/connectors", methods=["POST"])
+def api_conn_create():
+    data = request.json or {}
+    name        = str(data.get("name",           "")).strip()
+    local_node  = str(data.get("local_node",     "")).strip()
+    target_node = str(data.get("target_node",    "")).strip()
+    connect_time = data.get("connect_time") or None
+    idle_limit_sec = int(data.get("idle_limit_sec", 180))
+    settle_sec     = int(data.get("settle_sec",     300))
+
+    if not name:
+        return jsonify({"error": "Name is required"}), 400
+    if not re.match(r'^\d{4,7}$', local_node):
+        return jsonify({"error": "Invalid local node number"}), 400
+    if not re.match(r'^\d{4,7}$', target_node):
+        return jsonify({"error": "Invalid target node number"}), 400
+    if connect_time and not re.match(r'^\d{2}:\d{2}$', connect_time):
+        return jsonify({"error": "connect_time must be HH:MM"}), 400
+
+    db = get_db()
+    db.execute(
+        "INSERT INTO connectors (name, local_node, target_node, connect_time, idle_limit_sec, settle_sec) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (name, local_node, target_node, connect_time, idle_limit_sec, settle_sec)
+    )
+    db.commit()
+    row = db.execute("SELECT * FROM connectors WHERE rowid=last_insert_rowid()").fetchone()
+    log("INFO", f"[CONNECTOR] Created '{name}' ({local_node} → {target_node})")
+    return jsonify(dict(row)), 201
+
+
+@app.route("/api/connectors/<int:cid>", methods=["PATCH"])
+def api_conn_update(cid):
+    db  = get_db()
+    row = db.execute("SELECT * FROM connectors WHERE id=?", (cid,)).fetchone()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+
+    data = request.json or {}
+    name           = str(data.get("name",           row["name"])).strip()
+    local_node     = str(data.get("local_node",     row["local_node"])).strip()
+    target_node    = str(data.get("target_node",    row["target_node"])).strip()
+    connect_time   = data.get("connect_time") or None
+    idle_limit_sec = int(data.get("idle_limit_sec", row["idle_limit_sec"]))
+    settle_sec     = int(data.get("settle_sec",     row["settle_sec"]))
+
+    if not re.match(r'^\d{4,7}$', local_node):
+        return jsonify({"error": "Invalid local node number"}), 400
+    if not re.match(r'^\d{4,7}$', target_node):
+        return jsonify({"error": "Invalid target node number"}), 400
+    if connect_time and not re.match(r'^\d{2}:\d{2}$', connect_time):
+        return jsonify({"error": "connect_time must be HH:MM"}), 400
+
+    db.execute(
+        "UPDATE connectors SET name=?, local_node=?, target_node=?, connect_time=?, "
+        "idle_limit_sec=?, settle_sec=? WHERE id=?",
+        (name, local_node, target_node, connect_time, idle_limit_sec, settle_sec, cid)
+    )
+    db.commit()
+    updated = db.execute("SELECT * FROM connectors WHERE id=?", (cid,)).fetchone()
+    return jsonify(dict(updated))
+
+
+@app.route("/api/connectors/<int:cid>", methods=["DELETE"])
+def api_conn_delete(cid):
+    db  = get_db()
+    row = db.execute("SELECT * FROM connectors WHERE id=?", (cid,)).fetchone()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+    db.execute("DELETE FROM connectors WHERE id=?", (cid,))
+    db.commit()
+    log("INFO", f"[CONNECTOR] Deleted '{row['name']}'")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/connectors/<int:cid>/toggle", methods=["POST"])
+def api_conn_toggle(cid):
+    db  = get_db()
+    row = db.execute("SELECT * FROM connectors WHERE id=?", (cid,)).fetchone()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+    new_val = 0 if row["enabled"] else 1
+    db.execute("UPDATE connectors SET enabled=? WHERE id=?", (new_val, cid))
+    db.commit()
+    return jsonify({"id": cid, "enabled": new_val})
+
+
+@app.route("/api/connectors/<int:cid>/connect", methods=["POST"])
+def api_conn_manual_connect(cid):
+    db  = get_db()
+    row = db.execute("SELECT * FROM connectors WHERE id=?", (cid,)).fetchone()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # Set to waiting — the scheduler will connect on its next tick when node is idle
+    db.execute(
+        "UPDATE connectors SET state='waiting', state_msg='Waiting for node to be idle', "
+        "state_updated=? WHERE id=?", (now_str, cid)
+    )
+    db.commit()
+    log("INFO", f"[CONNECTOR] Manual connect requested for '{row['name']}'")
+    return jsonify({"ok": True, "state": "waiting"})
+
+
+@app.route("/api/connectors/<int:cid>/disconnect", methods=["POST"])
+def api_conn_manual_disconnect(cid):
+    db  = get_db()
+    row = db.execute("SELECT * FROM connectors WHERE id=?", (cid,)).fetchone()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        _connector_do_disconnect(row["local_node"], row["target_node"])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    db.execute(
+        "UPDATE connectors SET state='idle', state_msg='Manually disconnected', "
+        "state_updated=?, connected_at=NULL, last_activity=NULL WHERE id=?",
+        (now_str, cid)
+    )
+    db.commit()
+    log("INFO", f"[CONNECTOR] Manually disconnected '{row['name']}'")
+    return jsonify({"ok": True, "state": "idle"})
+
+
+@app.route("/api/connectors/<int:cid>/reset", methods=["POST"])
+def api_conn_reset(cid):
+    """Clear error state back to idle."""
+    db  = get_db()
+    row = db.execute("SELECT * FROM connectors WHERE id=?", (cid,)).fetchone()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    db.execute(
+        "UPDATE connectors SET state='idle', state_msg='', state_updated=?, "
+        "connected_at=NULL, last_activity=NULL WHERE id=?",
+        (now_str, cid)
+    )
+    db.commit()
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
 # Startup — load node DB and start background AMI poller
 # These run regardless of whether we're under gunicorn or direct python.
 # ---------------------------------------------------------------------------
@@ -2789,6 +3084,7 @@ load_astdb()
 start_poller()
 start_favstats_poller()
 start_announcer()
+start_connector_scheduler()
 
 if __name__ == "__main__":
     log("INFO", "Starting in direct-run mode (not via gunicorn)")
