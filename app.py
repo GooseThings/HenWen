@@ -776,35 +776,23 @@ def get_node_numbers(content):
     return nodes
 
 
-def parse_stanza_settings(content, stanza_name):
+def _collect_stanzas(content):
     """
-    Parse key=value pairs from a specific named stanza in rpt.conf.
+    Pass 1 of stanza parsing, shared by parse_stanza_settings() and the
+    template-discovery helpers below.
 
-    ASL3 uses Asterisk config templates — a node stanza like [64393](node-main)
-    inherits all settings from [node-main](!) but can override them.
-    This function returns the *effective* settings for the requested stanza by:
-      1. Collecting settings from the template stanza it inherits from (if any)
-      2. Overlaying settings from the named stanza itself (overrides win)
-
-    This matches how Asterisk actually reads the file and fixes the bug where
-    the old flat parser would return the wrong value when the same key appeared
-    in multiple stanzas (e.g. duplex=3 in [node-main] but duplex=0 somewhere else).
-
-    Returns dict: { key: {"value": str, "commented": bool, "raw_line": str} }
+    Returns { name: {"is_template": bool, "template": str|None, "lines": [...]} }
+    "template" is the raw, un-split header field — may be a single name or a
+    comma-separated list (Asterisk supports multiple inheritance).
     """
-    lines = content.splitlines()
-
-    # ── Pass 1: collect all stanzas ──────────────────────────────────────────
-    # stanzas = { name: {"template": str|None, "lines": [...]} }
     stanzas = {}
     current = None
-    for line in lines:
+    for line in content.splitlines():
         s = line.strip()
         hdr = re.match(r'^\[([^\]]+)\](?:\(([^)]+)\))?', s)
         if hdr:
             raw_name = hdr.group(1).strip()
             raw_tmpl = (hdr.group(2) or "").strip()
-            # Template definition stanzas end with (!) — skip them as base stanzas
             is_template_def = raw_tmpl == "!"
             template_ref    = None if (not raw_tmpl or raw_tmpl == "!") else raw_tmpl
             current = raw_name
@@ -815,32 +803,87 @@ def parse_stanza_settings(content, stanza_name):
             }
         elif current is not None:
             stanzas[current]["lines"].append(line)
+    return stanzas
 
-    def parse_lines(lines_list):
-        """Parse key=value pairs from a list of raw lines."""
-        result = {}
-        for line in lines_list:
-            stripped  = line.strip()
-            commented = stripped.startswith(";")
-            if commented:
-                # Heavily-indented comment-only lines are wrapped documentation
-                # (e.g. stock rpt.conf explains node_lookup_method's "both"/
-                # "dns"/"file" values as indented comment lines under the
-                # directive), not a real disabled setting — those are
-                # conventionally flush-left. Without this, "both"/"dns"/"file"
-                # get parsed as bogus settings of their own.
-                indent = len(line) - len(line.lstrip(" \t"))
-                if indent > 8:
-                    continue
-                stripped = stripped[1:].strip()
-            m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([^;]*?)(?:\s*;.*)?$', stripped)
-            if m:
-                k = m.group(1).strip()
-                v = m.group(2).strip()
-                result[k] = {"value": v, "commented": commented, "raw_line": line}
-        return result
 
-    # ── Pass 2: resolve effective settings for the requested stanza ──────────
+def _parse_kv_lines(lines_list):
+    """Parse key=value pairs from a list of raw stanza lines."""
+    result = {}
+    for line in lines_list:
+        stripped  = line.strip()
+        commented = stripped.startswith(";")
+        if commented:
+            # Heavily-indented comment-only lines are wrapped documentation
+            # (e.g. stock rpt.conf explains node_lookup_method's "both"/
+            # "dns"/"file" values as indented comment lines under the
+            # directive), not a real disabled setting — those are
+            # conventionally flush-left. Without this, "both"/"dns"/"file"
+            # get parsed as bogus settings of their own.
+            indent = len(line) - len(line.lstrip(" \t"))
+            if indent > 8:
+                continue
+            stripped = stripped[1:].strip()
+        m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([^;]*?)(?:\s*;.*)?$', stripped)
+        if m:
+            k = m.group(1).strip()
+            v = m.group(2).strip()
+            result[k] = {"value": v, "commented": commented, "raw_line": line}
+    return result
+
+
+def get_template_names(content):
+    """Names of all template-definition stanzas, i.e. [name](!)."""
+    stanzas = _collect_stanzas(content)
+    return [name for name, s in stanzas.items() if s["is_template"]]
+
+
+def get_node_template_usage(content):
+    """
+    Map of template name -> sorted list of node numbers that use it,
+    restricted to templates actually referenced by a node-number stanza
+    (so functions/telemetry/morse/etc. templates used only by non-node
+    stanzas don't show up as "node templates"). Only templates that
+    actually exist as a [name](!) definition are included — a node
+    referencing a missing template (e.g. allscan-uci in the sample
+    config) just doesn't contribute it here, same as Asterisk has
+    nothing to inherit from it either.
+    """
+    stanzas   = _collect_stanzas(content)
+    templates = set(get_template_names(content))
+    usage     = {}
+    for node in get_node_numbers(content):
+        stanza = stanzas.get(node)
+        if not stanza or not stanza["template"]:
+            continue
+        for tmpl_name in (t.strip() for t in stanza["template"].split(",")):
+            if tmpl_name in templates:
+                usage.setdefault(tmpl_name, []).append(node)
+    for node_list in usage.values():
+        node_list.sort()
+    return usage
+
+
+def parse_stanza_settings(content, stanza_name):
+    """
+    Parse key=value pairs from a specific named stanza in rpt.conf.
+
+    ASL3 uses Asterisk config templates — a node stanza like [64393](node-main)
+    inherits all settings from [node-main](!) but can override them.
+    This function returns the *effective* settings for the requested stanza by:
+      1. Collecting settings from the template stanza(s) it inherits from
+      2. Overlaying settings from the named stanza itself (overrides win)
+
+    This matches how Asterisk actually reads the file and fixes the bug where
+    the old flat parser would return the wrong value when the same key appeared
+    in multiple stanzas (e.g. duplex=3 in [node-main] but duplex=0 somewhere else).
+
+    Returns dict: { key: {"value": str, "commented": bool, "raw_line": str,
+                           "source": "own" | <template name>} }
+    "source" lets callers (and the UI) distinguish a node's own setting from
+    one it only has because a shared template provides it.
+    """
+    stanzas = _collect_stanzas(content)
+
     target = stanzas.get(stanza_name)
     if target is None:
         log("WARN", f"[CONF] Stanza [{stanza_name}] not found in rpt.conf")
@@ -864,12 +907,16 @@ def parse_stanza_settings(content, stanza_name):
         if tmpl_name not in stanzas:
             log("WARN", f"[CONF] [{stanza_name}] references template [{tmpl_name}] which doesn't exist in rpt.conf — skipping")
             continue
-        tmpl_settings = parse_lines(stanzas[tmpl_name]["lines"])
+        tmpl_settings = _parse_kv_lines(stanzas[tmpl_name]["lines"])
+        for k, v in tmpl_settings.items():
+            v["source"] = tmpl_name
         effective.update(tmpl_settings)
         log("DEBUG", f"[CONF] [{stanza_name}] inherits from [{tmpl_name}]: {len(tmpl_settings)} settings")
 
     # Overlay with the stanza's own settings (these override the template)
-    own = parse_lines(target["lines"])
+    own = _parse_kv_lines(target["lines"])
+    for k, v in own.items():
+        v["source"] = "own"
     effective.update(own)
     log("DEBUG", f"[CONF] [{stanza_name}] effective settings: {len(effective)} total ({len(own)} own overrides)")
 
@@ -1233,11 +1280,13 @@ def get_asterisk_status():
 # ---------------------------------------------------------------------------
 @app.route("/")
 def index():
-    content = read_conf_file(RPT_CONF_PATH)
-    nodes   = get_node_numbers(content) if content else []
+    content   = read_conf_file(RPT_CONF_PATH)
+    nodes     = get_node_numbers(content) if content else []
+    templates = sorted(get_node_template_usage(content).keys()) if content else []
     return render_template("index.html",
                            conf_exists=content is not None,
                            nodes=nodes,
+                           templates=templates,
                            conf_path=RPT_CONF_PATH)
 
 
@@ -1278,7 +1327,42 @@ def api_get_node_conf(node):
                 settings = s
                 log("INFO", f"[API] /api/conf/node/{node}: using template [{tmpl}] as fallback")
                 break
-    return jsonify({"node": node, "settings": settings})
+    usage     = get_node_template_usage(content)
+    templates = [t for t, nodes in usage.items() if node in nodes]
+    return jsonify({"node": node, "settings": settings, "templates": templates})
+
+
+@app.route("/api/conf/templates")
+def api_get_templates():
+    """
+    List node-level templates (e.g. [node-main](!)) and which node numbers
+    use each one. A "node-level" template is one actually referenced by a
+    node-number stanza — this excludes functions/telemetry/morse/etc.
+    templates, which use the same (!) syntax but aren't node settings.
+    """
+    content = read_conf_file(RPT_CONF_PATH)
+    if content is None:
+        return jsonify({"error": "Cannot read rpt.conf"}), 404
+    usage = get_node_template_usage(content)
+    return jsonify({"templates": usage})
+
+
+@app.route("/api/conf/template/<name>")
+def api_get_template_conf(name):
+    """
+    Return the effective settings of a template stanza itself, e.g.
+    [node-main](!). Editing these settings here changes them for every
+    node that inherits from this template — unlike /api/conf/node/<node>,
+    where edits only ever create a node-specific override.
+    """
+    content = read_conf_file(RPT_CONF_PATH)
+    if content is None:
+        return jsonify({"error": "Cannot read rpt.conf"}), 404
+    if name not in get_template_names(content):
+        return jsonify({"error": f"Template [{name}] not found in rpt.conf"}), 404
+    settings = parse_stanza_settings(content, name)
+    usage    = get_node_template_usage(content)
+    return jsonify({"template": name, "settings": settings, "used_by": usage.get(name, [])})
 
 
 @app.route("/api/save", methods=["POST"])

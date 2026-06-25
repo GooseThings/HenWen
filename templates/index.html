@@ -245,6 +245,15 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     </button>
     {% endfor %}
 
+    {% if templates %}
+    <div class="nav-section">Global Templates</div>
+    {% for tmpl in templates %}
+    <button class="nav-item" onclick="showPage('template-{{ tmpl }}')">
+      {{ tmpl }}<span class="node-badge">global</span>
+    </button>
+    {% endfor %}
+    {% endif %}
+
     <div class="nav-section">Tools</div>
     <button class="nav-item" onclick="showPage('raw-editor')">Raw Editor</button>
     <button class="nav-item" onclick="showPage('backups')">Backups</button>
@@ -421,6 +430,20 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
       <button class="help-icon" onclick="showToggleHelp()" title="What does the switch next to each setting do?">?</button>
     </div>
     <div id="node-content-{{ node }}"><div class="muted">Loading...</div></div>
+  </section>
+  {% endfor %}
+
+  <!-- Global template pages -->
+  {% for tmpl in templates %}
+  <section class="page" id="page-template-{{ tmpl }}">
+    <div class="page-title">Global: {{ tmpl }}</div>
+    <div class="page-sub">
+      Editing stanza <span class="mono">[{{ tmpl }}](!)</span> &mdash; changes here apply to
+      every node using this template.
+      <button class="help-icon" onclick="showToggleHelp()" title="What does the switch next to each setting do?">?</button>
+    </div>
+    <div class="alert alert-warn" id="template-used-by-{{ tmpl }}" style="margin-bottom:16px">Loading...</div>
+    <div id="template-content-{{ tmpl }}"><div class="muted">Loading...</div></div>
   </section>
   {% endfor %}
 
@@ -664,7 +687,9 @@ function showPage(id) {
   else if (id === 'general')      loadGeneralEditor();
   else {
     var m = id.match(/^node-(\d+)$/);
+    var t = id.match(/^template-(.+)$/);
     if (m) loadNodeEditor(m[1]);
+    else if (t) loadTemplateEditor(t[1]);
   }
 }
 
@@ -788,11 +813,23 @@ function buildValueInput(key, value, meta) {
   return '<input type="text" value="' + esc(value) + '" ' + common + '>';
 }
 
-function makeToggleRow(key, value, commented, desc, meta) {
+// `source` is "own" (set directly on this stanza), a template name (this
+// stanza only has the setting because it inherits from that template), or
+// undefined (no inheritance info available, e.g. the [general] stanza).
+// Anything other than "own" gets a clickable "global: <template>" badge so
+// the user can see this value is shared, and jump straight to the template
+// page where editing it actually affects every node that uses it.
+function makeToggleRow(key, value, commented, desc, meta, source) {
   var checked = commented ? '' : 'checked';
+  var globalBadge = (source && source !== 'own')
+    ? ' <span class="badge badge-unk" style="cursor:pointer" '
+      + 'onclick="showPage(\'template-' + esc(source) + '\')" '
+      + 'title="Inherited from the [' + esc(source) + '] template. Click to edit it globally — '
+      + 'changes there apply to every node using this template.">global: ' + esc(source) + '</span>'
+    : '';
   return '<div class="toggle-row">'
     + '<div class="toggle-info">'
-    + '<div class="toggle-key">' + esc(key) + '</div>'
+    + '<div class="toggle-key">' + esc(key) + globalBadge + '</div>'
     + (desc ? '<div class="toggle-desc">' + esc(desc) + '</div>' : '')
     + '</div>'
     + '<div style="display:flex;align-items:center;gap:12px;flex-shrink:0">'
@@ -864,7 +901,11 @@ function showToggleHelp() {
     + 'default or to whatever a template stanza provides &mdash; but your value stays saved in the '
     + 'file, disabled, ready to switch back on later.</p>'
     + '<p>This lets you try a value without committing to it, or temporarily disable a setting '
-    + 'without losing the value you had configured.</p>');
+    + 'without losing the value you had configured.</p>'
+    + '<p>A setting tagged <span class="badge badge-unk">global: node-main</span> isn\'t set on '
+    + 'this node directly &mdash; it\'s inherited from a shared template. Editing it on a node\'s '
+    + 'own page only creates an override for that one node. Click the badge to edit the template '
+    + 'itself instead, which changes the value for every node that uses it.</p>');
 }
 
 async function saveChanges() {
@@ -927,13 +968,13 @@ async function loadGeneralEditor() {
   var html = '<div class="card"><div class="card-body">';
   GENERAL_META.forEach(function(m) {
     var st = s[m.key] || {};
-    html += makeToggleRow(m.key, st.value || '', st.commented !== false, m.desc, m);
+    html += makeToggleRow(m.key, st.value || '', st.commented !== false, m.desc, m, st.source);
   });
   // Show any other keys present in [general] not in our known list
   var knownGen = {node_lookup_method:1, dns_node_domain:1, max_dns_node_length:1};
   Object.keys(s).forEach(function(k) {
     if (!knownGen[k]) {
-      html += makeToggleRow(k, s[k].value || '', s[k].commented !== false, 'Custom [general] setting');
+      html += makeToggleRow(k, s[k].value || '', s[k].commented !== false, 'Custom [general] setting', null, s[k].source);
     }
   });
   html += '</div></div>';
@@ -1108,24 +1149,27 @@ var NODE_SECS = [
   ]},
 ];
 
-async function loadNodeEditor(node) {
-  currentSection = node;
-  var el = document.getElementById('node-content-' + node);
-  if (!el) return;
-  el.innerHTML = '<div class="muted">Loading settings for node ' + esc(node) + '...</div>';
+// Shared renderer for both per-node pages and global template pages — both
+// show the same NODE_SECS-driven editor over a stanza's effective settings.
+// Returns the raw API response data so callers can use extra fields
+// (e.g. the template endpoint's "used_by" list).
+async function loadStanzaEditor(sectionName, elId, apiUrl, loadingLabel, fallbackToGeneral) {
+  currentSection = sectionName;
+  var el = document.getElementById(elId);
+  if (!el) return null;
+  el.innerHTML = '<div class="muted">Loading settings for ' + esc(loadingLabel) + '...</div>';
 
-  // Use the new per-node endpoint that correctly resolves Asterisk template
-  // inheritance (e.g. [64393](node-main) inheriting from [node-main](!))
-  var r = await api('/api/conf/node/' + encodeURIComponent(node));
+  var r = await api(apiUrl);
   if (!r.ok) {
-    // Fallback to full conf parse if new endpoint fails
-    log('Per-node API failed, falling back to full conf parse', 'WARN');
-    r = await api('/api/conf');
-    if (!r.ok) {
-      el.innerHTML = '<div class="alert alert-danger">Failed to load rpt.conf. Service must run as root.</div>';
-      return;
+    if (fallbackToGeneral) {
+      log('Per-node API failed, falling back to full conf parse', 'WARN');
+      r = await api('/api/conf');
+      if (r.ok) r.data.settings = r.data.general_settings || {};
     }
-    r.data.settings = r.data.general_settings || {};
+    if (!r.ok) {
+      el.innerHTML = '<div class="alert alert-danger">' + esc(r.data.error || 'Failed to load rpt.conf.') + '</div>';
+      return null;
+    }
   }
 
   var s    = r.data.settings || {};
@@ -1139,7 +1183,7 @@ async function loadNodeEditor(node) {
           + '<div class="sec-body' + open + '">';
     sec.keys.forEach(function(m) {
       var st = s[m.key] || {};
-      html += makeToggleRow(m.key, st.value || '', st.commented !== false, m.desc, m);
+      html += makeToggleRow(m.key, st.value || '', st.commented !== false, m.desc, m, st.source);
     });
     html += '</div></div>';
   });
@@ -1157,13 +1201,33 @@ async function loadNodeEditor(node) {
           + '<div class="sec-body">';
     extraKeys.forEach(function(k) {
       var st = s[k];
-      html += makeToggleRow(k, st.value || '', st.commented !== false, 'Custom / advanced setting');
+      html += makeToggleRow(k, st.value || '', st.commented !== false, 'Custom / advanced setting', null, st.source);
     });
     html += '</div></div>';
   }
 
   el.innerHTML = html;
-  log('Node ' + node + ' editor loaded (' + Object.keys(s).length + ' effective settings).', 'DEBUG');
+  log(loadingLabel + ' editor loaded (' + Object.keys(s).length + ' effective settings).', 'DEBUG');
+  return r.data;
+}
+
+async function loadNodeEditor(node) {
+  // Uses the per-node endpoint, which correctly resolves Asterisk template
+  // inheritance (e.g. [64393](node-main) inheriting from [node-main](!)).
+  await loadStanzaEditor(node, 'node-content-' + node,
+    '/api/conf/node/' + encodeURIComponent(node), 'node ' + node, true);
+}
+
+async function loadTemplateEditor(name) {
+  var usedByEl = document.getElementById('template-used-by-' + name);
+  var data = await loadStanzaEditor(name, 'template-content-' + name,
+    '/api/conf/template/' + encodeURIComponent(name), 'template ' + name, false);
+  if (!usedByEl) return;
+  var usedBy = (data && data.used_by) || [];
+  usedByEl.textContent = usedBy.length
+    ? 'Used by node' + (usedBy.length > 1 ? 's' : '') + ': ' + usedBy.join(', ')
+      + '. Saving a change here affects all of them.'
+    : 'No nodes currently reference this template.';
 }
 
 function toggleSec(el) {
