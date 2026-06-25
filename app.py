@@ -71,9 +71,14 @@ SERVICE_FILE_PATH = os.environ.get("SERVICE_FILE_PATH",
 DEFAULT_SECRET_KEYS = {"", "asl3-ez-change-me", "asl3-ez-change-me-in-production"}
 
 # Persistent AMI poller settings (tunable via service file env vars)
-# 3s poll matches Allmon's update rate; 30s TTL avoids false "stale" warnings
-POLL_INTERVAL   = float(os.environ.get("AMI_POLL_INTERVAL", "3.0"))   # seconds between polls
-CACHE_TTL       = float(os.environ.get("AMI_CACHE_TTL",     "30.0"))  # seconds before cache is stale
+# 1s poll for near-real-time keyed-status updates in the UI. This used to
+# be 3s, tuned around AMIClient.command()'s old 12s-per-call bug (waiting
+# on a "--END COMMAND--" sentinel this AMI build never sends) — now that
+# every AMI command completes in under a millisecond, polling this often
+# costs nothing. 10s TTL still gives a generous buffer before flagging
+# cached data as stale.
+POLL_INTERVAL   = float(os.environ.get("AMI_POLL_INTERVAL", "1.0"))   # seconds between polls
+CACHE_TTL       = float(os.environ.get("AMI_CACHE_TTL",     "10.0"))  # seconds before cache is stale
 
 # Full paths — do NOT rely on PATH env under gunicorn/systemd
 SYSTEMCTL_PATH  = "/bin/systemctl"

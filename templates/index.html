@@ -290,6 +290,18 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     <div class="page-sub">Connect, disconnect, and monitor nodes</div>
 
     <div class="card">
+      <div class="card-header">
+        <h2>Node Status</h2>
+        <button class="btn btn-sm" onclick="ncStatus()">Refresh Now</button>
+      </div>
+      <div class="card-body">
+        <div id="nc-status">
+          <span class="muted"><span class="spinner"></span> Loading node status...</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
       <div class="card-header"><h2>Connect / Disconnect</h2></div>
       <div class="card-body">
         <div class="form-row" style="margin-bottom:14px">
@@ -317,18 +329,6 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
           <input type="checkbox" id="nc-disc-first" style="width:auto" checked>
           Disconnect from all nodes prior to connecting
         </label>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-header">
-        <h2>Node Status</h2>
-        <button class="btn btn-sm" onclick="ncStatus()">Refresh Now</button>
-      </div>
-      <div class="card-body">
-        <div id="nc-status">
-          <span class="muted"><span class="spinner"></span> Loading node status...</span>
-        </div>
       </div>
     </div>
 
@@ -1191,7 +1191,7 @@ function startNcPolling() {
   stopNcPolling();
   _ncStatusInit = false;
   ncStatus();                              // immediate first fetch
-  _ncPollTimer = setInterval(ncStatus, 4000);  // 4s matches Allmon's rate
+  _ncPollTimer = setInterval(ncStatus, 1000);  // 1s — AMI commands are now sub-ms, no need to wait longer
 }
 
 function stopNcPolling() {
