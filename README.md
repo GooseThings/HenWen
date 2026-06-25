@@ -14,6 +14,7 @@ A browser-based web interface for managing your AllStarLink 3 nodes:
 
 ## Recent Changes
 
+- **Added: About card to the Settings page.** Shows author info, project links (GitHub, WE8CHZ.org, GPL-2.0 license), and AllStarLink resource links (portal, ASL3 docs, rpt.conf reference, community forum).
 - **Added: 6 color themes**, selectable from the Settings page. Dark (default), Midnight (OLED black), Light, Terminal (green phosphor), Amber (amber phosphor), and Nord. Switching is instant with no page reload; the choice persists in `localStorage` and applies to the login page as well.
 - **Added: login/authentication.** The first time you open the app you are prompted to create a username and password. All pages and API endpoints require a valid session after that. Passwords are stored as salted hashes (werkzeug pbkdf2:sha256) in the local SQLite database — never in plain text. The Settings page has a Change Password form. The Flask `SECRET_KEY` (which signs session cookies) can still be rotated from Settings; rotating it invalidates all active sessions.
 - **Compacted UI and improved mobile support.** Tighter spacing and a smaller base font make better use of screen space on all devices. On mobile, the sidebar collapses to a sticky top bar with a hamburger button — the nav is hidden by default and auto-closes after selecting a page, so the content is immediately visible. Toggle rows (on settings pages) wrap on narrow screens so the key name is always readable. Buttons get a larger minimum touch target on mobile.
