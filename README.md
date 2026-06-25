@@ -104,7 +104,7 @@ Go to **AMI Diagnostics** in the web UI and click **Run Test**. You should see a
 
 ## Changing the Flask Secret Key
 
-ASL3-EZ ships with a generic default `SECRET_KEY` so it works out of the box. It isn't currently used to protect anything sensitive (there's no login/session yet), but changing it is good hygiene and will matter once authentication is added.
+ASL3-EZ ships with a generic default `SECRET_KEY`. It signs the session cookies that keep you logged in, so using a weak or well-known key would let an attacker forge a valid session. Rotating it invalidates all active sessions (everyone gets logged out).
 
 Go to **Settings** in the web UI and click **Generate & Apply New Key** (or enter your own, 16+ characters). This writes the new key into the systemd unit file and restarts ASL3-EZ to apply it — the page will briefly disconnect, then reload it. The Dashboard shows a warning banner if you're still on the default key.
 
@@ -170,12 +170,12 @@ All settings can be overridden in the service file:
 ASL3-EZ/
 ├── app.py                  # Flask backend
 ├── templates/
-│   └── index.html          # Single-page web UI
+│   ├── index.html          # Main single-page web UI
+│   └── login.html          # Login / first-run setup page
 ├── requirements.txt        # Python deps (flask, gunicorn)
 ├── ASL3-EZ.service         # systemd unit file
 ├── install.sh              # Installer
-├── uninstall.sh             # Uninstaller
-├── sample-rpt.conf         # Sample for testing
+├── uninstall.sh            # Uninstaller
 └── README.md
 ```
 
