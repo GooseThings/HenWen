@@ -827,6 +827,33 @@ sudo asterisk -rx "module reload manager"</pre>
       </div>
     </div>
 
+    <!-- Diagnostics -->
+    <div class="card">
+      <div class="card-header"><h2>Pre-flight Diagnostics</h2></div>
+      <div class="card-body">
+        <p class="muted" style="margin-bottom:12px;font-size:0.88rem">
+          Runs real AMI commands against your node to verify that Smart Connector
+          will work correctly — command permissions, node variable reads, link stats,
+          and the iLink connect/disconnect command path. No dry-run: these are actual
+          Asterisk commands.
+        </p>
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px">
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Local Node</label>
+            <select id="diag-local" class="val-input"></select>
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Target Node <span class="muted">(optional)</span></label>
+            <input type="text" id="diag-target" class="val-input" placeholder="666380" style="width:110px">
+          </div>
+          <div style="align-self:flex-end">
+            <button class="btn btn-primary" onclick="runDiagnostics()">Run Diagnostics</button>
+          </div>
+        </div>
+        <div id="sc-diag-results"></div>
+      </div>
+    </div>
+
     <!-- List -->
     <div class="card">
       <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
@@ -2647,7 +2674,7 @@ function populateConnNodeSelects() {
     var m = el.id.match(/^page-node-(\d+)$/);
     if (m) nodes.push(m[1]);
   });
-  ['sc-local'].forEach(function(selId) {
+  ['sc-local', 'diag-local'].forEach(function(selId) {
     var sel = document.getElementById(selId);
     if (!sel) return;
     sel.innerHTML = '';
@@ -2656,6 +2683,45 @@ function populateConnNodeSelects() {
     });
     if (!nodes.length) { var o = document.createElement('option'); o.value=''; o.textContent='(none)'; sel.appendChild(o); }
   });
+}
+
+async function runDiagnostics() {
+  var res    = document.getElementById('sc-diag-results');
+  var local  = document.getElementById('diag-local').value.trim();
+  var target = document.getElementById('diag-target').value.trim();
+  if (!local) { res.innerHTML = '<span style="color:var(--danger)">Select a local node first.</span>'; return; }
+  res.innerHTML = '<span class="muted">Running tests...</span>';
+  try {
+    var r = await fetch('/api/connectors/diagnose', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({local_node: local, target_node: target}),
+    });
+    var d = await r.json();
+    if (d.error && !d.tests.length) {
+      res.innerHTML = '<span style="color:var(--danger)">AMI connection failed: ' + esc(d.error) + '</span>';
+      return;
+    }
+    var html = '<table style="width:100%;border-collapse:collapse;font-size:0.88rem">';
+    d.tests.forEach(function(t) {
+      var icon  = t.pass ? '<span style="color:var(--green)">PASS</span>' : '<span style="color:var(--danger)">FAIL</span>';
+      var fix   = t.fix  ? '<div style="color:var(--accent);font-size:0.82rem;margin-top:3px">Fix: ' + esc(t.fix) + '</div>' : '';
+      html += '<tr style="border-bottom:1px solid var(--border)">' +
+        '<td style="padding:8px 10px 8px 0;width:36px;vertical-align:top">' + icon + '</td>' +
+        '<td style="padding:8px 0;vertical-align:top"><strong>' + esc(t.name) + '</strong>' +
+          '<div class="muted" style="font-size:0.82rem">' + esc(t.detail) + '</div>' + fix + '</td>' +
+      '</tr>';
+    });
+    html += '</table>';
+    if (d.all_pass) {
+      html = '<div style="color:var(--green);font-weight:600;margin-bottom:10px">All tests passed — Smart Connector is ready to use.</div>' + html;
+    } else {
+      html = '<div style="color:var(--danger);font-weight:600;margin-bottom:10px">One or more tests failed. Fix the issues above before using Smart Connector.</div>' + html;
+    }
+    res.innerHTML = html;
+  } catch(e) {
+    res.innerHTML = '<span style="color:var(--danger)">Error: ' + esc(String(e)) + '</span>';
+  }
 }
 
 async function loadConnectors() {
@@ -2714,6 +2780,7 @@ function connCard(c) {
         (c.state === 'error'
           ? '<button class="btn btn-sm" onclick="connReset(' + c.id + ')">Clear Error</button>'
           : '') +
+        '<button class="btn btn-sm" onclick="connSyncState(' + c.id + ')" title="Re-check actual Asterisk lstats and correct state if drifted">Sync State</button>' +
         '<button class="btn btn-sm" onclick="connEditShow(' + c.id + ')">Edit</button>' +
         '<button class="btn btn-sm" style="color:var(--danger);border-color:var(--danger)" onclick="connDelete(' + c.id + ',' + JSON.stringify(c.name) + ')">Delete</button>' +
       '</div>' +
@@ -2771,6 +2838,35 @@ async function connDisconnect(id) {
 async function connReset(id) {
   await fetch('/api/connectors/' + id + '/reset', { method: 'POST' });
   loadConnectors();
+}
+
+async function connSyncState(id) {
+  // Pull fresh connector data then cross-check against diagnostics
+  var r = await fetch('/api/connectors/' + id);
+  if (!r.ok) return;
+  var c = await r.json();
+  // Run a quick diagnose to get actual lstats
+  var dr = await fetch('/api/connectors/diagnose', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({local_node: c.local_node, target_node: c.target_node}),
+  });
+  var dd = await dr.json();
+  if (dd.error) { alert('Sync failed: ' + dd.error); return; }
+  // Check test result for the link state test
+  var linkTest = dd.tests.find(function(t) { return t.name.indexOf('link state') !== -1; });
+  var nowConnected = linkTest && linkTest.detail.indexOf('currently connected') !== -1;
+  if (c.state === 'connected' && !nowConnected) {
+    if (confirm('DB says connected but Asterisk shows the link is gone. Reset state to Idle?')) {
+      await fetch('/api/connectors/' + id + '/reset', { method: 'POST' });
+      loadConnectors();
+    }
+  } else if (c.state !== 'connected' && nowConnected) {
+    alert('Asterisk shows node ' + c.target_node + ' is connected, but DB state is "' + c.state + '".\nYou may want to manually set this connector to connected state.');
+    loadConnectors();
+  } else {
+    alert('State looks correct: DB="' + c.state + '", Asterisk link present=' + nowConnected);
+  }
 }
 
 async function connDelete(id, name) {

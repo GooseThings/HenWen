@@ -2821,6 +2821,17 @@ def _connector_do_disconnect(local: str, target: str):
     return ami_send_command(_cmd)
 
 
+def _connector_link_present(local: str, target: str) -> bool:
+    """
+    Return True if target appears in the AMI cache's connected list for local.
+    Returns None (unknown) if the cache has no data yet for this node.
+    """
+    cached = _ami_cache.get(local)
+    if not cached:
+        return None  # no data yet — don't assume anything
+    return target in cached.get("connected", [])
+
+
 def _run_connectors():
     now     = datetime.now()
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -2830,8 +2841,10 @@ def _run_connectors():
     rows = db.execute("SELECT * FROM connectors WHERE enabled=1").fetchall()
 
     for row in rows:
-        cid   = row["id"]
-        state = row["state"]
+        cid    = row["id"]
+        state  = row["state"]
+        local  = row["local_node"]
+        target = row["target_node"]
 
         # idle → check if scheduled connect_time has arrived
         if state == "idle" and row["connect_time"] and now_hm == row["connect_time"]:
@@ -2845,19 +2858,23 @@ def _run_connectors():
 
         # waiting → connect when node is idle (or force after 2 min)
         if state == "waiting":
-            idle   = not _node_active(row["local_node"])
-            forced = False
+            node_idle = not _node_active(local)
+            forced    = False
             if row["state_updated"]:
                 try:
-                    su = datetime.strptime(row["state_updated"], "%Y-%m-%d %H:%M:%S")
+                    su     = datetime.strptime(row["state_updated"], "%Y-%m-%d %H:%M:%S")
                     forced = (now - su).total_seconds() > 120
                 except Exception:
                     pass
 
-            if idle or forced:
+            if node_idle or forced:
                 label = "forced" if forced else "node idle"
                 try:
-                    _connector_do_connect(row["local_node"], row["target_node"])
+                    result = _connector_do_connect(local, target)
+                    if not result.get("success", True):
+                        raise RuntimeError(
+                            f"ilink 3 rejected by Asterisk: {result.get('raw', '')[:120]}"
+                        )
                     db.execute(
                         "UPDATE connectors SET state='connected', state_msg='Connected', "
                         "state_updated=?, connected_at=?, last_activity=? WHERE id=?",
@@ -2873,8 +2890,21 @@ def _run_connectors():
                     db.commit()
                     log("ERROR", f"[CONNECTOR] Connect failed for '{row['name']}': {e}")
 
-        # connected → settle then monitor idle time
+        # connected → verify link still exists, settle, then monitor idle
         elif state == "connected":
+            # Check AMI cache: if we have fresh data and target is gone, reset to idle
+            link_present = _connector_link_present(local, target)
+            if link_present is False:
+                db.execute(
+                    "UPDATE connectors SET state='idle', "
+                    "state_msg='Link ended (remote node disconnected)', "
+                    "state_updated=?, connected_at=NULL, last_activity=NULL WHERE id=?",
+                    (now_str, cid)
+                )
+                db.commit()
+                log("INFO", f"[CONNECTOR] '{row['name']}' — target {target} no longer in lstats, resetting to idle")
+                continue
+
             try:
                 connected_at = datetime.strptime(row["connected_at"], "%Y-%m-%d %H:%M:%S")
             except Exception:
@@ -2883,19 +2913,29 @@ def _run_connectors():
             if (now - connected_at).total_seconds() < row["settle_sec"]:
                 continue  # still in settle window
 
-            if _node_active(row["local_node"]):
+            if _node_active(local):
                 db.execute("UPDATE connectors SET last_activity=? WHERE id=?", (now_str, cid))
                 db.commit()
             else:
+                # Use connected_at as the fallback if last_activity is somehow NULL
+                last_act_str = row["last_activity"] or row["connected_at"] or now_str
                 try:
-                    last_act = datetime.strptime(row["last_activity"], "%Y-%m-%d %H:%M:%S")
+                    last_act = datetime.strptime(last_act_str, "%Y-%m-%d %H:%M:%S")
                     idle_sec = (now - last_act).total_seconds()
                 except Exception:
-                    idle_sec = 0
+                    idle_sec = row["idle_limit_sec"]  # safe: treat as timed-out
+
+                log("DEBUG", f"[CONNECTOR] '{row['name']}' idle for {idle_sec:.0f}s / {row['idle_limit_sec']}s")
 
                 if idle_sec >= row["idle_limit_sec"]:
                     try:
-                        _connector_do_disconnect(row["local_node"], row["target_node"])
+                        result = _connector_do_disconnect(local, target)
+                        # ilink 1 on an already-gone node returns no-error output
+                        # so treat both success and "node not connected" as done
+                        raw = result.get("raw", "")
+                        hard_fail = any(w in raw for w in ["permission denied", "not permitted", "unknown command"])
+                        if hard_fail:
+                            raise RuntimeError(f"ilink 1 rejected: {raw[:120]}")
                         db.execute(
                             "UPDATE connectors SET state='idle', "
                             "state_msg='Auto-disconnected after idle timeout', "
@@ -2906,6 +2946,11 @@ def _run_connectors():
                         log("INFO", f"[CONNECTOR] '{row['name']}' auto-disconnected after {idle_sec:.0f}s idle")
                     except Exception as e:
                         log("ERROR", f"[CONNECTOR] Disconnect failed for '{row['name']}': {e}")
+                        db.execute(
+                            "UPDATE connectors SET state_msg=? WHERE id=?",
+                            (f"Disconnect error: {str(e)[:150]}", cid)
+                        )
+                        db.commit()
 
 
 def _connector_loop():
@@ -2932,6 +2977,15 @@ def api_conn_list():
     db   = get_db()
     rows = db.execute("SELECT * FROM connectors ORDER BY name COLLATE NOCASE").fetchall()
     return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/connectors/<int:cid>")
+def api_conn_get(cid):
+    db  = get_db()
+    row = db.execute("SELECT * FROM connectors WHERE id=?", (cid,)).fetchone()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify(dict(row))
 
 
 @app.route("/api/connectors", methods=["POST"])
@@ -3074,6 +3128,126 @@ def api_conn_reset(cid):
     )
     db.commit()
     return jsonify({"ok": True})
+
+
+@app.route("/api/connectors/diagnose", methods=["POST"])
+def api_conn_diagnose():
+    """
+    Run real smoke-tests for Smart Connector prerequisites on a given node.
+    Every test actually exercises the AMI command path — no dry-run mode.
+    """
+    data        = request.json or {}
+    local_node  = str(data.get("local_node",  "")).strip()
+    target_node = str(data.get("target_node", "")).strip()
+
+    if not re.match(r'^\d{4,7}$', local_node):
+        return jsonify({"error": "Invalid local node number"}), 400
+
+    results = []
+
+    def _pass(name, detail):
+        results.append({"name": name, "pass": True,  "detail": detail})
+
+    def _fail(name, detail, fix=None):
+        results.append({"name": name, "pass": False, "detail": detail, "fix": fix or ""})
+
+    def _run(ami):
+        # ── Test 1: AMI command permission ──────────────────────────────────
+        try:
+            lines = ami.command("core show version")
+            ver   = next((l for l in lines if "asterisk" in l.lower()), None)
+            if ver:
+                _pass("AMI command permission", ver)
+            else:
+                _fail("AMI command permission",
+                      "No Asterisk version in response — AMI user may lack 'command' write permission.",
+                      "Add 'write = command' to the AMI user in manager.conf and reload.")
+        except Exception as e:
+            _fail("AMI command permission", f"Command failed: {e}",
+                  "Check manager.conf: user needs write = system,call,command,...")
+
+        # ── Test 2: Node variable read (proves node exists + rpt works) ─────
+        try:
+            lines = ami.command(f"rpt show variables {local_node}")
+            raw   = " ".join(lines)
+            has_rx = "RPT_RXKEYED" in raw
+            has_tx = "RPT_TXKEYED" in raw
+            if has_rx and has_tx:
+                rxval = next((l.split("=")[-1].strip() for l in lines if "RPT_RXKEYED" in l), "?")
+                txval = next((l.split("=")[-1].strip() for l in lines if "RPT_TXKEYED" in l), "?")
+                _pass(f"Node {local_node} variable read",
+                      f"RPT_RXKEYED={rxval}, RPT_TXKEYED={txval} — node exists and idle detection will work")
+            elif "unknown node" in raw.lower():
+                _fail(f"Node {local_node} variable read",
+                      f"Asterisk says 'Unknown node {local_node}'.",
+                      f"Make sure [{local_node}] is in rpt.conf and Asterisk is using it.")
+            else:
+                _fail(f"Node {local_node} variable read",
+                      f"RPT_RXKEYED/RPT_TXKEYED not found in output: {raw[:120]}",
+                      "Check that app_rpt is loaded and this node is active.")
+        except Exception as e:
+            _fail(f"Node {local_node} variable read", f"Command error: {e}")
+
+        # ── Test 3: rpt lstats (proves link-list is readable) ───────────────
+        try:
+            lines = ami.command(f"rpt lstats {local_node}")
+            raw   = " ".join(lines)
+            if any("NODE" in l and "PEER" in l for l in lines):
+                n_links = sum(1 for l in lines
+                              if re.search(r'\b\d{4,7}\b', l) and "NODE" not in l and "----" not in l)
+                _pass(f"Node {local_node} link stats",
+                      f"lstats readable — {n_links} active link(s) currently")
+            else:
+                _fail(f"Node {local_node} link stats",
+                      f"Unexpected lstats output: {raw[:120]}",
+                      "The auto-disconnect relies on lstats — check that rpt lstats works from the Asterisk CLI.")
+        except Exception as e:
+            _fail(f"Node {local_node} link stats", f"Command error: {e}")
+
+        # ── Test 4: iLink command path ───────────────────────────────────────
+        # Disconnect a node (0) that is never connected — safe no-op that
+        # exercises the exact same code path as the real disconnect command.
+        try:
+            lines = ami.command(f"rpt cmd {local_node} ilink 1 0")
+            raw   = " ".join(lines).lower()
+            blocked = any(w in raw for w in
+                          ["permission denied", "not permitted", "unknown command", "no permission"])
+            if blocked:
+                _fail("iLink command path",
+                      f"Asterisk rejected the ilink command: {raw[:120]}",
+                      "AMI user needs write = command. Also check that app_rpt is loaded.")
+            else:
+                _pass("iLink command path",
+                      "rpt cmd ilink accepted by Asterisk — connect/disconnect commands will work")
+        except Exception as e:
+            _fail("iLink command path", f"Command error: {e}")
+
+        # ── Test 5: Target node reachable (if provided) ─────────────────────
+        if re.match(r'^\d{4,7}$', target_node):
+            try:
+                lines  = ami.command(f"rpt lstats {local_node}")
+                linked = []
+                for l in lines:
+                    for n in re.findall(r'\b(\d{4,7})\b', l):
+                        if n != local_node:
+                            linked.append(n)
+                if target_node in linked:
+                    _pass(f"Target {target_node} link state",
+                          f"Node {target_node} is currently connected to {local_node}")
+                else:
+                    _pass(f"Target {target_node} link state",
+                          f"Node {target_node} is not currently connected (expected — this is a pre-connect check)")
+            except Exception as e:
+                _fail(f"Target {target_node} link state", f"Could not check lstats: {e}")
+
+        return {"tests": results}
+
+    try:
+        outcome = ami_send_command(_run)
+        all_pass = all(t["pass"] for t in outcome["tests"])
+        return jsonify({"tests": outcome["tests"], "all_pass": all_pass})
+    except Exception as e:
+        return jsonify({"error": f"AMI connection failed: {e}", "tests": results}), 500
 
 
 # ---------------------------------------------------------------------------
