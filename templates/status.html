@@ -315,7 +315,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       <div class="map-card">
         <div class="card-header">
           <span class="card-title">Network Map</span>
-          <span class="card-count" id="map-count"></span>
           <div class="map-ctl">
             <select class="map-ctl-sel" id="map-tile-sel" onchange="changeTiles(this.value)">
               <option value="dark">OSM Dark</option>
@@ -569,10 +568,6 @@ function updateMap() {
     m.addTo(_map); _markers.push(m);
     allPinned.push(p);
   });
-
-  /* Pin count */
-  var n = allPinned.length;
-  document.getElementById('map-count').textContent = n ? n + ' pin' + (n !== 1 ? 's' : '') : '';
 
   /* Auto-fit on first data load only */
   if (!_mapFitted && allPinned.length > 0) {
