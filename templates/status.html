@@ -507,10 +507,15 @@ function _buildNightPoly() {
 function updateGrayline() {
   if (_grayLayer) { _map.removeLayer(_grayLayer); _grayLayer = null; }
   if (!_showGrayline || !_map) return;
-  _grayLayer = L.polygon(_buildNightPoly(), {
-    color:'transparent', fillColor:'#000020', fillOpacity:0.38, interactive:false
-  }).addTo(_map);
-  if (_grayLayer._map) _grayLayer.bringToBack();
+  var base = _buildNightPoly();
+  var opts = { color:'transparent', fillColor:'#000020', fillOpacity:0.38, interactive:false };
+  /* Render at -360°, 0°, +360° offsets so the overlay covers all repeated world copies
+     that Leaflet shows at low zoom levels */
+  var layers = [-360, 0, 360].map(function(off) {
+    return L.polygon(base.map(function(p){ return [p[0], p[1] + off]; }), opts);
+  });
+  _grayLayer = L.layerGroup(layers).addTo(_map);
+  layers.forEach(function(l){ try { l.bringToBack(); } catch(e){} });
 }
 
 /* ── Master map renderer ── */
