@@ -100,6 +100,96 @@ html[data-theme="nord"] {
   --log-bg:  #242932;
 }
 
+html[data-theme="mario"] {
+  --bg:      #1a1464;
+  --bg2:     #221a7a;
+  --bg3:     #2e2490;
+  --border:  #3c32b0;
+  --accent:  #e8000d;
+  --green:   #1aaa00;
+  --warn:    #f8c800;
+  --danger:  #f85000;
+  --text:    #f8f8f8;
+  --text2:   #c8b840;
+  --text3:   #e8e0ff;
+  --log-bg:  #0e0c40;
+}
+
+html[data-theme="dracula"] {
+  --bg:      #282a36;
+  --bg2:     #1e2030;
+  --bg3:     #343746;
+  --border:  #44475a;
+  --accent:  #bd93f9;
+  --green:   #50fa7b;
+  --warn:    #f1fa8c;
+  --danger:  #ff5555;
+  --text:    #f8f8f2;
+  --text2:   #6272a4;
+  --text3:   #e0d8f8;
+  --log-bg:  #14151e;
+}
+
+html[data-theme="monokai"] {
+  --bg:      #272822;
+  --bg2:     #1e1f1a;
+  --bg3:     #3e3d32;
+  --border:  #49483e;
+  --accent:  #66d9e8;
+  --green:   #a6e22e;
+  --warn:    #e6db74;
+  --danger:  #f92672;
+  --text:    #f8f8f2;
+  --text2:   #75715e;
+  --text3:   #cfcfc2;
+  --log-bg:  #1a1a16;
+}
+
+html[data-theme="cyberpunk"] {
+  --bg:      #0d0d1a;
+  --bg2:     #12122a;
+  --bg3:     #1a1a3a;
+  --border:  #2a1a50;
+  --accent:  #ff00ff;
+  --green:   #00ffaa;
+  --warn:    #ffee00;
+  --danger:  #ff0066;
+  --text:    #e8e0ff;
+  --text2:   #8870cc;
+  --text3:   #ccbbff;
+  --log-bg:  #080814;
+}
+
+html[data-theme="solarized"] {
+  --bg:      #fdf6e3;
+  --bg2:     #eee8d5;
+  --bg3:     #e5dfc8;
+  --border:  #cdc7b0;
+  --accent:  #268bd2;
+  --green:   #859900;
+  --warn:    #b58900;
+  --danger:  #dc322f;
+  --text:    #657b83;
+  --text2:   #93a1a1;
+  --text3:   #586e75;
+  --log-bg:  #073642;
+}
+
+html[data-theme="cotton-candy"] {
+  --bg:      #fdf0fc;
+  --bg2:     #fff5fe;
+  --bg3:     #f5e6f8;
+  --border:  #ddb8e8;
+  --accent:  #b44cc0;
+  --green:   #2e9e6e;
+  --warn:    #c87820;
+  --danger:  #c83050;
+  --text:    #2a1030;
+  --text2:   #8850a0;
+  --text3:   #1e0820;
+  --log-bg:  #1e0820;
+}
+
 html { font-size: 15px; }
 
 body {
@@ -1066,6 +1156,72 @@ sudo asterisk -rx "module reload manager"</pre>
             </div>
             <div class="ts-name" style="background:#3b4252;color:#eceff4">Nord</div>
           </div>
+          <div class="theme-swatch" id="ts-mario" onclick="applyTheme('mario')">
+            <div class="ts-preview" style="background:#1a1464">
+              <div class="ts-dots">
+                <span style="background:#e8000d"></span>
+                <span style="background:#1aaa00"></span>
+                <span style="background:#f85000"></span>
+                <span style="background:#f8c800"></span>
+              </div>
+            </div>
+            <div class="ts-name" style="background:#221a7a;color:#f8f8f8">Mario</div>
+          </div>
+          <div class="theme-swatch" id="ts-dracula" onclick="applyTheme('dracula')">
+            <div class="ts-preview" style="background:#282a36">
+              <div class="ts-dots">
+                <span style="background:#bd93f9"></span>
+                <span style="background:#50fa7b"></span>
+                <span style="background:#ff5555"></span>
+                <span style="background:#f8f8f2"></span>
+              </div>
+            </div>
+            <div class="ts-name" style="background:#1e2030;color:#f8f8f2">Dracula</div>
+          </div>
+          <div class="theme-swatch" id="ts-monokai" onclick="applyTheme('monokai')">
+            <div class="ts-preview" style="background:#272822">
+              <div class="ts-dots">
+                <span style="background:#66d9e8"></span>
+                <span style="background:#a6e22e"></span>
+                <span style="background:#f92672"></span>
+                <span style="background:#e6db74"></span>
+              </div>
+            </div>
+            <div class="ts-name" style="background:#1e1f1a;color:#f8f8f2">Monokai</div>
+          </div>
+          <div class="theme-swatch" id="ts-cyberpunk" onclick="applyTheme('cyberpunk')">
+            <div class="ts-preview" style="background:#0d0d1a">
+              <div class="ts-dots">
+                <span style="background:#ff00ff"></span>
+                <span style="background:#00ffaa"></span>
+                <span style="background:#ff0066"></span>
+                <span style="background:#ffee00"></span>
+              </div>
+            </div>
+            <div class="ts-name" style="background:#12122a;color:#e8e0ff">Cyberpunk</div>
+          </div>
+          <div class="theme-swatch" id="ts-solarized" onclick="applyTheme('solarized')">
+            <div class="ts-preview" style="background:#fdf6e3">
+              <div class="ts-dots">
+                <span style="background:#268bd2"></span>
+                <span style="background:#859900"></span>
+                <span style="background:#dc322f"></span>
+                <span style="background:#657b83"></span>
+              </div>
+            </div>
+            <div class="ts-name" style="background:#eee8d5;color:#586e75;border-top:1px solid #cdc7b0">Solarized</div>
+          </div>
+          <div class="theme-swatch" id="ts-cotton-candy" onclick="applyTheme('cotton-candy')">
+            <div class="ts-preview" style="background:#fdf0fc">
+              <div class="ts-dots">
+                <span style="background:#b44cc0"></span>
+                <span style="background:#2e9e6e"></span>
+                <span style="background:#c83050"></span>
+                <span style="background:#2a1030"></span>
+              </div>
+            </div>
+            <div class="ts-name" style="background:#fff5fe;color:#2a1030;border-top:1px solid #ddb8e8">Cotton Candy</div>
+          </div>
         </div>
       </div>
     </div>
@@ -1169,7 +1325,7 @@ sudo asterisk -rx "module reload manager"</pre>
 'use strict';
 
 /* ── Theme ──────────────────────────────────────────────────────────────── */
-var THEME_NAMES = ['dark','midnight','light','terminal','amber','nord'];
+var THEME_NAMES = ['dark','midnight','light','terminal','amber','nord','mario','dracula','monokai','cyberpunk','solarized','cotton-candy'];
 
 function applyTheme(name) {
   if (THEME_NAMES.indexOf(name) === -1) name = 'dark';
