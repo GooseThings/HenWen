@@ -478,7 +478,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     {% endif %}
 
     <div class="nav-section">Tools</div>
-    <a class="nav-item" href="/status" target="_blank" style="text-decoration:none">Status Board &#8599;</a>
+    <a class="nav-item" href="/status" target="_blank" style="text-decoration:none">Node Kiosk &#8599;</a>
     <button class="nav-item" onclick="showPage('dtmf')">DTMF Control</button>
     <button class="nav-item" onclick="showPage('node-id')">Node ID</button>
     <button class="nav-item" onclick="showPage('announcements')">Announcements</button>
@@ -490,6 +490,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     <button class="nav-item" onclick="showPage('ami-diag')">AMI Diagnostics</button>
     <button class="nav-item" onclick="showPage('ast-console')">Asterisk Console</button>
     <button class="nav-item" onclick="showPage('settings')">Settings</button>
+    <button class="nav-item" onclick="showPage('user-mgmt')">User Management</button>
   </nav>
   <div class="sidebar-footer">
     <span class="sidebar-user">{{ session.get('username', '') }}</span>
@@ -1668,6 +1669,61 @@ sudo asterisk -rx "module reload manager"</pre>
     </div>
   </section>
 
+  <!-- User Management -->
+  <section class="page" id="page-user-mgmt">
+    <div class="page-title">User Management</div>
+    <div class="page-sub">Create and manage user accounts. Roles: <strong>admin</strong> (full access) and <strong>kiosk</strong> (Node Kiosk + connect/disconnect only).</div>
+    <div class="card">
+      <div class="card-header">
+        <h2>Users</h2>
+        <button class="btn btn-primary btn-sm" onclick="showCreateUserForm()">+ New User</button>
+      </div>
+      <div class="card-body" style="padding:0">
+        <table class="tbl" id="users-table">
+          <thead><tr><th>Username</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead>
+          <tbody id="users-tbody"><tr><td colspan="4" class="muted" style="padding:14px">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card" id="user-form-card" style="display:none">
+      <div class="card-header">
+        <h2 id="user-form-title">New User</h2>
+        <button class="btn btn-sm" onclick="hideUserForm()">Cancel</button>
+      </div>
+      <div class="card-body">
+        <input type="hidden" id="uf-id">
+        <div class="form-row" style="margin-bottom:12px">
+          <div>
+            <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:4px">Username</label>
+            <input id="uf-username" type="text" placeholder="2-32 chars: letters, digits, _ . -" class="val-input" style="width:100%">
+          </div>
+          <div>
+            <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:4px">Role</label>
+            <select id="uf-role" style="width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg3);color:var(--text);font-size:0.88rem">
+              <option value="kiosk">kiosk — Node Kiosk + connect/disconnect only</option>
+              <option value="admin">admin — Full access</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row" style="margin-bottom:14px">
+          <div>
+            <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:4px" id="uf-pw-label">Password</label>
+            <input id="uf-password" type="password" placeholder="min 8 characters" class="val-input" style="width:100%">
+          </div>
+          <div>
+            <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:4px">Confirm Password</label>
+            <input id="uf-password2" type="password" placeholder="repeat password" class="val-input" style="width:100%">
+          </div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-primary" onclick="saveUser()">Save</button>
+          <button class="btn" onclick="hideUserForm()">Cancel</button>
+        </div>
+        <div id="uf-status" style="margin-top:8px;font-size:0.82rem"></div>
+      </div>
+    </div>
+  </section>
+
 </main>
 </div>
 
@@ -1806,6 +1862,7 @@ function showPage(id) {
   else if (id === 'ami-diag')       loadSysInfo();
   else if (id === 'ast-console')  astFetchLog();
   else if (id === 'settings')       { loadSecretKeyStatus(); syncThemePicker(); }
+  else if (id === 'user-mgmt')      loadUsers();
   else if (id === 'dtmf')             { populateDtmfNodeSelect(); }
   else if (id === 'node-id')          { loadIdConfigs(); populateIdNodeSelect(); }
   else if (id === 'announcements')    { loadAnnouncements(); populateAnnNodeSelect(); }
@@ -4193,6 +4250,106 @@ async function uploadAnnouncement() {
   } catch(e) {
     res.innerHTML = '<span style="color:var(--danger)">Error: ' + esc(String(e)) + '</span>';
   }
+}
+
+/* ── User Management ─────────────────────────────────────────────────────── */
+async function loadUsers() {
+  var r = await api('/api/users');
+  var tbody = document.getElementById('users-tbody');
+  if (!r.ok) { tbody.innerHTML = '<tr><td colspan="4" class="muted" style="padding:14px">Error loading users.</td></tr>'; return; }
+  var users = r.data.users || [];
+  if (!users.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="muted" style="padding:14px">No users found.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = users.map(function(u) {
+    var roleBadge = u.role === 'admin'
+      ? '<span style="background:rgba(88,166,255,.12);color:var(--accent);padding:1px 7px;border-radius:3px;font-size:0.75rem;font-weight:600">admin</span>'
+      : '<span style="background:rgba(63,185,80,.1);color:var(--green);padding:1px 7px;border-radius:3px;font-size:0.75rem;font-weight:600">kiosk</span>';
+    var created = u.created_at ? new Date(u.created_at + 'Z').toLocaleDateString() : '—';
+    return '<tr>'
+      + '<td style="font-weight:600">' + esc(u.username) + '</td>'
+      + '<td>' + roleBadge + '</td>'
+      + '<td style="color:var(--text2);font-size:0.82rem">' + created + '</td>'
+      + '<td><div class="btn-row">'
+      + '<button class="btn btn-sm" onclick="editUser(' + u.id + ',\'' + esc(u.username) + '\',\'' + esc(u.role) + '\')">Edit</button>'
+      + '<button class="btn btn-warn btn-sm" onclick="deleteUser(' + u.id + ',\'' + esc(u.username) + '\')">Delete</button>'
+      + '</div></td>'
+      + '</tr>';
+  }).join('');
+}
+
+function showCreateUserForm() {
+  document.getElementById('user-form-card').style.display = '';
+  document.getElementById('user-form-title').textContent = 'New User';
+  document.getElementById('uf-id').value       = '';
+  document.getElementById('uf-username').value = '';
+  document.getElementById('uf-username').disabled = false;
+  document.getElementById('uf-role').value     = 'kiosk';
+  document.getElementById('uf-password').value = '';
+  document.getElementById('uf-password2').value = '';
+  document.getElementById('uf-pw-label').textContent = 'Password';
+  document.getElementById('uf-status').textContent = '';
+  document.getElementById('user-form-card').scrollIntoView({behavior:'smooth'});
+}
+
+function editUser(id, username, role) {
+  document.getElementById('user-form-card').style.display = '';
+  document.getElementById('user-form-title').textContent = 'Edit: ' + username;
+  document.getElementById('uf-id').value       = id;
+  document.getElementById('uf-username').value = username;
+  document.getElementById('uf-username').disabled = true;
+  document.getElementById('uf-role').value     = role;
+  document.getElementById('uf-password').value = '';
+  document.getElementById('uf-password2').value = '';
+  document.getElementById('uf-pw-label').textContent = 'New Password (leave blank to keep current)';
+  document.getElementById('uf-status').textContent = '';
+  document.getElementById('user-form-card').scrollIntoView({behavior:'smooth'});
+}
+
+function hideUserForm() {
+  document.getElementById('user-form-card').style.display = 'none';
+}
+
+async function saveUser() {
+  var id     = document.getElementById('uf-id').value;
+  var uname  = document.getElementById('uf-username').value.trim();
+  var role   = document.getElementById('uf-role').value;
+  var pw     = document.getElementById('uf-password').value;
+  var pw2    = document.getElementById('uf-password2').value;
+  var st     = document.getElementById('uf-status');
+
+  if (pw !== pw2) { st.style.color='var(--red)'; st.textContent='Passwords do not match.'; return; }
+  if (!id && pw.length < 8) { st.style.color='var(--red)'; st.textContent='Password must be at least 8 characters.'; return; }
+  if (pw && pw.length < 8) { st.style.color='var(--red)'; st.textContent='Password must be at least 8 characters.'; return; }
+
+  var payload = {role: role};
+  if (!id) payload.username = uname;
+  if (pw) payload.password = pw;
+
+  var url    = id ? '/api/users/' + id : '/api/users';
+  var method = id ? 'PUT' : 'POST';
+  var r = await api(url, {
+    method: method,
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)
+  });
+
+  if (r.ok) {
+    st.style.color = 'var(--green)';
+    st.textContent = id ? 'Updated.' : 'User created.';
+    setTimeout(function(){ hideUserForm(); loadUsers(); }, 800);
+  } else {
+    st.style.color = 'var(--red)';
+    st.textContent = (r.data && r.data.error) || ('Error ' + r.status);
+  }
+}
+
+async function deleteUser(id, username) {
+  if (!confirm('Delete user "' + username + '"? This cannot be undone.')) return;
+  var r = await api('/api/users/' + id, {method: 'DELETE'});
+  if (r.ok) { log('User "' + username + '" deleted.', 'OK'); loadUsers(); }
+  else log('Delete failed: ' + (r.data && r.data.error || r.status), 'ERROR');
 }
 </script>
 </body>

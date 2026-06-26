@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ASL3-EZ Status Board</title>
+<title>ASL3-EZ Node Kiosk</title>
 <script>(function(){var t=localStorage.getItem('asl3ez-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
 <style>
@@ -299,10 +299,15 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
   <!-- Header -->
   <header class="header">
-    <div class="header-brand"><strong>ASL3-EZ</strong> <span>STATUS BOARD</span></div>
+    <div class="header-brand"><strong>ASL3-EZ</strong> <span>NODE KIOSK</span></div>
     <div class="header-clock" id="clock">--:--:--</div>
     <div class="header-actions">
       <div class="ast-pill" id="ast-pill"><div class="dot"></div><span id="ast-text">Asterisk</span></div>
+      <div id="kiosk-user-bar" style="display:none;align-items:center;gap:8px;font-size:0.75rem">
+        <span id="kiosk-username" style="color:var(--text2)"></span>
+        <button class="btn-icon" onclick="kioskLogout()">Logout</button>
+      </div>
+      <button class="btn-icon" id="kiosk-login-btn" onclick="openKioskLogin()" style="display:none">Login</button>
       <button class="btn-icon" onclick="toggleFS()" title="Fullscreen">&#x26F6; Fullscreen</button>
       <a class="btn-icon" href="/">&#8592; Dashboard</a>
     </div>
@@ -386,6 +391,24 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       <span id="f-stale" class="f-stale" style="display:none"> — DATA STALE</span></span>
     <span>Uptime: <strong id="f-uptime">—</strong> &nbsp;|&nbsp; Disk: <strong id="f-disk">—</strong></span>
   </footer>
+
+  <!-- Kiosk login modal -->
+  <div id="kiosk-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;align-items:center;justify-content:center">
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:28px 32px;min-width:280px;max-width:340px">
+      <div style="font-size:0.68rem;letter-spacing:.12em;text-transform:uppercase;color:var(--text2);margin-bottom:12px">Authentication Required</div>
+      <input id="kl-user" type="text" placeholder="Username" autocomplete="username"
+             style="width:100%;box-sizing:border-box;margin-bottom:8px;padding:7px 10px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-size:0.88rem"
+             onkeydown="if(event.key==='Enter')document.getElementById('kl-pass').focus()">
+      <input id="kl-pass" type="password" placeholder="Password" autocomplete="current-password"
+             style="width:100%;box-sizing:border-box;margin-bottom:12px;padding:7px 10px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-size:0.88rem"
+             onkeydown="if(event.key==='Enter')kioskLogin()">
+      <div style="display:flex;gap:8px">
+        <button onclick="kioskLogin()" style="flex:1;padding:7px;background:var(--accent);border:none;border-radius:5px;color:var(--bg);font-weight:600;cursor:pointer;font-size:0.88rem">Login</button>
+        <button onclick="closeKioskModal()" style="padding:7px 14px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text2);cursor:pointer;font-size:0.88rem">Cancel</button>
+      </div>
+      <div id="kl-error" style="margin-top:8px;font-size:0.8rem;color:var(--red);min-height:1em"></div>
+    </div>
+  </div>
 
 </div>
 
@@ -861,6 +884,9 @@ async function sbConnect(localNode, remoteNode, btn) {
     if (r.ok && d.ok) {
       sbToast('Connecting to ' + remoteNode + '…', true);
       setTimeout(refreshBoard, 1500);
+    } else if (r.status === 401) {
+      if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
+      openKioskLogin(sbConnect, [localNode, remoteNode, null]);
     } else {
       sbToast('Connect failed: ' + (d.error || r.status), false);
       if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
@@ -883,6 +909,9 @@ async function sbDisconnect(localNode, remoteNode, btn) {
     if (r.ok && d.ok) {
       sbToast('Disconnected ' + remoteNode, true);
       setTimeout(refreshBoard, 1500);
+    } else if (r.status === 401) {
+      if (btn) { btn.disabled = false; btn.textContent = 'Disconnect'; }
+      openKioskLogin(sbDisconnect, [localNode, remoteNode, null]);
     } else {
       sbToast('Disconnect failed: ' + (d.error || r.status), false);
       if (btn) { btn.disabled = false; btn.textContent = 'Disconnect'; }
@@ -931,11 +960,81 @@ async function statusConnectNew() {
   }
 }
 
+/* ── Kiosk login modal ── */
+var _pendingAction = null;  // {fn, args} to call after login
+
+function openKioskLogin(pendingFn, pendingArgs) {
+  _pendingAction = pendingFn ? {fn: pendingFn, args: pendingArgs || []} : null;
+  var modal = document.getElementById('kiosk-modal-overlay');
+  modal.style.display = 'flex';
+  document.getElementById('kl-user').value  = '';
+  document.getElementById('kl-pass').value  = '';
+  document.getElementById('kl-error').textContent = '';
+  setTimeout(function(){ document.getElementById('kl-user').focus(); }, 50);
+}
+
+function closeKioskModal() {
+  document.getElementById('kiosk-modal-overlay').style.display = 'none';
+  _pendingAction = null;
+}
+
+async function kioskLogin() {
+  var username = document.getElementById('kl-user').value.trim();
+  var password = document.getElementById('kl-pass').value;
+  document.getElementById('kl-error').textContent = '';
+  var r = await fetch('/api/login', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({username: username, password: password})
+  });
+  var d = await r.json();
+  if (r.ok && d.ok) {
+    closeKioskModal();
+    updateKioskUserBar(d.username, d.role);
+    if (_pendingAction) {
+      _pendingAction.fn.apply(null, _pendingAction.args);
+      _pendingAction = null;
+    }
+  } else {
+    document.getElementById('kl-error').textContent = d.error || 'Login failed';
+  }
+}
+
+async function kioskLogout() {
+  await fetch('/logout');
+  updateKioskUserBar(null, null);
+  sbToast('Logged out', true);
+}
+
+function updateKioskUserBar(username, role) {
+  var bar = document.getElementById('kiosk-user-bar');
+  var btn = document.getElementById('kiosk-login-btn');
+  if (username) {
+    document.getElementById('kiosk-username').textContent = username + ' (' + role + ')';
+    bar.style.display = 'flex';
+    btn.style.display = 'none';
+  } else {
+    bar.style.display = 'none';
+    btn.style.display = '';
+  }
+}
+
+async function checkKioskSession() {
+  var r = await fetch('/api/session');
+  var d = await r.json();
+  if (d.logged_in) {
+    updateKioskUserBar(d.username, d.role);
+  } else {
+    updateKioskUserBar(null, null);
+  }
+}
+
 /* ── Boot ── */
 initMap();
 refreshBoard();
 refreshWeather();
 refreshActivity();
+checkKioskSession();
 
 setInterval(refreshBoard,    5000);    /* node status every 5s */
 setInterval(refreshActivity, 15000);   /* activity every 15s */

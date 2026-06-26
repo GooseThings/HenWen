@@ -240,6 +240,26 @@ def get_db():
         on_node_disconnect INTEGER NOT NULL DEFAULT 0,
         watch_nodes        TEXT    NOT NULL DEFAULT ''
     )""")
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        username      TEXT    UNIQUE NOT NULL,
+        password_hash TEXT    NOT NULL,
+        role          TEXT    NOT NULL DEFAULT 'kiosk',
+        created_at    TEXT    DEFAULT (datetime('now'))
+    )""")
+    # Migrate legacy single-user auth to users table
+    legacy_user = conn.execute("SELECT value FROM settings WHERE key='auth_user'").fetchone()
+    legacy_hash = conn.execute("SELECT value FROM settings WHERE key='auth_password_hash'").fetchone()
+    if legacy_user and legacy_hash:
+        existing_admin = conn.execute("SELECT id FROM users WHERE role='admin'").fetchone()
+        if not existing_admin:
+            conn.execute(
+                "INSERT OR IGNORE INTO users (username, password_hash, role) VALUES (?,?,?)",
+                (legacy_user["value"], legacy_hash["value"], "admin")
+            )
+            conn.execute("DELETE FROM settings WHERE key IN ('auth_user','auth_password_hash')")
+            conn.commit()
     conn.commit()
     return conn
 
@@ -265,27 +285,49 @@ def set_setting(key, value):
 # Authentication
 # ---------------------------------------------------------------------------
 def is_auth_configured():
-    return bool(get_setting("auth_password_hash"))
+    try:
+        row = get_db().execute("SELECT id FROM users WHERE role='admin'").fetchone()
+        return row is not None
+    except Exception:
+        return False
 
 
 @app.before_request
 def check_auth():
-    # These endpoints are always public (status board is designed for unauthenticated TV display)
-    _PUBLIC = {'login', 'logout', 'static', None,
-               'status_board', 'api_status_board', 'api_status_weather', 'api_status_activity',
-               'api_status_connect', 'api_status_disconnect'}
-    if request.endpoint in _PUBLIC:
+    _PUBLIC          = {'login', 'logout', 'static', None,
+                        'status_board', 'api_status_board',
+                        'api_status_weather', 'api_status_activity',
+                        'api_login', 'api_session'}
+    _KIOSK_OR_ADMIN  = {'api_status_connect', 'api_status_disconnect'}
+
+    endpoint = request.endpoint
+    if endpoint in _PUBLIC:
         return None
-    # Everything else requires a logged-in session
+
     if not is_auth_configured():
-        # No account yet — send browsers to setup, return 503 for API calls
         if request.path.startswith('/api/'):
             return jsonify({"error": "Setup required", "setup_url": "/login"}), 503
         return redirect(url_for('login'))
-    if not session.get('logged_in'):
+
+    logged_in = session.get('logged_in')
+    role      = session.get('role', '')
+
+    if endpoint in _KIOSK_OR_ADMIN:
+        if not logged_in:
+            return jsonify({"error": "Authentication required"}), 401
+        return None
+
+    # Everything else requires admin
+    if not logged_in:
         if request.path.startswith('/api/'):
             return jsonify({"error": "Authentication required"}), 401
         return redirect(url_for('login'))
+
+    if role != 'admin':
+        if request.path.startswith('/api/'):
+            return jsonify({"error": "Admin access required"}), 403
+        return redirect(url_for('status_board'))
+
     return None
 
 
@@ -308,20 +350,27 @@ def login():
             if password != confirm:
                 return render_template("login.html", setup_mode=True,
                                        error="Passwords do not match.")
-            set_setting("auth_user", username)
-            set_setting("auth_password_hash", generate_password_hash(password))
+            db = get_db()
+            db.execute("INSERT OR REPLACE INTO users (username, password_hash, role) VALUES (?,?,?)",
+                       (username, generate_password_hash(password), "admin"))
+            db.commit()
             session["logged_in"] = True
             session["username"]  = username
+            session["role"]      = "admin"
+            session["user_id"]   = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()["id"]
             log("INFO", f"[AUTH] Initial account created for '{username}'")
             return redirect(url_for('index'))
 
         # Normal login
-        stored_user = get_setting("auth_user", "")
-        stored_hash = get_setting("auth_password_hash", "")
-        if username == stored_user and stored_hash and check_password_hash(stored_hash, password):
+        user = get_db().execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+        if user and check_password_hash(user["password_hash"], password):
             session["logged_in"] = True
             session["username"]  = username
-            log("INFO", f"[AUTH] Login: '{username}'")
+            session["role"]      = user["role"]
+            session["user_id"]   = user["id"]
+            log("INFO", f"[AUTH] Login: '{username}' (role={user['role']})")
+            if user["role"] == "kiosk":
+                return redirect(url_for('status_board'))
             return redirect(url_for('index'))
         log("WARN", f"[AUTH] Failed login attempt for '{username}'")
         return render_template("login.html", setup_mode=False,
@@ -339,6 +388,36 @@ def logout():
     session.clear()
     log("INFO", f"[AUTH] Logout: '{username}'")
     return redirect(url_for('login'))
+
+
+@app.route("/api/login", methods=["POST"])
+def api_login():
+    """JSON login for the Node Kiosk inline modal."""
+    data     = request.json or {}
+    username = str(data.get("username", "")).strip()
+    password = str(data.get("password", ""))
+    user     = get_db().execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+    if user and check_password_hash(user["password_hash"], password):
+        session["logged_in"] = True
+        session["username"]  = username
+        session["role"]      = user["role"]
+        session["user_id"]   = user["id"]
+        log("INFO", f"[AUTH] API Login: '{username}' (role={user['role']})")
+        return jsonify({"ok": True, "role": user["role"], "username": username})
+    log("WARN", f"[AUTH] API Login failed for '{username}'")
+    return jsonify({"error": "Invalid username or password"}), 401
+
+
+@app.route("/api/session")
+def api_session():
+    """Public endpoint — returns current session state for the kiosk page."""
+    if session.get("logged_in"):
+        return jsonify({
+            "logged_in": True,
+            "username":  session.get("username", ""),
+            "role":      session.get("role", ""),
+        })
+    return jsonify({"logged_in": False})
 
 
 # ---------------------------------------------------------------------------
@@ -2607,6 +2686,90 @@ def api_alerts_test():
         return jsonify({"error": str(e)}), 500
 
 
+# ── User Management API ───────────────────────────────────────────────────────
+
+@app.route("/api/users")
+def api_users_list():
+    rows = get_db().execute(
+        "SELECT id, username, role, created_at FROM users ORDER BY role DESC, username"
+    ).fetchall()
+    return jsonify({"users": [dict(r) for r in rows]})
+
+
+@app.route("/api/users", methods=["POST"])
+def api_users_create():
+    data     = request.json or {}
+    username = str(data.get("username", "")).strip()
+    password = str(data.get("password", ""))
+    role     = str(data.get("role", "kiosk")).strip()
+    if not re.match(r'^[A-Za-z0-9_.-]{2,32}$', username):
+        return jsonify({"error": "Username must be 2-32 chars: letters, digits, _ . -"}), 400
+    if len(password) < 8:
+        return jsonify({"error": "Password must be at least 8 characters."}), 400
+    if role not in ("admin", "kiosk"):
+        return jsonify({"error": "Role must be 'admin' or 'kiosk'"}), 400
+    db = get_db()
+    try:
+        db.execute("INSERT INTO users (username, password_hash, role) VALUES (?,?,?)",
+                   (username, generate_password_hash(password), role))
+        db.commit()
+        log("INFO", f"[USERS] Created user '{username}' role={role}")
+        return jsonify({"ok": True})
+    except sqlite3.IntegrityError:
+        return jsonify({"error": f"Username '{username}' already exists."}), 409
+
+
+@app.route("/api/users/<int:uid>", methods=["PUT"])
+def api_users_update(uid):
+    data       = request.json or {}
+    db         = get_db()
+    user       = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    # Prevent removing the last admin
+    new_role = str(data.get("role", user["role"])).strip()
+    if user["role"] == "admin" and new_role != "admin":
+        admin_count = db.execute("SELECT COUNT(*) FROM users WHERE role='admin'").fetchone()[0]
+        if admin_count <= 1:
+            return jsonify({"error": "Cannot remove the last admin account."}), 400
+    updates = []
+    params  = []
+    if "role" in data:
+        if new_role not in ("admin", "kiosk"):
+            return jsonify({"error": "Role must be 'admin' or 'kiosk'"}), 400
+        updates.append("role=?"); params.append(new_role)
+    if "password" in data:
+        pw = data["password"]
+        if len(pw) < 8:
+            return jsonify({"error": "Password must be at least 8 characters."}), 400
+        updates.append("password_hash=?"); params.append(generate_password_hash(pw))
+    if not updates:
+        return jsonify({"ok": True, "note": "Nothing to update"})
+    params.append(uid)
+    db.execute(f"UPDATE users SET {', '.join(updates)} WHERE id=?", params)
+    db.commit()
+    log("INFO", f"[USERS] Updated user id={uid}: {', '.join(k for k in data if k != 'password')}")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/users/<int:uid>", methods=["DELETE"])
+def api_users_delete(uid):
+    db   = get_db()
+    user = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    if session.get("user_id") == uid:
+        return jsonify({"error": "Cannot delete your own account."}), 400
+    if user["role"] == "admin":
+        admin_count = db.execute("SELECT COUNT(*) FROM users WHERE role='admin'").fetchone()[0]
+        if admin_count <= 1:
+            return jsonify({"error": "Cannot delete the last admin account."}), 400
+    db.execute("DELETE FROM users WHERE id=?", (uid,))
+    db.commit()
+    log("INFO", f"[USERS] Deleted user '{user['username']}' (id={uid})")
+    return jsonify({"ok": True})
+
+
 # ── Favorites API ─────────────────────────────────────────────────────────────
 
 @app.route("/api/favorites")
@@ -2879,7 +3042,7 @@ def api_sysinfo():
         "rpt_conf_writable": os.access(RPT_CONF_PATH, os.W_OK),
         "secret_key_is_default": SECRET_KEY in DEFAULT_SECRET_KEYS,
         "auth_configured":       is_auth_configured(),
-        "auth_user":             get_setting("auth_user", "") if is_auth_configured() else "",
+        "auth_user":             session.get("username", "") if is_auth_configured() else "",
     })
 
 
@@ -3226,16 +3389,20 @@ def api_set_secret_key():
 
 @app.route("/api/auth/change-password", methods=["POST"])
 def api_change_password():
-    data        = request.json or {}
-    current_pw  = data.get("current_password", "")
-    new_pw      = data.get("new_password", "")
-    stored_hash = get_setting("auth_password_hash", "")
-    if not stored_hash or not check_password_hash(stored_hash, current_pw):
+    data       = request.json or {}
+    current_pw = data.get("current_password", "")
+    new_pw     = data.get("new_password", "")
+    username   = session.get("username", "")
+    db   = get_db()
+    user = db.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+    if not user or not check_password_hash(user["password_hash"], current_pw):
         return jsonify({"error": "Current password is incorrect."}), 400
     if len(new_pw) < 8:
         return jsonify({"error": "New password must be at least 8 characters."}), 400
-    set_setting("auth_password_hash", generate_password_hash(new_pw))
-    log("INFO", f"[AUTH] Password changed for '{get_setting('auth_user', '')}'")
+    db.execute("UPDATE users SET password_hash=? WHERE username=?",
+               (generate_password_hash(new_pw), username))
+    db.commit()
+    log("INFO", f"[AUTH] Password changed for '{username}'")
     return jsonify({"success": True, "message": "Password updated."})
 
 
