@@ -2807,7 +2807,11 @@ async function astSetVerbose() {
   var level  = parseInt(document.getElementById('ast-verbose-level').value, 10);
   var result = document.getElementById('ast-verbose-result');
   result.textContent = 'Setting...';
-  var r = await api('/api/asterisk/verbose', {level: level});
+  var r = await api('/api/asterisk/verbose', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({level: level})
+  });
   if (r.ok) {
     result.style.color = 'var(--green)';
     result.textContent = 'Verbosity set to ' + level
