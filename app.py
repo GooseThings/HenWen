@@ -243,8 +243,10 @@ def is_auth_configured():
 
 @app.before_request
 def check_auth():
-    # These endpoints are always public
-    if request.endpoint in ('login', 'logout', 'static', None):
+    # These endpoints are always public (status board is designed for unauthenticated TV display)
+    _PUBLIC = {'login', 'logout', 'static', None,
+               'status_board', 'api_status_board', 'api_status_weather', 'api_status_activity'}
+    if request.endpoint in _PUBLIC:
         return None
     # Everything else requires a logged-in session
     if not is_auth_configured():
