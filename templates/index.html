@@ -339,6 +339,8 @@ input:checked + .slider::before  { transform: translateX(16px); background: var(
 .ts-dots { display: flex; gap: 4px; }
 .ts-dots span { display: inline-block; width: 11px; height: 11px; border-radius: 50%; }
 .ts-name { padding: 5px 9px 7px; font-size: 0.78rem; font-weight: 500; }
+.dtmf-key { width:100%; height:48px; font-size:1.1rem; font-weight:600; padding:0; justify-content:center; }
+.dtmf-key:active { background: var(--accent); color: #000; }
 .log-panel div { margin-bottom: 1px; word-break: break-all; }
 .lt    { color: #4a5568; }
 .lOK   { color: var(--green); }
@@ -482,6 +484,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     {% endif %}
 
     <div class="nav-section">Tools</div>
+    <button class="nav-item" onclick="showPage('dtmf')">DTMF Control</button>
     <button class="nav-item" onclick="showPage('node-id')">Node ID</button>
     <button class="nav-item" onclick="showPage('announcements')">Announcements</button>
     <button class="nav-item" onclick="showPage('smart-connector')">Smart Connector</button>
@@ -871,6 +874,98 @@ sudo asterisk -rx "module reload manager"</pre>
         <button class="btn btn-sm" onclick="loadSysInfo()">Refresh</button>
       </div>
       <div class="card-body" id="sysinfo-out"><span class="muted">Loading...</span></div>
+    </div>
+  </section>
+
+  <!-- DTMF Control -->
+  <section class="page" id="page-dtmf">
+    <div class="page-title">DTMF Control</div>
+    <div class="page-sub">Send DTMF sequences to your node via AMI — same as keying up and pressing tones on RF. Functions depend on your <code>[functions]</code> stanza in rpt.conf.</div>
+
+    <div style="display:grid;grid-template-columns:auto 1fr;gap:18px;align-items:start">
+
+      <!-- Left: keypad + COP -->
+      <div>
+        <div class="card" style="display:inline-block">
+          <div class="card-body" style="padding-bottom:10px">
+            <div style="margin-bottom:10px">
+              <label class="toggle-label" style="display:block;margin-bottom:4px">Node</label>
+              <select id="dtmf-node" class="val-input" style="width:100%"></select>
+            </div>
+
+            <!-- Sequence display -->
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:10px">
+              <div id="dtmf-seq" style="flex:1;min-width:160px;background:var(--bg);border:1px solid var(--border);
+                border-radius:4px;padding:7px 10px;font-family:monospace;font-size:1.1rem;
+                letter-spacing:3px;min-height:36px;color:var(--text)"></div>
+              <button class="btn btn-sm" onclick="dtmfBackspace()" title="Backspace">⌫</button>
+              <button class="btn btn-sm" onclick="dtmfClear()">Clear</button>
+            </div>
+
+            <!-- Phone keypad -->
+            <div style="display:grid;grid-template-columns:repeat(3,52px);gap:5px;margin-bottom:5px">
+              <button class="btn dtmf-key" onclick="dtmfAppend('1')">1</button>
+              <button class="btn dtmf-key" onclick="dtmfAppend('2')">2</button>
+              <button class="btn dtmf-key" onclick="dtmfAppend('3')">3</button>
+              <button class="btn dtmf-key" onclick="dtmfAppend('4')">4</button>
+              <button class="btn dtmf-key" onclick="dtmfAppend('5')">5</button>
+              <button class="btn dtmf-key" onclick="dtmfAppend('6')">6</button>
+              <button class="btn dtmf-key" onclick="dtmfAppend('7')">7</button>
+              <button class="btn dtmf-key" onclick="dtmfAppend('8')">8</button>
+              <button class="btn dtmf-key" onclick="dtmfAppend('9')">9</button>
+              <button class="btn dtmf-key" onclick="dtmfAppend('*')">*</button>
+              <button class="btn dtmf-key" onclick="dtmfAppend('0')">0</button>
+              <button class="btn dtmf-key" onclick="dtmfAppend('#')">#</button>
+            </div>
+            <!-- Extended DTMF row -->
+            <div style="display:grid;grid-template-columns:repeat(4,37px);gap:5px;margin-bottom:10px">
+              <button class="btn dtmf-key" style="font-size:0.8rem" onclick="dtmfAppend('A')">A</button>
+              <button class="btn dtmf-key" style="font-size:0.8rem" onclick="dtmfAppend('B')">B</button>
+              <button class="btn dtmf-key" style="font-size:0.8rem" onclick="dtmfAppend('C')">C</button>
+              <button class="btn dtmf-key" style="font-size:0.8rem" onclick="dtmfAppend('D')">D</button>
+            </div>
+
+            <button class="btn btn-primary" style="width:100%" onclick="dtmfSend()">Send DTMF</button>
+            <div id="dtmf-result" style="margin-top:8px;font-size:0.85rem;min-height:20px"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: COP quick actions + history -->
+      <div>
+        <div class="card" style="margin-bottom:14px">
+          <div class="card-header"><h2>COP Quick Actions</h2></div>
+          <div class="card-body" style="padding-top:6px">
+            <p class="muted" style="font-size:0.8rem;margin-bottom:10px">These execute <code>rpt cmd &lt;node&gt; cop &lt;N&gt;</code> directly — no DTMF mapping required. Numbering matches default app_rpt; your node may differ.</p>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+              <button class="btn btn-sm" style="text-align:left" onclick="dtmfCop(3)">Force ID <span class="muted" style="float:right">cop 3</span></button>
+              <button class="btn btn-sm" style="text-align:left" onclick="dtmfCop(6)">Report Time <span class="muted" style="float:right">cop 6</span></button>
+              <button class="btn btn-sm" style="text-align:left" onclick="dtmfCop(15)">Full Startup <span class="muted" style="float:right">cop 15</span></button>
+              <button class="btn btn-sm" style="text-align:left" onclick="dtmfCop(16)">Partial Shutdown <span class="muted" style="float:right">cop 16</span></button>
+              <button class="btn btn-sm" style="text-align:left" onclick="dtmfCop(14)">Full Shutdown <span class="muted" style="float:right">cop 14</span></button>
+              <button class="btn btn-sm" style="text-align:left" onclick="dtmfCop(13)">Disconnect All Links <span class="muted" style="float:right">cop 13</span></button>
+              <button class="btn btn-sm" style="text-align:left" onclick="dtmfCop(21)">Enable Telemetry <span class="muted" style="float:right">cop 21</span></button>
+              <button class="btn btn-sm" style="text-align:left" onclick="dtmfCop(22)">Disable Telemetry <span class="muted" style="float:right">cop 22</span></button>
+              <button class="btn btn-sm" style="text-align:left" onclick="dtmfCop(12)">Enable TX <span class="muted" style="float:right">cop 12</span></button>
+              <button class="btn btn-sm" style="text-align:left" onclick="dtmfCop(11)">Disable TX <span class="muted" style="float:right">cop 11</span></button>
+              <button class="btn btn-sm" style="text-align:left" onclick="dtmfCop(1)">System Status <span class="muted" style="float:right">cop 1</span></button>
+              <button class="btn btn-sm" style="text-align:left" onclick="dtmfCop(10)">Stop Audio <span class="muted" style="float:right">cop 10</span></button>
+            </div>
+            <div id="dtmf-cop-result" style="margin-top:8px;font-size:0.85rem;min-height:20px"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+            <h2>History</h2>
+            <button class="btn btn-sm" onclick="dtmfClearHistory()">Clear</button>
+          </div>
+          <div class="card-body" style="padding-top:4px">
+            <div id="dtmf-history" style="font-size:0.85rem"><span class="muted">No commands sent yet.</span></div>
+          </div>
+        </div>
+      </div>
+
     </div>
   </section>
 
@@ -1441,6 +1536,7 @@ function showPage(id) {
   else if (id === 'backups')      loadBackups();
   else if (id === 'ami-diag')     loadSysInfo();
   else if (id === 'settings')       { loadSecretKeyStatus(); syncThemePicker(); }
+  else if (id === 'dtmf')             { populateDtmfNodeSelect(); }
   else if (id === 'node-id')          { loadIdConfigs(); populateIdNodeSelect(); }
   else if (id === 'announcements')    { loadAnnouncements(); populateAnnNodeSelect(); }
   else if (id === 'smart-connector') { loadConnectors(); populateConnNodeSelects(); }
@@ -2875,6 +2971,116 @@ async function annSaveEdit(id) {
     loadAnnouncements();
   } catch(e) {
     res.innerHTML = '<span style="color:var(--danger)">Error: ' + esc(String(e)) + '</span>';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// DTMF Control
+// ---------------------------------------------------------------------------
+
+var _dtmfSeq   = '';
+var _dtmfHist  = [];
+
+function populateDtmfNodeSelect() {
+  var nodes = [];
+  document.querySelectorAll('[id^="page-node-"]').forEach(function(el) {
+    var m = el.id.match(/^page-node-(\d+)$/);
+    if (m) nodes.push(m[1]);
+  });
+  var sel = document.getElementById('dtmf-node');
+  if (!sel) return;
+  sel.innerHTML = '';
+  nodes.forEach(function(n) {
+    var o = document.createElement('option'); o.value = n; o.textContent = n; sel.appendChild(o);
+  });
+  if (!nodes.length) { var o = document.createElement('option'); o.value=''; o.textContent='(none)'; sel.appendChild(o); }
+}
+
+function dtmfAppend(ch) {
+  _dtmfSeq += ch;
+  document.getElementById('dtmf-seq').textContent = _dtmfSeq;
+}
+
+function dtmfBackspace() {
+  _dtmfSeq = _dtmfSeq.slice(0, -1);
+  document.getElementById('dtmf-seq').textContent = _dtmfSeq;
+}
+
+function dtmfClear() {
+  _dtmfSeq = '';
+  document.getElementById('dtmf-seq').textContent = '';
+}
+
+function dtmfAddHistory(label, ok, detail) {
+  var ts = new Date().toLocaleTimeString();
+  _dtmfHist.unshift({ ts: ts, label: label, ok: ok, detail: detail });
+  if (_dtmfHist.length > 20) _dtmfHist.pop();
+  var el = document.getElementById('dtmf-history');
+  if (!el) return;
+  el.innerHTML = _dtmfHist.map(function(h) {
+    var col = h.ok ? 'var(--green)' : 'var(--danger)';
+    var icon = h.ok ? '✓' : '✗';
+    return '<div style="display:flex;gap:8px;padding:4px 0;border-bottom:1px solid var(--border)">' +
+      '<span style="color:' + col + ';font-weight:700;width:14px;flex-shrink:0">' + icon + '</span>' +
+      '<span class="muted" style="width:70px;flex-shrink:0">' + esc(h.ts) + '</span>' +
+      '<span style="flex:1">' + esc(h.label) + '</span>' +
+      (h.detail ? '<span class="muted" style="font-size:0.8rem;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(h.detail) + '">' + esc(h.detail) + '</span>' : '') +
+    '</div>';
+  }).join('');
+}
+
+function dtmfClearHistory() {
+  _dtmfHist = [];
+  var el = document.getElementById('dtmf-history');
+  if (el) el.innerHTML = '<span class="muted">No commands sent yet.</span>';
+}
+
+async function dtmfSend() {
+  var res  = document.getElementById('dtmf-result');
+  var node = document.getElementById('dtmf-node').value;
+  var seq  = _dtmfSeq;
+  if (!seq) { res.innerHTML = '<span style="color:var(--warn)">Enter a sequence first.</span>'; return; }
+  res.innerHTML = '<span class="muted">Sending...</span>';
+  try {
+    var r = await fetch('/api/dtmf/send', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ node: node, digits: seq })
+    });
+    var d = await r.json();
+    if (!r.ok) {
+      res.innerHTML = '<span style="color:var(--danger)">' + esc(d.error || 'Error') + '</span>';
+      dtmfAddHistory('DTMF ' + seq + ' → node ' + node, false, d.error || 'Error');
+    } else {
+      res.innerHTML = '<span style="color:var(--green)">Sent: ' + esc(seq) + '</span>';
+      dtmfAddHistory('DTMF ' + seq + ' → node ' + node, true, d.raw || '');
+      dtmfClear();
+    }
+  } catch(e) {
+    res.innerHTML = '<span style="color:var(--danger)">' + esc(String(e)) + '</span>';
+    dtmfAddHistory('DTMF ' + seq + ' → node ' + node, false, String(e));
+  }
+}
+
+async function dtmfCop(fn) {
+  var res  = document.getElementById('dtmf-cop-result');
+  var node = document.getElementById('dtmf-node').value;
+  res.innerHTML = '<span class="muted">Sending cop ' + fn + '...</span>';
+  try {
+    var r = await fetch('/api/dtmf/cop', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ node: node, function: fn })
+    });
+    var d = await r.json();
+    if (!r.ok) {
+      res.innerHTML = '<span style="color:var(--danger)">' + esc(d.error || 'Error') + '</span>';
+      dtmfAddHistory('cop ' + fn + ' → node ' + node, false, d.error || 'Error');
+    } else {
+      res.innerHTML = '<span style="color:var(--green)">cop ' + fn + ' sent</span>';
+      dtmfAddHistory('cop ' + fn + ' → node ' + node, true, d.raw || '');
+    }
+  } catch(e) {
+    res.innerHTML = '<span style="color:var(--danger)">' + esc(String(e)) + '</span>';
+    dtmfAddHistory('cop ' + fn + ' → node ' + node, false, String(e));
   }
 }
 

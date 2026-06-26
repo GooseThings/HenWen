@@ -3531,6 +3531,52 @@ def api_id_upload():
 
 
 # ---------------------------------------------------------------------------
+# DTMF Control
+# ---------------------------------------------------------------------------
+
+_DTMF_VALID = re.compile(r'^[0-9A-Da-d*#]+$')
+
+@app.route("/api/dtmf/send", methods=["POST"])
+def api_dtmf_send():
+    data   = request.get_json(force=True)
+    node   = str(data.get("node", "")).strip()
+    digits = str(data.get("digits", "")).strip().upper()
+    if not node.isdigit():
+        return jsonify({"error": "node must be numeric"}), 400
+    if not digits or not _DTMF_VALID.match(digits):
+        return jsonify({"error": "digits must contain only 0-9 A-D * #"}), 400
+    def _send(ami):
+        lines = ami.command(f"rpt cmd {node} dtmf {digits}")
+        raw   = "\n".join(lines)
+        return {"ok": True, "raw": raw}
+    try:
+        result = ami_send_command(_send)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/dtmf/cop", methods=["POST"])
+def api_dtmf_cop():
+    data     = request.get_json(force=True)
+    node     = str(data.get("node", "")).strip()
+    function = str(data.get("function", "")).strip()
+    if not node.isdigit():
+        return jsonify({"error": "node must be numeric"}), 400
+    if not function.isdigit():
+        return jsonify({"error": "function must be a positive integer"}), 400
+    def _send(ami):
+        lines = ami.command(f"rpt cmd {node} cop {function}")
+        raw   = "\n".join(lines)
+        return {"ok": True, "raw": raw}
+    try:
+        result = ami_send_command(_send)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
 # Startup — load node DB and start background AMI poller
 # These run regardless of whether we're under gunicorn or direct python.
 # ---------------------------------------------------------------------------
