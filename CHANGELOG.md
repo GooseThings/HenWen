@@ -2,6 +2,10 @@
 
 ## Recent Changes
 
+- **Improved: Status Board map layout.** Map card capped at 900 px wide so it no longer stretches across the full page on wide monitors. Connected-nodes card capped to match (940 px), keeping both right edges flush. In fullscreen mode (F11) both caps are removed and the panels fill the screen. Map pan is bounded to the range the grayline covers (±540°). Minimum zoom set to 1 so the world repeats at most ~3 times. Pin count removed from the Network Map header.
+- **Fixed: Status Board global activity panel showing connected nodes.** Nodes that are currently connected via AMI were appearing in the global activity feed because every key-up is recorded in the local keyed history. The activity panel now filters out any node in the connected-nodes list. The KEYED/ONLINE badge was also removed from activity rows — keyed state is only shown in the connected-nodes panel.
+- **Fixed: Status Board grayline not wrapping at low zoom.** The night-side polygon was drawn once (lon −180 to +180) but Leaflet shows repeated world copies at low zoom, leaving uncovered gaps. The polygon is now rendered at three longitude offsets (−360°, 0°, +360°) so the overlay covers the full visible map at any zoom or pan position.
+
 - **Added: Status Board (`/status`).** A clean full-screen display designed for TV or kiosk use. No authentication required — safe for public screens. Features:
   - **Weather bar**: live conditions (temp, humidity, wind, description) for the node's location via wttr.in; cached 10 minutes server-side.
   - **Node status**: large pulsing green keyed indicator, linked node count, CPU temp/uptime/disk/AMI vitals.
