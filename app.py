@@ -992,49 +992,47 @@ _global_nodes_lock  = threading.Lock()
 
 
 def _fetch_global_nodes():
-    """Download the AllStarLink global stats and return top 10 by regseconds."""
-    try:
-        req = urlreq.Request(
-            ASL_GLOBAL_STATS_URL,
-            headers={"User-Agent": "ASL3-EZ/1.0 (ham radio node monitor; status board)"},
-        )
-        with urlreq.urlopen(req, timeout=25) as resp:
-            data = json.loads(resp.read())
+    """Download the AllStarLink global stats and return top 10 by regseconds.
+    Raises urllib.error.HTTPError so the caller can inspect the status code."""
+    req = urlreq.Request(
+        ASL_GLOBAL_STATS_URL,
+        headers={"User-Agent": "ASL3-EZ/1.0 (ham radio node monitor; status board)"},
+    )
+    with urlreq.urlopen(req, timeout=25) as resp:
+        data = json.loads(resp.read())
 
-        active = [n for n in data if n.get("node", {}).get("Status") == "Active"
-                  and n["node"].get("regseconds")]
-        active.sort(key=lambda x: x["node"]["regseconds"], reverse=True)
+    active = [n for n in data
+              if n.get("node", {}).get("Status") == "Active" and n["node"].get("regseconds")]
+    active.sort(key=lambda x: x["node"]["regseconds"], reverse=True)
 
-        result = []
-        for n in active[:10]:
-            node_obj   = n["node"]
-            server_obj = node_obj.get("server") or {}
-            lat = lon = None
-            try:
-                if server_obj.get("Latitude") and server_obj.get("Logitude"):
-                    lat = float(server_obj["Latitude"])
-                    lon = float(server_obj["Logitude"])   # note: typo is in their API
-            except (ValueError, TypeError):
-                pass
-            import datetime as _dt
-            ts = node_obj.get("regseconds", 0)
-            result.append({
-                "node":     str(node_obj["name"]),
-                "callsign": node_obj.get("callsign", ""),
-                "location": server_obj.get("Location", "") or node_obj.get("node_frequency", ""),
-                "lat":      lat,
-                "lon":      lon,
-                "ts":       ts,
-            })
-        return result
-    except Exception as e:
-        log("WARN", f"[GLOBAL-ACTIVITY] Fetch failed: {e}")
-        return []
+    result = []
+    for n in active[:10]:
+        node_obj   = n["node"]
+        server_obj = node_obj.get("server") or {}
+        lat = lon = None
+        try:
+            if server_obj.get("Latitude") and server_obj.get("Logitude"):
+                lat = float(server_obj["Latitude"])
+                lon = float(server_obj["Logitude"])   # note: AllStarLink API typo
+        except (ValueError, TypeError):
+            pass
+        result.append({
+            "node":     str(node_obj["name"]),
+            "callsign": node_obj.get("callsign", ""),
+            "location": server_obj.get("Location", "") or node_obj.get("node_frequency", ""),
+            "lat":      lat,
+            "lon":      lon,
+            "ts":       node_obj.get("regseconds", 0),
+        })
+    return result
 
 
 def _global_activity_poll_loop():
     global _global_nodes_ts
-    log("INFO", "[GLOBAL-ACTIVITY] Poller started")
+    log("INFO", "[GLOBAL-ACTIVITY] Poller started — first fetch in 90s")
+    # Initial delay: avoid hammering AllStarLink on restart
+    time.sleep(90)
+    backoff = 0  # consecutive 429/error count
     while True:
         try:
             nodes = _fetch_global_nodes()
@@ -1043,9 +1041,14 @@ def _global_activity_poll_loop():
                 _global_nodes_cache.extend(nodes)
                 _global_nodes_ts = time.time()
             log("INFO", f"[GLOBAL-ACTIVITY] Fetched {len(nodes)} recent global nodes")
+            backoff = 0
+            time.sleep(GLOBAL_ACTIVITY_INTERVAL)
         except Exception as e:
-            log("WARN", f"[GLOBAL-ACTIVITY] Loop error: {e}")
-        time.sleep(GLOBAL_ACTIVITY_INTERVAL)
+            # Back off on 429 or network errors — double sleep each failure, cap at 30 min
+            backoff = min(backoff + 1, 6)
+            sleep_s = GLOBAL_ACTIVITY_INTERVAL * (2 ** (backoff - 1))
+            log("WARN", f"[GLOBAL-ACTIVITY] Fetch failed ({e}) — retry in {sleep_s:.0f}s")
+            time.sleep(sleep_s)
 
 
 def start_global_activity_poller():
