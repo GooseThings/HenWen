@@ -387,6 +387,7 @@ function makeStarIcon(color) {
 
 var _hostedNodes = [];         /* [{node, callsign, location, lat, lon}] — set by refreshBoard */
 var _lastActivityPoints = [];  /* last combined activity list — used to redraw map on board refresh */
+var _mapFitted = false;        /* auto-fit bounds only on first data load */
 
 function updateMap(points) {
   if (!_map) return;
@@ -424,13 +425,14 @@ function updateMap(points) {
   document.getElementById('map-count').textContent =
     allPinned.length ? allPinned.length + ' pin' + (allPinned.length !== 1 ? 's' : '') : '';
 
-  if (allPinned.length > 0) {
+  if (!_mapFitted && allPinned.length > 0) {
     var lats = allPinned.map(function(p){ return p.lat; });
     var lons = allPinned.map(function(p){ return p.lon; });
     _map.fitBounds([
       [Math.min.apply(null,lats)-3, Math.min.apply(null,lons)-3],
       [Math.max.apply(null,lats)+3, Math.max.apply(null,lons)+3]
     ], {padding: [15,15], maxZoom: 7});
+    _mapFitted = true;
   }
 }
 
