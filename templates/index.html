@@ -886,31 +886,6 @@ sudo asterisk -rx "module reload manager"</pre>
     <div class="page-sub">View the Asterisk log and control verbosity — equivalent to <span class="mono">asterisk -rvvv</span>.</div>
 
     <div class="card">
-      <div class="card-header">
-        <h2>Verbosity Level</h2>
-      </div>
-      <div class="card-body">
-        <p style="margin-bottom:12px;color:var(--text2);font-size:0.9rem">
-          Sets how much detail Asterisk writes to its log file. Level 0 = silent, 3 = normal verbose
-          (<span class="mono">-vvv</span>), 5 = very detailed. Changes take effect immediately without a restart.
-        </p>
-        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-          <label class="form-label" style="margin:0">Verbose level:</label>
-          <select id="ast-verbose-level" style="width:auto">
-            <option value="0">0 — silent</option>
-            <option value="1">1 — minimal</option>
-            <option value="2">2 — normal</option>
-            <option value="3" selected>3 — verbose (-vvv)</option>
-            <option value="4">4 — more verbose (-vvvv)</option>
-            <option value="5">5 — very verbose (-vvvvv)</option>
-          </select>
-          <button class="btn btn-primary" onclick="astSetVerbose()">Set Verbosity</button>
-          <span id="ast-verbose-result" style="font-size:0.85rem"></span>
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
       <div class="card-header"><h2>CLI</h2></div>
       <div class="card-body">
         <p style="margin-bottom:10px;color:var(--text2);font-size:0.9rem">Run any Asterisk CLI command via AMI. Output appears below. Use ↑ / ↓ to navigate history.</p>
@@ -1009,6 +984,31 @@ sudo asterisk -rx "module reload manager"</pre>
           </table>
         </details>
 
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <h2>Verbosity Level</h2>
+      </div>
+      <div class="card-body">
+        <p style="margin-bottom:12px;color:var(--text2);font-size:0.9rem">
+          Sets how much detail Asterisk writes to its log file. Level 0 = silent, 3 = normal verbose
+          (<span class="mono">-vvv</span>), 5 = very detailed. Changes take effect immediately without a restart.
+        </p>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <label class="form-label" style="margin:0">Verbose level:</label>
+          <select id="ast-verbose-level" style="width:auto">
+            <option value="0">0 — silent</option>
+            <option value="1">1 — minimal</option>
+            <option value="2">2 — normal</option>
+            <option value="3" selected>3 — verbose (-vvv)</option>
+            <option value="4">4 — more verbose (-vvvv)</option>
+            <option value="5">5 — very verbose (-vvvvv)</option>
+          </select>
+          <button class="btn btn-primary" onclick="astSetVerbose()">Set Verbosity</button>
+          <span id="ast-verbose-result" style="font-size:0.85rem"></span>
+        </div>
       </div>
     </div>
 
