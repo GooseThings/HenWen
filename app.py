@@ -2472,17 +2472,21 @@ def api_status_board():
         with _link_stats_lock:
             ls_snapshot = dict(_link_stats)
         for cn in cached.get("connected", []):
-            cn_info = lookup_node(cn)
+            cn_info    = lookup_node(cn)
+            cn_loc     = cn_info.get("location", "")
+            cn_coords  = _geocode(cn_loc) if cn_loc else None
             ls = ls_snapshot.get(cn, {})
             connected_details.append({
                 "node":         cn,
                 "callsign":     cn_info.get("callsign", ""),
                 "desc":         cn_info.get("desc", ""),
-                "location":     cn_info.get("location", ""),
+                "location":     cn_loc,
                 "keyed":        cached.get("links", {}).get(cn, {}).get("keyed", False),
                 "connect_time": lct.get(cn, ""),
                 "keyups":       ls.get("keyups", 0),
                 "last_keyed":   ls.get("last_keyed"),
+                "lat":          cn_coords["lat"] if cn_coords else None,
+                "lon":          cn_coords["lon"] if cn_coords else None,
             })
         location = info.get("location", "")
         coords   = _geocode(location) if location else None

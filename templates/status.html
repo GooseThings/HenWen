@@ -238,8 +238,16 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 #map { flex: 1; background: #0d1117; }
 .leaflet-container { background: #0d1117 !important; }
 .leaflet-tile { filter: invert(90%) hue-rotate(180deg) brightness(0.85) saturate(0.8); }
+#map.map-native .leaflet-tile { filter: none; }
 .leaflet-control-zoom a { background: var(--bg3) !important; color: var(--text) !important;
   border-color: var(--border) !important; }
+.map-ctl { display: flex; align-items: center; gap: 5px; margin-left: auto; flex-wrap: wrap; }
+.map-ctl-sel { background: var(--bg3); border: 1px solid var(--border); color: var(--text);
+  border-radius: 4px; padding: 2px 5px; font-size: 0.7rem; cursor: pointer; }
+.map-btn { background: var(--bg3); border: 1px solid var(--border); color: var(--text2);
+  border-radius: 4px; padding: 2px 8px; font-size: 0.7rem; font-weight: 600;
+  cursor: pointer; letter-spacing: .04em; transition: all .15s; white-space: nowrap; }
+.map-btn.on { background: var(--accent); border-color: var(--accent); color: var(--bg); }
 
 /* ── Footer ── */
 .footer { display: flex; align-items: center; justify-content: space-between;
@@ -308,6 +316,18 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <div class="card-header">
           <span class="card-title">Network Map</span>
           <span class="card-count" id="map-count"></span>
+          <div class="map-ctl">
+            <select class="map-ctl-sel" id="map-tile-sel" onchange="changeTiles(this.value)">
+              <option value="dark">OSM Dark</option>
+              <option value="carto-dk">Dark (CartoDB)</option>
+              <option value="carto-lt">Light</option>
+              <option value="topo">Topography</option>
+              <option value="satellite">Satellite</option>
+            </select>
+            <button class="map-btn on" id="btn-global"   onclick="toggleLayer('global',this)">Global</button>
+            <button class="map-btn on" id="btn-lines"    onclick="toggleLayer('lines',this)">Lines</button>
+            <button class="map-btn on" id="btn-grayline" onclick="toggleLayer('grayline',this)">Grayline</button>
+          </div>
         </div>
         <div id="map"></div>
       </div>
@@ -357,8 +377,49 @@ function toggleFS() {
 }
 
 /* ── Leaflet map ── */
-var _map = null;
-var _markers = [];
+var _map            = null;
+var _markers        = [];
+var _lines          = [];
+var _grayLayer      = null;
+var _currentTile    = null;
+
+/* Toggle state */
+var _showGlobal   = true;
+var _showLines    = true;
+var _showGrayline = true;
+
+/* Data state */
+var _hostedNodes        = [];  /* [{node,callsign,location,lat,lon}] from board refresh */
+var _connectedNodes     = [];  /* [{node,callsign,location,lat,lon,host_lat,host_lon}] */
+var _lastActivityPoints = [];  /* combined activity list */
+var _mapFitted          = false;
+
+/* Tile layer definitions: darkFilter=true means keep OSM invert CSS */
+var _tileDefs = {
+  'dark':      { url:'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',           maxZoom:18, darkFilter:true  },
+  'carto-dk':  { url:'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',maxZoom:19, darkFilter:false },
+  'carto-lt':  { url:'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',maxZoom:19,darkFilter:false },
+  'topo':      { url:'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',              maxZoom:17, darkFilter:false },
+  'satellite': { url:'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', maxZoom:18, darkFilter:false },
+};
+
+function changeTiles(key) {
+  var def = _tileDefs[key] || _tileDefs['dark'];
+  if (_currentTile) _map.removeLayer(_currentTile);
+  _currentTile = L.tileLayer(def.url, {maxZoom: def.maxZoom}).addTo(_map);
+  /* Move tile layer to bottom so markers stay on top */
+  _currentTile.bringToBack();
+  document.getElementById('map').classList.toggle('map-native', !def.darkFilter);
+  localStorage.setItem('asl3ez-maptiles', key);
+}
+
+function toggleLayer(which, btn) {
+  if (which === 'global')   _showGlobal   = !_showGlobal;
+  if (which === 'lines')    _showLines    = !_showLines;
+  if (which === 'grayline') _showGrayline = !_showGrayline;
+  btn.classList.toggle('on');
+  updateMap();
+}
 
 function initMap() {
   if (_map) return;
@@ -366,18 +427,17 @@ function initMap() {
     zoomControl: true, attributionControl: false,
     center: [20, 0], zoom: 2,
   });
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 18
-  }).addTo(_map);
 
-  /* Re-render markers at new size after every zoom change */
-  _map.on('zoomend', function() {
-    updateMap(_lastActivityPoints);
-  });
+  /* Load saved tile pref */
+  var saved = localStorage.getItem('asl3ez-maptiles') || 'dark';
+  var sel = document.getElementById('map-tile-sel');
+  if (sel) sel.value = saved;
+  changeTiles(saved);
+
+  _map.on('zoomend', function() { updateMap(); });
 }
 
 function pinSize() {
-  /* Return [w, h] for drop pins based on current zoom level */
   if (!_map) return [16, 24];
   var z = _map.getZoom();
   if (z <= 2)  return [10, 15];
@@ -400,73 +460,130 @@ function starSize() {
 function makeIcon(color) {
   var s = pinSize();
   var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + s[0] + '" height="' + s[1] +
-    '" viewBox="0 0 20 30">' +
-    '<path d="M10 0C4.5 0 0 4.5 0 10c0 7.5 10 20 10 20S20 17.5 20 10C20 4.5 15.5 0 10 0z"' +
-    ' fill="' + color + '" opacity="0.9"/>' +
-    '<circle cx="10" cy="10" r="4" fill="white" opacity="0.9"/></svg>';
-  return L.divIcon({ html: svg, iconSize: s, iconAnchor: [s[0]/2, s[1]],
-    popupAnchor: [0, -s[1]], className: '' });
+    '" viewBox="0 0 20 30"><path d="M10 0C4.5 0 0 4.5 0 10c0 7.5 10 20 10 20S20 17.5 20 10C20 4.5 15.5 0 10 0z"' +
+    ' fill="' + color + '" opacity="0.9"/><circle cx="10" cy="10" r="4" fill="white" opacity="0.9"/></svg>';
+  return L.divIcon({ html:svg, iconSize:s, iconAnchor:[s[0]/2,s[1]], popupAnchor:[0,-s[1]], className:'' });
 }
 
 function makeStarIcon(color) {
   var s = starSize();
   var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + s[0] + '" height="' + s[1] +
-    '" viewBox="0 0 32 32">' +
-    '<polygon points="16,2 20,12 31,12 22,19 25,30 16,23 7,30 10,19 1,12 12,12"' +
+    '" viewBox="0 0 32 32"><polygon points="16,2 20,12 31,12 22,19 25,30 16,23 7,30 10,19 1,12 12,12"' +
     ' fill="' + color + '" stroke="white" stroke-width="1.5" opacity="0.95"/></svg>';
-  return L.divIcon({ html: svg, iconSize: s, iconAnchor: [s[0]/2, s[1]/2],
-    popupAnchor: [0, -s[1]/2], className: '' });
+  return L.divIcon({ html:svg, iconSize:s, iconAnchor:[s[0]/2,s[1]/2], popupAnchor:[0,-s[1]/2], className:'' });
 }
 
-var _hostedNodes = [];         /* [{node, callsign, location, lat, lon}] — set by refreshBoard */
-var _lastActivityPoints = [];  /* last combined activity list — used to redraw map on board refresh */
-var _mapFitted = false;        /* auto-fit bounds only on first data load */
+/* ── Grayline (day/night terminator) ── */
+function _solarPos() {
+  var d = new Date(), rad = Math.PI / 180;
+  var n = d.getTime() / 86400000 - 10957.5;      /* days since J2000.0 */
+  var L = (280.460 + 0.9856474 * n) % 360;
+  var g = ((357.528 + 0.9856003 * n) % 360) * rad;
+  var lam = (L + 1.915 * Math.sin(g) + 0.020 * Math.sin(2*g)) * rad;
+  var eps = (23.439 - 0.0000004 * n) * rad;
+  var dec = Math.asin(Math.sin(eps) * Math.sin(lam)) / rad;
+  var ra  = Math.atan2(Math.cos(eps) * Math.sin(lam), Math.cos(lam)) / rad;
+  var GMST = ((280.46061837 + 360.98564736629 * n) % 360 + 360) % 360;
+  var lonS = ((ra - GMST + 360) % 360);
+  if (lonS > 180) lonS -= 360;
+  return { dec: dec, lonS: lonS };
+}
 
-function updateMap(points) {
+function _buildNightPoly() {
+  var sol = _solarPos(), rad = Math.PI / 180;
+  var dec = sol.dec, lonS = sol.lonS;
+  if (Math.abs(dec) < 0.1) dec = 0.1;
+  var pts = [];
+  for (var lon = -180; lon <= 180; lon += 2) {
+    var dL  = (lon - lonS) * rad;
+    var lat = Math.atan(-Math.cos(dL) / Math.tan(dec * rad)) / rad;
+    pts.push([lat, lon]);
+  }
+  if (dec > 0) { pts.push([-89.9, 180]); pts.push([-89.9, -180]); }
+  else         { pts.push([ 89.9, 180]); pts.push([ 89.9, -180]); }
+  return pts;
+}
+
+function updateGrayline() {
+  if (_grayLayer) { _map.removeLayer(_grayLayer); _grayLayer = null; }
+  if (!_showGrayline || !_map) return;
+  _grayLayer = L.polygon(_buildNightPoly(), {
+    color:'transparent', fillColor:'#000020', fillOpacity:0.38, interactive:false
+  }).addTo(_map);
+  if (_grayLayer._map) _grayLayer.bringToBack();
+}
+
+/* ── Master map renderer ── */
+function updateMap() {
   if (!_map) return;
+
+  /* Clear markers and lines */
   _markers.forEach(function(m) { _map.removeLayer(m); });
   _markers = [];
+  _lines.forEach(function(l) { _map.removeLayer(l); });
+  _lines = [];
 
-  /* Activity pins (global/local) */
-  var valid = points.filter(function(p) { return p.lat != null && p.lon != null; });
-  valid.forEach(function(p) {
-    var color = p.type === 'local' ? '#3fb950' : '#58a6ff';
-    var m = L.marker([p.lat, p.lon], {icon: makeIcon(color)})
-      .bindPopup(
-        '<b>' + esc(p.callsign||p.node) + '</b><br>' +
-        esc(p.location||'') + '<br>' +
-        '<small>Node ' + esc(p.node) + (p.type==='local' ? ' &mdash; keyed' : ' &mdash; online') + '</small>'
-      );
-    m.addTo(_map);
-    _markers.push(m);
-  });
+  var allPinned = [];
 
-  /* Star pins for hosted (this server's) nodes */
+  /* 1. Hosted-node gold stars */
   _hostedNodes.forEach(function(n) {
     if (n.lat == null || n.lon == null) return;
-    var m = L.marker([n.lat, n.lon], {icon: makeStarIcon('#ffd700'), zIndexOffset: 1000})
-      .bindPopup(
-        '<b>&#11088; ' + esc(n.callsign||n.node) + '</b><br>' +
-        esc(n.location||'') + '<br>' +
-        '<small>Node ' + esc(n.node) + ' &mdash; this server</small>'
-      );
-    m.addTo(_map);
-    _markers.push(m);
+    var m = L.marker([n.lat, n.lon], {icon:makeStarIcon('#ffd700'), zIndexOffset:1000})
+      .bindPopup('<b>&#11088; ' + esc(n.callsign||n.node) + '</b><br>' +
+                 esc(n.location||'') + '<br><small>Node ' + esc(n.node) + ' &mdash; this server</small>');
+    m.addTo(_map); _markers.push(m);
+    allPinned.push(n);
   });
 
-  var allPinned = valid.concat(_hostedNodes.filter(function(n){ return n.lat != null; }));
-  document.getElementById('map-count').textContent =
-    allPinned.length ? allPinned.length + ' pin' + (allPinned.length !== 1 ? 's' : '') : '';
+  /* 2. Connected-node red pins + dashed lines to their hosted node */
+  _connectedNodes.forEach(function(c) {
+    if (c.lat == null || c.lon == null) return;
+    var m = L.marker([c.lat, c.lon], {icon:makeIcon('#e74c3c'), zIndexOffset:500})
+      .bindPopup('<b>' + esc(c.callsign||c.node) + '</b><br>' +
+                 esc(c.location||'') + '<br><small>Node ' + esc(c.node) + ' &mdash; connected</small>');
+    m.addTo(_map); _markers.push(m);
+    allPinned.push(c);
+    if (_showLines && c.host_lat != null && c.host_lon != null) {
+      var line = L.polyline([[c.lat, c.lon], [c.host_lat, c.host_lon]], {
+        color:'#e74c3c', weight:1.5, opacity:0.55, dashArray:'5 6', interactive:false
+      }).addTo(_map);
+      _lines.push(line);
+    }
+  });
 
+  /* 3. Activity pins: local (green) always shown; global (blue) only if _showGlobal */
+  var actPts = _lastActivityPoints.filter(function(p) {
+    return p.lat != null && p.lon != null && (_showGlobal || p.type === 'local');
+  });
+  actPts.forEach(function(p) {
+    var color = p.type === 'local' ? '#3fb950' : '#58a6ff';
+    var m = L.marker([p.lat, p.lon], {icon:makeIcon(color)})
+      .bindPopup('<b>' + esc(p.callsign||p.node) + '</b><br>' +
+                 esc(p.location||'') + '<br><small>Node ' + esc(p.node) +
+                 (p.type==='local' ? ' &mdash; keyed' : ' &mdash; online') + '</small>');
+    m.addTo(_map); _markers.push(m);
+    allPinned.push(p);
+  });
+
+  /* Pin count */
+  var n = allPinned.length;
+  document.getElementById('map-count').textContent = n ? n + ' pin' + (n !== 1 ? 's' : '') : '';
+
+  /* Auto-fit on first data load only */
   if (!_mapFitted && allPinned.length > 0) {
-    var lats = allPinned.map(function(p){ return p.lat; });
-    var lons = allPinned.map(function(p){ return p.lon; });
-    _map.fitBounds([
-      [Math.min.apply(null,lats)-3, Math.min.apply(null,lons)-3],
-      [Math.max.apply(null,lats)+3, Math.max.apply(null,lons)+3]
-    ], {padding: [15,15], maxZoom: 7});
-    _mapFitted = true;
+    var lats = allPinned.map(function(p){return p.lat;}).filter(function(v){return v!=null;});
+    var lons = allPinned.map(function(p){return p.lon;}).filter(function(v){return v!=null;});
+    if (lats.length) {
+      _map.fitBounds([
+        [Math.min.apply(null,lats)-3, Math.min.apply(null,lons)-3],
+        [Math.max.apply(null,lats)+3, Math.max.apply(null,lons)+3]
+      ], {padding:[15,15], maxZoom:7});
+      _mapFitted = true;
+    }
   }
+
+  /* Grayline — rebuild each render so time stays current */
+  updateGrayline();
 }
 
 /* ── Weather bar ── */
@@ -543,6 +660,20 @@ async function refreshBoard() {
     _hostedNodes = nodes.filter(function(n){ return n.lat != null && n.lon != null; })
       .map(function(n){ return {node:n.node, callsign:n.callsign, location:n.location, lat:n.lat, lon:n.lon}; });
 
+    /* Connected nodes with lat/lon for red map pins */
+    _connectedNodes = [];
+    nodes.forEach(function(n) {
+      (n.connected||[]).forEach(function(c) {
+        if (c.lat != null && c.lon != null) {
+          _connectedNodes.push({
+            node:c.node, callsign:c.callsign, location:c.location,
+            lat:c.lat, lon:c.lon,
+            host_lat:n.lat, host_lon:n.lon,
+          });
+        }
+      });
+    });
+
     /* Connected nodes */
     var allLinked = [];
     nodes.forEach(function(n) { (n.connected||[]).forEach(function(c){ allLinked.push(c); }); });
@@ -578,8 +709,8 @@ async function refreshBoard() {
     var anyStale = (data.nodes||[]).some(function(n){ return n.stale; });
     document.getElementById('f-stale').style.display = anyStale ? '' : 'none';
 
-    /* Re-render map star pins whenever board data changes */
-    updateMap(_lastActivityPoints);
+    /* Re-render map whenever board data changes */
+    updateMap();
   } catch(e) {}
 }
 
@@ -629,7 +760,7 @@ async function refreshActivity() {
     }
 
     _lastActivityPoints = combined;
-    updateMap(combined);
+    updateMap();
   } catch(e) {}
 }
 
@@ -639,9 +770,10 @@ refreshBoard();
 refreshWeather();
 refreshActivity();
 
-setInterval(refreshBoard,    5000);   /* node status every 5s */
-setInterval(refreshActivity, 15000);  /* activity every 15s (server caches for 5min, no extra requests) */
-setInterval(refreshWeather,  600000); /* weather every 10min */
+setInterval(refreshBoard,    5000);    /* node status every 5s */
+setInterval(refreshActivity, 15000);   /* activity every 15s */
+setInterval(refreshWeather,  600000);  /* weather every 10min */
+setInterval(updateGrayline,  120000);  /* grayline advances ~0.5° every 2min */
 </script>
 </body>
 </html>
