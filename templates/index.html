@@ -922,6 +922,7 @@ sudo asterisk -rx "module reload manager"</pre>
           <input type="text" id="ast-log-filter" placeholder="filter text..." style="width:160px">
           <button class="btn btn-primary btn-sm" onclick="astFetchLog()">Fetch Log</button>
           <button class="btn btn-sm" onclick="astClearLog()">Clear</button>
+          <button class="btn btn-sm" id="ast-recall-btn" onclick="astRecallLog()" style="display:none">Recall</button>
           <label style="display:flex;align-items:center;gap:5px;font-size:0.85rem;cursor:pointer;margin:0">
             <input type="checkbox" id="ast-auto-refresh" style="width:auto" onchange="astToggleAutoRefresh()">
             Auto-refresh (5s)
@@ -2775,6 +2776,13 @@ var _astClearTime        = null;   // set by astClearLog(); filters out older li
 function astClearLog() {
   _astClearTime = new Date();
   document.getElementById('ast-log').innerHTML = '';
+  document.getElementById('ast-recall-btn').style.display = '';
+}
+
+function astRecallLog() {
+  _astClearTime = null;
+  document.getElementById('ast-recall-btn').style.display = 'none';
+  astFetchLog();
 }
 
 async function astFetchLog() {
