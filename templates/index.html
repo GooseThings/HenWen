@@ -2799,8 +2799,7 @@ async function astFetchLog() {
     return '<div class="' + cls + '">' + esc(line) + '</div>';
   }).join('');
 
-  // Auto-scroll to bottom
-  panel.scrollTop = panel.scrollHeight;
+  requestAnimationFrame(function() { panel.scrollTop = panel.scrollHeight; });
 }
 
 async function astSetVerbose() {
