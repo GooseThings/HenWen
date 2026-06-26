@@ -93,6 +93,14 @@ CACHE_TTL       = float(os.environ.get("AMI_CACHE_TTL",     "10.0"))  # seconds 
 # poller also backs off exponentially on failures (see _favstats_poll_loop).
 FAVORITES_POLL_INTERVAL = max(5.0, float(os.environ.get("FAVORITES_POLL_INTERVAL", "30.0")))
 
+# Log verbosity: DEBUG shows all messages; INFO (default) suppresses DEBUG noise.
+# Set LOG_LEVEL=DEBUG in the service file Environment= lines for full verbose output.
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+_LOG_LEVELS = {"DEBUG": 0, "INFO": 1, "WARN": 2, "ERROR": 3}
+
+# Asterisk log file path (used by the Asterisk Console log viewer)
+ASTERISK_LOG_PATH = os.environ.get("ASTERISK_LOG_PATH", "/var/log/asterisk/messages.log")
+
 # Full paths — do NOT rely on PATH env under gunicorn/systemd
 SYSTEMCTL_PATH  = "/bin/systemctl"
 if not os.path.exists(SYSTEMCTL_PATH):
@@ -123,6 +131,8 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 _log_lock = threading.Lock()
 
 def log(level, msg):
+    if _LOG_LEVELS.get(level, 1) < _LOG_LEVELS.get(LOG_LEVEL, 1):
+        return
     ts  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     out = f"[{ts}] [{level}] {msg}"
     with _log_lock:
@@ -135,6 +145,7 @@ log("INFO", f"  BACKUP_DIR     = {BACKUP_DIR}")
 log("INFO", f"  AMI_HOST:PORT  = {AMI_HOST}:{AMI_PORT}")
 log("INFO", f"  DB_PATH        = {DB_PATH}")
 log("INFO", f"  Running as UID = {os.getuid()} ({'root' if os.getuid()==0 else 'non-root'})")
+log("INFO", f"  LOG_LEVEL      = {LOG_LEVEL}")
 
 
 # ---------------------------------------------------------------------------
@@ -2193,6 +2204,78 @@ def api_sysinfo():
         "auth_configured":       is_auth_configured(),
         "auth_user":             get_setting("auth_user", "") if is_auth_configured() else "",
     })
+
+
+# ── Asterisk console log viewer ───────────────────────────────────────────────
+
+@app.route("/api/asterisk/log")
+def api_asterisk_log():
+    """
+    Return the last N lines from the Asterisk log file.
+    Query params:
+      lines  (int, default 100, max 2000)
+      filter (str, optional) — case-insensitive substring filter
+    """
+    try:
+        n = min(int(request.args.get("lines", 100)), 2000)
+    except (ValueError, TypeError):
+        n = 100
+    filt = request.args.get("filter", "").lower().strip()
+
+    if not os.path.exists(ASTERISK_LOG_PATH):
+        return jsonify({"lines": [], "path": ASTERISK_LOG_PATH,
+                        "error": f"Log file not found: {ASTERISK_LOG_PATH}"}), 404
+
+    try:
+        with open(ASTERISK_LOG_PATH, "rb") as f:
+            # Efficient tail: seek near the end, read, decode
+            f.seek(0, 2)
+            size = f.tell()
+            # Read up to 512 KB from the end — enough for thousands of lines
+            read_size = min(size, 512 * 1024)
+            f.seek(size - read_size)
+            raw = f.read(read_size).decode("utf-8", errors="replace")
+
+        all_lines = raw.splitlines()
+        if filt:
+            all_lines = [l for l in all_lines if filt in l.lower()]
+        result = all_lines[-n:]
+        log("DEBUG", f"[API] /api/asterisk/log: returning {len(result)} lines (filter={filt!r})")
+        return jsonify({"lines": result, "path": ASTERISK_LOG_PATH, "total_returned": len(result)})
+    except PermissionError:
+        return jsonify({"lines": [], "path": ASTERISK_LOG_PATH,
+                        "error": f"Permission denied reading {ASTERISK_LOG_PATH}"}), 403
+    except Exception as e:
+        log("ERROR", f"[API] /api/asterisk/log error: {e}")
+        return jsonify({"lines": [], "path": ASTERISK_LOG_PATH, "error": str(e)}), 500
+
+
+@app.route("/api/asterisk/verbose", methods=["POST"])
+def api_asterisk_verbose():
+    """
+    Set Asterisk console verbosity via AMI.
+    Body: {"level": N}  where N is 0–9.
+    Equivalent to running 'asterisk -rvvv' (level=3) from the command line.
+    """
+    data = request.get_json(force=True)
+    try:
+        level = int(data.get("level", 3))
+        if not 0 <= level <= 9:
+            return jsonify({"error": "level must be 0–9"}), 400
+    except (ValueError, TypeError):
+        return jsonify({"error": "level must be an integer 0–9"}), 400
+
+    def _set_verbose(ami):
+        lines = ami.command(f"core set verbose {level}")
+        return {"ok": True, "level": level, "output": lines}
+
+    try:
+        result = ami_send_command(_set_verbose)
+        log("INFO", f"[API] Asterisk verbosity set to {level}")
+        return jsonify(result)
+    except Exception as e:
+        log("ERROR", f"[API] /api/asterisk/verbose error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 # ── App settings (SECRET_KEY) ─────────────────────────────────────────────────

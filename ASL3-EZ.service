@@ -39,5 +39,14 @@ Environment=AMI_PORT=5038
 # Change this to a long random string in production
 Environment=SECRET_KEY=asl3-ez-change-me-in-production
 
+# ── Logging ───────────────────────────────────────────────────────────────
+# LOG_LEVEL controls ASL3-EZ's own log verbosity in journald.
+# INFO (default) shows normal operation messages; DEBUG adds detailed trace
+# output for every AMI command, config parse, and API call.
+# Uncomment to enable verbose debug logging:
+#Environment=LOG_LEVEL=DEBUG
+# Path to the Asterisk log file shown in the Asterisk Console page.
+Environment=ASTERISK_LOG_PATH=/var/log/asterisk/messages.log
+
 [Install]
 WantedBy=multi-user.target
