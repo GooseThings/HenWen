@@ -2434,11 +2434,15 @@ def api_status_board():
                 "location": cn_info.get("location", ""),
                 "keyed":    cached.get("links", {}).get(cn, {}).get("keyed", False),
             })
+        location = info.get("location", "")
+        coords   = _geocode(location) if location else None
         node_data.append({
             "node":      node,
             "callsign":  info.get("callsign", ""),
             "desc":      info.get("desc", ""),
-            "location":  info.get("location", ""),
+            "location":  location,
+            "lat":       coords["lat"] if coords else None,
+            "lon":       coords["lon"] if coords else None,
             "keyed":     cached.get("keyed", False),
             "connected": connected_details,
             "stale":     cached.get("stale", True),

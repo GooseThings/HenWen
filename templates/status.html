@@ -320,11 +320,24 @@ function makeIcon(color) {
     popupAnchor: [0,-30], className: '' });
 }
 
+function makeStarIcon(color) {
+  /* 5-pointed star for the hosted node */
+  var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">' +
+    '<polygon points="16,2 20,12 31,12 22,19 25,30 16,23 7,30 10,19 1,12 12,12"' +
+    ' fill="' + color + '" stroke="white" stroke-width="1.5" opacity="0.95"/></svg>';
+  return L.divIcon({ html: svg, iconSize: [32,32], iconAnchor: [16,16],
+    popupAnchor: [0,-16], className: '' });
+}
+
+var _hostedNodes = [];         /* [{node, callsign, location, lat, lon}] — set by refreshBoard */
+var _lastActivityPoints = [];  /* last combined activity list — used to redraw map on board refresh */
+
 function updateMap(points) {
   if (!_map) return;
   _markers.forEach(function(m) { _map.removeLayer(m); });
   _markers = [];
 
+  /* Activity pins (global/local) */
   var valid = points.filter(function(p) { return p.lat != null && p.lon != null; });
   valid.forEach(function(p) {
     var color = p.type === 'local' ? '#3fb950' : '#58a6ff';
@@ -338,12 +351,26 @@ function updateMap(points) {
     _markers.push(m);
   });
 
-  document.getElementById('map-count').textContent =
-    valid.length ? valid.length + ' pin' + (valid.length !== 1 ? 's' : '') : '';
+  /* Star pins for hosted (this server's) nodes */
+  _hostedNodes.forEach(function(n) {
+    if (n.lat == null || n.lon == null) return;
+    var m = L.marker([n.lat, n.lon], {icon: makeStarIcon('#ffd700'), zIndexOffset: 1000})
+      .bindPopup(
+        '<b>&#11088; ' + esc(n.callsign||n.node) + '</b><br>' +
+        esc(n.location||'') + '<br>' +
+        '<small>Node ' + esc(n.node) + ' &mdash; this server</small>'
+      );
+    m.addTo(_map);
+    _markers.push(m);
+  });
 
-  if (valid.length > 0) {
-    var lats = valid.map(function(p){ return p.lat; });
-    var lons = valid.map(function(p){ return p.lon; });
+  var allPinned = valid.concat(_hostedNodes.filter(function(n){ return n.lat != null; }));
+  document.getElementById('map-count').textContent =
+    allPinned.length ? allPinned.length + ' pin' + (allPinned.length !== 1 ? 's' : '') : '';
+
+  if (allPinned.length > 0) {
+    var lats = allPinned.map(function(p){ return p.lat; });
+    var lons = allPinned.map(function(p){ return p.lon; });
     _map.fitBounds([
       [Math.min.apply(null,lats)-3, Math.min.apply(null,lons)-3],
       [Math.max.apply(null,lats)+3, Math.max.apply(null,lons)+3]
@@ -421,6 +448,10 @@ async function refreshBoard() {
         '</div>';
     }
 
+    /* Update hosted-node star pins */
+    _hostedNodes = nodes.filter(function(n){ return n.lat != null && n.lon != null; })
+      .map(function(n){ return {node:n.node, callsign:n.callsign, location:n.location, lat:n.lat, lon:n.lon}; });
+
     /* Connected nodes */
     var allLinked = [];
     nodes.forEach(function(n) { (n.connected||[]).forEach(function(c){ allLinked.push(c); }); });
@@ -448,6 +479,9 @@ async function refreshBoard() {
     document.getElementById('f-updated').textContent = nowStr();
     var anyStale = (data.nodes||[]).some(function(n){ return n.stale; });
     document.getElementById('f-stale').style.display = anyStale ? '' : 'none';
+
+    /* Re-render map star pins whenever board data changes */
+    updateMap(_lastActivityPoints);
   } catch(e) {}
 }
 
@@ -496,6 +530,7 @@ async function refreshActivity() {
       }).join('');
     }
 
+    _lastActivityPoints = combined;
     updateMap(combined);
   } catch(e) {}
 }
@@ -506,9 +541,9 @@ refreshBoard();
 refreshWeather();
 refreshActivity();
 
-setInterval(refreshBoard,    5000);    /* node status every 5s */
-setInterval(refreshActivity, 60000);   /* activity every 60s (server-side 5min cache) */
-setInterval(refreshWeather,  600000);  /* weather every 10min */
+setInterval(refreshBoard,    5000);   /* node status every 5s */
+setInterval(refreshActivity, 15000);  /* activity every 15s (server caches for 5min, no extra requests) */
+setInterval(refreshWeather,  600000); /* weather every 10min */
 </script>
 </body>
 </html>
