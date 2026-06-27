@@ -312,6 +312,17 @@ def check_auth():
     logged_in = session.get('logged_in')
     role      = session.get('role', '')
 
+    # Sessions created before role tracking was added won't have 'role'.
+    # Look it up from the DB and patch the session so subsequent requests are fast.
+    if logged_in and not role:
+        username = session.get('username', '')
+        if username:
+            row = get_db().execute("SELECT role FROM users WHERE username=?",
+                                   (username,)).fetchone()
+            if row:
+                role = row['role']
+                session['role'] = role
+
     if endpoint in _KIOSK_OR_ADMIN:
         if not logged_in:
             return jsonify({"error": "Authentication required"}), 401
