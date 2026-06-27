@@ -126,7 +126,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .weather-loading { color: var(--text2); font-style: italic; }
 
 /* ── Main two-row content area ── */
-.content-area { display: flex; flex-direction: column; gap: 10px; flex: 1; min-height: 0; }
+.content-area { display: grid; grid-template-columns: 1fr 210px; grid-template-rows: 55fr 45fr; gap: 10px; flex: 1; min-height: 0; }
 
 /* ── Top row: node + connected ── */
 .top-row { display: grid; grid-template-columns: 260px minmax(0, 940px); gap: 10px; flex: 55; min-height: 0; }
@@ -250,6 +250,38 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   border-radius: 4px; padding: 2px 8px; font-size: 0.7rem; font-weight: 600;
   cursor: pointer; letter-spacing: .04em; transition: all .15s; white-space: nowrap; }
 .map-btn.on { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+
+/* ── Favorites sidebar ── */
+.favorites-card {
+  grid-column: 2; grid-row: 1 / span 2;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+  display: flex; flex-direction: column; overflow: hidden; min-height: 0;
+}
+.fav-list { flex: 1; overflow-y: auto; }
+.fav-list::-webkit-scrollbar { width: 3px; }
+.fav-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.fav-warn {
+  padding: 5px 12px; font-size: 0.67rem; color: var(--warn);
+  border-bottom: 1px solid var(--border); background: rgba(255,179,0,.07);
+  flex-shrink: 0;
+}
+.fav-row {
+  padding: 9px 12px; border-bottom: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 3px; transition: background .15s;
+}
+.fav-row:last-child { border-bottom: none; }
+.fav-row:hover { background: var(--bg3); }
+.fav-top { display: flex; align-items: center; gap: 5px; }
+.fav-conn-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  background: var(--green); box-shadow: 0 0 4px rgba(63,185,80,.7);
+}
+.fav-num  { font-size: 0.9rem; font-weight: 700; font-family: var(--mono); }
+.fav-call { font-size: 0.75rem; font-weight: 600; color: var(--accent); }
+.fav-loc  { font-size: 0.67rem; color: var(--text2); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.fav-actions { display: flex; gap: 4px; margin-top: 3px; }
+.fav-actions .sb-btn { font-size: 0.68rem; padding: 2px 8px; }
 
 /* Remove width caps in fullscreen — let both rows fill the screen */
 :fullscreen .top-row    { grid-template-columns: 260px 1fr; }
@@ -382,6 +414,21 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       </div>
 
     </div>
+
+    <!-- Favorites sidebar -->
+    <div class="favorites-card">
+      <div class="card-header">
+        <span class="card-title">Favorites</span>
+        <span class="card-count" id="fav-count"></span>
+      </div>
+      <div id="fav-warn" class="fav-warn" style="display:none">
+        &#9888; Disconnect all nodes first
+      </div>
+      <div class="fav-list" id="fav-list">
+        <div class="empty-msg">Loading&hellip;</div>
+      </div>
+    </div>
+
   </div>
 
   <!-- Footer -->
@@ -794,6 +841,9 @@ async function refreshBoard() {
 
     /* Re-render map whenever board data changes */
     updateMap();
+
+    /* Keep favorites sidebar in sync with connected state */
+    renderFavorites();
   } catch(e) {}
 }
 
@@ -1029,11 +1079,97 @@ async function checkKioskSession() {
   }
 }
 
+/* ── Favorites sidebar ── */
+var _favorites = [];
+
+async function loadFavorites() {
+  try {
+    var r = await fetch('/api/favorites');
+    if (!r.ok) return;
+    var d = await r.json();
+    _favorites = d.favorites || [];
+    renderFavorites();
+  } catch(e) {}
+}
+
+function renderFavorites() {
+  var fl  = document.getElementById('fav-list');
+  var fc  = document.getElementById('fav-count');
+  var fw  = document.getElementById('fav-warn');
+  if (!fl) return;
+
+  if (!_favorites.length) {
+    fl.innerHTML = '<div class="empty-msg" style="font-size:0.8rem">No favorites saved</div>';
+    fc.textContent = '';
+    fw.style.display = 'none';
+    return;
+  }
+
+  /* Build set of currently connected node numbers */
+  var connSet = {};
+  (window._lastBoardNodes || []).forEach(function(n) {
+    (n.connected || []).forEach(function(c) { connSet[c.node] = true; });
+  });
+  var anyConn   = Object.keys(connSet).length > 0;
+  var localNode = (window._lastBoardNodes && window._lastBoardNodes[0])
+                  ? window._lastBoardNodes[0].node : '';
+
+  fw.style.display = anyConn ? '' : 'none';
+  fc.textContent   = _favorites.length + ' saved';
+
+  fl.innerHTML = _favorites.map(function(f) {
+    var isConn  = !!connSet[f.node];
+    var dot     = isConn ? '<span class="fav-conn-dot"></span>' : '';
+    var name    = f.label || f.callsign || '';
+    var loc     = f.location || '';
+
+    var actions;
+    if (isConn) {
+      actions = '<button class="sb-btn disconnect" onclick="favDisconnect(\'' +
+        esc(localNode) + '\',\'' + esc(f.node) + '\',this)">Disconnect</button>';
+    } else if (anyConn) {
+      actions = '<button class="sb-btn connect" disabled ' +
+        'style="opacity:.4;cursor:not-allowed" ' +
+        'title="Disconnect all nodes before connecting">Connect</button>';
+    } else {
+      actions = '<button class="sb-btn connect" onclick="favConnect(\'' +
+        esc(localNode) + '\',\'' + esc(f.node) + '\',this)">Connect</button>';
+    }
+
+    return '<div class="fav-row">' +
+      '<div class="fav-top">' + dot +
+        '<span class="fav-num">' + esc(f.node) + '</span>' +
+        (name ? '<span class="fav-call">' + esc(name) + '</span>' : '') +
+      '</div>' +
+      (loc ? '<div class="fav-loc">' + esc(loc) + '</div>' : '') +
+      '<div class="fav-actions">' + actions + '</div>' +
+    '</div>';
+  }).join('');
+}
+
+async function favConnect(localNode, remoteNode, btn) {
+  /* Enforce single-connection rule */
+  var connSet = {};
+  (window._lastBoardNodes || []).forEach(function(n) {
+    (n.connected || []).forEach(function(c) { connSet[c.node] = true; });
+  });
+  if (Object.keys(connSet).length > 0) {
+    sbToast('Disconnect all nodes before connecting a favorite', false);
+    return;
+  }
+  await sbConnect(localNode, remoteNode, btn);
+}
+
+async function favDisconnect(localNode, remoteNode, btn) {
+  await sbDisconnect(localNode, remoteNode, btn);
+}
+
 /* ── Boot ── */
 initMap();
 refreshBoard();
 refreshWeather();
 refreshActivity();
+loadFavorites();
 checkKioskSession();
 
 setInterval(refreshBoard,    5000);    /* node status every 5s */

@@ -297,7 +297,8 @@ def check_auth():
     _PUBLIC          = {'login', 'logout', 'static', None,
                         'status_board', 'status_board_redirect',
                         'api_status_board', 'api_status_weather', 'api_status_activity',
-                        'api_login', 'api_session'}
+                        'api_login', 'api_session',
+                        'api_favorites', 'api_favorites_status'}
     _KIOSK_OR_ADMIN  = {'api_status_connect', 'api_status_disconnect'}
 
     endpoint = request.endpoint
