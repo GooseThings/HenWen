@@ -307,12 +307,19 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .sb-btn.neutral    { background: var(--bg3); border-color: var(--border); color: var(--text2); }
 .sb-btn.neutral:hover { color: var(--text); }
 
-/* small connect form that slides under the Connected Nodes header */
+/* always-visible connect bar */
 .conn-form-bar { padding: 7px 18px; border-bottom: 1px solid var(--border);
-  display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
+  display: flex; gap: 6px; align-items: center; flex-shrink: 0; flex-wrap: wrap; }
 .conn-form-bar input { width: 100px; font-family: var(--mono); font-size: 0.82rem;
   padding: 3px 7px; border: 1px solid var(--border); border-radius: 4px;
   background: var(--bg3); color: var(--text); }
+.perm-label { font-size: 0.72rem; color: var(--text2); display: flex; align-items: center;
+  gap: 4px; user-select: none; cursor: pointer; white-space: nowrap; }
+.perm-label input[type=checkbox] { cursor: pointer; accent-color: var(--accent); }
+/* idle-countdown badge in node rows */
+.idle-badge { font-size: 0.68rem; padding: 1px 6px; border-radius: 3px; font-weight: 600;
+  background: rgba(88,166,255,.1); color: var(--accent); white-space: nowrap; }
+.idle-badge.warn { background: rgba(255,179,0,.15); color: var(--warn); }
 
 /* toast notification */
 #sb-toast { position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%);
@@ -370,14 +377,15 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <div class="card-header">
           <span class="card-title">Connected Nodes</span>
           <span class="card-count" id="conn-count"></span>
-          <button class="sb-btn connect" style="margin-left:auto" onclick="toggleConnForm()">+ Connect</button>
         </div>
-        <div class="conn-form-bar" id="conn-form-bar" style="display:none">
+        <div class="conn-form-bar" id="conn-form-bar">
           <input id="conn-form-node" type="text" placeholder="Node #" maxlength="7"
                  onkeydown="if(event.key==='Enter')statusConnectNew()">
           <button class="sb-btn connect" onclick="statusConnectNew()">Connect</button>
-          <button class="sb-btn neutral" onclick="toggleConnForm()">Cancel</button>
-          <span id="conn-form-msg" style="font-size:0.75rem;color:var(--text2);margin-left:4px"></span>
+          <label class="perm-label" id="perm-label" style="display:none">
+            <input type="checkbox" id="conn-perm-chk"> Permanent
+          </label>
+          <span id="conn-form-msg" style="font-size:0.75rem;color:var(--text2)"></span>
         </div>
         <div class="node-list" id="node-list">
           <div class="empty-msg">Loading&hellip;</div>
@@ -817,6 +825,16 @@ async function refreshBoard() {
         if (c.connect_time) meta.push('Conn: <strong>' + esc(c.connect_time) + '</strong>');
         if (c.keyups)       meta.push('Keys: <strong>' + c.keyups + '</strong>');
         if (c.last_keyed)   meta.push('Last: <strong>' + relTime(c.last_keyed) + '</strong>');
+        var idleBadge = '';
+        if (c.permanent === false && typeof c.idle_remaining === 'number') {
+          var mins = Math.floor(c.idle_remaining / 60);
+          var secs = c.idle_remaining % 60;
+          var ts   = mins + ':' + (secs < 10 ? '0' : '') + secs;
+          var warn = c.idle_remaining < 120;
+          idleBadge = '<span class="idle-badge' + (warn ? ' warn' : '') + '">Idle: ' + ts + '</span>';
+        } else if (c.permanent === true) {
+          idleBadge = '<span class="idle-badge">Permanent</span>';
+        }
         var dotClass = !isConn ? ' connecting' : (c.keyed ? ' keyed' : '');
         var dcBtn = '<button class="sb-btn disconnect" onclick="sbDisconnect(\'' +
           esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)">Disconnect</button>';
@@ -826,7 +844,7 @@ async function refreshBoard() {
           '<div class="nr-call">' + esc(c.callsign||'—') + '</div>' +
           '<div class="nr-right">' +
             '<div class="nr-loc">' + esc(c.location||c.desc||'') + '</div>' +
-            (meta.length ? '<div class="nr-meta"><span>' + meta.join('</span><span>') + '</span></div>' : '') +
+            (meta.length ? '<div class="nr-meta"><span>' + meta.join('</span><span>') + '</span>' + idleBadge + '</div>' : (idleBadge ? '<div class="nr-meta">' + idleBadge + '</div>' : '')) +
             (!isConn ? '<div class="nr-meta" style="color:var(--warn)">Connecting…</div>' : '') +
           '</div>' +
           dcBtn +
@@ -929,13 +947,13 @@ function sbToast(msg, ok) {
   _sbToastTimer = setTimeout(function() { t.className = ''; }, 3500);
 }
 
-async function sbConnect(localNode, remoteNode, btn) {
+async function sbConnect(localNode, remoteNode, btn, permanent) {
   if (btn) { btn.disabled = true; btn.textContent = '…'; }
   try {
     var r = await fetch('/api/status/connect', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({local_node: localNode, remote_node: remoteNode})
+      body: JSON.stringify({local_node: localNode, remote_node: remoteNode, permanent: !!permanent})
     });
     var d = await r.json();
     if (r.ok && d.ok) {
@@ -943,7 +961,7 @@ async function sbConnect(localNode, remoteNode, btn) {
       setTimeout(refreshBoard, 1500);
     } else if (r.status === 401) {
       if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
-      openKioskLogin(sbConnect, [localNode, remoteNode, null]);
+      openKioskLogin(sbConnect, [localNode, remoteNode, null, permanent]);
     } else {
       sbToast('Connect failed: ' + (d.error || r.status), false);
       if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
@@ -979,17 +997,6 @@ async function sbDisconnect(localNode, remoteNode, btn) {
   }
 }
 
-function toggleConnForm() {
-  var bar = document.getElementById('conn-form-bar');
-  if (!bar) return;
-  var show = bar.style.display === 'none' || bar.style.display === '';
-  bar.style.display = show ? 'flex' : 'none';
-  if (show) {
-    var inp = document.getElementById('conn-form-node');
-    if (inp) { inp.value = ''; inp.focus(); }
-  }
-}
-
 async function statusConnectNew() {
   var inp = document.getElementById('conn-form-node');
   if (!inp) return;
@@ -1001,16 +1008,21 @@ async function statusConnectNew() {
   var local = (window._lastBoardNodes && window._lastBoardNodes[0])
                ? window._lastBoardNodes[0].node : '';
   if (!local) { document.getElementById('conn-form-msg').textContent = 'No local node found'; return; }
+  var perm  = document.getElementById('conn-perm-chk');
+  var permanent = perm && perm.checked;
   document.getElementById('conn-form-msg').textContent = 'Connecting…';
   var r = await fetch('/api/status/connect', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({local_node: local, remote_node: remote})
+    body: JSON.stringify({local_node: local, remote_node: remote, permanent: permanent})
   });
+  if (r.status === 401) { openKioskLogin(statusConnectNew, []); return; }
   var d = await r.json();
   if (r.ok && d.ok) {
-    sbToast('Connecting to ' + remote + '…', true);
-    toggleConnForm();
+    sbToast((permanent ? 'Permanently connecting' : 'Connecting') + ' to ' + remote + '…', true);
+    inp.value = '';
+    if (perm) perm.checked = false;
+    document.getElementById('conn-form-msg').textContent = '';
     setTimeout(refreshBoard, 1500);
   } else {
     document.getElementById('conn-form-msg').textContent = d.error || ('Error ' + r.status);
@@ -1046,8 +1058,11 @@ async function kioskLogin() {
   });
   var d = await r.json();
   if (r.ok && d.ok) {
+    window._kioskRole = d.role;
     closeKioskModal();
     updateKioskUserBar(d.username, d.role);
+    var pl = document.getElementById('perm-label');
+    if (pl) pl.style.display = (d.role === 'admin' || d.role === 'superuser') ? '' : 'none';
     if (_pendingAction) {
       _pendingAction.fn.apply(null, _pendingAction.args);
       _pendingAction = null;
@@ -1080,10 +1095,15 @@ async function checkKioskSession() {
   var r = await fetch('/api/session');
   var d = await r.json();
   if (d.logged_in) {
+    window._kioskRole = d.role;
     updateKioskUserBar(d.username, d.role);
   } else {
+    window._kioskRole = '';
     updateKioskUserBar(null, null);
   }
+  /* Show Permanent checkbox only for admin/superuser */
+  var pl = document.getElementById('perm-label');
+  if (pl) pl.style.display = (window._kioskRole === 'admin' || window._kioskRole === 'superuser') ? '' : 'none';
 }
 
 /* ── Heartbeat indicator ── */
@@ -1173,7 +1193,9 @@ async function favConnect(localNode, remoteNode, btn) {
     sbToast('Disconnect all nodes before connecting a favorite', false);
     return;
   }
-  await sbConnect(localNode, remoteNode, btn);
+  /* Favorites from admin/superuser use permanent flag */
+  var permanent = (window._kioskRole === 'admin' || window._kioskRole === 'superuser');
+  await sbConnect(localNode, remoteNode, btn, permanent);
 }
 
 async function favDisconnect(localNode, remoteNode, btn) {

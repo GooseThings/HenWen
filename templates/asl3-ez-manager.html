@@ -483,12 +483,13 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     <button class="nav-item" onclick="showPage('node-id')">Node ID</button>
     <button class="nav-item" onclick="showPage('announcements')">Announcements</button>
     <button class="nav-item" onclick="showPage('smart-connector')">Smart Connector</button>
-    <button class="nav-item" onclick="showPage('raw-editor')">Raw Editor</button>
+    <button class="nav-item" id="nav-raw-editor" onclick="showPage('raw-editor')">Raw Editor</button>
     <button class="nav-item" onclick="showPage('backups')">Backups</button>
     <button class="nav-item" onclick="showPage('conn-history')">Conn. History</button>
     <button class="nav-item" onclick="showPage('alerts')">Alerts</button>
     <button class="nav-item" onclick="showPage('ami-diag')">AMI Diagnostics</button>
     <button class="nav-item" onclick="showPage('ast-console')">Asterisk Console</button>
+    <button class="nav-item" onclick="showPage('kiosk-settings')">Kiosk Settings</button>
     <button class="nav-item" onclick="showPage('settings')">Settings</button>
     <button class="nav-item" onclick="showPage('user-mgmt')">User Management</button>
   </nav>
@@ -925,6 +926,55 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
           <button class="btn" onclick="alTest()">Send Test</button>
         </div>
         <div id="al-status" style="margin-top:8px;font-size:0.82rem"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Kiosk Settings -->
+  <section class="page" id="page-kiosk-settings">
+    <div class="page-title">Kiosk Settings</div>
+    <div class="card" style="max-width:520px">
+      <div class="card-body">
+        <div class="form-group">
+          <label class="form-label">Idle Timeout (minutes)</label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="number" id="ks-idle-min" class="form-control" style="width:90px"
+                   min="1" max="1440" value="10">
+            <span style="font-size:0.82rem;color:var(--text-muted)">
+              User connections auto-disconnect after this many idle minutes.<br>
+              Admin &amp; Superuser connections are <em>permanent</em> from the kiosk (no timeout).
+            </span>
+          </div>
+        </div>
+        <button class="btn btn-success" onclick="ksSave()">Save</button>
+        <span id="ks-status" style="margin-left:10px;font-size:0.82rem"></span>
+      </div>
+    </div>
+
+    <div class="card" style="max-width:700px;margin-top:16px">
+      <div class="card-header"><strong>Role Permissions</strong></div>
+      <div class="card-body" style="padding:0">
+        <table class="table table-sm mb-0" style="font-size:0.82rem">
+          <thead><tr>
+            <th>Feature</th>
+            <th style="text-align:center">User</th>
+            <th style="text-align:center">Admin</th>
+            <th style="text-align:center">Superuser</th>
+          </tr></thead>
+          <tbody>
+            <tr><td>Node Kiosk (connect/disconnect)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
+            <tr><td>Permanent kiosk connections</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
+            <tr><td>Dashboard &amp; Node Control</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
+            <tr><td>General Settings, DTMF, Node ID</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
+            <tr><td>Announcements, Smart Connector</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
+            <tr><td>Backups, Alerts, Conn. History</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
+            <tr><td>AMI Diagnostics, Asterisk Console</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
+            <tr><td>Kiosk Settings</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
+            <tr><td>User Management (create Users)</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
+            <tr><td>User Management (create Admins/Superusers)</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#10003;</td></tr>
+            <tr><td>Raw Editor (direct rpt.conf edit)</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#10003;</td></tr>
+          </tbody>
+        </table>
       </div>
     </div>
   </section>
@@ -1700,8 +1750,9 @@ sudo asterisk -rx "module reload manager"</pre>
           <div>
             <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:4px">Role</label>
             <select id="uf-role" style="width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg3);color:var(--text);font-size:0.88rem">
-              <option value="kiosk">kiosk — Node Kiosk + connect/disconnect only</option>
-              <option value="admin">admin — Full access</option>
+              <option value="user">user — Node Kiosk + connect/disconnect only</option>
+              <option value="admin">admin — Manager access, no raw editor</option>
+              <option value="superuser">superuser — Full access including raw editor</option>
             </select>
           </div>
         </div>
@@ -1858,8 +1909,9 @@ function showPage(id) {
   else if (id === 'raw-editor')   rawLoad();
   else if (id === 'backups')        loadBackups();
   else if (id === 'conn-history')   chLoad(0);
-  else if (id === 'alerts')         alLoad();
-  else if (id === 'ami-diag')       loadSysInfo();
+  else if (id === 'alerts')           alLoad();
+  else if (id === 'kiosk-settings')   ksLoad();
+  else if (id === 'ami-diag')         loadSysInfo();
   else if (id === 'ast-console')  astFetchLog();
   else if (id === 'settings')       { loadSecretKeyStatus(); syncThemePicker(); }
   else if (id === 'user-mgmt')      loadUsers();
@@ -3470,8 +3522,43 @@ async function applySecretKey() {
 }
 
 /* ── Init ────────────────────────────────────────────────────────────────── */
+/* ── Kiosk Settings ────────────────────────────────────────────────────────── */
+async function ksLoad() {
+  var r = await api('/api/kiosk/settings');
+  if (!r.ok) return;
+  var d = r.data;
+  var inp = document.getElementById('ks-idle-min');
+  if (inp) inp.value = Math.round((d.idle_timeout_sec || 600) / 60);
+}
+
+async function ksSave() {
+  var inp = document.getElementById('ks-idle-min');
+  var st  = document.getElementById('ks-status');
+  if (!inp) return;
+  var mins = parseInt(inp.value, 10);
+  if (isNaN(mins) || mins < 1 || mins > 1440) {
+    st.textContent = 'Enter 1–1440 minutes.'; st.style.color = 'var(--danger)'; return;
+  }
+  var r = await api('/api/kiosk/settings', 'PUT', {idle_timeout_sec: mins * 60});
+  if (r.ok) { st.textContent = 'Saved.'; st.style.color = 'var(--success)'; }
+  else       { st.textContent = r.data.error || 'Error'; st.style.color = 'var(--danger)'; }
+  setTimeout(function(){ st.textContent = ''; }, 3000);
+}
+
+/* ── Role-based nav visibility ─────────────────────────────────────────────── */
+async function applyRoleNav() {
+  var r = await fetch('/api/session');
+  if (!r.ok) return;
+  var d = await r.json();
+  var role = d.role || '';
+  /* Only superuser sees Raw Editor */
+  var rawBtn = document.getElementById('nav-raw-editor');
+  if (rawBtn) rawBtn.style.display = (role === 'superuser') ? '' : 'none';
+}
+
 window.addEventListener('DOMContentLoaded', function() {
   log('ASL3-EZ loaded.', 'INFO');
+  applyRoleNav();
   {% if not conf_exists %}
   log('rpt.conf not found at {{ conf_path }}. Check path and permissions.', 'WARN');
   {% endif %}
@@ -4263,9 +4350,10 @@ async function loadUsers() {
     return;
   }
   tbody.innerHTML = users.map(function(u) {
-    var roleBadge = u.role === 'admin'
-      ? '<span style="background:rgba(88,166,255,.12);color:var(--accent);padding:1px 7px;border-radius:3px;font-size:0.75rem;font-weight:600">admin</span>'
-      : '<span style="background:rgba(63,185,80,.1);color:var(--green);padding:1px 7px;border-radius:3px;font-size:0.75rem;font-weight:600">kiosk</span>';
+    var roleColor = u.role === 'superuser' ? 'rgba(248,81,73,.15);color:var(--red)'
+                  : u.role === 'admin'     ? 'rgba(88,166,255,.12);color:var(--accent)'
+                  :                          'rgba(63,185,80,.1);color:var(--green)';
+    var roleBadge = '<span style="background:' + roleColor + ';padding:1px 7px;border-radius:3px;font-size:0.75rem;font-weight:600">' + esc(u.role) + '</span>';
     var created = u.created_at ? new Date(u.created_at + 'Z').toLocaleDateString() : '—';
     return '<tr>'
       + '<td style="font-weight:600">' + esc(u.username) + '</td>'
@@ -4285,7 +4373,7 @@ function showCreateUserForm() {
   document.getElementById('uf-id').value       = '';
   document.getElementById('uf-username').value = '';
   document.getElementById('uf-username').disabled = false;
-  document.getElementById('uf-role').value     = 'kiosk';
+  document.getElementById('uf-role').value     = 'user';
   document.getElementById('uf-password').value = '';
   document.getElementById('uf-password2').value = '';
   document.getElementById('uf-pw-label').textContent = 'Password';

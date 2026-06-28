@@ -245,21 +245,33 @@ def get_db():
         id            INTEGER PRIMARY KEY AUTOINCREMENT,
         username      TEXT    UNIQUE NOT NULL,
         password_hash TEXT    NOT NULL,
-        role          TEXT    NOT NULL DEFAULT 'kiosk',
+        role          TEXT    NOT NULL DEFAULT 'user',
         created_at    TEXT    DEFAULT (datetime('now'))
     )""")
-    # Migrate legacy single-user auth to users table
+    # Migrate legacy single-user auth to users table (pre-roles era)
     legacy_user = conn.execute("SELECT value FROM settings WHERE key='auth_user'").fetchone()
     legacy_hash = conn.execute("SELECT value FROM settings WHERE key='auth_password_hash'").fetchone()
     if legacy_user and legacy_hash:
-        existing_admin = conn.execute("SELECT id FROM users WHERE role='admin'").fetchone()
-        if not existing_admin:
+        existing_super = conn.execute("SELECT id FROM users WHERE role='superuser'").fetchone()
+        if not existing_super:
             conn.execute(
                 "INSERT OR IGNORE INTO users (username, password_hash, role) VALUES (?,?,?)",
-                (legacy_user["value"], legacy_hash["value"], "admin")
+                (legacy_user["value"], legacy_hash["value"], "superuser")
             )
             conn.execute("DELETE FROM settings WHERE key IN ('auth_user','auth_password_hash')")
             conn.commit()
+    # Migrate two-tier roles (admin→superuser, kiosk→user) to three-tier system
+    needs_role_migration = conn.execute(
+        "SELECT 1 FROM settings WHERE key='roles_v3_migrated'"
+    ).fetchone()
+    if not needs_role_migration:
+        conn.execute("UPDATE users SET role='superuser' WHERE role='admin'")
+        conn.execute("UPDATE users SET role='user'      WHERE role='kiosk'")
+        conn.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('roles_v3_migrated','1')")
+        conn.commit()
+    # Seed kiosk defaults
+    for _k, _v in [('kiosk_idle_timeout_sec', '600')]:
+        conn.execute("INSERT OR IGNORE INTO settings (key,value) VALUES (?,?)", (_k, _v))
     conn.commit()
     return conn
 
@@ -286,7 +298,7 @@ def set_setting(key, value):
 # ---------------------------------------------------------------------------
 def is_auth_configured():
     try:
-        row = get_db().execute("SELECT id FROM users WHERE role='admin'").fetchone()
+        row = get_db().execute("SELECT id FROM users WHERE role='superuser'").fetchone()
         return row is not None
     except Exception:
         return False
@@ -298,8 +310,10 @@ def check_auth():
                         'status_board', 'status_board_redirect',
                         'api_status_board', 'api_status_weather', 'api_status_activity',
                         'api_login', 'api_session',
-                        'api_favorites', 'api_favorites_status'}
-    _KIOSK_OR_ADMIN  = {'api_status_connect', 'api_status_disconnect'}
+                        'api_favorites', 'api_favorites_status',
+                        'api_kiosk_settings_get'}
+    # Any logged-in user (superuser / admin / user)
+    _USER_OR_ABOVE = {'api_status_connect', 'api_status_disconnect'}
 
     endpoint = request.endpoint
     if endpoint in _PUBLIC:
@@ -324,18 +338,18 @@ def check_auth():
                 role = row['role']
                 session['role'] = role
 
-    if endpoint in _KIOSK_OR_ADMIN:
+    if endpoint in _USER_OR_ABOVE:
         if not logged_in:
             return jsonify({"error": "Authentication required"}), 401
         return None
 
-    # Everything else requires admin
+    # Everything else requires admin or superuser
     if not logged_in:
         if request.path.startswith('/api/'):
             return jsonify({"error": "Authentication required"}), 401
         return redirect(url_for('login'))
 
-    if role != 'admin':
+    if role not in ('admin', 'superuser'):
         if request.path.startswith('/api/'):
             return jsonify({"error": "Admin access required"}), 403
         return redirect(url_for('status_board'))
@@ -364,11 +378,11 @@ def login():
                                        error="Passwords do not match.")
             db = get_db()
             db.execute("INSERT OR REPLACE INTO users (username, password_hash, role) VALUES (?,?,?)",
-                       (username, generate_password_hash(password), "admin"))
+                       (username, generate_password_hash(password), "superuser"))
             db.commit()
             session["logged_in"] = True
             session["username"]  = username
-            session["role"]      = "admin"
+            session["role"]      = "superuser"
             session["user_id"]   = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()["id"]
             log("INFO", f"[AUTH] Initial account created for '{username}'")
             return redirect(url_for('index'))
@@ -381,7 +395,7 @@ def login():
             session["role"]      = user["role"]
             session["user_id"]   = user["id"]
             log("INFO", f"[AUTH] Login: '{username}' (role={user['role']})")
-            if user["role"] == "kiosk":
+            if user["role"] == "user":
                 return redirect(url_for('status_board'))
             return redirect(url_for('index'))
         log("WARN", f"[AUTH] Failed login attempt for '{username}'")
@@ -965,7 +979,36 @@ def _poll_loop():
                             # Was established before and has now fully gone
                             _db_conn_close(node_str, peer)
                             _alert_events.append(("disconnect", node_str, peer))
+                            with _kiosk_temp_lock:
+                                _kiosk_temp_conns.pop((node_str, peer), None)
                         _prev_connected_map[node_str] = est_set
+
+                        # Kiosk idle-timeout: update last_active when local or peer is keyed
+                        local_keyed = bool(status.get("keyed"))
+                        with _kiosk_temp_lock:
+                            for (ln, pn), info in list(_kiosk_temp_conns.items()):
+                                if ln != node_str or info.get('permanent'):
+                                    continue
+                                peer_keyed = bool(status.get("links", {}).get(pn, {}).get("keyed"))
+                                if local_keyed or peer_keyed:
+                                    info['last_active'] = now_ts
+
+                        # Fire idle disconnects (outside _kiosk_temp_lock to avoid deadlock)
+                        idle_timeout = int(get_setting('kiosk_idle_timeout_sec', '600') or 600)
+                        _idle_dc = []
+                        with _kiosk_temp_lock:
+                            for (ln, pn), info in list(_kiosk_temp_conns.items()):
+                                if ln != node_str or info.get('permanent'):
+                                    continue
+                                if now_ts - info.get('last_active', now_ts) > idle_timeout:
+                                    _idle_dc.append((ln, pn))
+                                    del _kiosk_temp_conns[(ln, pn)]
+                        for (ln, pn) in _idle_dc:
+                            try:
+                                ami.rpt_cmd(ln, f"ilink 1 {pn}")
+                                log("INFO", f"[KIOSK] Idle timeout: disconnected {pn} from {ln}")
+                            except Exception as _e:
+                                log("ERROR", f"[KIOSK] Idle timeout disconnect failed: {_e}")
 
                 except Exception as e:
                     _ami_last_error = str(e)
@@ -1129,6 +1172,12 @@ _link_stats_lock = threading.Lock()
 
 # ── Connection history tracking ────────────────────────────────────────────────
 _prev_connected_map = {}  # {local_node_str: set(peer_str)}
+
+# ── Kiosk idle-timeout tracking ────────────────────────────────────────────────
+# key: (local_node_str, peer_str)
+# val: {'permanent': bool, 'last_active': float (epoch)}
+_kiosk_temp_conns = {}
+_kiosk_temp_lock  = threading.Lock()
 
 # ── Alert state ───────────────────────────────────────────────────────────────
 _alert_prev_ami    = None   # None=unknown, True=was connected, False=was disconnected
@@ -2368,6 +2417,8 @@ def api_save():
     raw     = data.get("raw_content")
 
     if raw is not None:
+        if session.get('role') != 'superuser':
+            return jsonify({"error": "Superuser access required for raw editor"}), 403
         log("INFO", f"[API] /api/save raw content ({len(raw)} bytes)")
         try:
             backup = write_conf_file(RPT_CONF_PATH, raw)
@@ -2584,6 +2635,29 @@ def api_backup_delete(name):
         return jsonify({"error": str(e)}), 500
 
 
+# ── Kiosk Settings API ────────────────────────────────────────────────────────
+
+@app.route("/api/kiosk/settings")
+def api_kiosk_settings_get():
+    return jsonify({
+        "idle_timeout_sec": int(get_setting('kiosk_idle_timeout_sec', '600') or 600),
+    })
+
+
+@app.route("/api/kiosk/settings", methods=["PUT"])
+def api_kiosk_settings_put():
+    data = request.json or {}
+    if "idle_timeout_sec" in data:
+        try:
+            val = int(data["idle_timeout_sec"])
+            if not (60 <= val <= 86400):
+                return jsonify({"error": "idle_timeout_sec must be 60–86400 seconds"}), 400
+            set_setting('kiosk_idle_timeout_sec', str(val))
+        except (TypeError, ValueError):
+            return jsonify({"error": "idle_timeout_sec must be an integer"}), 400
+    return jsonify({"ok": True})
+
+
 # ── Connection History API ─────────────────────────────────────────────────────
 
 @app.route("/api/connection-history")
@@ -2710,22 +2784,26 @@ def api_users_list():
 
 @app.route("/api/users", methods=["POST"])
 def api_users_create():
-    data     = request.json or {}
-    username = str(data.get("username", "")).strip()
-    password = str(data.get("password", ""))
-    role     = str(data.get("role", "kiosk")).strip()
+    data        = request.json or {}
+    username    = str(data.get("username", "")).strip()
+    password    = str(data.get("password", ""))
+    role        = str(data.get("role", "user")).strip()
+    caller_role = session.get('role', '')
     if not re.match(r'^[A-Za-z0-9_.-]{2,32}$', username):
         return jsonify({"error": "Username must be 2-32 chars: letters, digits, _ . -"}), 400
     if len(password) < 8:
         return jsonify({"error": "Password must be at least 8 characters."}), 400
-    if role not in ("admin", "kiosk"):
-        return jsonify({"error": "Role must be 'admin' or 'kiosk'"}), 400
+    if role not in ("superuser", "admin", "user"):
+        return jsonify({"error": "Role must be superuser, admin, or user"}), 400
+    # Admins can only create user-level accounts
+    if caller_role == 'admin' and role in ('superuser', 'admin'):
+        return jsonify({"error": "Admins can only create user accounts"}), 403
     db = get_db()
     try:
         db.execute("INSERT INTO users (username, password_hash, role) VALUES (?,?,?)",
                    (username, generate_password_hash(password), role))
         db.commit()
-        log("INFO", f"[USERS] Created user '{username}' role={role}")
+        log("INFO", f"[USERS] Created user '{username}' role={role} by {caller_role}")
         return jsonify({"ok": True})
     except sqlite3.IntegrityError:
         return jsonify({"error": f"Username '{username}' already exists."}), 409
@@ -2733,22 +2811,27 @@ def api_users_create():
 
 @app.route("/api/users/<int:uid>", methods=["PUT"])
 def api_users_update(uid):
-    data       = request.json or {}
-    db         = get_db()
-    user       = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    data        = request.json or {}
+    db          = get_db()
+    user        = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    caller_role = session.get('role', '')
     if not user:
         return jsonify({"error": "User not found"}), 404
-    # Prevent removing the last admin
     new_role = str(data.get("role", user["role"])).strip()
-    if user["role"] == "admin" and new_role != "admin":
-        admin_count = db.execute("SELECT COUNT(*) FROM users WHERE role='admin'").fetchone()[0]
-        if admin_count <= 1:
-            return jsonify({"error": "Cannot remove the last admin account."}), 400
+    # Admins cannot elevate accounts to admin/superuser, or edit existing elevated accounts
+    if caller_role == 'admin' and (user["role"] in ('superuser', 'admin') or
+                                    new_role in ('superuser', 'admin')):
+        return jsonify({"error": "Admins can only manage user accounts"}), 403
+    # Prevent removing the last superuser
+    if user["role"] == "superuser" and new_role != "superuser":
+        su_count = db.execute("SELECT COUNT(*) FROM users WHERE role='superuser'").fetchone()[0]
+        if su_count <= 1:
+            return jsonify({"error": "Cannot change the last superuser account."}), 400
     updates = []
     params  = []
     if "role" in data:
-        if new_role not in ("admin", "kiosk"):
-            return jsonify({"error": "Role must be 'admin' or 'kiosk'"}), 400
+        if new_role not in ("superuser", "admin", "user"):
+            return jsonify({"error": "Role must be superuser, admin, or user"}), 400
         updates.append("role=?"); params.append(new_role)
     if "password" in data:
         pw = data["password"]
@@ -2766,16 +2849,19 @@ def api_users_update(uid):
 
 @app.route("/api/users/<int:uid>", methods=["DELETE"])
 def api_users_delete(uid):
-    db   = get_db()
-    user = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    db          = get_db()
+    user        = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    caller_role = session.get('role', '')
     if not user:
         return jsonify({"error": "User not found"}), 404
     if session.get("user_id") == uid:
         return jsonify({"error": "Cannot delete your own account."}), 400
-    if user["role"] == "admin":
-        admin_count = db.execute("SELECT COUNT(*) FROM users WHERE role='admin'").fetchone()[0]
-        if admin_count <= 1:
-            return jsonify({"error": "Cannot delete the last admin account."}), 400
+    if caller_role == 'admin' and user["role"] in ('superuser', 'admin'):
+        return jsonify({"error": "Admins can only manage user accounts"}), 403
+    if user["role"] == "superuser":
+        su_count = db.execute("SELECT COUNT(*) FROM users WHERE role='superuser'").fetchone()[0]
+        if su_count <= 1:
+            return jsonify({"error": "Cannot delete the last superuser account."}), 400
     db.execute("DELETE FROM users WHERE id=?", (uid,))
     db.commit()
     log("INFO", f"[USERS] Deleted user '{user['username']}' (id={uid})")
@@ -3077,23 +3163,39 @@ def api_status_board():
         lct = cached.get("link_connect_time", {})
         with _link_stats_lock:
             ls_snapshot = dict(_link_stats)
+        node_str_local = str(node)
+        idle_timeout   = int(get_setting('kiosk_idle_timeout_sec', '600') or 600)
         for cn in cached.get("connected", []):
             cn_info    = lookup_node(cn)
             cn_loc     = cn_info.get("location", "")
             cn_coords  = _geocode(cn_loc) if cn_loc else None
             ls = ls_snapshot.get(cn, {})
+            # Idle-timeout info for kiosk display
+            with _kiosk_temp_lock:
+                tc = _kiosk_temp_conns.get((node_str_local, cn))
+            if tc and not tc.get('permanent'):
+                idle_remaining = max(0, int(idle_timeout - (time.time() - tc['last_active'])))
+                is_permanent   = False
+            elif tc and tc.get('permanent'):
+                idle_remaining = None
+                is_permanent   = True
+            else:
+                idle_remaining = None
+                is_permanent   = None  # not tracked (pre-existing connection)
             connected_details.append({
-                "node":          cn,
-                "callsign":      cn_info.get("callsign", ""),
-                "desc":          cn_info.get("desc", ""),
-                "location":      cn_loc,
-                "keyed":         cached.get("links", {}).get(cn, {}).get("keyed", False),
-                "connect_time":  lct.get(cn, ""),
-                "keyups":        ls.get("keyups", 0),
-                "last_keyed":    ls.get("last_keyed"),
-                "lat":           cn_coords["lat"] if cn_coords else None,
-                "lon":           cn_coords["lon"] if cn_coords else None,
-                "connect_state": cached.get("link_connect_state", {}).get(cn, "ESTABLISHED"),
+                "node":           cn,
+                "callsign":       cn_info.get("callsign", ""),
+                "desc":           cn_info.get("desc", ""),
+                "location":       cn_loc,
+                "keyed":          cached.get("links", {}).get(cn, {}).get("keyed", False),
+                "connect_time":   lct.get(cn, ""),
+                "keyups":         ls.get("keyups", 0),
+                "last_keyed":     ls.get("last_keyed"),
+                "lat":            cn_coords["lat"] if cn_coords else None,
+                "lon":            cn_coords["lon"] if cn_coords else None,
+                "connect_state":  cached.get("link_connect_state", {}).get(cn, "ESTABLISHED"),
+                "idle_remaining": idle_remaining,
+                "permanent":      is_permanent,
             })
         location = info.get("location", "")
         coords   = _geocode(location) if location else None
@@ -3166,7 +3268,7 @@ def api_status_activity():
 
 @app.route("/api/status/connect", methods=["POST"])
 def api_status_connect():
-    """Connect a remote node to a local node — public endpoint for the Status Board."""
+    """Connect a remote node to a local node."""
     data        = request.json or {}
     local_node  = str(data.get("local_node",  "")).strip()
     remote_node = str(data.get("remote_node", "")).strip()
@@ -3174,11 +3276,19 @@ def api_status_connect():
         return jsonify({"error": "Invalid local_node"}), 400
     if not re.match(r'^\d{4,7}$', remote_node):
         return jsonify({"error": "Invalid remote_node"}), 400
+    # Only admin/superuser may mark a connection as permanent (no idle timeout)
+    caller_role = session.get('role', '')
+    permanent   = bool(data.get("permanent", False)) and caller_role in ('admin', 'superuser')
     try:
         with _ami_pool_lock:
             ami = _ami_ensure_connected()
             result = ami.rpt_cmd(local_node, f"ilink 3 {remote_node}")
-        log("INFO", f"[API] /api/status/connect {local_node} -> {remote_node}")
+        with _kiosk_temp_lock:
+            _kiosk_temp_conns[(local_node, remote_node)] = {
+                'permanent':   permanent,
+                'last_active': time.time(),
+            }
+        log("INFO", f"[API] /api/status/connect {local_node} -> {remote_node} permanent={permanent}")
         return jsonify({"ok": True, "output": result})
     except Exception as e:
         log("ERROR", f"[API] /api/status/connect error: {e}")
