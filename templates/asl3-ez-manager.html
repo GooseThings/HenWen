@@ -4470,7 +4470,7 @@ function connCard(c) {
           : '') +
         '<button class="btn btn-sm" onclick="connSyncState(' + c.id + ')" title="Re-check actual Asterisk lstats and correct state if drifted">Sync State</button>' +
         '<button class="btn btn-sm" onclick="connEditShow(' + c.id + ')">Edit</button>' +
-        '<button class="btn btn-sm" style="color:var(--danger);border-color:var(--danger)" onclick="connDelete(' + c.id + ',' + JSON.stringify(c.name) + ')">Delete</button>' +
+        '<button class="btn btn-sm" style="color:var(--danger);border-color:var(--danger)" onclick=\'connDelete(' + c.id + ',' + JSON.stringify(c.name) + ')\'>Delete</button>' +
       '</div>' +
       editDiv +
     '</div>' +
