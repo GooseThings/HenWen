@@ -77,7 +77,8 @@ SERVICE_NAME    = os.environ.get("SERVICE_NAME",     "ASL3-EZ")
 SOUNDS_DIR      = os.environ.get("SOUNDS_DIR",       "/var/lib/asterisk/sounds/asl3ez")
 SERVICE_FILE_PATH = os.environ.get("SERVICE_FILE_PATH",
                                     f"/etc/systemd/system/{SERVICE_NAME}.service")
-SECURE_COOKIES  = os.environ.get("SECURE_COOKIES", "false").lower() == "true"
+SECURE_COOKIES       = os.environ.get("SECURE_COOKIES", "false").lower() == "true"
+SESSION_IDLE_TIMEOUT = int(os.environ.get("SESSION_IDLE_TIMEOUT", "1800"))  # 30 minutes
 
 # SECRET_KEY values that ship with the app/installer — used to warn the user
 # in the dashboard that they're still on the default and should change it.
@@ -371,6 +372,19 @@ def check_auth():
 
     logged_in = session.get('logged_in')
     role      = session.get('role', '')
+
+    # Idle session timeout: expire sessions inactive for > SESSION_IDLE_TIMEOUT seconds.
+    # last_active is updated on every non-public request so any API poll resets it.
+    if logged_in:
+        now         = time.time()
+        last_active = session.get('last_active', now)
+        if now - last_active > SESSION_IDLE_TIMEOUT:
+            session.clear()
+            logged_in = False
+            if request.path.startswith('/api/'):
+                return jsonify({"error": "Session expired", "timeout": True}), 401
+            return redirect(url_for('login'))
+        session['last_active'] = now
 
     # Refresh role from DB if missing or if 'admin' (the pre-v3 role that was
     # migrated to 'superuser' in the DB but not in existing sessions).

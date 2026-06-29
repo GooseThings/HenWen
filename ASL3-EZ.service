@@ -38,6 +38,8 @@ Environment=AMI_PORT=5038
 # ── Security ─────────────────────────────────────────────────────────────
 # Change this to a long random string in production
 Environment=SECRET_KEY=asl3-ez-change-me-in-production
+# Idle session timeout in seconds (default 1800 = 30 minutes)
+#Environment=SESSION_IDLE_TIMEOUT=1800
 
 # ── Logging ───────────────────────────────────────────────────────────────
 # LOG_LEVEL controls ASL3-EZ's own log verbosity in journald.

@@ -518,7 +518,29 @@ var _csrfToken = (document.querySelector('meta[name="csrf-token"]') || {}).conte
 function apiFetch(url, opts) {
   opts = opts || {};
   opts.headers = Object.assign({'X-CSRFToken': _csrfToken}, opts.headers || {});
-  return fetch(url, opts);
+  return fetch(url, opts).then(function(r) {
+    if (r.status === 401) {
+      r.clone().json().then(function(d) {
+        if (d.timeout) _handleSessionTimeout();
+      }).catch(function(){});
+    }
+    return r;
+  });
+}
+
+function _handleSessionTimeout() {
+  if (window._sessionTimeoutShown) return;
+  window._sessionTimeoutShown = true;
+  /* Reset kiosk state */
+  window._kioskRole = '';
+  updateKioskUserBar(null, null);
+  renderFavorites();
+  sbToast('Session expired — please log in again', false);
+  /* Re-fetch a fresh CSRF token for the new (empty) session */
+  fetch('/api/csrf-token').then(function(r) { return r.json(); })
+    .then(function(d) { if (d.csrf_token) _csrfToken = d.csrf_token; })
+    .catch(function(){});
+  setTimeout(function() { window._sessionTimeoutShown = false; }, 10000);
 }
 function relTime(ts) {
   var d = Math.floor(Date.now()/1000 - ts);
