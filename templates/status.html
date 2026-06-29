@@ -315,6 +315,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .sb-btn.disconnect:hover { background: rgba(248,81,73,.2); }
 .sb-btn.neutral    { background: var(--bg3); border-color: var(--border); color: var(--text2); }
 .sb-btn.neutral:hover { color: var(--text); }
+.sb-btn.fav        { background: rgba(232,113,10,.10); border-color: rgba(232,113,10,.35); color: #e8710a; }
+.sb-btn.fav:hover  { background: rgba(232,113,10,.22); }
 
 /* always-visible connect bar */
 .conn-form-bar { padding: 7px 18px; border-bottom: 1px solid var(--border);
@@ -400,7 +402,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
                  onkeydown="if(event.key==='Enter')statusConnectNew()">
           <button class="sb-btn connect" onclick="statusConnectNew()">Connect</button>
           <button class="sb-btn monitor" onclick="statusMonitorNew()">Monitor</button>
-          <button class="sb-btn" id="fav-add-btn" onclick="addToFavorites()" title="Add node to your Favorites list">&#9733; Fav</button>
+          <button class="sb-btn fav" id="fav-add-btn" onclick="addToFavorites()" title="Add node to your Favorites list">&#9733; Fav</button>
           <label class="perm-label" id="perm-label" style="display:none">
             <input type="checkbox" id="conn-perm-chk"> Permanent
           </label>
