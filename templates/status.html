@@ -358,8 +358,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <button class="btn-icon" onclick="kioskLogout()">Logout</button>
       </div>
       <button class="btn-icon" id="kiosk-login-btn" onclick="openKioskLogin()" style="display:none">Login</button>
+      <button class="btn-icon" id="listen-btn" onclick="toggleListen()" title="Listen to node audio">&#128266; Listen</button>
       <button class="btn-icon" onclick="toggleFS()" title="Fullscreen">&#x26F6; Fullscreen</button>
       <a class="btn-icon" href="/asl3-ez-manager">&#8592; Manager</a>
+      <audio id="node-audio" style="display:none"></audio>
     </div>
   </header>
 
@@ -1236,6 +1238,55 @@ async function favConnect(localNode, remoteNode, btn) {
 
 async function favDisconnect(localNode, remoteNode, btn) {
   await sbDisconnect(localNode, remoteNode, btn);
+}
+
+/* ── Audio listen ── */
+var _listenActive = false;
+
+function toggleListen() {
+  if (_listenActive) {
+    _stopListen();
+  } else {
+    _startListen();
+  }
+}
+
+function _startListen() {
+  var node = (window._lastBoardNodes && window._lastBoardNodes[0])
+             ? window._lastBoardNodes[0].node : '';
+  if (!node) { sbToast('No local node found', false); return; }
+
+  var audio = document.getElementById('node-audio');
+  var btn   = document.getElementById('listen-btn');
+  audio.src = '/api/audio/stream/' + node;
+  audio.load();
+  audio.play().then(function() {
+    _listenActive = true;
+    btn.textContent = '🔇 Mute';
+    btn.style.color = 'var(--green)';
+  }).catch(function(e) {
+    sbToast('Audio error: ' + e.message, false);
+    audio.src = '';
+  });
+}
+
+function _stopListen() {
+  var audio = document.getElementById('node-audio');
+  var btn   = document.getElementById('listen-btn');
+  var node  = (window._lastBoardNodes && window._lastBoardNodes[0])
+              ? window._lastBoardNodes[0].node : '';
+  audio.pause();
+  audio.src = '';
+  _listenActive = false;
+  btn.textContent = '🔊 Listen';
+  btn.style.color = '';
+  if (node) {
+    fetch('/api/audio/stop', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({node: node})
+    }).catch(function(){});
+  }
 }
 
 /* ── Boot ── */
