@@ -358,10 +358,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <button class="btn-icon" onclick="kioskLogout()">Logout</button>
       </div>
       <button class="btn-icon" id="kiosk-login-btn" onclick="openKioskLogin()" style="display:none">Login</button>
-      <button class="btn-icon" id="listen-btn" onclick="toggleListen()" title="Listen to node audio">&#128266; Listen</button>
+      <button class="btn-icon" id="listen-btn" onclick="toggleListen()" title="Listen to node audio">&#9834; Listen</button>
       <button class="btn-icon" onclick="toggleFS()" title="Fullscreen">&#x26F6; Fullscreen</button>
       <a class="btn-icon" href="/asl3-ez-manager">&#8592; Manager</a>
-      <audio id="node-audio" style="display:none"></audio>
+      <audio id="node-audio" preload="none"></audio>
     </div>
   </header>
 
@@ -1242,6 +1242,7 @@ async function favDisconnect(localNode, remoteNode, btn) {
 
 /* ── Audio listen ── */
 var _listenActive = false;
+var _listenTimeout = null;
 
 function toggleListen() {
   if (_listenActive) {
@@ -1251,35 +1252,97 @@ function toggleListen() {
   }
 }
 
+function _listenSetBtn(html, color, disabled) {
+  var btn = document.getElementById('listen-btn');
+  if (!btn) return;
+  btn.innerHTML = html;
+  btn.style.color = color || '';
+  btn.disabled = !!disabled;
+}
+
 function _startListen() {
   var node = (window._lastBoardNodes && window._lastBoardNodes[0])
              ? window._lastBoardNodes[0].node : '';
   if (!node) { sbToast('No local node found', false); return; }
 
   var audio = document.getElementById('node-audio');
-  var btn   = document.getElementById('listen-btn');
+
+  /* Immediate feedback — user knows something is happening */
+  _listenSetBtn('... Connecting', 'var(--text2)', true);
+
+  /* Clear any previous listeners */
+  audio.oncanplay = null;
+  audio.onerror   = null;
+  if (_listenTimeout) { clearTimeout(_listenTimeout); _listenTimeout = null; }
+
+  /* Pre-flight check: surface backend errors before touching <audio> */
+  fetch('/api/audio/check/' + node)
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (!d.ok) {
+        _listenSetBtn('&#9834; Listen', '', false);
+        sbToast('Audio unavailable: ' + (d.issues || []).join('; '), false);
+        return;
+      }
+      _doStartListen(audio, node);
+    })
+    .catch(function(e) {
+      _listenSetBtn('&#9834; Listen', '', false);
+      sbToast('Check failed: ' + e.message, false);
+    });
+}
+
+function _doStartListen(audio, node) {
+  audio.oncanplay = function() {
+    if (_listenTimeout) { clearTimeout(_listenTimeout); _listenTimeout = null; }
+    _listenActive = true;
+    _listenSetBtn('&#9646;&#9646; Mute', 'var(--green)', false);
+    sbToast('Listening to node ' + node, true);
+  };
+
+  audio.onerror = function() {
+    var codes = {1:'ABORTED', 2:'NETWORK', 3:'DECODE', 4:'FORMAT'};
+    var code  = audio.error ? (codes[audio.error.code] || ('ERR_' + audio.error.code)) : 'unknown';
+    var msg   = audio.error ? audio.error.message : '';
+    _listenSetBtn('&#9834; Listen', '', false);
+    _listenActive = false;
+    if (_listenTimeout) { clearTimeout(_listenTimeout); _listenTimeout = null; }
+    sbToast('Audio error: ' + code + (msg ? ' — ' + msg : ''), false);
+  };
+
+  /* 20-second timeout: if canplay hasn't fired, something is wrong */
+  _listenTimeout = setTimeout(function() {
+    if (!_listenActive) {
+      audio.pause();
+      audio.src = '';
+      _listenSetBtn('&#9834; Listen', '', false);
+      sbToast('Timed out waiting for audio stream', false);
+    }
+  }, 20000);
+
   audio.src = '/api/audio/stream/' + node;
   audio.load();
-  audio.play().then(function() {
-    _listenActive = true;
-    btn.textContent = '🔇 Mute';
-    btn.style.color = 'var(--green)';
-  }).catch(function(e) {
-    sbToast('Audio error: ' + e.message, false);
+  audio.play().catch(function(e) {
+    /* Autoplay policy or other play() rejection */
+    if (_listenTimeout) { clearTimeout(_listenTimeout); _listenTimeout = null; }
+    _listenSetBtn('&#9834; Listen', '', false);
+    _listenActive = false;
+    sbToast('Playback blocked: ' + e.message, false);
     audio.src = '';
   });
 }
 
 function _stopListen() {
   var audio = document.getElementById('node-audio');
-  var btn   = document.getElementById('listen-btn');
   var node  = (window._lastBoardNodes && window._lastBoardNodes[0])
               ? window._lastBoardNodes[0].node : '';
+  if (_listenTimeout) { clearTimeout(_listenTimeout); _listenTimeout = null; }
+  audio.oncanplay = null;
+  audio.onerror   = null;
   audio.pause();
   audio.src = '';
   _listenActive = false;
-  btn.textContent = '🔊 Listen';
-  btn.style.color = '';
+  _listenSetBtn('&#9834; Listen', '', false);
   if (node) {
     fetch('/api/audio/stop', {
       method: 'POST',

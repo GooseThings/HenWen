@@ -3602,6 +3602,47 @@ def api_audio_stop():
     return jsonify({'ok': True})
 
 
+@app.route('/api/audio/check/<node>')
+def api_audio_check(node):
+    """Diagnostic: verify prerequisites for audio streaming."""
+    if not re.match(r'^\d{4,7}$', node):
+        return jsonify({'error': 'invalid node'}), 400
+    issues = []
+    if not shutil.which('ffmpeg'):
+        issues.append('ffmpeg not found in PATH')
+    try:
+        r = subprocess.run(['ffmpeg', '-encoders'], capture_output=True, text=True, timeout=5)
+        if 'libopus' not in r.stdout:
+            issues.append('ffmpeg lacks libopus encoder')
+    except Exception as e:
+        issues.append(f'ffmpeg probe failed: {e}')
+    try:
+        with open('/etc/asterisk/extensions.conf') as f:
+            if _MONITOR_CONF not in f.read():
+                issues.append('monitor #include missing from extensions.conf')
+    except Exception as e:
+        issues.append(f'extensions.conf unreadable: {e}')
+    if not os.path.exists(_MONITOR_CONF):
+        issues.append(f'{_MONITOR_CONF} not written yet')
+    def _context_check(ami):
+        lines = ami.command('dialplan show asl3ez-monitor')
+        return {'lines': lines}
+    try:
+        r2 = ami_send_command(_context_check)
+        if not any('asl3ez-monitor' in l for l in r2.get('lines', [])):
+            issues.append('asl3ez-monitor context not loaded in Asterisk dialplan')
+    except Exception as e:
+        issues.append(f'AMI dialplan check failed: {e}')
+    with _audio_lock:
+        active = node in _audio_active
+    return jsonify({
+        'ok':     len(issues) == 0,
+        'issues': issues,
+        'active': active,
+        'node':   node,
+    })
+
+
 @app.route("/")
 def status_board():
     return render_template("status.html")
