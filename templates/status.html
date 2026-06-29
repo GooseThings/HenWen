@@ -1218,18 +1218,20 @@ function renderFavorites() {
 }
 
 async function favConnect(localNode, remoteNode, btn) {
-  /* Enforce single-connection rule */
-  var connSet = {};
-  (window._lastBoardNodes || []).forEach(function(n) {
-    (n.connected || []).forEach(function(c) { connSet[c.node] = true; });
-  });
-  if (Object.keys(connSet).length > 0) {
-    sbToast('Disconnect all nodes before connecting a favorite', false);
-    return;
+  var role = window._kioskRole || '';
+  /* Single-connection rule applies to user role only */
+  if (role !== 'admin' && role !== 'superuser') {
+    var connSet = {};
+    (window._lastBoardNodes || []).forEach(function(n) {
+      (n.connected || []).forEach(function(c) { connSet[c.node] = true; });
+    });
+    if (Object.keys(connSet).length > 0) {
+      sbToast('Disconnect the current node before connecting another', false);
+      return;
+    }
   }
-  /* Favorites from admin/superuser use permanent flag */
-  var permanent = (window._kioskRole === 'admin' || window._kioskRole === 'superuser');
-  await sbConnect(localNode, remoteNode, btn, permanent);
+  /* Favorites are never permanent; use the connect form + Permanent checkbox for that */
+  await sbConnect(localNode, remoteNode, btn, false);
 }
 
 async function favDisconnect(localNode, remoteNode, btn) {
