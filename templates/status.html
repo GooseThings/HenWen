@@ -947,13 +947,14 @@ async function refreshActivity() {
     keyed.forEach(function(e) { seenNodes[e.node] = true; });
     var globalOnly = globals.filter(function(g) { return !seenNodes[g.node]; });
 
-    var combined = keyed.slice(0,5).map(function(e) {
+    var combined = keyed.map(function(e) {
       return {node:e.node, callsign:e.callsign, location:e.location,
               lat:e.lat, lon:e.lon, ts:e.ts, type:'local'};
-    }).concat(globalOnly.slice(0, Math.max(0, 10-Math.min(keyed.length,5))).map(function(g) {
+    }).concat(globalOnly.map(function(g) {
       return {node:g.node, callsign:g.callsign, location:g.location,
               lat:g.lat, lon:g.lon, ts:g.ts, type:'global'};
     }));
+    combined.sort(function(a,b){ return b.ts - a.ts; });
 
     /* Activity list — no keyed/online badge, just source dot + node info + connect btn */
     var al = document.getElementById('activity-list');

@@ -1425,9 +1425,10 @@ GLOBAL_ACTIVITY_INTERVAL = 300.0   # 5 minutes between full hub sweeps
 # The poller gracefully skips any that return no data.
 _ASL_HUBS = [27339, 41522, 2000, 55143, 3109050, 9050, 436000, 460220]
 
-_global_nodes_cache = []   # list[dict] — up to 10 nodes from linked hub nodes
+_global_nodes_cache = []   # rolling history, newest first, de-duped by node
 _global_nodes_ts    = 0.0
 _global_nodes_lock  = threading.Lock()
+_GLOBAL_MAX_AGE_SEC = 480 * 60  # prune entries older than max pin duration (8 h)
 
 
 def _fetch_hub_linked_nodes():
@@ -1482,11 +1483,18 @@ def _global_activity_poll_loop():
     while True:
         try:
             nodes = _fetch_hub_linked_nodes()
+            now    = time.time()
+            cutoff = now - _GLOBAL_MAX_AGE_SEC
+            new_ids = {n["node"] for n in nodes}
             with _global_nodes_lock:
+                # Drop old entries and any node that just appeared in the new batch
+                retained = [e for e in _global_nodes_cache
+                            if e["ts"] >= cutoff and e["node"] not in new_ids]
+                # New nodes go to the front (most recent first)
                 _global_nodes_cache.clear()
-                _global_nodes_cache.extend(nodes)
-                _global_nodes_ts = time.time()
-            log("INFO", f"[GLOBAL-ACTIVITY] Fetched {len(nodes)} nodes from hub sweep")
+                _global_nodes_cache.extend(nodes + retained)
+                _global_nodes_ts = now
+            log("INFO", f"[GLOBAL-ACTIVITY] Sweep: {len(nodes)} new, {len(retained)} retained, {len(nodes)+len(retained)} total")
             backoff = 0
             time.sleep(GLOBAL_ACTIVITY_INTERVAL)
         except Exception as e:
@@ -3331,11 +3339,11 @@ def api_status_activity():
                 entry["lon"] = coords["lon"]
 
     with _global_nodes_lock:
-        global_nodes = list(_global_nodes_cache[:10])
+        global_nodes = [e for e in _global_nodes_cache if e["ts"] >= cutoff]
         global_ts    = _global_nodes_ts
 
     resp = jsonify({
-        "recently_keyed":    keyed[:10],
+        "recently_keyed":    keyed,
         "global_nodes":      global_nodes,
         "global_updated":    global_ts,
         "pin_duration_min":  pin_min,
