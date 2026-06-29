@@ -1433,12 +1433,15 @@ _GLOBAL_MAX_AGE_SEC = 480 * 60  # prune entries older than max pin duration (8 h
 
 def _fetch_hub_linked_nodes():
     """
-    Query each hub in _ASL_HUBS for its linkedNodes list.
-    Returns up to 10 nodes sorted by most-recently registered, with lat/lon
-    taken directly from the server{} sub-object — no geocoding required.
+    Query each hub in _ASL_HUBS for ALL of its linkedNodes.
+    Collect every unique node across all hubs, then return the 10 whose
+    regseconds (last-connected-to-hub timestamp) are most recent.
+    This means the returned batch changes sweep-to-sweep as nodes
+    reconnect, allowing the accumulation history to grow over time.
     """
     seen  = set()
-    nodes = []
+    pool  = []
+    now   = time.time()
     for hub in _ASL_HUBS:
         try:
             url = ASL_HUB_STATS_URL.format(hub)
@@ -1460,19 +1463,22 @@ def _fetch_hub_linked_nodes():
                         lon = float(srv["Logitude"])  # AllStarLink API typo
                 except (ValueError, TypeError):
                     pass
-                nodes.append({
+                pool.append({
                     "node":     name,
                     "callsign": n.get("callsign", ""),
                     "location": srv.get("Location", "") or n.get("node_frequency", ""),
                     "lat":      lat,
                     "lon":      lon,
-                    "ts":       time.time(),   # "seen now" — regseconds is node creation date, not activity
+                    "reg_ts":   int(n.get("regseconds", 0) or 0),
+                    "ts":       now,   # observation time — used for retention/display
                 })
         except Exception as e:
             log("DEBUG", f"[GLOBAL-ACTIVITY] Hub {hub}: {e}")
         time.sleep(1.0)   # 1 s gap between hub requests
 
-    return nodes[:10]
+    # Top 10 across all hubs by most-recently-connected-to-hub
+    pool.sort(key=lambda x: x["reg_ts"], reverse=True)
+    return pool[:10]
 
 
 def _global_activity_poll_loop():
@@ -1487,14 +1493,15 @@ def _global_activity_poll_loop():
             cutoff = now - _GLOBAL_MAX_AGE_SEC
             new_ids = {n["node"] for n in nodes}
             with _global_nodes_lock:
-                # Drop old entries and any node that just appeared in the new batch
+                # Retain old entries that are still within the window and
+                # weren't refreshed in this sweep (those get the new entry)
                 retained = [e for e in _global_nodes_cache
                             if e["ts"] >= cutoff and e["node"] not in new_ids]
-                # New nodes go to the front (most recent first)
+                # New batch at the front, retained history behind
                 _global_nodes_cache.clear()
                 _global_nodes_cache.extend(nodes + retained)
                 _global_nodes_ts = now
-            log("INFO", f"[GLOBAL-ACTIVITY] Sweep: {len(nodes)} new, {len(retained)} retained, {len(nodes)+len(retained)} total")
+            log("INFO", f"[GLOBAL-ACTIVITY] Sweep: {len(nodes)} new/refreshed, {len(retained)} retained, {len(nodes)+len(retained)} total")
             backoff = 0
             time.sleep(GLOBAL_ACTIVITY_INTERVAL)
         except Exception as e:
