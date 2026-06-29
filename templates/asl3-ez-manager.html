@@ -250,11 +250,26 @@ body {
 }
 
 .sidebar-footer {
-  padding: 10px 14px; border-top: 1px solid var(--border);
+  padding: 10px 14px 12px; border-top: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 6px;
+}
+.sidebar-footer-row {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.sidebar-user {
+  color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: 0.8rem;
 }
-.sidebar-user { color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-logout {
+  color: var(--text2); text-decoration: none; white-space: nowrap; flex-shrink: 0;
+  font-size: 0.78rem; opacity: 0.7;
+}
+.sidebar-logout:hover { color: var(--danger, #e05); opacity: 1; }
+.sidebar-github {
+  font-size: 0.7rem; color: var(--text-muted); text-decoration: none;
+  text-align: center; opacity: 0.5;
+}
+.sidebar-github:hover { opacity: 1; }
 
 .main { flex: 1; padding: 20px 24px; max-width: 1100px; overflow-x: hidden; }
 
@@ -496,10 +511,11 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     <button class="nav-item" onclick="showPage('user-mgmt')">User Management</button>
   </nav>
   <div class="sidebar-footer">
-    <span class="sidebar-user">{{ session.get('username', '') }}</span>
-    <a href="/logout" class="btn btn-sm">Logout</a>
-    <a href="https://github.com/GooseThings/ASL3-EZ" target="_blank" rel="noopener"
-       style="font-size:0.72rem;color:var(--text-muted);text-decoration:none;display:block;margin-top:6px;text-align:center">GitHub &mdash; ASL3-EZ</a>
+    <div class="sidebar-footer-row">
+      <span class="sidebar-user">{{ session.get('username', '') }}</span>
+      <a href="/logout" class="sidebar-logout">Sign out</a>
+    </div>
+    <a href="https://github.com/GooseThings/ASL3-EZ" target="_blank" rel="noopener" class="sidebar-github">github.com/GooseThings/ASL3-EZ</a>
   </div>
 </aside>
 
