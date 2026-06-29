@@ -979,32 +979,6 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
       </div>
     </div>
 
-    <div class="card" style="max-width:700px;margin-top:16px">
-      <div class="card-header"><strong>Role Permissions</strong></div>
-      <div class="card-body" style="padding:0">
-        <table class="table table-sm mb-0" style="font-size:0.82rem">
-          <thead><tr>
-            <th>Feature</th>
-            <th style="text-align:center">Superuser</th>
-            <th style="text-align:center">Admin</th>
-            <th style="text-align:center">User</th>
-          </tr></thead>
-          <tbody>
-            <tr><td>Node Kiosk (connect/disconnect)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
-            <tr><td>Permanent kiosk connections</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>Dashboard &amp; Node Control</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>General Settings, DTMF, Node ID</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>Announcements, Smart Connector</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>Backups, Alerts, Conn. History</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>AMI Diagnostics, Asterisk Console</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>Kiosk Settings</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>User Management (create Users)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>User Management (create Admins/Superusers)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>Raw Editor (direct rpt.conf edit)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
   </section>
 
   <!-- AMI Diagnostics -->
@@ -1799,6 +1773,33 @@ sudo asterisk -rx "module reload manager"</pre>
           <button class="btn" onclick="hideUserForm()">Cancel</button>
         </div>
         <div id="uf-status" style="margin-top:8px;font-size:0.82rem"></div>
+      </div>
+    </div>
+
+    <div class="card" style="max-width:700px;margin-top:16px">
+      <div class="card-header"><strong>Role Permissions</strong></div>
+      <div class="card-body" style="padding:0">
+        <table class="table table-sm mb-0" style="font-size:0.82rem">
+          <thead><tr>
+            <th>Feature</th>
+            <th style="text-align:center">Superuser</th>
+            <th style="text-align:center">Admin</th>
+            <th style="text-align:center">User</th>
+          </tr></thead>
+          <tbody>
+            <tr><td>Node Kiosk (connect/disconnect)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
+            <tr><td>Permanent kiosk connections</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Dashboard &amp; Node Control</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>General Settings, DTMF, Node ID</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Announcements, Smart Connector</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Backups, Alerts, Conn. History</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>AMI Diagnostics, Asterisk Console</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Kiosk Settings</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>User Management (create Users)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>User Management (create Admins/Superusers)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Raw Editor (direct rpt.conf edit)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
+          </tbody>
+        </table>
       </div>
     </div>
   </section>
