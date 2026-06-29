@@ -270,7 +270,11 @@ def get_db():
         conn.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('roles_v3_migrated','1')")
         conn.commit()
     # Seed kiosk defaults
-    for _k, _v in [('kiosk_idle_timeout_sec', '600')]:
+    for _k, _v in [
+        ('kiosk_idle_timeout_sec', '600'),
+        ('kiosk_clock_format',     '12'),
+        ('kiosk_timezone',         'UTC'),
+    ]:
         conn.execute("INSERT OR IGNORE INTO settings (key,value) VALUES (?,?)", (_k, _v))
     conn.commit()
     return conn
@@ -2641,6 +2645,8 @@ def api_backup_delete(name):
 def api_kiosk_settings_get():
     return jsonify({
         "idle_timeout_sec": int(get_setting('kiosk_idle_timeout_sec', '600') or 600),
+        "clock_format":     get_setting('kiosk_clock_format', '12'),
+        "timezone":         get_setting('kiosk_timezone', 'UTC'),
     })
 
 
@@ -2655,6 +2661,21 @@ def api_kiosk_settings_put():
             set_setting('kiosk_idle_timeout_sec', str(val))
         except (TypeError, ValueError):
             return jsonify({"error": "idle_timeout_sec must be an integer"}), 400
+    if "clock_format" in data:
+        val = str(data["clock_format"])
+        if val not in ('12', '24'):
+            return jsonify({"error": "clock_format must be '12' or '24'"}), 400
+        set_setting('kiosk_clock_format', val)
+    if "timezone" in data:
+        tz = str(data["timezone"]).strip()
+        if not tz:
+            return jsonify({"error": "timezone cannot be empty"}), 400
+        try:
+            import zoneinfo
+            zoneinfo.ZoneInfo(tz)
+        except Exception:
+            return jsonify({"error": f"Unknown timezone: {tz}"}), 400
+        set_setting('kiosk_timezone', tz)
     return jsonify({"ok": True})
 
 

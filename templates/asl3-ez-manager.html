@@ -947,7 +947,22 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
             </span>
           </div>
         </div>
-        <button class="btn btn-success" onclick="ksSave()">Save</button>
+        <div class="form-group" style="margin-top:16px">
+          <label class="form-label">Clock Format</label>
+          <div style="display:flex;gap:22px;align-items:center">
+            <label style="cursor:pointer;display:flex;align-items:center;gap:6px">
+              <input type="radio" name="ks-clock-fmt" id="ks-clock-12" value="12"> 12-hour (AM/PM)
+            </label>
+            <label style="cursor:pointer;display:flex;align-items:center;gap:6px">
+              <input type="radio" name="ks-clock-fmt" id="ks-clock-24" value="24"> 24-hour
+            </label>
+          </div>
+        </div>
+        <div class="form-group" style="margin-top:16px">
+          <label class="form-label">Kiosk Timezone</label>
+          <select id="ks-timezone" class="form-control" style="max-width:300px"></select>
+        </div>
+        <button class="btn btn-success" onclick="ksSave()" style="margin-top:8px">Save</button>
         <span id="ks-status" style="margin-left:10px;font-size:0.82rem"></span>
       </div>
     </div>
@@ -3524,12 +3539,106 @@ async function applySecretKey() {
 
 /* ── Init ────────────────────────────────────────────────────────────────── */
 /* ── Kiosk Settings ────────────────────────────────────────────────────────── */
+var KS_TIMEZONES = [
+  ['UTC','UTC'],
+  ['America/New_York','US / Eastern (New York)'],
+  ['America/Chicago','US / Central (Chicago)'],
+  ['America/Denver','US / Mountain (Denver)'],
+  ['America/Phoenix','US / Arizona — no DST (Phoenix)'],
+  ['America/Los_Angeles','US / Pacific (Los Angeles)'],
+  ['America/Anchorage','US / Alaska (Anchorage)'],
+  ['America/Honolulu','US / Hawaii (Honolulu)'],
+  ['America/St_Johns','Canada / Newfoundland (St. Johns)'],
+  ['America/Halifax','Canada / Atlantic (Halifax)'],
+  ['America/Toronto','Canada / Eastern (Toronto)'],
+  ['America/Winnipeg','Canada / Central (Winnipeg)'],
+  ['America/Edmonton','Canada / Mountain (Edmonton)'],
+  ['America/Vancouver','Canada / Pacific (Vancouver)'],
+  ['America/Mexico_City','Mexico / Central (Mexico City)'],
+  ['America/Bogota','Colombia (Bogotá)'],
+  ['America/Lima','Peru (Lima)'],
+  ['America/Caracas','Venezuela (Caracas)'],
+  ['America/Santiago','Chile (Santiago)'],
+  ['America/Sao_Paulo','Brazil / East (São Paulo)'],
+  ['America/Argentina/Buenos_Aires','Argentina (Buenos Aires)'],
+  ['Europe/London','UK (London)'],
+  ['Europe/Dublin','Ireland (Dublin)'],
+  ['Europe/Lisbon','Portugal (Lisbon)'],
+  ['Europe/Paris','France (Paris)'],
+  ['Europe/Madrid','Spain (Madrid)'],
+  ['Europe/Amsterdam','Netherlands (Amsterdam)'],
+  ['Europe/Berlin','Germany (Berlin)'],
+  ['Europe/Rome','Italy (Rome)'],
+  ['Europe/Zurich','Switzerland (Zürich)'],
+  ['Europe/Vienna','Austria (Vienna)'],
+  ['Europe/Stockholm','Sweden (Stockholm)'],
+  ['Europe/Oslo','Norway (Oslo)'],
+  ['Europe/Copenhagen','Denmark (Copenhagen)'],
+  ['Europe/Helsinki','Finland (Helsinki)'],
+  ['Europe/Warsaw','Poland (Warsaw)'],
+  ['Europe/Prague','Czechia (Prague)'],
+  ['Europe/Budapest','Hungary (Budapest)'],
+  ['Europe/Bucharest','Romania (Bucharest)'],
+  ['Europe/Athens','Greece (Athens)'],
+  ['Europe/Kiev','Ukraine (Kyiv)'],
+  ['Europe/Moscow','Russia / Moscow'],
+  ['Europe/Istanbul','Turkey (Istanbul)'],
+  ['Africa/Lagos','Nigeria (Lagos)'],
+  ['Africa/Cairo','Egypt (Cairo)'],
+  ['Africa/Johannesburg','South Africa (Johannesburg)'],
+  ['Africa/Nairobi','Kenya (Nairobi)'],
+  ['Asia/Jerusalem','Israel (Jerusalem)'],
+  ['Asia/Riyadh','Saudi Arabia (Riyadh)'],
+  ['Asia/Dubai','UAE (Dubai)'],
+  ['Asia/Tehran','Iran (Tehran)'],
+  ['Asia/Karachi','Pakistan (Karachi)'],
+  ['Asia/Kolkata','India (Kolkata)'],
+  ['Asia/Dhaka','Bangladesh (Dhaka)'],
+  ['Asia/Bangkok','Thailand (Bangkok)'],
+  ['Asia/Singapore','Singapore'],
+  ['Asia/Kuala_Lumpur','Malaysia (Kuala Lumpur)'],
+  ['Asia/Manila','Philippines (Manila)'],
+  ['Asia/Hong_Kong','Hong Kong'],
+  ['Asia/Shanghai','China (Shanghai)'],
+  ['Asia/Taipei','Taiwan (Taipei)'],
+  ['Asia/Seoul','South Korea (Seoul)'],
+  ['Asia/Tokyo','Japan (Tokyo)'],
+  ['Pacific/Guam','Guam'],
+  ['Pacific/Auckland','New Zealand (Auckland)'],
+  ['Pacific/Fiji','Fiji'],
+  ['Australia/Perth','Australia / West (Perth)'],
+  ['Australia/Darwin','Australia / NT (Darwin)'],
+  ['Australia/Adelaide','Australia / South (Adelaide)'],
+  ['Australia/Brisbane','Australia / QLD (Brisbane)'],
+  ['Australia/Sydney','Australia / NSW (Sydney)'],
+  ['Australia/Melbourne','Australia / VIC (Melbourne)'],
+  ['Australia/Hobart','Australia / TAS (Hobart)'],
+];
+
+function ksPopulateTZ(selected) {
+  var sel = document.getElementById('ks-timezone');
+  if (!sel) return;
+  sel.innerHTML = '';
+  KS_TIMEZONES.forEach(function(pair) {
+    var opt = document.createElement('option');
+    opt.value = pair[0];
+    opt.textContent = pair[1];
+    if (pair[0] === selected) opt.selected = true;
+    sel.appendChild(opt);
+  });
+}
+
 async function ksLoad() {
+  ksPopulateTZ('UTC');
   var r = await api('/api/kiosk/settings');
   if (!r.ok) return;
   var d = r.data;
   var inp = document.getElementById('ks-idle-min');
   if (inp) inp.value = Math.round((d.idle_timeout_sec || 600) / 60);
+  var fmt = d.clock_format || '12';
+  var rb  = document.getElementById('ks-clock-' + fmt);
+  if (rb) rb.checked = true;
+  ksPopulateTZ(d.timezone || 'UTC');
 }
 
 async function ksSave() {
@@ -3540,7 +3649,13 @@ async function ksSave() {
   if (isNaN(mins) || mins < 1 || mins > 1440) {
     st.textContent = 'Enter 1–1440 minutes.'; st.style.color = 'var(--danger)'; return;
   }
-  var r = await api('/api/kiosk/settings', 'PUT', {idle_timeout_sec: mins * 60});
+  var fmtEl = document.querySelector('input[name="ks-clock-fmt"]:checked');
+  var tzEl  = document.getElementById('ks-timezone');
+  var r = await api('/api/kiosk/settings', 'PUT', {
+    idle_timeout_sec: mins * 60,
+    clock_format:     fmtEl ? fmtEl.value : '12',
+    timezone:         tzEl  ? tzEl.value  : 'UTC',
+  });
   if (r.ok) { st.textContent = 'Saved.'; st.style.color = 'var(--success)'; }
   else       { st.textContent = r.data.error || 'Error'; st.style.color = 'var(--danger)'; }
   setTimeout(function(){ st.textContent = ''; }, 3000);

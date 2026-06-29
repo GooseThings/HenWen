@@ -493,9 +493,30 @@ function relTime(ts) {
   if (d < 86400) return Math.floor(d/3600) + 'h ago';
   return Math.floor(d/86400) + 'd ago';
 }
+var _clockFormat = '24';
+var _clockTZ     = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+
 function nowStr() {
-  var n = new Date();
-  return String(n.getHours()).padStart(2,'0')+':'+String(n.getMinutes()).padStart(2,'0')+':'+String(n.getSeconds()).padStart(2,'0');
+  try {
+    var parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: _clockTZ,
+      hour:     '2-digit',
+      minute:   '2-digit',
+      second:   '2-digit',
+      hour12:   _clockFormat === '12',
+    }).formatToParts(new Date());
+    var h = '', m = '', s = '', ap = '';
+    for (var i = 0; i < parts.length; i++) {
+      if (parts[i].type === 'hour')      h  = parts[i].value;
+      if (parts[i].type === 'minute')    m  = parts[i].value;
+      if (parts[i].type === 'second')    s  = parts[i].value;
+      if (parts[i].type === 'dayPeriod') ap = parts[i].value;
+    }
+    return h + ':' + m + ':' + s + (ap ? ' ' + ap : '');
+  } catch(e) {
+    var n = new Date();
+    return String(n.getHours()).padStart(2,'0')+':'+String(n.getMinutes()).padStart(2,'0')+':'+String(n.getSeconds()).padStart(2,'0');
+  }
 }
 
 /* ── Clock ── */
@@ -503,6 +524,13 @@ function tickClock() {
   document.getElementById('clock').textContent = nowStr();
 }
 setInterval(tickClock, 1000); tickClock();
+
+/* Load clock format + timezone from kiosk settings */
+fetch('/api/kiosk/settings').then(function(r){ return r.ok ? r.json() : null; }).then(function(d){
+  if (!d) return;
+  if (d.clock_format) _clockFormat = d.clock_format;
+  if (d.timezone)     _clockTZ     = d.timezone;
+}).catch(function(){});
 
 /* ── Fullscreen ── */
 function toggleFS() {
