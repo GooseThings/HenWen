@@ -305,6 +305,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 }
 .sb-btn.connect    { background: rgba(88,166,255,.08); border-color: rgba(88,166,255,.3); color: var(--accent); }
 .sb-btn.connect:hover { background: rgba(88,166,255,.2); }
+.sb-btn.monitor    { background: rgba(63,185,80,.08);  border-color: rgba(63,185,80,.3);  color: var(--green); }
+.sb-btn.monitor:hover { background: rgba(63,185,80,.2); }
 .sb-btn.disconnect { background: rgba(248,81,73,.08);  border-color: rgba(248,81,73,.3);  color: var(--red); }
 .sb-btn.disconnect:hover { background: rgba(248,81,73,.2); }
 .sb-btn.neutral    { background: var(--bg3); border-color: var(--border); color: var(--text2); }
@@ -461,6 +463,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <span>Updated: <span id="f-updated">—</span>
       <span id="f-stale" class="f-stale" style="display:none"> — DATA STALE</span></span>
     <span>Uptime: <strong id="f-uptime">—</strong> &nbsp;|&nbsp; Disk: <strong id="f-disk">—</strong></span>
+    <span><a href="https://github.com/GooseThings/ASL3-EZ" target="_blank" rel="noopener"
+             style="color:var(--text2);text-decoration:none" title="ASL3-EZ on GitHub">ASL3-EZ</a></span>
   </footer>
 
   <!-- Kiosk login modal -->
@@ -953,7 +957,9 @@ async function refreshActivity() {
       al.innerHTML = combined.map(function(e) {
         var connBtn = localNode
           ? '<button class="sb-btn connect" onclick="sbConnect(\'' +
-              esc(localNode) + '\',\'' + esc(e.node) + '\',this)">Connect</button>'
+              esc(localNode) + '\',\'' + esc(e.node) + '\',this)">Connect</button>' +
+            '<button class="sb-btn monitor" onclick="sbConnect(\'' +
+              esc(localNode) + '\',\'' + esc(e.node) + '\',this,false,true)">Monitor</button>'
           : '';
         return '<div class="act-row">' +
           '<div class="act-dot ' + e.type + '"></div>' +
@@ -990,28 +996,29 @@ function sbToast(msg, ok) {
   _sbToastTimer = setTimeout(function() { t.className = ''; }, 3500);
 }
 
-async function sbConnect(localNode, remoteNode, btn, permanent) {
+async function sbConnect(localNode, remoteNode, btn, permanent, monitor) {
+  var label = monitor ? 'Monitor' : 'Connect';
   if (btn) { btn.disabled = true; btn.textContent = '…'; }
   try {
     var r = await fetch('/api/status/connect', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({local_node: localNode, remote_node: remoteNode, permanent: !!permanent})
+      body: JSON.stringify({local_node: localNode, remote_node: remoteNode, permanent: !!permanent, monitor: !!monitor})
     });
     var d = await r.json();
     if (r.ok && d.ok) {
-      sbToast('Connecting to ' + remoteNode + '…', true);
+      sbToast((monitor ? 'Monitoring' : 'Connecting to') + ' ' + remoteNode + '…', true);
       setTimeout(refreshBoard, 1500);
     } else if (r.status === 401) {
-      if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
-      openKioskLogin(sbConnect, [localNode, remoteNode, null, permanent]);
+      if (btn) { btn.disabled = false; btn.textContent = label; }
+      openKioskLogin(sbConnect, [localNode, remoteNode, null, permanent, monitor]);
     } else {
-      sbToast('Connect failed: ' + (d.error || r.status), false);
-      if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
+      sbToast(label + ' failed: ' + (d.error || r.status), false);
+      if (btn) { btn.disabled = false; btn.textContent = label; }
     }
   } catch(e) {
-    sbToast('Connect error: ' + e.message, false);
-    if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
+    sbToast(label + ' error: ' + e.message, false);
+    if (btn) { btn.disabled = false; btn.textContent = label; }
   }
 }
 
@@ -1209,10 +1216,15 @@ function renderFavorites() {
     } else if (anyConn) {
       actions = '<button class="sb-btn connect" disabled ' +
         'style="opacity:.4;cursor:not-allowed" ' +
-        'title="Disconnect all nodes before connecting">Connect</button>';
+        'title="Disconnect all nodes before connecting">Connect</button>' +
+        '<button class="sb-btn monitor" disabled ' +
+        'style="opacity:.4;cursor:not-allowed" ' +
+        'title="Disconnect all nodes before connecting">Monitor</button>';
     } else {
       actions = '<button class="sb-btn connect" onclick="favConnect(\'' +
-        esc(localNode) + '\',\'' + esc(f.node) + '\',this)">Connect</button>';
+        esc(localNode) + '\',\'' + esc(f.node) + '\',this)">Connect</button>' +
+        '<button class="sb-btn monitor" onclick="favMonitor(\'' +
+        esc(localNode) + '\',\'' + esc(f.node) + '\',this)">Monitor</button>';
     }
 
     return '<div class="fav-row">' +
@@ -1241,6 +1253,21 @@ async function favConnect(localNode, remoteNode, btn) {
   }
   /* Favorites are never permanent; use the connect form + Permanent checkbox for that */
   await sbConnect(localNode, remoteNode, btn, false);
+}
+
+async function favMonitor(localNode, remoteNode, btn) {
+  var role = window._kioskRole || '';
+  if (role !== 'admin' && role !== 'superuser') {
+    var connSet = {};
+    (window._lastBoardNodes || []).forEach(function(n) {
+      (n.connected || []).forEach(function(c) { connSet[c.node] = true; });
+    });
+    if (Object.keys(connSet).length > 0) {
+      sbToast('Disconnect the current node before connecting another', false);
+      return;
+    }
+  }
+  await sbConnect(localNode, remoteNode, btn, false, true);
 }
 
 async function favDisconnect(localNode, remoteNode, btn) {

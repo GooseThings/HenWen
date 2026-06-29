@@ -3314,10 +3314,12 @@ def api_status_connect():
     # Only admin/superuser may mark a connection as permanent (no idle timeout)
     caller_role = session.get('role', '')
     permanent   = bool(data.get("permanent", False)) and caller_role in ('admin', 'superuser')
+    monitor     = bool(data.get("monitor", False))
+    ilink_mode  = "2" if monitor else "3"   # 2=monitor (listen-only), 3=transceive
     try:
         with _ami_pool_lock:
             ami = _ami_ensure_connected()
-            result = ami.rpt_cmd(local_node, f"ilink 3 {remote_node}")
+            result = ami.rpt_cmd(local_node, f"ilink {ilink_mode} {remote_node}")
         with _kiosk_temp_lock:
             _kiosk_temp_conns[(local_node, remote_node)] = {
                 'permanent':   permanent,
