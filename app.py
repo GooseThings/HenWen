@@ -3398,11 +3398,22 @@ def api_status_connect():
         return jsonify({"error": "Invalid local_node"}), 400
     if not re.match(r'^\d{4,7}$', remote_node):
         return jsonify({"error": "Invalid remote_node"}), 400
-    # Only admin/superuser may mark a connection permanent (no idle timeout)
+    # Only admin/superuser may request a permanent connection
     caller_role = session.get('role', '')
     permanent   = bool(data.get("permanent", False)) and caller_role in ('admin', 'superuser')
     monitor     = bool(data.get("monitor", False))
-    ilink_mode  = "2" if monitor else "3"   # 2=monitor (listen-only), 3=transceive
+    # ilink 3  = transient transceive (default — remote can drop it, no auto-reconnect)
+    # ilink 13 = permanent transceive (auto-reconnects if far end drops it)
+    # ilink 2  = transient monitor (listen-only)
+    # ilink 12 = permanent monitor
+    if permanent and monitor:
+        ilink_mode = "12"
+    elif permanent:
+        ilink_mode = "13"
+    elif monitor:
+        ilink_mode = "2"
+    else:
+        ilink_mode = "3"
     try:
         with _ami_pool_lock:
             ami = _ami_ensure_connected()
@@ -3410,9 +3421,10 @@ def api_status_connect():
         with _kiosk_temp_lock:
             _kiosk_temp_conns[(local_node, remote_node)] = {
                 'permanent':   permanent,
+                'monitor':     monitor,
                 'last_active': time.time(),
             }
-        log("INFO", f"[API] /api/status/connect {local_node} -> {remote_node} permanent={permanent}")
+        log("INFO", f"[API] /api/status/connect {local_node} -> {remote_node} mode=ilink{ilink_mode}")
         return jsonify({"ok": True, "output": result})
     except Exception as e:
         log("ERROR", f"[API] /api/status/connect error: {e}")
@@ -3442,7 +3454,7 @@ def api_status_disconnect():
 
 @app.route("/api/status/squash-idle", methods=["POST"])
 def api_status_squash_idle():
-    """Mark a connected node as permanent — remove it from idle-timeout tracking."""
+    """Upgrade an existing connection to permanent (ilink 12/13) and remove it from idle-timeout tracking."""
     if session.get('role') not in ('admin', 'superuser'):
         return jsonify({"error": "Admin access required"}), 403
     data        = request.json or {}
@@ -3452,14 +3464,23 @@ def api_status_squash_idle():
         return jsonify({"error": "Invalid local_node"}), 400
     if not re.match(r'^\d{4,7}$', remote_node):
         return jsonify({"error": "Invalid remote_node"}), 400
+    key = (local_node, remote_node)
     with _kiosk_temp_lock:
-        key = (local_node, remote_node)
+        is_monitor = _kiosk_temp_conns.get(key, {}).get('monitor', False)
         if key in _kiosk_temp_conns:
             _kiosk_temp_conns[key]['permanent'] = True
         else:
-            # Connection exists (pre-dates this session or made from manager) — start tracking it as permanent
-            _kiosk_temp_conns[key] = {'permanent': True, 'last_active': time.time()}
-    log("INFO", f"[API] /api/status/squash-idle {local_node} -> {remote_node}: marked permanent")
+            _kiosk_temp_conns[key] = {'permanent': True, 'monitor': False, 'last_active': time.time()}
+    # Re-issue as the appropriate permanent ilink mode so app_rpt will auto-reconnect if dropped
+    ilink_mode = "12" if is_monitor else "13"
+    try:
+        with _ami_pool_lock:
+            ami = _ami_ensure_connected()
+            ami.rpt_cmd(local_node, f"ilink {ilink_mode} {remote_node}")
+    except Exception as e:
+        log("ERROR", f"[API] /api/status/squash-idle ilink{ilink_mode} failed: {e}")
+        return jsonify({"error": str(e)}), 500
+    log("INFO", f"[API] /api/status/squash-idle {local_node} -> {remote_node}: upgraded to ilink{ilink_mode}")
     return jsonify({"ok": True})
 
 
