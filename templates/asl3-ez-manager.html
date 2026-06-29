@@ -943,7 +943,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
                    min="1" max="1440" value="10">
             <span style="font-size:0.82rem;color:var(--text-muted)">
               User connections auto-disconnect after this many idle minutes.<br>
-              Admin &amp; Superuser connections are <em>permanent</em> from the kiosk (no timeout).
+              Superuser &amp; Admin can mark connections as <em>permanent</em> (no timeout) via the connect form.
             </span>
           </div>
         </div>
@@ -973,22 +973,22 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
         <table class="table table-sm mb-0" style="font-size:0.82rem">
           <thead><tr>
             <th>Feature</th>
-            <th style="text-align:center">User</th>
-            <th style="text-align:center">Admin</th>
             <th style="text-align:center">Superuser</th>
+            <th style="text-align:center">Admin</th>
+            <th style="text-align:center">User</th>
           </tr></thead>
           <tbody>
             <tr><td>Node Kiosk (connect/disconnect)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
-            <tr><td>Permanent kiosk connections</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
-            <tr><td>Dashboard &amp; Node Control</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
-            <tr><td>General Settings, DTMF, Node ID</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
-            <tr><td>Announcements, Smart Connector</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
-            <tr><td>Backups, Alerts, Conn. History</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
-            <tr><td>AMI Diagnostics, Asterisk Console</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
-            <tr><td>Kiosk Settings</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
-            <tr><td>User Management (create Users)</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
-            <tr><td>User Management (create Admins/Superusers)</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#10003;</td></tr>
-            <tr><td>Raw Editor (direct rpt.conf edit)</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#10003;</td></tr>
+            <tr><td>Permanent kiosk connections</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Dashboard &amp; Node Control</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>General Settings, DTMF, Node ID</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Announcements, Smart Connector</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Backups, Alerts, Conn. History</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>AMI Diagnostics, Asterisk Console</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Kiosk Settings</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>User Management (create Users)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>User Management (create Admins/Superusers)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Raw Editor (direct rpt.conf edit)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
           </tbody>
         </table>
       </div>
@@ -1738,7 +1738,7 @@ sudo asterisk -rx "module reload manager"</pre>
   <!-- User Management -->
   <section class="page" id="page-user-mgmt">
     <div class="page-title">User Management</div>
-    <div class="page-sub">Create and manage user accounts. Roles: <strong>admin</strong> (full access) and <strong>kiosk</strong> (Node Kiosk + connect/disconnect only).</div>
+    <div class="page-sub">Create and manage user accounts. Roles: <strong>superuser</strong> (full access), <strong>admin</strong> (manager access, no raw editor), <strong>user</strong> (Node Kiosk only).</div>
     <div class="card">
       <div class="card-header">
         <h2>Users</h2>
@@ -1766,9 +1766,9 @@ sudo asterisk -rx "module reload manager"</pre>
           <div>
             <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:4px">Role</label>
             <select id="uf-role" style="width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg3);color:var(--text);font-size:0.88rem">
-              <option value="user">user — Node Kiosk + connect/disconnect only</option>
-              <option value="admin">admin — Manager access, no raw editor</option>
               <option value="superuser">superuser — Full access including raw editor</option>
+              <option value="admin">admin — Manager access, no raw editor</option>
+              <option value="user">user — Node Kiosk + connect/disconnect only</option>
             </select>
           </div>
         </div>
