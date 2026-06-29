@@ -295,6 +295,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   text-overflow: ellipsis; white-space: nowrap; }
 .fav-actions { display: flex; flex-direction: column; gap: 3px; margin-top: 3px; }
 .fav-actions .sb-btn { font-size: 0.68rem; padding: 2px 8px; }
+.fav-del-btn { background: none; border: none; color: var(--text2); cursor: pointer;
+  font-size: 0.65rem; padding: 0 0 0 2px; margin-left: auto; opacity: 0.45;
+  line-height: 1; flex-shrink: 0; }
+.fav-del-btn:hover { color: #f85149; opacity: 1; }
 
 
 /* ── Status-board action buttons ── */
@@ -396,6 +400,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
                  onkeydown="if(event.key==='Enter')statusConnectNew()">
           <button class="sb-btn connect" onclick="statusConnectNew()">Connect</button>
           <button class="sb-btn monitor" onclick="statusMonitorNew()">Monitor</button>
+          <button class="sb-btn" id="fav-add-btn" onclick="addToFavorites()" title="Add node to your Favorites list">&#9733; Fav</button>
           <label class="perm-label" id="perm-label" style="display:none">
             <input type="checkbox" id="conn-perm-chk"> Permanent
           </label>
@@ -1263,6 +1268,7 @@ function renderFavorites() {
       '<div class="fav-top">' + dot +
         '<span class="fav-num">' + esc(f.node) + '</span>' +
         (name ? '<span class="fav-call">' + esc(name) + '</span>' : '') +
+        '<button class="fav-del-btn" onclick="removeFavorite(\'' + esc(f.node) + '\')" title="Remove from Favorites">✕</button>' +
       '</div>' +
       (loc ? '<div class="fav-loc">' + esc(loc) + '</div>' : '') +
       '<div class="fav-actions">' + actions + '</div>' +
@@ -1304,6 +1310,43 @@ async function favMonitor(localNode, remoteNode, btn) {
 
 async function favDisconnect(localNode, remoteNode, btn) {
   await sbDisconnect(localNode, remoteNode, btn);
+}
+
+async function addToFavorites() {
+  var inp = document.getElementById('conn-form-node');
+  if (!inp) return;
+  var node = inp.value.trim();
+  if (!/^\d{4,7}$/.test(node)) {
+    document.getElementById('conn-form-msg').textContent = 'Enter a 4-7 digit node number';
+    return;
+  }
+  var r = await fetch('/api/favorites/add', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({node: node})
+  });
+  if (r.status === 401) { openKioskLogin(addToFavorites, []); return; }
+  var d = await r.json();
+  if (r.ok && d.success) {
+    sbToast('Added ' + node + ' to your Favorites', true);
+    loadFavorites();
+  } else {
+    document.getElementById('conn-form-msg').textContent = d.error || ('Error ' + r.status);
+  }
+}
+
+async function removeFavorite(node) {
+  var r = await fetch('/api/favorites/delete', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({node: node})
+  });
+  if (r.status === 401) { openKioskLogin(null, null); return; }
+  var d = await r.json();
+  if (r.ok && d.success) {
+    sbToast('Removed ' + node + ' from your Favorites', true);
+    loadFavorites();
+  }
 }
 
 /* ── Audio listen ── */

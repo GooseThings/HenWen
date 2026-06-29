@@ -164,11 +164,31 @@ def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("""CREATE TABLE IF NOT EXISTS favorites (
-        id    INTEGER PRIMARY KEY AUTOINCREMENT,
-        node  TEXT    UNIQUE NOT NULL,
-        label TEXT    DEFAULT '',
-        added TEXT    DEFAULT (datetime('now'))
+        id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        node    TEXT    NOT NULL,
+        label   TEXT    DEFAULT '',
+        added   TEXT    DEFAULT (datetime('now')),
+        UNIQUE(user_id, node)
     )""")
+    # Migrate old schema (no user_id) to per-user schema
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(favorites)").fetchall()]
+    if 'user_id' not in cols:
+        conn.execute("ALTER TABLE favorites RENAME TO _favorites_v1")
+        conn.execute("""CREATE TABLE favorites (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            node    TEXT    NOT NULL,
+            label   TEXT    DEFAULT '',
+            added   TEXT    DEFAULT (datetime('now')),
+            UNIQUE(user_id, node)
+        )""")
+        first = conn.execute("SELECT id FROM users ORDER BY id LIMIT 1").fetchone()
+        if first:
+            conn.execute("""INSERT OR IGNORE INTO favorites (user_id, node, label, added)
+                SELECT ?, node, label, added FROM _favorites_v1""", (first["id"],))
+        conn.execute("DROP TABLE IF EXISTS _favorites_v1")
+        conn.commit()
     conn.execute("""CREATE TABLE IF NOT EXISTS settings (
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -318,7 +338,8 @@ def check_auth():
                         'api_favorites', 'api_favorites_status',
                         'api_kiosk_settings_get'}
     # Any logged-in user (superuser / admin / user)
-    _USER_OR_ABOVE = {'api_status_connect', 'api_status_disconnect'}
+    _USER_OR_ABOVE = {'api_status_connect', 'api_status_disconnect',
+                      'api_fav_add', 'api_fav_delete', 'api_fav_label'}
 
     endpoint = request.endpoint
     if endpoint in _PUBLIC:
@@ -1118,7 +1139,7 @@ def _favstats_poll_loop():
         any_429     = False
         try:
             db    = get_db()
-            nodes = [r["node"] for r in db.execute("SELECT node FROM favorites").fetchall()]
+            nodes = [r["node"] for r in db.execute("SELECT DISTINCT node FROM favorites").fetchall()]
             for node in nodes:
                 try:
                     result = _fetch_node_stats(node)
@@ -2903,9 +2924,12 @@ def api_users_delete(uid):
 
 @app.route("/api/favorites")
 def api_favorites():
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"favorites": []})
     try:
         db   = get_db()
-        rows = db.execute("SELECT * FROM favorites ORDER BY id").fetchall()
+        rows = db.execute("SELECT * FROM favorites WHERE user_id=? ORDER BY id", (user_id,)).fetchall()
         favs = [dict(r) for r in rows]
         for fav in favs:
             fav.update(lookup_node(fav["node"]))
@@ -2918,15 +2942,16 @@ def api_favorites():
 @app.route("/api/favorites/status")
 def api_favorites_status():
     """
-    Cached keyed/connected-count status for every current favorite, sourced
-    from the public AllStarLink stats API by the background favstats
-    poller. Always reads from cache — never makes an outbound request
-    itself — so this endpoint is cheap regardless of how often the
-    frontend polls it.
+    Cached keyed/connected-count status for the current user's favorites,
+    sourced from the background favstats poller. Always reads from cache.
     """
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"favorites": {}, "poll_interval": FAVORITES_POLL_INTERVAL})
     try:
         db    = get_db()
-        nodes = [r["node"] for r in db.execute("SELECT node FROM favorites").fetchall()]
+        nodes = [r["node"] for r in db.execute(
+            "SELECT node FROM favorites WHERE user_id=?", (user_id,)).fetchall()]
         return jsonify({
             "favorites":     {n: get_cached_favstats(n) for n in nodes},
             "poll_interval": FAVORITES_POLL_INTERVAL,
@@ -2938,6 +2963,9 @@ def api_favorites_status():
 
 @app.route("/api/favorites/add", methods=["POST"])
 def api_fav_add():
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": "Authentication required"}), 401
     data  = request.json or {}
     node  = str(data.get("node",  "")).strip()
     label = str(data.get("label", "")).strip()
@@ -2948,9 +2976,10 @@ def api_fav_add():
         label = info.get("callsign") or info.get("desc") or f"Node {node}"
     try:
         db = get_db()
-        db.execute("INSERT OR IGNORE INTO favorites (node, label) VALUES (?,?)", (node, label))
+        db.execute("INSERT OR IGNORE INTO favorites (user_id, node, label) VALUES (?,?,?)",
+                   (user_id, node, label))
         db.commit()
-        log("INFO", f"[API] Favorite added: node={node} label={label!r}")
+        log("INFO", f"[API] Favorite added: user_id={user_id} node={node} label={label!r}")
         return jsonify({"success": True, "node": node, "label": label})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -2958,13 +2987,16 @@ def api_fav_add():
 
 @app.route("/api/favorites/delete", methods=["POST"])
 def api_fav_delete():
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": "Authentication required"}), 401
     data = request.json or {}
     node = str(data.get("node", "")).strip()
     try:
         db = get_db()
-        db.execute("DELETE FROM favorites WHERE node=?", (node,))
+        db.execute("DELETE FROM favorites WHERE user_id=? AND node=?", (user_id, node))
         db.commit()
-        log("INFO", f"[API] Favorite deleted: node={node}")
+        log("INFO", f"[API] Favorite deleted: user_id={user_id} node={node}")
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -2972,12 +3004,16 @@ def api_fav_delete():
 
 @app.route("/api/favorites/label", methods=["POST"])
 def api_fav_label():
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": "Authentication required"}), 401
     data  = request.json or {}
     node  = str(data.get("node",  "")).strip()
     label = str(data.get("label", "")).strip()
     try:
         db = get_db()
-        db.execute("UPDATE favorites SET label=? WHERE node=?", (label, node))
+        db.execute("UPDATE favorites SET label=? WHERE user_id=? AND node=?",
+                   (label, user_id, node))
         db.commit()
         return jsonify({"success": True})
     except Exception as e:
