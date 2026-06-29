@@ -2926,14 +2926,18 @@ def api_users_delete(uid):
 def api_favorites():
     user_id = session.get("user_id")
     if not user_id:
-        return jsonify({"favorites": []})
+        resp = jsonify({"favorites": []})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
     try:
         db   = get_db()
         rows = db.execute("SELECT * FROM favorites WHERE user_id=? ORDER BY id", (user_id,)).fetchall()
         favs = [dict(r) for r in rows]
         for fav in favs:
             fav.update(lookup_node(fav["node"]))
-        return jsonify({"favorites": favs})
+        resp = jsonify({"favorites": favs})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
     except Exception as e:
         log("ERROR", f"[API] /api/favorites: {e}")
         return jsonify({"error": str(e)}), 500

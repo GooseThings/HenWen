@@ -1207,7 +1207,7 @@ var _favorites = [];
 
 async function loadFavorites() {
   try {
-    var r = await fetch('/api/favorites');
+    var r = await fetch('/api/favorites', {cache: 'no-store'});
     if (!r.ok) return;
     var d = await r.json();
     _favorites = d.favorites || [];
