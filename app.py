@@ -3440,6 +3440,29 @@ def api_status_disconnect():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/status/squash-idle", methods=["POST"])
+def api_status_squash_idle():
+    """Mark a connected node as permanent — remove it from idle-timeout tracking."""
+    if session.get('role') not in ('admin', 'superuser'):
+        return jsonify({"error": "Admin access required"}), 403
+    data        = request.json or {}
+    local_node  = str(data.get("local_node",  "")).strip()
+    remote_node = str(data.get("remote_node", "")).strip()
+    if not re.match(r'^\d{4,7}$', local_node):
+        return jsonify({"error": "Invalid local_node"}), 400
+    if not re.match(r'^\d{4,7}$', remote_node):
+        return jsonify({"error": "Invalid remote_node"}), 400
+    with _kiosk_temp_lock:
+        key = (local_node, remote_node)
+        if key in _kiosk_temp_conns:
+            _kiosk_temp_conns[key]['permanent'] = True
+        else:
+            # Connection exists (pre-dates this session or made from manager) — start tracking it as permanent
+            _kiosk_temp_conns[key] = {'permanent': True, 'last_active': time.time()}
+    log("INFO", f"[API] /api/status/squash-idle {local_node} -> {remote_node}: marked permanent")
+    return jsonify({"ok": True})
+
+
 # ---------------------------------------------------------------------------
 # Audio monitoring — one ffmpeg per node, broadcast to N simultaneous clients
 #

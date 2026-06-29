@@ -333,6 +333,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .idle-badge { font-size: 0.68rem; padding: 1px 6px; border-radius: 3px; font-weight: 600;
   background: rgba(88,166,255,.1); color: var(--accent); white-space: nowrap; }
 .idle-badge.warn { background: rgba(255,179,0,.15); color: var(--warn); }
+.idle-squash-btn { font-size: 0.68rem; padding: 1px 6px; border-radius: 3px; font-weight: 600;
+  background: rgba(63,185,80,.08); border: 1px solid rgba(63,185,80,.3); color: var(--green);
+  cursor: pointer; white-space: nowrap; }
+.idle-squash-btn:hover { background: rgba(63,185,80,.22); }
 
 /* toast notification */
 #sb-toast { position: fixed; bottom: 64px; left: 50%; transform: translateX(-50%);
@@ -895,6 +899,11 @@ async function refreshBoard() {
           var ts   = mins + ':' + (secs < 10 ? '0' : '') + secs;
           var warn = c.idle_remaining < 120;
           idleBadge = '<span class="idle-badge' + (warn ? ' warn' : '') + '">Idle: ' + ts + '</span>';
+          if (window._kioskRole === 'admin' || window._kioskRole === 'superuser') {
+            idleBadge += '<button class="idle-squash-btn" onclick="sbSquashIdle(\'' +
+              esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)" ' +
+              'title="Disable idle disconnect for this connection">Permanent</button>';
+          }
         } else if (c.permanent === true) {
           idleBadge = '<span class="idle-badge">Permanent</span>';
         }
@@ -1069,6 +1078,28 @@ async function sbDisconnect(localNode, remoteNode, btn) {
   } catch(e) {
     sbToast('Disconnect error: ' + e.message, false);
     if (btn) { btn.disabled = false; btn.textContent = 'Disconnect'; }
+  }
+}
+
+async function sbSquashIdle(localNode, remoteNode, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  try {
+    var r = await apiFetch('/api/status/squash-idle', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({local_node: localNode, remote_node: remoteNode})
+    });
+    var d = await r.json();
+    if (r.ok && d.ok) {
+      sbToast('Idle timer disabled for ' + remoteNode, true);
+      setTimeout(refreshBoard, 500);
+    } else {
+      sbToast('Failed: ' + (d.error || r.status), false);
+      if (btn) { btn.disabled = false; btn.textContent = 'Permanent'; }
+    }
+  } catch(e) {
+    sbToast('Error: ' + e.message, false);
+    if (btn) { btn.disabled = false; btn.textContent = 'Permanent'; }
   }
 }
 
