@@ -902,7 +902,7 @@ async function refreshBoard() {
           if (window._kioskRole === 'admin' || window._kioskRole === 'superuser') {
             idleBadge += '<button class="idle-squash-btn" onclick="sbSquashIdle(\'' +
               esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)" ' +
-              'title="Disable idle disconnect for this connection">Permanent</button>';
+              'title="Upgrade to permanent connection — disables idle timeout and auto-reconnects if dropped">No Timeout</button>';
           }
         } else if (c.permanent === true) {
           idleBadge = '<span class="idle-badge">Permanent</span>';
@@ -990,7 +990,7 @@ async function refreshActivity() {
         var connBtn = localNode
           ? '<div style="display:flex;flex-direction:column;gap:3px;align-items:stretch">' +
               '<button class="sb-btn connect" onclick="sbConnect(\'' +
-                esc(localNode) + '\',\'' + esc(e.node) + '\',this)">Connect</button>' +
+                esc(localNode) + '\',\'' + esc(e.node) + '\',this,false,false)">Connect</button>' +
               '<button class="sb-btn monitor" onclick="sbConnect(\'' +
                 esc(localNode) + '\',\'' + esc(e.node) + '\',this,false,true)">Monitor</button>' +
             '</div>'
@@ -1095,11 +1095,11 @@ async function sbSquashIdle(localNode, remoteNode, btn) {
       setTimeout(refreshBoard, 500);
     } else {
       sbToast('Failed: ' + (d.error || r.status), false);
-      if (btn) { btn.disabled = false; btn.textContent = 'Permanent'; }
+      if (btn) { btn.disabled = false; btn.textContent = 'No Timeout'; }
     }
   } catch(e) {
     sbToast('Error: ' + e.message, false);
-    if (btn) { btn.disabled = false; btn.textContent = 'Permanent'; }
+    if (btn) { btn.disabled = false; btn.textContent = 'No Timeout'; }
   }
 }
 
@@ -1288,7 +1288,9 @@ function renderFavorites() {
   var localNode = (window._lastBoardNodes && window._lastBoardNodes[0])
                   ? window._lastBoardNodes[0].node : '';
 
-  fw.style.display = anyConn ? '' : 'none';
+  var isAdmin = (window._kioskRole === 'admin' || window._kioskRole === 'superuser');
+  /* Warning banner only applies to kiosk users who are limited to one connection */
+  fw.style.display = (anyConn && !isAdmin) ? '' : 'none';
   fc.textContent   = _favorites.length + ' saved';
 
   fl.innerHTML = _favorites.map(function(f) {
@@ -1301,7 +1303,8 @@ function renderFavorites() {
     if (isConn) {
       actions = '<button class="sb-btn disconnect" onclick="favDisconnect(\'' +
         esc(localNode) + '\',\'' + esc(f.node) + '\',this)">Disconnect</button>';
-    } else if (anyConn) {
+    } else if (anyConn && !isAdmin) {
+      /* Kiosk users can only have one connection at a time */
       actions = '<button class="sb-btn connect" disabled ' +
         'style="opacity:.4;cursor:not-allowed" ' +
         'title="Disconnect all nodes before connecting">Connect</button>' +
