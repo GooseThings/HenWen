@@ -47,7 +47,13 @@ python3 -m venv "$INSTALL_DIR/venv"
 # ── rpt_backups directory ─────────────────────────────────
 echo "[4/7] Creating backup directory..."
 mkdir -p /etc/asterisk/rpt_backups
-chmod 755 /etc/asterisk/rpt_backups  # readable by all, writable by root only
+chown asterisk:asterisk /etc/asterisk/rpt_backups
+chmod 750 /etc/asterisk/rpt_backups
+
+# Fix ownership of the database so the service can write it as the asterisk user
+if [ -f /etc/asterisk/asl3ez.db ]; then
+    chown asterisk:asterisk /etc/asterisk/asl3ez.db
+fi
 
 # ── Verify rpt.conf accessible ────────────────────────────
 echo "[5/7] Checking rpt.conf..."
