@@ -1789,7 +1789,8 @@ def write_conf_file(path, content):
             raise
     except PermissionError as e:
         log("ERROR", f"[CONF] Permission denied writing {path}: {e}. "
-                     f"Running as UID {os.getuid()}. Service must run as root (User=root).")
+                     f"Running as {pwd.getpwuid(os.getuid()).pw_name}. "
+                     f"Ensure {path} is writable by the service user.")
         raise
 
     return backup_path
@@ -2081,94 +2082,166 @@ def update_setting_in_content(content, section, key, value, enable=True):
 # (paths, stanza names, etc.) and are not validated.
 # ---------------------------------------------------------------------------
 SETTINGS_SCHEMA = {
-    # [general]
-    "node_lookup_method": {"type": "enum", "options": ["both", "dns", "file"]},
-    "max_dns_node_length": {"type": "number", "min": 1},
+    # [general] stanza
+    "node_lookup_method": {"type": "enum",   "options": ["both", "dns", "file"]},
+    "max_dns_node_length":{"type": "number", "min": 1, "max": 10},
+    "dns_node_domain":    {"type": "nonempty"},
 
     # Basic / Required
-    "duplex":              {"type": "enum", "options": ["0", "1", "2", "3", "4"]},
+    "rxchannel":   {"type": "nonempty"},          # driver/channel — can't be blank when live
+    "duplex":      {"type": "enum",   "options": ["0", "1", "2", "3", "4"]},
+    "context":     {"type": "identifier"},        # Asterisk dialplan context name
+    "callerid":    {},                            # "Name" <number> — flexible, blank OK
+    "accountcode": {},                            # CDR code — blank OK
+    "linktolink":  {"type": "boolean"},
 
     # Station Identification
-    "idtime":              {"type": "number", "min": 0},
-    "politeid":            {"type": "number", "min": 0},
-    "beaconing":           {"type": "enum", "options": ["0", "1"]},
+    "idrecording": {"type": "id_sound"},          # |iCALLSIGN or sound filename
+    "idtalkover":  {"type": "id_sound"},          # same; must have a value when enabled
+    "idtime":      {"type": "number", "min": 0, "max": 2400000},
+    "politeid":    {"type": "number", "min": 0},
+    "beaconing":   {"type": "boolean"},
 
     # Timers
-    "hangtime":            {"type": "number", "min": 0},
-    "althangtime":         {"type": "number", "min": 0},
-    "totime":              {"type": "number", "min": 0, "max": 9999999},
-    "time_out_reset_unkey_interval":    {"type": "number", "min": 0, "max": 10000},
+    "hangtime":    {"type": "number", "min": 0},
+    "althangtime": {"type": "number", "min": 0},
+    "totime":      {"type": "number", "min": 0, "max": 9999999},
+    "time_out_reset_unkey_interval":    {"type": "number", "min": 0, "max": 3000},
     "time_out_reset_kerchunk_interval": {"type": "number", "min": 0},
-    "sleeptime":           {"type": "number", "min": 0},
+    "sleeptime":   {"type": "number", "min": 0},
 
     # Telemetry
-    "telemdefault":        {"type": "enum", "options": ["0", "1", "2"]},
-    "telemdynamic":        {"type": "enum", "options": ["0", "1"]},
-    "holdofftelem":        {"type": "enum", "options": ["0", "1"]},
-    "telemduckdb":         {"type": "number"},
-    "telemnomdb":          {"type": "number"},
-    "nounkeyct":           {"type": "enum", "options": ["yes", "no"]},
-    "nolocallinkct":       {"type": "enum", "options": ["0", "1"]},
+    "telemdefault":  {"type": "enum",    "options": ["0", "1", "2"]},
+    "telemdynamic":  {"type": "boolean"},
+    "holdofftelem":  {"type": "boolean"},
+    "telemduckdb":   {"type": "number"},
+    "telemnomdb":    {"type": "number"},
+    "unlinkedct":    {},                          # courtesy tone name — blank OK (no tone)
+    "remotect":      {},
+    "linkunkeyct":   {},
+    "nounkeyct":     {"type": "boolean"},
+    "nolocallinkct": {"type": "boolean"},
 
     # DTMF & Functions
-    "dtmfkey":             {"type": "enum", "options": ["0", "1"]},
-    "propagate_dtmf":      {"type": "enum", "options": ["yes", "no"]},
-    "linktolink":          {"type": "enum", "options": ["yes", "no"]},
+    "funcchar":       {"type": "dtmf_char"},      # exactly one character; ≠ endchar
+    "endchar":        {"type": "dtmf_char"},      # exactly one character; ≠ funcchar
+    "functions":      {"type": "identifier"},
+    "link_functions": {"type": "identifier"},
+    "phone_functions":{"type": "identifier"},
+    "dtmfkey":        {"type": "boolean"},
+    "dtmfkeys":       {"type": "identifier"},
+    "propagate_dtmf": {"type": "boolean"},
+    "startup_macro":  {},                         # DTMF command string — blank = no-op
 
     # Node Connections
-    "lnkactenable":        {"type": "enum", "options": ["0", "1"]},
-    "lnkacttime":          {"type": "number", "min": 0},
+    "extnodefile":    {},                         # file path(s) — blank OK
+    "nodes":          {"type": "identifier"},
+    "nodenames":      {},                         # directory path — blank uses default
+    "connpgm":        {"type": "nonempty"},       # script path — must exist when enabled
+    "discpgm":        {"type": "nonempty"},
+    "lnkactenable":   {"type": "boolean"},
+    "lnkacttime":     {"type": "number", "min": 0, "max": 90000},
+    "lnkactmacro":    {},                         # DTMF macro — blank OK
+    "lnkacttimerwarn":{},                         # sound filename — blank = no warning
 
     # Audio
-    "linkmongain":         {"type": "number"},
-    "erxgain":             {"type": "number"},
-    "etxgain":             {"type": "number"},
+    "linkmongain":    {"type": "number"},
+    "erxgain":        {"type": "number"},
+    "etxgain":        {"type": "number"},
+    "rxnotch":        {"type": "notch"},          # freq,bandwidth — blank OK, format required if set
+    "outstreamcmd":   {},                         # command string — blank OK
 
     # Tail & Scheduler
-    "tailmessagetime":     {"type": "number", "min": 0, "max": 200000000},
-    "tailsquashedtime":    {"type": "number", "min": 0},
+    "tailmessagelist":  {},                       # comma-sep sound files — blank OK
+    "tailmessagetime":  {"type": "number", "min": 0, "max": 200000000},
+    "tailsquashedtime": {"type": "number", "min": 0},
+    "scheduler":        {"type": "identifier"},
 
     # Parrot / Echo
-    "parrot":              {"type": "enum", "options": ["0", "1"]},
-    "parrottime":          {"type": "number", "min": 0},
+    "parrot":     {"type": "boolean"},
+    "parrottime": {"type": "number", "min": 0},
 
     # EchoLink
-    "eannmode":            {"type": "enum", "options": ["0", "1", "2", "3"]},
-    "echolinkdefault":     {"type": "enum", "options": ["0", "1", "2", "3"]},
-    "echolinkdynamic":     {"type": "enum", "options": ["0", "1"]},
+    "eannmode":        {"type": "enum",    "options": ["0", "1", "2", "3"]},
+    "echolinkdefault": {"type": "enum",    "options": ["0", "1", "2", "3"]},
+    "echolinkdynamic": {"type": "boolean"},
+    "elke":            {},                        # FFF timer units — blank = not an Elke node
 
     # Archiving & Stats
-    "archiveformat":       {"type": "enum", "options": ["wav49", "wav", "gsm"]},
-    "archiveaudio":        {"type": "enum", "options": ["yes", "no"]},
+    "archivedir":      {"type": "nonempty"},      # directory path — must exist when enabled
+    "archiveformat":   {"type": "enum",    "options": ["wav49", "wav", "gsm"]},
+    "archivedatefmt":  {"type": "nonempty"},      # strftime format — can't be blank
+    "archiveaudio":    {"type": "boolean"},
+    "statpost_url":    {"type": "url"},           # http(s) URL — blank OK, format required if set
+    "statpost_program":{},                        # external program path — blank uses default
 
-    # Stanza Name Overrides (telemetry-mode keys despite the section name)
-    "guilinkdefault":      {"type": "enum", "options": ["0", "1", "2", "3"]},
-    "guilinkdynamic":      {"type": "enum", "options": ["0", "1"]},
-    "phonelinkdefault":    {"type": "enum", "options": ["0", "1", "2", "3"]},
-    "phonelinkdynamic":    {"type": "enum", "options": ["0", "1"]},
-    "tlbdefault":          {"type": "enum", "options": ["0", "1", "2", "3"]},
-    "tlbdynamic":          {"type": "enum", "options": ["0", "1"]},
+    # Link Telemetry
+    "guilinkdefault":  {"type": "enum",    "options": ["0", "1", "2", "3"]},
+    "guilinkdynamic":  {"type": "boolean"},
+    "phonelinkdefault":{"type": "enum",    "options": ["0", "1", "2", "3"]},
+    "phonelinkdynamic":{"type": "boolean"},
+    "tlbdefault":      {"type": "enum",    "options": ["0", "1", "2", "3"]},
+    "tlbdynamic":      {"type": "boolean"},
 
     # Voting
-    "votermode":           {"type": "enum", "options": ["0", "1", "2"]},
-    "votertype":           {"type": "enum", "options": ["0", "1", "2"]},
-    "votermargin":         {"type": "number"},
+    "votermode":   {"type": "enum",   "options": ["0", "1", "2"]},
+    "votertype":   {"type": "enum",   "options": ["0", "1", "2"]},
+    "votermargin": {"type": "number"},
+
+    # Stanza Name Overrides
+    "controlstates": {"type": "identifier"},
+    "macro":         {"type": "identifier"},
+    "telemetry":     {"type": "identifier"},
+    "morse":         {"type": "identifier"},
+    "tonemacro":     {"type": "identifier"},
+    "events":        {"type": "identifier"},
+    "wait-times":    {"type": "identifier"},
 }
 
 
-def validate_setting(key, value):
-    """
-    Return None if `value` is acceptable for `key`, otherwise an error string.
-    Keys with no schema entry are free-form and always pass.
-    """
-    schema = SETTINGS_SCHEMA.get(key)
-    if schema is None or value == "":
-        return None
+# Compiled regexes for validate_setting
+_RE_IDENTIFIER = re.compile(r'^[A-Za-z0-9_\-]+$')
+_RE_NOTCH      = re.compile(r'^\d+(?:\.\d+)?(?:,\d+(?:\.\d+)?)+$')   # one or more freq,bw pairs
+_RE_URL        = re.compile(r'^https?://')
+_RE_CW_CHARS   = re.compile(r'^[A-Za-z0-9 /.\-!?,_]+$')
+_RE_SOUNDFILE  = re.compile(r'^[A-Za-z0-9_/.\-]+$')
+_BOOL_VALUES   = frozenset(["0", "1", "yes", "no", "true", "false", "on", "off"])
 
-    if schema["type"] == "enum":
-        if value not in schema["options"]:
-            return f"{key}: {value!r} is not valid. Must be one of {schema['options']}"
-    elif schema["type"] == "number":
+# Types that cannot be empty when the setting is active (toggle ON)
+_NONEMPTY_TYPES = frozenset(["nonempty", "id_sound", "dtmf_char", "identifier"])
+
+
+def validate_setting(key, value):
+    """Return None if value is acceptable for key, otherwise an error string."""
+    schema = SETTINGS_SCHEMA.get(key)
+    if schema is None:
+        return None   # unknown key: free-form, always passes
+
+    t = schema.get("type", "freeform")
+
+    if value == "":
+        if t in _NONEMPTY_TYPES:
+            label = {
+                "nonempty":   "a value",
+                "id_sound":   "a sound file name or |iCALLSIGN CW value",
+                "dtmf_char":  "a single character",
+                "identifier": "a stanza or context name",
+            }.get(t, "a value")
+            return f"{key}: requires {label} when enabled — disable the toggle instead of leaving it blank"
+        return None   # blank is fine for freeform/number/enum/boolean/notch/url
+
+    # Non-empty value validation
+    if t == "enum":
+        opts = schema.get("options", [])
+        if value not in opts:
+            return f"{key}: {value!r} is not valid — must be one of: {', '.join(opts)}"
+
+    elif t == "boolean":
+        if value.lower() not in _BOOL_VALUES:
+            return (f"{key}: {value!r} is not valid — must be one of: "
+                    "0, 1, yes, no, true, false, on, off")
+
+    elif t == "number":
         try:
             num = float(value)
         except ValueError:
@@ -2176,7 +2249,37 @@ def validate_setting(key, value):
         if "min" in schema and num < schema["min"]:
             return f"{key}: {value!r} is below the minimum of {schema['min']}"
         if "max" in schema and num > schema["max"]:
-            return f"{key}: {value!r} is above the maximum of {schema['max']}"
+            return f"{key}: {value!r} exceeds the maximum of {schema['max']}"
+
+    elif t == "id_sound":
+        if value.startswith("|i"):
+            cw = value[2:]
+            if not cw:
+                return f"{key}: CW format |i<callsign> requires a callsign after |i (e.g. |iN8GMZ)"
+            if not _RE_CW_CHARS.match(cw):
+                return (f"{key}: CW callsign {cw!r} contains invalid characters "
+                        "(allowed: A-Z 0-9 space / . - ! ? , _)")
+        elif not _RE_SOUNDFILE.match(value):
+            return (f"{key}: sound file name {value!r} contains invalid characters "
+                    "(letters, digits, / . - _ only — no spaces or special chars)")
+
+    elif t == "dtmf_char":
+        if len(value) != 1:
+            return f"{key}: must be exactly one character, got {len(value)} character(s)"
+
+    elif t == "identifier":
+        if not _RE_IDENTIFIER.match(value):
+            return (f"{key}: {value!r} must use only letters, digits, "
+                    "hyphens, and underscores (no spaces)")
+
+    elif t == "notch":
+        if not _RE_NOTCH.match(value):
+            return (f"{key}: {value!r} must be one or more freq,bandwidth pairs "
+                    "separated by commas (e.g. 1065,40)")
+
+    elif t == "url":
+        if not _RE_URL.match(value):
+            return f"{key}: {value!r} must start with http:// or https://"
 
     return None
 
@@ -2554,7 +2657,7 @@ def api_save():
                             "message": f"Saved. Backup: {backup}"})
         except PermissionError as e:
             return jsonify({"error": str(e),
-                            "hint": "Service must run as root. Check User=root in ASL3-EZ.service"}), 403
+                            "hint": "Ensure rpt.conf and backups are owned by the service user (chown asterisk:asterisk /etc/asterisk/rpt.conf)"}), 403
         except Exception as e:
             log("ERROR", f"[API] /api/save error: {e}")
             return jsonify({"error": str(e)}), 500
@@ -2579,6 +2682,20 @@ def api_save():
             err = validate_setting(key, value)
         if err:
             errors.append(err)
+    # Cross-field: funcchar and endchar must differ
+    if not is_macro_stanza and not is_schedule_stanza and not errors:
+        parsed_conf = parse_rpt_conf(content)
+        sec_vals = {k: v.get("value", "") for k, v in parsed_conf.get(section, {}).items()}
+        for k, info in changes.items():
+            if info.get("enabled", True):
+                sec_vals[k] = info.get("value", "")
+            else:
+                sec_vals.pop(k, None)
+        fc = sec_vals.get("funcchar", "")
+        ec = sec_vals.get("endchar", "")
+        if fc and ec and fc == ec:
+            errors.append(f"funcchar and endchar must be different characters (both are {fc!r})")
+
     if errors:
         log("WARN", f"[API] /api/save rejected invalid value(s): {errors}")
         return jsonify({"error": "Invalid setting value(s)", "details": errors}), 400
@@ -2595,7 +2712,7 @@ def api_save():
                         "message": f"Saved {len(changes)} setting(s). Backup: {backup}"})
     except PermissionError as e:
         return jsonify({"error": str(e),
-                        "hint": "Service must run as root. Check User=root in ASL3-EZ.service"}), 403
+                        "hint": "Ensure rpt.conf and backups are owned by the service user (chown asterisk:asterisk /etc/asterisk/rpt.conf)"}), 403
     except Exception as e:
         log("ERROR", f"[API] /api/save error: {e}")
         return jsonify({"error": str(e)}), 500
@@ -2622,7 +2739,7 @@ def api_restart():
         }), 500
     except PermissionError as e:
         return jsonify({"error": str(e),
-                        "hint": "Service must run as root to call systemctl restart"}), 403
+                        "hint": "Service user needs sudo rights for systemctl restart"}), 403
     except Exception as e:
         log("ERROR", f"[API] /api/restart exception: {e}")
         return jsonify({"error": str(e)}), 500
@@ -2742,7 +2859,7 @@ def api_backup_restore(name):
         return jsonify({"ok": True, "backup": backup})
     except PermissionError as e:
         return jsonify({"error": str(e),
-                        "hint": "Service must run as root to write rpt.conf"}), 403
+                        "hint": "Ensure rpt.conf is writable by the service user (chown asterisk:asterisk)"}), 403
     except Exception as e:
         log("ERROR", f"[API] /api/backups/{name}/restore error: {e}")
         return jsonify({"error": str(e)}), 500
@@ -3323,7 +3440,7 @@ def api_sysinfo():
         "ami_host":          f"{AMI_HOST}:{AMI_PORT}",
         "ami_connected":     _ami_connected,
         "ami_poll_interval": POLL_INTERVAL,
-        "running_as":        "root" if os.getuid() == 0 else f"uid={os.getuid()} (NOT ROOT - some features will fail)",
+        "running_as":        pwd.getpwuid(os.getuid()).pw_name,
         "rpt_conf_path":     RPT_CONF_PATH,
         "rpt_conf_exists":   os.path.exists(RPT_CONF_PATH),
         "rpt_conf_writable": os.access(RPT_CONF_PATH, os.W_OK),
@@ -4199,7 +4316,7 @@ def api_set_secret_key():
     except PermissionError as e:
         log("ERROR", f"[SETTINGS] Permission denied writing {SERVICE_FILE_PATH}: {e}")
         return jsonify({"error": str(e),
-                        "hint": "Service must run as root to edit the systemd unit file."}), 403
+                        "hint": "Editing the service file requires root access."}), 403
     except Exception as e:
         log("ERROR", f"[SETTINGS] secret_key update failed: {e}")
         return jsonify({"error": str(e)}), 500

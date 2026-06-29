@@ -2004,7 +2004,7 @@ async function refreshDashboard() {
   setStat('s-ami',    d.ami_user || 'NOT SET',
                       (d.ami_user && d.ami_user !== 'NOT CONFIGURED') ? 'ok' : 'error');
   setStat('s-uid',    d.running_as || 'unknown',
-                      d.running_as === 'root' ? 'ok' : 'warn');
+                      d.running_as === 'root' ? 'warn' : 'ok');
   setStat('s-conf',
     d.rpt_conf_exists ? (d.rpt_conf_writable ? 'Exists + Writable' : 'Exists (read-only)') : 'NOT FOUND',
     (d.rpt_conf_exists && d.rpt_conf_writable) ? 'ok' : d.rpt_conf_exists ? 'warn' : 'error');
@@ -2026,8 +2026,8 @@ async function refreshDashboard() {
     log('Asterisk is not running. Use Restart Asterisk.', 'WARN');
   if (!d.ami_user || d.ami_user === 'NOT CONFIGURED')
     log('AMI credentials not configured. See AMI Diagnostics page.', 'ERROR');
-  if (d.running_as !== 'root')
-    log('Not running as root. rpt.conf save and Asterisk restart will fail.', 'WARN');
+  if (d.running_as === 'root')
+    log('ASL3-EZ is running as root. Consider switching to the asterisk user for better security.', 'WARN');
 }
 
 /* ── Restart / reload ───────────────────────────────────────────────────── */
@@ -2068,8 +2068,11 @@ async function fetchConf() {
 //   (none)   -> free-text <input type=text> (paths, stanza names, etc.)
 function buildValueInput(key, value, meta) {
   meta = meta || {};
-  var common = 'class="val-input" '
-             + 'onchange="markChange(\'' + esc(key) + '\',this)"';
+  var reqAttr  = meta.required  ? ' data-required="true"' : '';
+  var phAttr   = meta.placeholder ? ' placeholder="' + esc(meta.placeholder) + '"' : '';
+  var common   = 'class="val-input"'
+               + reqAttr
+               + ' onchange="markChange(\'' + esc(key) + '\',this)"';
 
   if (meta.type === 'enum' && meta.options) {
     var hasCurrent = meta.options.some(function(o) { return o.value === value; });
@@ -2090,7 +2093,15 @@ function buildValueInput(key, value, meta) {
     return '<input type="number" value="' + esc(value) + '"' + minAttr + maxAttr + ' ' + common + '>';
   }
 
-  return '<input type="text" value="' + esc(value) + '" ' + common + '>';
+  if (meta.type === 'dtmf_char') {
+    return '<input type="text" value="' + esc(value) + '" maxlength="1" style="width:60px" ' + common + phAttr + '>';
+  }
+
+  if (meta.type === 'id_sound') {
+    return '<input type="text" value="' + esc(value) + '" style="width:180px" ' + common + phAttr + '>';
+  }
+
+  return '<input type="text" value="' + esc(value) + '" ' + common + phAttr + '>';
 }
 
 // `source` is "own" (set directly on this stanza), a template name (this
@@ -2124,25 +2135,46 @@ function makeToggleRow(key, value, commented, desc, meta, source) {
 // markChange/markToggle both capture the row's full state (value + enabled)
 // so toggling the switch without touching the value field — or vice versa —
 // never sends a half-filled change that would blank out the other field.
+function _applyFieldError(inputEl, err) {
+  if (err) {
+    inputEl.style.outline = '2px solid var(--danger, #dc3545)';
+    inputEl.title = err;
+  } else {
+    inputEl.style.outline = '';
+    inputEl.title = '';
+  }
+}
+
 function markChange(key, inputEl) {
-  var val = inputEl.value;
-  var row = inputEl.closest('.toggle-row');
-  var cb  = row ? row.querySelector('input[type=checkbox]') : null;
+  var val     = inputEl.value;
+  var row     = inputEl.closest('.toggle-row');
+  var cb      = row ? row.querySelector('input[type=checkbox]') : null;
+  var enabled = cb ? cb.checked : true;
   if (!pendingChanges[currentSection]) pendingChanges[currentSection] = {};
   if (!pendingChanges[currentSection][key]) pendingChanges[currentSection][key] = {};
   pendingChanges[currentSection][key].value   = val;
-  pendingChanges[currentSection][key].enabled = cb ? cb.checked : true;
-  showUnsaved('Change pending: ' + key + ' = ' + val);
+  pendingChanges[currentSection][key].enabled = enabled;
+  var err = enabled ? validateField(key, val) : null;
+  _applyFieldError(inputEl, err);
+  showUnsaved(err ? ('⚠️ ' + err) : ('Change pending: ' + key + ' = ' + val));
 }
 
 function markToggle(key, cb) {
-  var row   = cb.closest('.toggle-row');
-  var input = row ? row.querySelector('input[type=text], input[type=number], select') : null;
+  var row     = cb.closest('.toggle-row');
+  var input   = row ? row.querySelector('input[type=text], input[type=number], select') : null;
+  var enabled = cb.checked;
+  var val     = input ? input.value : '';
   if (!pendingChanges[currentSection]) pendingChanges[currentSection] = {};
   if (!pendingChanges[currentSection][key]) pendingChanges[currentSection][key] = {};
-  pendingChanges[currentSection][key].enabled = cb.checked;
-  if (input) pendingChanges[currentSection][key].value = input.value;
-  showUnsaved('Toggle: ' + key + ' -> ' + (cb.checked ? 'enabled' : 'commented'));
+  pendingChanges[currentSection][key].enabled = enabled;
+  if (input) pendingChanges[currentSection][key].value = val;
+  // When enabling, immediately validate so the user sees the error before saving
+  if (input) {
+    var err = enabled ? validateField(key, val) : null;
+    _applyFieldError(input, err);
+    if (err) { showUnsaved('⚠️ ' + err); return; }
+  }
+  showUnsaved('Toggle: ' + key + ' → ' + (enabled ? 'enabled' : 'commented out'));
 }
 
 function showUnsaved(msg) {
@@ -2192,6 +2224,28 @@ async function saveChanges() {
   var section = currentSection;
   var changes = pendingChanges[section];
   if (!changes || !Object.keys(changes).length) { log('No changes to save.', 'WARN'); return; }
+
+  // Client-side pre-flight validation
+  var clientErrors = [];
+  Object.keys(changes).forEach(function(key) {
+    var info = changes[key];
+    if (!info.enabled) return;
+    var err = validateField(key, info.value || '');
+    if (err) clientErrors.push(err);
+  });
+  // Cross-field: funcchar ≠ endchar
+  var fcInfo = changes['funcchar'];
+  var ecInfo = changes['endchar'];
+  if (fcInfo && ecInfo && fcInfo.enabled && ecInfo.enabled &&
+      fcInfo.value && ecInfo.value && fcInfo.value === ecInfo.value) {
+    clientErrors.push('funcchar and endchar must be different characters (both are "' + fcInfo.value + '")');
+  }
+  if (clientErrors.length) {
+    clientErrors.forEach(function(e) { log('⚠️ ' + e, 'ERROR'); });
+    log('Fix the errors above before saving.', 'WARN');
+    return;
+  }
+
   log('Saving ' + Object.keys(changes).length + ' change(s) to [' + section + ']...', 'INFO');
   var r = await api('/api/save', {
     method: 'POST',
@@ -2288,7 +2342,8 @@ var ZERO_ONE_OPTS = [{value:'0', label:'0 — disabled (default)'}, {value:'1', 
 
 var NODE_SECS = [
   {title:'Basic / Required', keys:[
-    {key:'rxchannel',      desc:'Radio interface driver, e.g. dahdi/pseudo (hub node), SimpleUSB/usbradio, Radio/usbradio.'},
+    {key:'rxchannel',      desc:'Radio interface driver: dahdi/pseudo (hub), SimpleUSB/NNNN, Radio/NNNN, Voter/NNNN, or USRP/ip:rxport:txport.',
+     required:true, placeholder:'dahdi/pseudo'},
     {key:'duplex',         desc:'Duplex/repeat mode for this node. Default is 2.',
      type:'enum', options:[
        {value:'0', label:'Half duplex, no telemetry tones or hang time'},
@@ -2297,19 +2352,24 @@ var NODE_SECS = [
        {value:'3', label:'Full duplex, telemetry/hang time, but audio is not repeated'},
        {value:'4', label:'Full duplex, telemetry/hang time, repeats audio only when autopatch is down'},
      ]},
-    {key:'context',        desc:'Asterisk dialplan context for this node (default: radio).'},
-    {key:'callerid',       desc:'Autopatch caller ID, e.g. "Repeater" <0000000000>.'},
+    {key:'context',        desc:'Asterisk dialplan context for autopatch calls (default: radio). Must match a stanza in extensions.conf.',
+     type:'identifier', required:true, placeholder:'radio'},
+    {key:'callerid',       desc:'Autopatch caller ID, e.g. "Repeater" <0000000000>.', placeholder:'"Repeater" <0000000000>'},
     {key:'accountcode',    desc:'Asterisk CDR account code (optional).'},
-    {key:'linktolink',     desc:'In duplex=0 mode, forces the radio interface into full duplex while keeping all other duplex-0 behavior.',
-     type:'enum', options: YES_NO_OPTS},
+    {key:'linktolink',     desc:'In duplex=0/1 mode, forces radio into full duplex while keeping all other duplex-0 behavior.',
+     type:'boolean'},
   ]},
   {title:'Station Identification', keys:[
-    {key:'idrecording',    desc:'Voice or CW ID — e.g. |iWB6NIL for CW, or a sound filename (no extension).'},
-    {key:'idtalkover',     desc:'Alternate (usually shorter/CW) ID played over an in-progress transmission.'},
-    {key:'idtime',         desc:'Milliseconds between ID announcements (default 300000 = 5 min).', type:'number', min:0},
-    {key:'politeid',       desc:'Milliseconds before the ID interval ends to attempt a polite tail ID (default 30000).', type:'number', min:0},
-    {key:'beaconing',      desc:'When enabled, sends the repeater ID at the idtime interval regardless of activity. Check your local regulations before enabling.',
-     type:'enum', options: ZERO_ONE_OPTS},
+    {key:'idrecording',    desc:'Voice or CW ID. Use |iCALLSIGN for CW (e.g. |iN8GMZ), or a sound filename without extension.',
+     type:'id_sound', required:true, placeholder:'|iN8GMZ'},
+    {key:'idtalkover',     desc:'Alternate (usually shorter) ID played over an in-progress transmission. Same format as idrecording.',
+     type:'id_sound', required:true, placeholder:'|iN8GMZ'},
+    {key:'idtime',         desc:'Milliseconds between ID announcements (default 300000 = 5 min). 0 = disable scheduled IDs.',
+     type:'number', min:0, max:2400000},
+    {key:'politeid',       desc:'Milliseconds before the ID timer expires to attempt a polite tail ID (default 30000 = 30 s).',
+     type:'number', min:0},
+    {key:'beaconing',      desc:'Send ID at every idtime interval regardless of activity. Required in some jurisdictions. Check local regulations.',
+     type:'boolean'},
   ]},
   {title:'Timers', keys:[
     {key:'hangtime',       desc:'Squelch tail hang time in ms (default 5000).', type:'number', min:0},
@@ -2321,49 +2381,61 @@ var NODE_SECS = [
   ]},
   {title:'Telemetry', keys:[
     {key:'telemdefault',   desc:'Whether telemetry tones are on by default (default 1 = on).', type:'enum', options: telemModeOptions(false)},
-    {key:'telemdynamic',   desc:'Whether users may change the local telemetry setting with a COP command (default 1 = allowed).',
-     type:'enum', options:[{value:'0', label:'0 — disallow'}, {value:'1', label:'1 — allow (default)'}]},
-    {key:'holdofftelem',   desc:'Holds off all telemetry until a local receiver user or a linked-node user unkeys (default 0 = disabled).',
-     type:'enum', options: ZERO_ONE_OPTS},
-    {key:'telemduckdb',    desc:'How far (in dB, typically negative) to duck telemetry level during voice, e.g. -15.', type:'number'},
-    {key:'telemnomdb',     desc:'Fine-tune the nominal telemetry level in dB (can be positive or negative).', type:'number'},
-    {key:'unlinkedct',     desc:'Courtesy tone to play when no nodes are connected, e.g. ct2.'},
-    {key:'remotect',       desc:'Courtesy tone to play when a remote base is connected, e.g. ct3.'},
-    {key:'linkunkeyct',    desc:'Courtesy tone to play when a linked node unkeys, e.g. ct8.'},
-    {key:'nounkeyct',      desc:'Completely disables the courtesy tone.', type:'enum', options: YES_NO_OPTS},
-    {key:'nolocallinkct',  desc:'Plays unlinkedct instead, if another local node (hosted on the same machine) is connected (default 0).',
-     type:'enum', options: ZERO_ONE_OPTS},
+    {key:'telemdynamic',   desc:'Whether users may change the local telemetry setting with a COP command. 1/yes = allow (default), 0/no = lock.',
+     type:'boolean'},
+    {key:'holdofftelem',   desc:'Hold off all telemetry until a local or linked user unkeys (default 0 = disabled). Accepts 0/1/yes/no.',
+     type:'boolean'},
+    {key:'telemduckdb',    desc:'How far (in dB, typically negative) to duck telemetry during voice, e.g. -15.', type:'number'},
+    {key:'telemnomdb',     desc:'Fine-tune the nominal telemetry level in dB (positive or negative).', type:'number'},
+    {key:'unlinkedct',     desc:'Courtesy tone name to play when no nodes are connected (e.g. ct2). Must match an entry in the [telemetry] stanza.'},
+    {key:'remotect',       desc:'Courtesy tone name to play when a remote base is connected (e.g. ct3).'},
+    {key:'linkunkeyct',    desc:'Courtesy tone name to play when a linked node unkeys (e.g. ct8).'},
+    {key:'nounkeyct',      desc:'Disable all courtesy tones and hang-time delays. Accepts yes/no/0/1.',
+     type:'boolean'},
+    {key:'nolocallinkct',  desc:'Use unlinkedct instead of the linked courtesy tone when only local (same-machine) nodes are connected. Accepts 0/1/yes/no.',
+     type:'boolean'},
   ]},
   {title:'DTMF & Functions', keys:[
-    {key:'funcchar',       desc:'DTMF function start character (default *).'},
-    {key:'endchar',        desc:'DTMF command end character (default #).'},
-    {key:'functions',      desc:'Name of the functions stanza to use (default: functions).'},
-    {key:'link_functions', desc:'Name of the functions stanza used by linked nodes (default: functions).'},
-    {key:'phone_functions',desc:'Name of the functions stanza used by phone/autopatch access (default: functions).'},
-    {key:'dtmfkey',        desc:'Requires a DTMF key sequence before this node will key up on every transmission (default 0 = normal access).',
-     type:'enum', options:[{value:'0', label:'0 — normal access (default)'}, {value:'1', label:'1 — require DTMF access'}]},
-    {key:'dtmfkeys',       desc:'Name of the dtmfkeys stanza (used together with dtmfkey=1).'},
-    {key:'propagate_dtmf', desc:'When yes, DTMF is regenerated from out-of-band signalling or the receiver decoder whenever a function start character is NOT detected (default no).',
-     type:'enum', options: YES_NO_OPTS},
+    {key:'funcchar',       desc:'DTMF function start character (default *). Must be exactly one character and different from endchar.',
+     type:'dtmf_char', required:true, placeholder:'*'},
+    {key:'endchar',        desc:'DTMF command end/termination character (default #). Must differ from funcchar.',
+     type:'dtmf_char', required:true, placeholder:'#'},
+    {key:'functions',      desc:'Name of the [functions] stanza defining DTMF commands for local users (default: functions).',
+     type:'identifier', required:true, placeholder:'functions'},
+    {key:'link_functions', desc:'Name of the [functions] stanza for linked-node DTMF (default: functions).',
+     type:'identifier', required:true, placeholder:'functions'},
+    {key:'phone_functions',desc:'Name of the [functions] stanza for phone/autopatch DTMF (default: functions).',
+     type:'identifier', required:true, placeholder:'functions'},
+    {key:'dtmfkey',        desc:'Require a DTMF sequence before this node keys up (default 0 = normal access). Requires a [dtmfkeys] stanza.',
+     type:'boolean'},
+    {key:'dtmfkeys',       desc:'Name of the [dtmfkeys] stanza for access control sequences (required when dtmfkey=1).',
+     type:'identifier', required:true, placeholder:'dtmfkeys'},
+    {key:'propagate_dtmf', desc:'Re-generate DTMF from out-of-band signalling when a function character is NOT detected (default no). Accepts yes/no/0/1.',
+     type:'boolean'},
   ]},
   {title:'Node Connections', keys:[
-    {key:'extnodefile',    desc:'Path to the external node list file (default /var/lib/asterisk/rpt_extnodes).'},
-    {key:'nodes',          desc:'Name of the nodes stanza to use (default: nodes).'},
-    {key:'nodenames',      desc:'Directory of custom node-name sound files (default rpt/nodenames).'},
-    {key:'startup_macro',  desc:'DTMF command string to run automatically at startup, e.g. *31000*31001.'},
-    {key:'connpgm',        desc:'Script to run on node connect (called with args: local_node remote_node).'},
-    {key:'discpgm',        desc:'Script to run on node disconnect (called with args: local_node remote_node).'},
-    {key:'lnkactenable',   desc:'Enables the link activity timer (default 0 = disabled).', type:'enum', options: ZERO_ONE_OPTS},
-    {key:'lnkacttime',     desc:'Link activity timer duration in seconds.', type:'number', min:0},
-    {key:'lnkactmacro',    desc:'DTMF macro to execute when the link activity timer expires.'},
-    {key:'lnkacttimerwarn',desc:'Sound file played as a warning before the link activity timer expires.'},
+    {key:'extnodefile',    desc:'Path to the external node list file (default /var/lib/asterisk/rpt_extnodes). Multiple paths can be comma-separated.'},
+    {key:'nodes',          desc:'Name of the [nodes] stanza for this node\'s connection list (default: nodes).',
+     type:'identifier', required:true, placeholder:'nodes'},
+    {key:'nodenames',      desc:'Directory of custom node-name sound files (default rpt/nodenames in the Asterisk sounds tree).'},
+    {key:'startup_macro',  desc:'DTMF command string run automatically at startup (e.g. *31000*31001). No # terminator needed.'},
+    {key:'connpgm',        desc:'Script to run on node connect. Called with: local_node remote_node. Must be executable.',
+     required:true, placeholder:'/etc/asterisk/custom/conlog.sh'},
+    {key:'discpgm',        desc:'Script to run on node disconnect. Same calling convention as connpgm.',
+     required:true, placeholder:'/etc/asterisk/custom/disclog.sh'},
+    {key:'lnkactenable',   desc:'Enable the link activity timer (default 0 = disabled). Accepts 0/1/yes/no.',
+     type:'boolean'},
+    {key:'lnkacttime',     desc:'Link activity timer in seconds — fires lnkactmacro when no link activity occurs in this interval.', type:'number', min:0, max:90000},
+    {key:'lnkactmacro',    desc:'DTMF function string to execute when the link activity timer expires (e.g. *52).'},
+    {key:'lnkacttimerwarn',desc:'Sound file played 30 seconds before the link activity timer expires.'},
   ]},
   {title:'Audio', keys:[
-    {key:'linkmongain',    desc:'Monitor-mode audio level adjustment in dB (default 0).', type:'number'},
-    {key:'erxgain',        desc:'EchoLink receive gain adjustment in dB (positive or negative).', type:'number'},
-    {key:'etxgain',        desc:'EchoLink transmit gain adjustment in dB (positive or negative).', type:'number'},
-    {key:'rxnotch',        desc:'Notch filter as freq,bandwidth (e.g. 1065,40). CPU-intensive — not recommended on a Raspberry Pi.'},
-    {key:'outstreamcmd',   desc:'Command pipeline used to stream audio out, e.g. to Broadcastify.'},
+    {key:'linkmongain',    desc:'Monitor-mode audio level in dB (default 0; installed default -22).', type:'number'},
+    {key:'erxgain',        desc:'EchoLink receive gain in dB (positive or negative).', type:'number'},
+    {key:'etxgain',        desc:'EchoLink transmit gain in dB (positive or negative).', type:'number'},
+    {key:'rxnotch',        desc:'Notch filter(s) as freq,bandwidth pairs in Hz (e.g. 1065,40). CPU-intensive; multiple pairs supported.',
+     type:'notch', placeholder:'1065,40'},
+    {key:'outstreamcmd',   desc:'Command pipeline for audio streaming, e.g. to Broadcastify.'},
   ]},
   {title:'Tail & Scheduler', keys:[
     {key:'tailmessagelist',desc:'Comma-separated list of sound files rotated as tail messages.'},
@@ -2372,8 +2444,8 @@ var NODE_SECS = [
     {key:'scheduler',      desc:'Name of the schedule stanza to use (default: schedule).'},
   ]},
   {title:'Parrot / Echo', keys:[
-    {key:'parrot',         desc:'The "parrot" repeats back everything it hears. Default 0 = off (can still be enabled via a COP command); 1 = always on.',
-     type:'enum', options: ZERO_ONE_OPTS},
+    {key:'parrot',         desc:'Parrot mode repeats back everything it hears. 0/no = off but COP-controllable; 1/yes = always on.',
+     type:'boolean'},
     {key:'parrottime',     desc:'Milliseconds to delay before playing back parrot audio (default 1000).', type:'number', min:0},
   ]},
   {title:'EchoLink', keys:[
@@ -2385,21 +2457,26 @@ var NODE_SECS = [
        {value:'3', label:'Say phonetic call sign and node number'},
      ]},
     {key:'echolinkdefault',desc:'Default telemetry mode for EchoLink connections (default 3 = follow local).', type:'enum', options: telemModeOptions(true)},
-    {key:'echolinkdynamic',desc:'Whether users may change EchoLink telemetry with a COP command.', type:'enum', options: ZERO_ONE_OPTS},
-    {key:'elke',           desc:'Elke link sleep timer value (FFF system units) — marks this node as an Elke link.'},
+    {key:'echolinkdynamic',desc:'Whether users may change EchoLink telemetry with a COP command. Accepts 0/1/yes/no.',
+     type:'boolean'},
+    {key:'elke',           desc:'Elke link sleep timer value (FFF system units) — marks this node as an Elke link. Leave blank if not an Elke node.'},
   ]},
   {title:'Archiving & Stats', keys:[
-    {key:'archivedir',     desc:'Directory for activity logs and audio recordings, e.g. /var/spool/asterisk/monitor.'},
+    {key:'archivedir',     desc:'Directory for activity logs and audio recordings (e.g. /var/spool/asterisk/monitor). Must exist and be writable.',
+     required:true, placeholder:'/var/spool/asterisk/monitor'},
     {key:'archiveformat',  desc:'Audio format for recordings (default wav49 = GSM in a .wav container).',
      type:'enum', options:[
        {value:'wav49', label:'wav49 — GSM in a .wav container (default)'},
        {value:'wav',   label:'wav — uncompressed SLIN .wav'},
        {value:'gsm',   label:'gsm — raw GSM format'},
      ]},
-    {key:'archivedatefmt', desc:'strftime-style filename date format for archived files, e.g. %Y%m%d%H%M%S.'},
-    {key:'archiveaudio',   desc:'Whether audio is saved with activity logs (default yes).', type:'enum', options: YES_NO_OPTS},
-    {key:'statpost_url',   desc:'URL to POST node statistics to, e.g. http://stats.allstarlink.org/uhandler.'},
-    {key:'statpost_program',desc:'External program used to post stats (rarely needed on modern installs).'},
+    {key:'archivedatefmt', desc:'strftime-style date format for archived filenames (default %Y%m%d%H%M%S).',
+     required:true, placeholder:'%Y%m%d%H%M%S'},
+    {key:'archiveaudio',   desc:'Save audio with activity logs (default yes). Set no to log only without audio files.',
+     type:'boolean'},
+    {key:'statpost_url',   desc:'URL to POST node statistics to (e.g. http://stats.allstarlink.org/uhandler).',
+     type:'url', placeholder:'http://stats.allstarlink.org/uhandler'},
+    {key:'statpost_program',desc:'External program used to post stats (default uses built-in HTTP poster; rarely changed).'},
   ]},
   {title:'Voting', keys:[
     {key:'votermode',      desc:'Simple Voter mode for this node (default 0 = no voting).',
@@ -2417,21 +2494,68 @@ var NODE_SECS = [
     {key:'votermargin',    desc:'RSSI difference (dB) required before the voter switches receivers (default 10).', type:'number'},
   ]},
   {title:'Stanza Name Overrides', keys:[
-    {key:'controlstates',  desc:'Name of the control states stanza (default: controlstates).'},
-    {key:'macro',          desc:'Name of the macro definitions stanza (default: macro).'},
-    {key:'telemetry',      desc:'Name of the telemetry tones stanza (default: telemetry).'},
-    {key:'morse',          desc:'Name of the Morse code parameters stanza (default: morse).'},
-    {key:'tonemacro',      desc:'Name of the CTCSS-triggered tone macro stanza.'},
-    {key:'events',         desc:'Name of the event management stanza (default: events).'},
-    {key:'wait-times',     desc:'Name of the wait-times stanza (default: wait-times).'},
+    {key:'controlstates',  desc:'Name of the [controlstates] stanza (default: controlstates).',
+     type:'identifier', required:true, placeholder:'controlstates'},
+    {key:'macro',          desc:'Name of the [macro] stanza (default: macro).',
+     type:'identifier', required:true, placeholder:'macro'},
+    {key:'telemetry',      desc:'Name of the [telemetry] stanza that defines tones (default: telemetry).',
+     type:'identifier', required:true, placeholder:'telemetry'},
+    {key:'morse',          desc:'Name of the [morse] stanza for Morse code parameters (default: morse).',
+     type:'identifier', required:true, placeholder:'morse'},
+    {key:'tonemacro',      desc:'Name of the CTCSS-triggered tone macro stanza.',
+     type:'identifier', required:true, placeholder:'tonemacro'},
+    {key:'events',         desc:'Name of the [events] stanza for event management (default: events).',
+     type:'identifier', required:true, placeholder:'events'},
+    {key:'wait-times',     desc:'Name of the [wait-times] stanza (default: wait-times).',
+     type:'identifier', required:true, placeholder:'wait-times'},
     {key:'guilinkdefault', desc:'Default telemetry mode for IAXRpt/SIP/VoIP client connections (default 1 = on).', type:'enum', options: telemModeOptions(true)},
-    {key:'guilinkdynamic', desc:'Whether users may change GUI/VoIP client telemetry with a COP command.', type:'enum', options: ZERO_ONE_OPTS},
+    {key:'guilinkdynamic', desc:'Whether users may change GUI/VoIP client telemetry with a COP command. Accepts 0/1/yes/no.',
+     type:'boolean'},
     {key:'phonelinkdefault',desc:'Default telemetry mode for autopatch / Phone Portal connections (default 1 = on).', type:'enum', options: telemModeOptions(true)},
-    {key:'phonelinkdynamic',desc:'Whether users may change phone/autopatch telemetry with a COP command.', type:'enum', options: ZERO_ONE_OPTS},
+    {key:'phonelinkdynamic',desc:'Whether users may change phone/autopatch telemetry with a COP command. Accepts 0/1/yes/no.',
+     type:'boolean'},
     {key:'tlbdefault',     desc:'Default telemetry mode for TheLinkBox connections (default 3 = follow local).', type:'enum', options: telemModeOptions(true)},
-    {key:'tlbdynamic',     desc:'Whether users may change TheLinkBox telemetry with a COP command.', type:'enum', options: ZERO_ONE_OPTS},
+    {key:'tlbdynamic',     desc:'Whether users may change TheLinkBox telemetry with a COP command. Accepts 0/1/yes/no.',
+     type:'boolean'},
   ]},
 ];
+
+// Flat key→meta lookup built from all section arrays.
+var META_BY_KEY = {};
+(GENERAL_META || []).forEach(function(m) { META_BY_KEY[m.key] = m; });
+(NODE_SECS || []).forEach(function(sec) {
+  sec.keys.forEach(function(m) { META_BY_KEY[m.key] = m; });
+});
+
+// Returns null if the value is acceptable, or an error string.
+function validateField(key, val, meta) {
+  meta = meta || META_BY_KEY[key] || {};
+  var t = meta.type || 'freeform';
+  if (val === '' || val === null || val === undefined) {
+    if (meta.required) return key + ': a value is required when this setting is enabled — disable the toggle instead of leaving it blank';
+    return null;
+  }
+  if (t === 'dtmf_char') {
+    if (val.length !== 1) return key + ': must be exactly one character (got ' + val.length + ')';
+  } else if (t === 'id_sound') {
+    if (val.charAt(0) === '|' && val.charAt(1) === 'i') {
+      var cw = val.slice(2);
+      if (!cw) return key + ': CW format |i<callsign> requires a callsign after |i (e.g. |iN8GMZ)';
+      if (!/^[A-Za-z0-9 /.\-!?,_]+$/.test(cw)) return key + ': CW callsign contains invalid characters (allowed: A-Z 0-9 space / . - ! ? , _)';
+    } else if (!/^[A-Za-z0-9_/.\-]+$/.test(val)) {
+      return key + ': sound file name contains invalid characters (letters, digits, / . - _ only — no spaces)';
+    }
+  } else if (t === 'notch') {
+    if (!/^\d+(?:\.\d+)?(?:,\d+(?:\.\d+)?)+$/.test(val)) return key + ': must be one or more freq,bandwidth pairs (e.g. 1065,40)';
+  } else if (t === 'url') {
+    if (!/^https?:\/\//.test(val)) return key + ': must start with http:// or https://';
+  } else if (t === 'identifier') {
+    if (!/^[A-Za-z0-9_\-]+$/.test(val)) return key + ': must use only letters, digits, hyphens, and underscores (no spaces)';
+  } else if (t === 'boolean') {
+    if (!/^(0|1|yes|no|true|false|on|off)$/i.test(val)) return key + ': must be one of: 0 1 yes no true false on off';
+  }
+  return null;
+}
 
 // Shared renderer for both per-node pages and global template pages — both
 // show the same NODE_SECS-driven editor over a stanza's effective settings.
