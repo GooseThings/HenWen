@@ -3431,7 +3431,9 @@ class _AudioBroadcast:
     def _read_loop(self):
         try:
             while True:
-                chunk = self.ffmpeg_proc.stdout.read(2048)
+                # read1() returns whatever is available immediately rather than
+                # blocking until the full buffer is filled — critical for low latency
+                chunk = self.ffmpeg_proc.stdout.read1(512)
                 if not chunk:
                     break
                 self._fanout(chunk)
@@ -3512,8 +3514,10 @@ def _start_broadcast(node):
             '-f', 's16le', '-ar', '8000', '-ac', '1',
             '-i', fifo_path,
             '-c:a', 'libopus', '-b:a', '24k',
-            '-frame_duration', '40',
-            '-f', 'webm', 'pipe:1',
+            '-frame_duration', '20',
+            '-f', 'webm',
+            '-cluster_time_limit', '200',  # flush WebM cluster every 200ms
+            'pipe:1',
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
