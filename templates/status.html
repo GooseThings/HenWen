@@ -422,6 +422,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <div class="card-header">
           <span class="card-title">Global Activity</span>
           <span class="card-count" id="act-count"></span>
+          <span id="act-updated" style="font-size:0.65rem;color:var(--text2);font-style:italic;margin-left:auto"></span>
         </div>
         <div class="activity-list" id="activity-list">
           <div class="empty-msg">Loading&hellip;</div>
@@ -957,6 +958,8 @@ async function refreshActivity() {
     /* Activity list — no keyed/online badge, just source dot + node info + connect btn */
     var al = document.getElementById('activity-list');
     document.getElementById('act-count').textContent = combined.length ? combined.length + ' nodes' : '';
+    var updEl = document.getElementById('act-updated');
+    if (updEl && data.global_updated) updEl.textContent = 'hub sweep ' + relTime(data.global_updated);
     if (!combined.length) {
       al.innerHTML = '<div class="empty-msg">No activity data yet</div>';
     } else {

@@ -1465,13 +1465,12 @@ def _fetch_hub_linked_nodes():
                     "location": srv.get("Location", "") or n.get("node_frequency", ""),
                     "lat":      lat,
                     "lon":      lon,
-                    "ts":       n.get("regseconds", 0),
+                    "ts":       time.time(),   # "seen now" — regseconds is node creation date, not activity
                 })
         except Exception as e:
             log("DEBUG", f"[GLOBAL-ACTIVITY] Hub {hub}: {e}")
         time.sleep(1.0)   # 1 s gap between hub requests
 
-    nodes.sort(key=lambda x: x["ts"], reverse=True)
     return nodes[:10]
 
 
