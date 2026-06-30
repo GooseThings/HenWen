@@ -13,7 +13,7 @@ Type=simple
 User=asterisk
 Group=asterisk
 WorkingDirectory=/opt/ASL3-EZ
-ExecStart=/opt/ASL3-EZ/venv/bin/gunicorn --workers 1 --bind 0.0.0.0:5000 --timeout 60 --log-level info app:app
+ExecStart=/opt/ASL3-EZ/venv/bin/gunicorn --workers 1 --worker-class gthread --threads 8 --bind 0.0.0.0:5000 --timeout 120 --log-level info app:app
 Restart=on-failure
 RestartSec=5
 

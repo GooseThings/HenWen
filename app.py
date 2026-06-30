@@ -3767,7 +3767,7 @@ class _AudioBroadcast:
     # ── client management ────────────────────────────────────────────────────
 
     def add_client(self, remote_addr='?'):
-        q = _queue_mod.Queue()
+        q = _queue_mod.Queue(maxsize=150)  # ~3 s of audio; drop oldest if client stalls
         with self._lock:
             self._clients.append(q)
         log('INFO', f'[AUDIO] {remote_addr} connected to node {self.node} '
@@ -3791,7 +3791,13 @@ class _AudioBroadcast:
     def _fanout(self, item):
         with self._lock:
             for q in self._clients:
-                q.put(item)
+                try:
+                    q.put_nowait(item)
+                except _queue_mod.Full:
+                    try: q.get_nowait()   # drop oldest frame
+                    except _queue_mod.Empty: pass
+                    try: q.put_nowait(item)
+                    except _queue_mod.Full: pass
 
     def _relay_loop(self):
         """
