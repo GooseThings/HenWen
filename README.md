@@ -2,7 +2,7 @@
 
 A browser-based web interface for managing your AllStarLink 3 node. Runs as a systemd service on the same machine as Asterisk.
 
-![kiosk](https://github.com/GooseThings/HenWen/blob/main/kiosk-example.jpg)
+![kiosk](kiosk-example.jpg)
 
 **Key features:**
 - Edit `rpt.conf` field-by-field (validated dropdowns and range-checked inputs sourced from the official ASL3 docs) or switch to a raw text editor
