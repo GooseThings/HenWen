@@ -4021,6 +4021,10 @@ def _start_broadcast(node):
         '-i', 'pipe:0',
         '-ar', '48000',        # resample to Opus native rate before encoding
         '-c:a', 'libopus', '-b:a', '24k',
+        '-vbr', 'on',          # variable bitrate: spend bits only when there's signal
+        '-cutoff', '4000',     # narrowband — the 8 kHz source has no content above 4 kHz
+                               # (Nyquist), so confine Opus to 0–4 kHz and spend every bit
+                               # on the speech band instead of an empty 4–8 kHz range
         '-frame_duration', '20',
         '-application', 'audio',
         '-f', 'webm',
