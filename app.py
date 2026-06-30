@@ -4663,15 +4663,20 @@ def _run_due_announcements():
     rows = db.execute("SELECT * FROM announcements WHERE enabled=1").fetchall()
 
     for row in rows:
+        name = row["name"]
         try:
             ws_h, ws_m = map(int, row["window_start"].split(":"))
             we_h, we_m = map(int, row["window_end"].split(":"))
         except Exception:
+            log("WARN", f"[ANNOUNCE] '{name}': bad window format "
+                        f"(start={row['window_start']!r} end={row['window_end']!r}) — skipping")
             continue
 
         start_min = ws_h * 60 + ws_m
         end_min   = we_h * 60 + we_m
         if not (start_min <= now_min <= end_min):
+            log("DEBUG", f"[ANNOUNCE] '{name}': outside window "
+                         f"{row['window_start']}–{row['window_end']} (now={now.strftime('%H:%M')})")
             continue
 
         if row["last_played"]:
@@ -4679,6 +4684,8 @@ def _run_due_announcements():
                 last = datetime.strptime(row["last_played"], "%Y-%m-%d %H:%M:%S")
                 elapsed_min = (now - last).total_seconds() / 60.0
                 if elapsed_min < row["interval_min"]:
+                    log("DEBUG", f"[ANNOUNCE] '{name}': interval not elapsed "
+                                 f"({elapsed_min:.1f}/{row['interval_min']} min)")
                     continue
             except Exception:
                 pass
@@ -4897,9 +4904,8 @@ def api_ann_play(ann_id):
             out = ami.command(_cmd)
             return {"output": out}
         result = ami_send_command(_play)
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        db.execute("UPDATE announcements SET last_played=? WHERE id=?", (now_str, ann_id))
-        db.commit()
+        # Deliberately do NOT update last_played here — test plays are manual
+        # one-offs and should not reset the scheduler's interval timer.
         return jsonify({"ok": True, "output": result.get("output", [])})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
