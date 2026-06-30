@@ -1528,6 +1528,8 @@ function _doStartListenMSE(audio, node) {
   var pending  = [];
   var cleaning = false;
 
+  var _cleaningWatchdog = null;
+
   function appendNext() {
     if (!sb || sb.updating || cleaning) return;
 
@@ -1537,6 +1539,14 @@ function _doStartListenMSE(audio, node) {
       var s0  = sb.buffered.start(0);
       if (cut > s0 + 0.1) {
         cleaning = true;
+        /* Watchdog: if updateend never fires, release the cleaning lock after 1s */
+        _cleaningWatchdog = setTimeout(function() {
+          if (cleaning) {
+            console.warn('[AUDIO] cleaning watchdog fired — releasing lock');
+            cleaning = false;
+            appendNext();
+          }
+        }, 1000);
         try { sb.remove(s0, cut); } catch(e) { cleaning = false; }
         return;
       }
@@ -1559,6 +1569,7 @@ function _doStartListenMSE(audio, node) {
     sb.mode = 'sequence';
 
     sb.addEventListener('updateend', function() {
+      if (_cleaningWatchdog) { clearTimeout(_cleaningWatchdog); _cleaningWatchdog = null; }
       cleaning = false;
       appendNext();
     });
@@ -1619,8 +1630,8 @@ function _doStartListenMSE(audio, node) {
             console.error('[AUDIO] stream read error:', e.message);
             if (_listenActive) {
               _listenActive = false;
-              _listenSetBtn('&#9834; Listen', '', false);
-              sbToast('Stream dropped — click Listen to reconnect', false);
+              _listenSetBtn('Reconnecting...', 'var(--text2)', true);
+              setTimeout(function() { if (!_listenActive) _startListen(); }, 3000);
             }
           });
         }
@@ -1629,8 +1640,8 @@ function _doStartListenMSE(audio, node) {
       .catch(function(e) {
         if (e.name === 'AbortError') return;
         _listenActive = false;
-        _listenSetBtn('&#9834; Listen', '', false);
-        sbToast('Audio stream error: ' + e.message, false);
+        _listenSetBtn('Reconnecting...', 'var(--text2)', true);
+        setTimeout(function() { if (!_listenActive) _startListen(); }, 3000);
       });
   });
 
