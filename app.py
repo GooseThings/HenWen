@@ -3801,49 +3801,82 @@ class _AudioBroadcast:
 
     def _relay_loop(self):
         """
-        Read audio from the FIFO (non-blocking) and write it — or silence —
-        to ffmpeg stdin at a steady 50 fps (20 ms / frame).
+        Feed audio to ffmpeg stdin at exactly 50 fps (one 20 ms frame per tick).
 
-        This guarantees ffmpeg always has input and therefore always produces
-        encoded output.  Uninterrupted output prevents NAT devices from
-        treating the HTTP connection as idle and dropping it.
+        Uses select() instead of a non-blocking read + sleep pair.  The old
+        pattern read the FIFO immediately and slept for the remainder; if
+        MixMonitor hadn't written yet the relay injected silence — then the
+        real audio arrived mid-sleep and was delayed one frame, producing a
+        periodic 20 ms click at the silence→audio boundary.
+
+        With select() the relay waits up to 20 ms FOR data.  If audio arrives
+        at t=18 ms it is read immediately at t=18 ms (no silence injected).
+        Silence is only injected when nothing arrives in the full 20 ms window.
+        select() also releases the GIL during the wait, reducing contention
+        with Gunicorn's gthread workers.
+
+        stdin.raw.write() bypasses Python's BufferedWriter so each 320-byte
+        frame is written to the ffmpeg pipe in one syscall with no flush().
         """
+        import select as _select_mod
+
         real_bytes    = 0
         silence_bytes = 0
         last_stats    = time.monotonic()
-        next_frame    = time.monotonic()
+        deadline      = time.monotonic()
 
         log('DEBUG', f'[AUDIO] relay started for node {self.node}')
 
         while not self._dead:
-            # Non-blocking read: up to one frame from MixMonitor
+            # Advance the per-frame deadline; if we have fallen more than two
+            # frames behind (≥ 40 ms late) reset rather than issuing a burst
+            # of back-to-back writes that would create a client-side lump.
+            deadline += _AUDIO_FRAME_INTERVAL
+            now  = time.monotonic()
+            wait = deadline - now
+            if wait < -(_AUDIO_FRAME_INTERVAL * 2):
+                deadline = now + _AUDIO_FRAME_INTERVAL
+                wait     = _AUDIO_FRAME_INTERVAL
+
+            # Block until audio data arrives or the window expires.
+            # This is the critical difference from the old design: we wait
+            # FOR data rather than reading immediately and sleeping afterward.
             try:
-                data = os.read(self.fifo_fd, _AUDIO_FRAME_BYTES)
-                if data:
-                    # Pad partial reads with silence so ffmpeg always gets
-                    # exactly one frame worth of samples.
+                r, _, _ = _select_mod.select([self.fifo_fd], [], [], max(0.0, wait))
+            except (OSError, ValueError) as exc:
+                log('WARN', f'[AUDIO] relay select error for {self.node}: {exc}')
+                break
+
+            if r:
+                try:
+                    data = os.read(self.fifo_fd, _AUDIO_FRAME_BYTES)
+                    if not data:
+                        break  # write end closed (MixMonitor stopped)
                     if len(data) < _AUDIO_FRAME_BYTES:
                         data += _AUDIO_SILENCE_FRAME[len(data):]
                     real_bytes += len(data)
-                    log('DEBUG', f'[AUDIO] relay {self.node}: {len(data)}B real audio')
-                else:
+                except BlockingIOError:
+                    # select() said readable but read returned EAGAIN (spurious
+                    # wakeup); treat this tick as silence.
                     data = _AUDIO_SILENCE_FRAME
                     silence_bytes += _AUDIO_FRAME_BYTES
-            except BlockingIOError:
+                except OSError as exc:
+                    log('WARN', f'[AUDIO] relay FIFO read error for {self.node}: {exc}')
+                    break
+            else:
+                # Timeout: no audio in this 20 ms window — fill with silence.
                 data = _AUDIO_SILENCE_FRAME
                 silence_bytes += _AUDIO_FRAME_BYTES
-            except OSError as exc:
-                log('WARN', f'[AUDIO] relay FIFO read error for {self.node}: {exc}')
-                break
 
             try:
-                self.ffmpeg_proc.stdin.write(data)
-                self.ffmpeg_proc.stdin.flush()
+                # raw.write() goes straight to the pipe fd — no BufferedWriter
+                # buffering and no flush() syscall needed.
+                self.ffmpeg_proc.stdin.raw.write(data)
             except (BrokenPipeError, OSError) as exc:
                 log('WARN', f'[AUDIO] relay ffmpeg stdin closed for {self.node}: {exc}')
                 break
 
-            # Periodic stats log (INFO so they show without LOG_LEVEL=DEBUG)
+            # Periodic stats (INFO so visible without LOG_LEVEL=DEBUG)
             now = time.monotonic()
             if now - last_stats >= 30:
                 total = real_bytes + silence_bytes
@@ -3853,14 +3886,6 @@ class _AudioBroadcast:
                             f'{silence_bytes}B silence injected')
                 real_bytes = silence_bytes = 0
                 last_stats = now
-
-            # Pace to exactly 50 fps; if we're behind, reset rather than catch up
-            next_frame += _AUDIO_FRAME_INTERVAL
-            sleep_time  = next_frame - time.monotonic()
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-            else:
-                next_frame = time.monotonic()
 
         try:
             self.ffmpeg_proc.stdin.close()
@@ -3983,9 +4008,14 @@ def _start_broadcast(node):
     #
     # WebM container (not Ogg): browsers handle live WebM streams more reliably.
     # -cluster_time_limit 200 forces a new WebM cluster every 200 ms so the
-    # browser always has fresh decode-able data and latency stays low.
+    # browser receives ~600-byte chunks 5×/s instead of ~300-byte chunks 10×/s.
+    # Fewer appendBuffer() calls per second reduces browser-side MSE overhead.
+    # -probesize 32 / -analyzeduration 0: skip format probing so encoding
+    # starts immediately (avoids several-hundred-ms startup silence).
     ffmpeg_cmd = [
         'ffmpeg', '-loglevel', 'warning',
+        '-probesize', '32',
+        '-analyzeduration', '0',
         '-fflags', '+nobuffer',
         '-f', 's16le', '-ar', '8000', '-ac', '1', '-channel_layout', 'mono',
         '-i', 'pipe:0',
@@ -3994,7 +4024,7 @@ def _start_broadcast(node):
         '-frame_duration', '20',
         '-application', 'audio',
         '-f', 'webm',
-        '-cluster_time_limit', '100',
+        '-cluster_time_limit', '200',
         'pipe:1',
     ]
     log('DEBUG', f'[AUDIO] launching ffmpeg: {" ".join(ffmpeg_cmd)}')
