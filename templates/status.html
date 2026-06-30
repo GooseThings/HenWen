@@ -947,14 +947,8 @@ async function refreshBoard() {
     }
 
     /* Footer */
-    document.getElementById('f-asl').textContent    = data.asl_version || '—';
-    document.getElementById('f-ast-ver').textContent = data.asterisk_version || '—';
-    document.getElementById('f-uptime').textContent  = data.uptime || '—';
-    var d2 = data.disk;
-    document.getElementById('f-disk').textContent   = d2 ? d2.used+'/'+d2.total : '—';
-    document.getElementById('f-updated').textContent = nowStr();
-    var anyStale = (data.nodes||[]).some(function(n){ return n.stale; });
-    document.getElementById('f-stale').style.display = anyStale ? '' : 'none';
+    var elUptime = document.getElementById('f-uptime');
+    if (elUptime) elUptime.textContent = data.uptime || '—';
 
     /* Re-render map whenever board data changes */
     updateMap();
