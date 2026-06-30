@@ -1658,8 +1658,10 @@ function _doStartListenMSE(audio, node) {
   };
 
   /* Stall recovery: when the browser fires 'waiting' (ran out of buffer),
-     pause and poll until we have ≥800ms of forward buffer before resuming.
-     This prevents choppy restarts from the browser playing on a thin buffer. */
+     poll until we have ≥400ms of forward buffer then jump to near the live
+     edge before resuming.  Jumping avoids a long speed-catch phase: without
+     the jump the player resumes from the stall point while the live edge has
+     moved ahead, so the rate controller runs at 1.12× for several seconds. */
   var _rebufferTimer = null;
   audio.addEventListener('waiting', function() {
     if (!_listenActive || ctrl.signal.aborted) return;
@@ -1670,10 +1672,13 @@ function _doStartListenMSE(audio, node) {
         clearInterval(_rebufferTimer); _rebufferTimer = null; return;
       }
       if (!sb || !sb.buffered.length) return;
-      var ahead = sb.buffered.end(sb.buffered.length - 1) - audio.currentTime;
-      if (ahead >= 0.8) {
+      var liveEdge3  = sb.buffered.end(sb.buffered.length - 1);
+      var ahead = liveEdge3 - audio.currentTime;
+      if (ahead >= 0.4) {
         clearInterval(_rebufferTimer); _rebufferTimer = null;
-        console.log('[AUDIO] rebuffered (' + ahead.toFixed(2) + 's ahead) — resuming');
+        /* Jump to near live edge so we don't have to speed-catch. */
+        audio.currentTime = Math.max(audio.currentTime, liveEdge3 - 0.4);
+        console.log('[AUDIO] rebuffered — resuming near live edge');
         audio.play().catch(function() {});
       }
     }, 100);
