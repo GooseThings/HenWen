@@ -3624,10 +3624,11 @@ def api_status_activity():
         global_ts    = _global_nodes_ts
 
     resp = jsonify({
-        "recently_keyed":    keyed,
-        "global_nodes":      global_nodes,
-        "global_updated":    global_ts,
-        "pin_duration_min":  pin_min,
+        "recently_keyed":     keyed,
+        "global_nodes":       global_nodes,
+        "global_updated":     global_ts,
+        "pin_duration_min":   pin_min,
+        "global_window_min":  _GLOBAL_DISPLAY_WINDOW_SEC / 60,
     })
     resp.headers["Cache-Control"] = "no-store"
     return resp

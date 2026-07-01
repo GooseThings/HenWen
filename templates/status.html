@@ -123,11 +123,11 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .weather-item strong { color: var(--text); }
 .weather-loading { color: var(--text2); font-style: italic; }
 
-/* ── Main two-row content area ── */
-.content-area { display: grid; grid-template-columns: 1fr 280px; grid-template-rows: 55fr 45fr; gap: 10px; flex: 1; min-height: 0; }
+/* ── Content area: Global Activity (full height) | node+connected / map | Favorites (full height) ── */
+.content-area { display: grid; grid-template-columns: 345px 1fr 280px; grid-template-rows: 55fr 45fr; gap: 10px; flex: 1; min-height: 0; }
 
 /* ── Top row: node + connected ── */
-.top-row { display: grid; grid-template-columns: 260px 1fr; gap: 10px; flex: 55; min-height: 0; }
+.top-row { grid-column: 2; grid-row: 1; display: grid; grid-template-columns: 260px 1fr; gap: 10px; min-height: 0; }
 
 /* ── Node status card ── */
 .node-card {
@@ -195,13 +195,11 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .nr-meta span { white-space: nowrap; }
 .nr-meta strong { color: var(--text); }
 
-/* ── Bottom row: activity + map ── */
-.bottom-row { display: grid; grid-template-columns: 345px 1fr; gap: 10px; flex: 45; min-height: 0; }
-
-/* ── Activity panel ── */
+/* ── Activity panel: full-height left column, matching Favorites' height ── */
 .activity-card {
+  grid-column: 1; grid-row: 1 / span 2;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
-  display: flex; flex-direction: column; overflow: hidden;
+  display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
 .activity-list { flex: 1; overflow-y: auto; }
 .activity-list::-webkit-scrollbar { width: 3px; }
@@ -228,7 +226,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .act-badge.global { background: rgba(88,166,255,.12); color: var(--accent); }
 
 /* ── Map ── */
-.map-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+.map-card { grid-column: 2; grid-row: 2; min-height: 0;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; }
 #map { flex: 1; background: #0d1117; }
 .leaflet-container { background: #0d1117 !important; }
@@ -246,7 +245,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
 /* ── Favorites sidebar ── */
 .favorites-card {
-  grid-column: 2; grid-row: 1 / span 2;
+  grid-column: 3; grid-row: 1 / span 2;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
@@ -366,6 +365,18 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   <!-- Content -->
   <div class="content-area">
 
+    <!-- Global Activity: full-height left column, matching Favorites' height -->
+    <div class="activity-card">
+      <div class="card-header">
+        <span class="card-title">Global Activity</span>
+        <span class="card-count" id="act-count"></span>
+        <span id="act-updated" style="font-size:0.65rem;color:var(--text2);font-style:italic;margin-left:auto"></span>
+      </div>
+      <div class="activity-list" id="activity-list">
+        <div class="empty-msg">Loading&hellip;</div>
+      </div>
+    </div>
+
     <!-- Top row: node status + connected nodes -->
     <div class="top-row">
 
@@ -401,39 +412,24 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
     </div>
 
-    <!-- Bottom row: activity + map -->
-    <div class="bottom-row">
-
-      <div class="activity-card">
-        <div class="card-header">
-          <span class="card-title">Global Activity</span>
-          <span class="card-count" id="act-count"></span>
-          <span id="act-updated" style="font-size:0.65rem;color:var(--text2);font-style:italic;margin-left:auto"></span>
-        </div>
-        <div class="activity-list" id="activity-list">
-          <div class="empty-msg">Loading&hellip;</div>
+    <!-- Map -->
+    <div class="map-card">
+      <div class="card-header">
+        <span class="card-title">Network Map</span><span id="map-pin-dur-label" style="font-size:0.65rem;color:var(--text2);font-style:italic;margin-left:6px"></span>
+        <div class="map-ctl">
+          <select class="map-ctl-sel" id="map-tile-sel" onchange="changeTiles(this.value)">
+            <option value="dark">OSM Dark</option>
+            <option value="carto-dk">Dark (CartoDB)</option>
+            <option value="carto-lt">Light</option>
+            <option value="topo">Topography</option>
+            <option value="satellite">Satellite</option>
+          </select>
+          <button class="map-btn on" id="btn-global"   onclick="toggleLayer('global',this)">Global</button>
+          <button class="map-btn on" id="btn-lines"    onclick="toggleLayer('lines',this)">Lines</button>
+          <button class="map-btn on" id="btn-grayline" onclick="toggleLayer('grayline',this)">Grayline</button>
         </div>
       </div>
-
-      <div class="map-card">
-        <div class="card-header">
-          <span class="card-title">Network Map</span><span id="map-pin-dur-label" style="font-size:0.65rem;color:var(--text2);font-style:italic;margin-left:6px"></span>
-          <div class="map-ctl">
-            <select class="map-ctl-sel" id="map-tile-sel" onchange="changeTiles(this.value)">
-              <option value="dark">OSM Dark</option>
-              <option value="carto-dk">Dark (CartoDB)</option>
-              <option value="carto-lt">Light</option>
-              <option value="topo">Topography</option>
-              <option value="satellite">Satellite</option>
-            </select>
-            <button class="map-btn on" id="btn-global"   onclick="toggleLayer('global',this)">Global</button>
-            <button class="map-btn on" id="btn-lines"    onclick="toggleLayer('lines',this)">Lines</button>
-            <button class="map-btn on" id="btn-grayline" onclick="toggleLayer('grayline',this)">Grayline</button>
-          </div>
-        </div>
-        <div id="map"></div>
-      </div>
-
+      <div id="map"></div>
     </div>
 
     <!-- Favorites sidebar -->
@@ -592,6 +588,7 @@ var _showGrayline = true;
 var _hostedNodes        = [];  /* [{node,callsign,location,lat,lon}] from board refresh */
 var _connectedNodes     = [];  /* [{node,callsign,location,lat,lon,host_lat,host_lon}] */
 var _lastActivityPoints = [];  /* combined activity list */
+var _globalWindowMin    = 15;  /* global-activity display window, from the server */
 var _mapFitted          = false;
 
 /* Tile layer definitions: darkFilter=true means keep OSM invert CSS */
@@ -660,12 +657,28 @@ function starSize() {
   return [36, 36];
 }
 
-function makeIcon(color) {
-  var s = pinSize();
+function makeIcon(color, opacity) {
+  var s  = pinSize();
+  var op = (opacity == null) ? 0.9 : opacity;
   var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + s[0] + '" height="' + s[1] +
     '" viewBox="0 0 20 30"><path d="M10 0C4.5 0 0 4.5 0 10c0 7.5 10 20 10 20S20 17.5 20 10C20 4.5 15.5 0 10 0z"' +
-    ' fill="' + color + '" opacity="0.9"/><circle cx="10" cy="10" r="4" fill="white" opacity="0.9"/></svg>';
+    ' fill="' + color + '" opacity="' + op + '"/><circle cx="10" cy="10" r="4" fill="white" opacity="' + op + '"/></svg>';
   return L.divIcon({ html:svg, iconSize:s, iconAnchor:[s[0]/2,s[1]], popupAnchor:[0,-s[1]], className:'' });
+}
+
+/* Global (blue) activity pins start bright and mute toward a dim blue-gray
+   as they age, fading out entirely by the time they fall out of the
+   global-activity display window (where they're dropped from the feed). */
+var GLOBAL_PIN_BRIGHT = [88, 166, 255];   /* #58a6ff */
+var GLOBAL_PIN_MUTED  = [70, 80, 95];     /* dim, desaturated blue-gray */
+
+function globalPinStyle(ageSec) {
+  var windowSec = Math.max(1, _globalWindowMin * 60);
+  var frac = Math.max(0, Math.min(1, ageSec / windowSec));
+  var rgb = GLOBAL_PIN_BRIGHT.map(function(c, i) {
+    return Math.round(c + (GLOBAL_PIN_MUTED[i] - c) * frac);
+  });
+  return { color: 'rgb(' + rgb.join(',') + ')', opacity: 0.9 - 0.6 * frac };
 }
 
 function makeStarIcon(color) {
@@ -773,9 +786,15 @@ function updateMap() {
   });
   actPts.forEach(function(p) {
     var color = p.type === 'local' ? '#3fb950' : '#58a6ff';
+    var opacity;
+    if (p.type === 'global') {
+      var ageSec = Math.max(0, (Date.now() / 1000) - (p.ts || 0));
+      var style  = globalPinStyle(ageSec);
+      color = style.color; opacity = style.opacity;
+    }
     allPinned.push(p);
     WORLD_OFFSETS.forEach(function(off) {
-      var m = L.marker([p.lat, p.lon + off], {icon:makeIcon(color)})
+      var m = L.marker([p.lat, p.lon + off], {icon:makeIcon(color, opacity)})
         .bindPopup('<b>' + esc(p.callsign||p.node) + '</b><br>' +
                    esc(p.location||'') + '<br><small>Node ' + esc(p.node) +
                    (p.type==='local' ? ' &mdash; keyed' : ' &mdash; online') + '</small>');
@@ -1006,6 +1025,7 @@ async function refreshActivity() {
     }
 
     _lastActivityPoints = combined;
+    _globalWindowMin = data.global_window_min || 15;
     updateMap();
 
     var pinMin = data.pin_duration_min || 60;
