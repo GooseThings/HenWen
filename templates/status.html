@@ -100,25 +100,9 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .header-brand strong { color: var(--accent); font-size: 1rem; }
 .header-logo { height: 69px; width: 69px; object-fit: contain; flex-shrink: 0;
   filter: drop-shadow(0 0 6px rgba(63,185,80,.35)); }
-.hb-dot {
-  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
-  background: var(--green); opacity: 0.25; margin-left: 2px;
-}
-.hb-dot.pulse { animation: hb-pulse .9s ease-out 1 forwards; }
-@keyframes hb-pulse {
-  0%   { opacity: 1; transform: scale(1.6); box-shadow: 0 0 9px rgba(63,185,80,.9); }
-  60%  { opacity: .6; transform: scale(1.1); box-shadow: 0 0 4px rgba(63,185,80,.4); }
-  100% { opacity: .25; transform: scale(1);  box-shadow: none; }
-}
 .header-clock { font-size: 2.6rem; font-weight: 300; font-variant-numeric: tabular-nums;
   letter-spacing: 0.04em; }
 .header-actions { display: flex; align-items: center; gap: 10px; }
-
-.ast-pill { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px;
-  border-radius: 20px; font-size: 0.8rem; font-weight: 600; border: 1px solid var(--border); }
-.ast-pill.running { border-color: var(--green); color: var(--green); }
-.ast-pill.stopped { border-color: var(--danger); color: var(--danger); }
-.ast-pill .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 
 .btn-icon { background: var(--bg3); border: 1px solid var(--border); color: var(--text2);
   border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 0.82rem;
@@ -152,34 +136,29 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   gap: 8px; overflow: hidden;
 }
 .node-label { font-size: 0.68rem; letter-spacing: 0.12em; color: var(--text2); text-transform: uppercase; }
-.node-number { font-size: 2.4rem; font-weight: 700; line-height: 1; }
-.node-callsign { font-size: 1.25rem; font-weight: 600; color: var(--accent); letter-spacing: 0.04em; }
+.node-number { font-size: 2.4rem; font-weight: 700; line-height: 1; color: var(--accent); text-decoration: none; }
+.node-callsign { font-size: 1.25rem; font-weight: 600; color: var(--text); letter-spacing: 0.04em; }
 .node-location { font-size: 0.78rem; color: var(--text2); text-align: center; }
 
 .keyed-wrap { display: flex; flex-direction: column; align-items: center; gap: 6px; margin: 6px 0 2px; }
 .keyed-dot { width: 56px; height: 56px; border-radius: 50%; background: #222;
   border: 3px solid #333; transition: background .4s, border-color .4s, box-shadow .4s; }
-.keyed-dot.keyed { background: var(--green); border-color: #5de073;
+.keyed-dot.healthy { background: var(--green); border-color: #5de073;
   box-shadow: 0 0 24px rgba(63,185,80,.65), 0 0 56px rgba(63,185,80,.25);
   animation: pulse-k 1.4s ease-in-out infinite; }
+.keyed-dot.down { background: var(--danger); border-color: var(--danger);
+  box-shadow: 0 0 24px rgba(219,68,55,.65), 0 0 56px rgba(219,68,55,.25);
+  animation: none; }
 @keyframes pulse-k {
   0%,100% { box-shadow: 0 0 24px rgba(63,185,80,.65), 0 0 56px rgba(63,185,80,.25); }
   50%      { box-shadow: 0 0 38px rgba(63,185,80,.9),  0 0 75px rgba(63,185,80,.4);  }
 }
 .keyed-label { font-size: 1rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
   color: var(--text2); }
-.keyed-label.keyed { color: var(--green); }
+.keyed-label.healthy { color: var(--green); }
+.keyed-label.down { color: var(--danger); }
 .link-count { font-size: 0.82rem; color: var(--text2); }
 .link-count span { color: var(--text); font-weight: 600; }
-
-.vitals { width: 100%; margin-top: auto; border-top: 1px solid var(--border); padding-top: 10px; }
-.vrow { display: flex; justify-content: space-between; padding: 4px 0;
-  border-bottom: 1px solid var(--border); font-size: 0.82rem; }
-.vrow:last-child { border-bottom: none; }
-.vk { color: var(--text2); }
-.vv { font-weight: 600; }
-.vv.ok   { color: var(--green); }
-.vv.warn { color: var(--warn); }
 
 /* ── Connected nodes ── */
 .connected-card {
@@ -207,8 +186,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   box-shadow: 0 0 5px rgba(224,68,68,.7); }
 .nr-dot.connecting { background: #d9a520; border-color: #d9a520;
   box-shadow: 0 0 5px rgba(217,165,32,.6); }
-.nr-num  { font-size: 1.05rem; font-weight: 700; font-family: var(--mono); }
-.nr-call { font-size: 0.95rem; font-weight: 600; color: var(--accent); letter-spacing: .03em; }
+.nr-num  { font-size: 1.05rem; font-weight: 700; font-family: var(--mono); color: var(--accent); text-decoration: none; }
+.nr-call { font-size: 0.95rem; font-weight: 600; color: var(--text); letter-spacing: .03em; }
 .nr-right { display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
 .nr-loc  { font-size: 0.82rem; color: var(--text2); white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; }
@@ -238,8 +217,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .act-dot.global { background: var(--accent); box-shadow: 0 0 4px rgba(88,166,255,.5); }
 .act-body { display: flex; flex-direction: column; gap: 1px; overflow: hidden; }
 .act-top { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
-.act-node { font-size: 0.95rem; font-weight: 700; font-family: var(--mono); }
-.act-call { font-size: 0.88rem; font-weight: 600; color: var(--accent); }
+.act-node { font-size: 0.95rem; font-weight: 700; font-family: var(--mono); color: var(--accent); text-decoration: none; }
+.act-call { font-size: 0.88rem; font-weight: 600; color: var(--text); }
 .act-loc  { font-size: 0.75rem; color: var(--text2); white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; }
 .act-ts   { font-size: 0.7rem; color: var(--text2); margin-left: auto; }
@@ -292,8 +271,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
   background: var(--green); box-shadow: 0 0 4px rgba(63,185,80,.7);
 }
-.fav-num  { font-size: 0.9rem; font-weight: 700; font-family: var(--mono); }
-.fav-call { font-size: 0.75rem; font-weight: 600; color: var(--accent); }
+.fav-num  { font-size: 0.9rem; font-weight: 700; font-family: var(--mono); color: var(--accent); text-decoration: none; }
+.fav-call { font-size: 0.75rem; font-weight: 600; color: var(--text); }
 .fav-loc  { font-size: 0.67rem; color: var(--text2); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
 .fav-actions { display: flex; flex-direction: column; gap: 3px; align-items: stretch; width: fit-content; }
@@ -362,11 +341,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   <header class="header">
     <div class="header-brand">
       <img class="header-logo" src="/static/logo-512.png" alt="HenWen">
-      <strong>HenWen</strong> <span>KIOSK</span><span class="hb-dot" id="hb-dot"></span>
+      <strong>HenWen</strong> <span>KIOSK</span>
     </div>
     <div class="header-clock" id="clock">--:--:--</div>
     <div class="header-actions">
-      <div class="ast-pill" id="ast-pill"><div class="dot"></div><span id="ast-text">Asterisk</span></div>
       <div id="kiosk-user-bar" style="display:none;align-items:center;gap:8px;font-size:0.75rem">
         <span id="kiosk-username" style="color:var(--text2)"></span>
         <button class="btn-icon" onclick="kioskLogout()">Logout</button>
@@ -476,7 +454,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
   <!-- Footer -->
   <footer class="footer">
-    <span>Uptime: <strong id="f-uptime">—</strong></span>
     <span>Logged in: <strong id="f-active-users">—</strong></span>
     <span><a href="https://github.com/GooseThings/HenWen" target="_blank" rel="noopener"
              style="color:var(--text2);text-decoration:none" title="HenWen on GitHub">HenWen</a></span>
@@ -510,6 +487,12 @@ function esc(s) {
   return String(s||'')
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
     .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+/* Node number rendered as a link to its AllStarLink stats page */
+function nodeLink(node, cssClass) {
+  return '<a class="' + cssClass + '" href="https://stats.allstarlink.org/stats/' +
+    encodeURIComponent(node) + '" target="_blank" rel="noopener">' + esc(node) + '</a>';
 }
 
 var _csrfToken = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
@@ -749,31 +732,39 @@ function updateMap() {
   _lines = [];
 
   var allPinned = [];
+  /* Mirrors the grayline's world-copy wrap so pins still show up on the
+     repeated map copies Leaflet renders at low zoom, instead of only
+     appearing once at their true longitude. */
+  var WORLD_OFFSETS = [-360, 0, 360];
 
   /* 1. Hosted-node gold stars */
   _hostedNodes.forEach(function(n) {
     if (n.lat == null || n.lon == null) return;
-    var m = L.marker([n.lat, n.lon], {icon:makeStarIcon('#ffd700'), zIndexOffset:1000})
-      .bindPopup('<b>&#11088; ' + esc(n.callsign||n.node) + '</b><br>' +
-                 esc(n.location||'') + '<br><small>Node ' + esc(n.node) + ' &mdash; this server</small>');
-    m.addTo(_map); _markers.push(m);
     allPinned.push(n);
+    WORLD_OFFSETS.forEach(function(off) {
+      var m = L.marker([n.lat, n.lon + off], {icon:makeStarIcon('#ffd700'), zIndexOffset:1000})
+        .bindPopup('<b>&#11088; ' + esc(n.callsign||n.node) + '</b><br>' +
+                   esc(n.location||'') + '<br><small>Node ' + esc(n.node) + ' &mdash; this server</small>');
+      m.addTo(_map); _markers.push(m);
+    });
   });
 
   /* 2. Connected-node red pins + dashed lines to their hosted node */
   _connectedNodes.forEach(function(c) {
     if (c.lat == null || c.lon == null) return;
-    var m = L.marker([c.lat, c.lon], {icon:makeIcon('#e74c3c'), zIndexOffset:500})
-      .bindPopup('<b>' + esc(c.callsign||c.node) + '</b><br>' +
-                 esc(c.location||'') + '<br><small>Node ' + esc(c.node) + ' &mdash; connected</small>');
-    m.addTo(_map); _markers.push(m);
     allPinned.push(c);
-    if (_showLines && c.host_lat != null && c.host_lon != null) {
-      var line = L.polyline([[c.lat, c.lon], [c.host_lat, c.host_lon]], {
-        color:'#e74c3c', weight:1.5, opacity:0.55, dashArray:'5 6', interactive:false
-      }).addTo(_map);
-      _lines.push(line);
-    }
+    WORLD_OFFSETS.forEach(function(off) {
+      var m = L.marker([c.lat, c.lon + off], {icon:makeIcon('#e74c3c'), zIndexOffset:500})
+        .bindPopup('<b>' + esc(c.callsign||c.node) + '</b><br>' +
+                   esc(c.location||'') + '<br><small>Node ' + esc(c.node) + ' &mdash; connected</small>');
+      m.addTo(_map); _markers.push(m);
+      if (_showLines && c.host_lat != null && c.host_lon != null) {
+        var line = L.polyline([[c.lat, c.lon + off], [c.host_lat, c.host_lon + off]], {
+          color:'#e74c3c', weight:1.5, opacity:0.55, dashArray:'5 6', interactive:false
+        }).addTo(_map);
+        _lines.push(line);
+      }
+    });
   });
 
   /* 3. Activity pins: local (green) always shown; global (blue) only if _showGlobal */
@@ -782,12 +773,14 @@ function updateMap() {
   });
   actPts.forEach(function(p) {
     var color = p.type === 'local' ? '#3fb950' : '#58a6ff';
-    var m = L.marker([p.lat, p.lon], {icon:makeIcon(color)})
-      .bindPopup('<b>' + esc(p.callsign||p.node) + '</b><br>' +
-                 esc(p.location||'') + '<br><small>Node ' + esc(p.node) +
-                 (p.type==='local' ? ' &mdash; keyed' : ' &mdash; online') + '</small>');
-    m.addTo(_map); _markers.push(m);
     allPinned.push(p);
+    WORLD_OFFSETS.forEach(function(off) {
+      var m = L.marker([p.lat, p.lon + off], {icon:makeIcon(color)})
+        .bindPopup('<b>' + esc(p.callsign||p.node) + '</b><br>' +
+                   esc(p.location||'') + '<br><small>Node ' + esc(p.node) +
+                   (p.type==='local' ? ' &mdash; keyed' : ' &mdash; online') + '</small>');
+      m.addTo(_map); _markers.push(m);
+    });
   });
 
   /* Auto-fit on first data load only */
@@ -843,12 +836,6 @@ async function refreshBoard() {
     if (!r.ok) return;
     var data = await r.json();
 
-    /* Asterisk pill */
-    var pill = document.getElementById('ast-pill');
-    pill.className = 'ast-pill ' + (data.asterisk_active ? 'running' : 'stopped');
-    document.getElementById('ast-text').textContent =
-      data.asterisk_active ? 'Asterisk Running' : 'Asterisk Stopped';
-
     /* Node card */
     var nodes = data.nodes || [];
     window._lastBoardNodes = nodes;
@@ -856,27 +843,20 @@ async function refreshBoard() {
     if (!nodes.length) {
       nc.innerHTML = '<div class="node-label">NODE</div><div style="color:var(--text2)">No nodes configured</div>';
     } else {
-      var n = nodes[0]; var keyed = n.keyed;
-      var temp = data.cpu_temp != null ? data.cpu_temp + ' °C' : 'N/A';
-      var tcls = data.cpu_temp != null ? (data.cpu_temp > 75 ? 'warn' : 'ok') : '';
-      var disk = data.disk ? data.disk.used+'/'+data.disk.total+' ('+data.disk.pct+')' : 'N/A';
+      var n = nodes[0];
+      /* Health circle: green pulse only when Asterisk is running, AMI is
+         connected, and this node's AMI data isn't stale. Any one down = solid red. */
+      var healthy = !!data.asterisk_active && !!data.ami_connected && !n.stale;
       nc.innerHTML =
         '<div class="node-label">NODE</div>' +
-        '<div class="node-number">' + esc(n.node) + '</div>' +
+        nodeLink(n.node, 'node-number') +
         (n.callsign ? '<div class="node-callsign">' + esc(n.callsign) + '</div>' : '') +
         (n.location ? '<div class="node-location">' + esc(n.location) + '</div>' : '') +
         '<div class="keyed-wrap">' +
-          '<div class="keyed-dot' + (keyed ? ' keyed' : '') + '"></div>' +
-          '<div class="keyed-label' + (keyed ? ' keyed' : '') + '">' + (keyed ? 'KEYED' : 'IDLE') + '</div>' +
+          '<div class="keyed-dot ' + (healthy ? 'healthy' : 'down') + '"></div>' +
+          '<div class="keyed-label ' + (healthy ? 'healthy' : 'down') + '">' + (healthy ? 'ONLINE' : 'OFFLINE') + '</div>' +
         '</div>' +
-        '<div class="link-count">Linked: <span>' + (n.connected ? n.connected.length : 0) + '</span></div>' +
-        (n.stale ? '<div style="font-size:.7rem;color:var(--warn)">&#9888; Stale</div>' : '') +
-        '<div class="vitals">' +
-          '<div class="vrow"><span class="vk">Uptime</span><span class="vv">' + esc(data.uptime||'—') + '</span></div>' +
-          '<div class="vrow"><span class="vk">CPU Temp</span><span class="vv ' + tcls + '">' + esc(temp) + '</span></div>' +
-          '<div class="vrow"><span class="vk">Disk</span><span class="vv">' + esc(disk) + '</span></div>' +
-          '<div class="vrow"><span class="vk">AMI</span><span class="vv ' + (data.ami_connected ? 'ok':'warn') + '">' + (data.ami_connected ? 'Connected':'Connecting') + '</span></div>' +
-        '</div>';
+        '<div class="link-count">Linked: <span>' + (n.connected ? n.connected.length : 0) + '</span></div>';
     }
 
     /* Update hosted-node star pins */
@@ -935,7 +915,7 @@ async function refreshBoard() {
           esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)">Disconnect</button>';
         return '<div class="node-row">' +
           '<div class="nr-dot' + dotClass + '"></div>' +
-          '<div class="nr-num">' + esc(c.node) + '</div>' +
+          nodeLink(c.node, 'nr-num') +
           '<div class="nr-call">' + esc(c.callsign||'—') + '</div>' +
           '<div class="nr-right">' +
             '<div class="nr-loc">' + esc(c.location||c.desc||'') + '</div>' +
@@ -948,8 +928,6 @@ async function refreshBoard() {
     }
 
     /* Footer */
-    var elUptime = document.getElementById('f-uptime');
-    if (elUptime) elUptime.textContent = data.uptime || '—';
     var elActiveUsers = document.getElementById('f-active-users');
     if (elActiveUsers) elActiveUsers.textContent = (data.active_users != null) ? data.active_users : '—';
 
@@ -958,8 +936,6 @@ async function refreshBoard() {
 
     /* Keep favorites sidebar in sync with connected state */
     renderFavorites();
-
-    triggerHeartbeat();
   } catch(e) {}
 }
 
@@ -1018,7 +994,7 @@ async function refreshActivity() {
           '<div class="act-dot ' + e.type + '"></div>' +
           '<div class="act-body">' +
             '<div class="act-top">' +
-              '<span class="act-node">' + esc(e.node) + '</span>' +
+              nodeLink(e.node, 'act-node') +
               (e.callsign ? '<span class="act-call">' + esc(e.callsign) + '</span>' : '') +
               '<span class="act-ts">' + (e.ts ? relTime(e.ts) : '') + '</span>' +
             '</div>' +
@@ -1280,15 +1256,6 @@ async function checkKioskSession() {
   if (pl) pl.style.display = (window._kioskRole === 'admin' || window._kioskRole === 'superuser') ? '' : 'none';
 }
 
-/* ── Heartbeat indicator ── */
-function triggerHeartbeat() {
-  var dot = document.getElementById('hb-dot');
-  if (!dot) return;
-  dot.classList.remove('pulse');
-  void dot.offsetWidth; /* force reflow to restart animation */
-  dot.classList.add('pulse');
-}
-
 /* ── Favorites sidebar ── */
 var _favorites = [];
 
@@ -1357,7 +1324,7 @@ function renderFavorites() {
     return '<div class="fav-row">' +
       '<div class="fav-body">' +
         '<div class="fav-top">' + dot +
-          '<span class="fav-num">' + esc(f.node) + '</span>' +
+          nodeLink(f.node, 'fav-num') +
           (name ? '<span class="fav-call">' + esc(name) + '</span>' : '') +
           '<button class="fav-del-btn" onclick="removeFavorite(\'' + esc(f.node) + '\')" title="Remove from Favorites">✕</button>' +
         '</div>' +
