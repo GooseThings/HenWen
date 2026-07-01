@@ -3685,30 +3685,38 @@ def api_status_squash_idle():
 # Audio monitoring — one ffmpeg per node, broadcast to N simultaneous clients
 #
 # Architecture:
-#   Asterisk MixMonitor → FIFO → Python relay thread → ffmpeg stdin → Ogg/Opus
+#   Asterisk MixMonitor → in-FIFO → audio_relay.py (own process) → paced-FIFO
+#                                                                       ↓
+#                                                              ffmpeg (reads
+#                                                              paced-FIFO directly)
 #                                                                       ↓
 #                                                         _read_loop fans stdout
 #                                                         to N client queues
 #
-# The Python relay is the critical piece for remote clients: it reads audio
-# from the FIFO non-blocking and injects 20 ms silence frames whenever the
-# node is quiet.  Without this, a silent node produces no TCP data and any
-# NAT device between the browser and server (home router, ISP, VPN) will
-# drop the idle connection after 30–90 s.  With continuous silence output
-# the stream stays alive indefinitely.
+# The frame-pacing relay (audio_relay.py) used to run as a Python thread
+# inside this gunicorn worker, sharing a GIL with Flask request handlers,
+# the AMI poller, and every other background thread. Any of those holding
+# the GIL for even a few milliseconds during a 20 ms frame window delayed
+# the next write — audibly, as a click or stutter. It now runs as its own
+# OS process so the kernel schedules its real-time frame loop independently
+# of everything else this worker is doing; ffmpeg reads the paced output
+# directly from a second FIFO rather than via a stdin pipe fed from within
+# this process.
 #
-# ffmpeg stderr (previously /dev/null) is now captured and emitted at WARN
-# so codec errors, format mismatches, etc. appear in journalctl.
+# The relay still injects 20 ms silence frames whenever the node is quiet:
+# without continuous output, a silent node produces no TCP data and any NAT
+# device between the browser and server (home router, ISP, VPN) will drop
+# the idle connection after 30–90 s.
+#
+# ffmpeg stderr is captured and emitted at WARN so codec errors, format
+# mismatches, etc. appear in journalctl.
 # ---------------------------------------------------------------------------
 import queue as _queue_mod
 
 _audio_lock   = threading.Lock()
 _audio_active = {}   # node -> _AudioBroadcast
 
-# 20 ms frame at 8 kHz mono s16le = 160 samples × 2 bytes
-_AUDIO_FRAME_BYTES    = 320
-_AUDIO_FRAME_INTERVAL = 0.020   # seconds
-_AUDIO_SILENCE_FRAME  = b'\x00' * _AUDIO_FRAME_BYTES
+_AUDIO_RELAY_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'audio_relay.py')
 
 
 def _find_node_channel(node):
@@ -3732,37 +3740,40 @@ def _find_node_channel(node):
 
 class _AudioBroadcast:
     """
-    Owns one ffmpeg process and fans its Ogg/Opus output to any number of
-    simultaneous HTTP streaming clients, each backed by its own Queue.
+    Owns one ffmpeg process (plus its dedicated audio_relay.py pacing process)
+    and fans ffmpeg's WebM/Opus output to any number of simultaneous HTTP
+    streaming clients, each backed by its own Queue.
 
     Lifecycle:
       - Created by the first listener for a node.
-      - _relay_loop reads audio from the FIFO and writes it (or silence) to
-        ffmpeg stdin, ensuring a continuous byte stream regardless of activity.
+      - relay_proc (audio_relay.py) paces MixMonitor's raw PCM into a second
+        FIFO that ffmpeg reads directly — see the module-level comment above
+        for why this runs out-of-process rather than as a thread here.
       - _read_loop reads ffmpeg stdout and puts chunks into every client queue.
       - _stderr_loop drains ffmpeg stderr to the application log.
+      - _relay_stderr_loop drains the relay process's stderr to the log.
       - When a client disconnects, remove_client() is called; if it was the
         last one, shutdown() tears everything down.
     """
 
-    def __init__(self, node, channel, ffmpeg_proc, fifo_fd):
+    def __init__(self, node, channel, ffmpeg_proc, relay_proc):
         self.node        = node
         self.channel     = channel
         self.ffmpeg_proc = ffmpeg_proc
-        self.fifo_fd     = fifo_fd     # O_RDWR | O_NONBLOCK fd to the FIFO
+        self.relay_proc  = relay_proc
         self._lock       = threading.Lock()
         self._clients    = []
         self._dead       = False
 
-        self._relay  = threading.Thread(target=self._relay_loop,  daemon=True,
-                                        name=f'audio-relay-{node}')
-        self._reader = threading.Thread(target=self._read_loop,   daemon=True,
+        self._reader = threading.Thread(target=self._read_loop, daemon=True,
                                         name=f'audio-reader-{node}')
         self._stderr = threading.Thread(target=self._stderr_loop, daemon=True,
                                         name=f'audio-stderr-{node}')
-        self._relay.start()
+        self._relay_stderr = threading.Thread(target=self._relay_stderr_loop, daemon=True,
+                                        name=f'audio-relay-stderr-{node}')
         self._reader.start()
         self._stderr.start()
+        self._relay_stderr.start()
 
     # ── client management ────────────────────────────────────────────────────
 
@@ -3799,100 +3810,6 @@ class _AudioBroadcast:
                     try: q.put_nowait(item)
                     except _queue_mod.Full: pass
 
-    def _relay_loop(self):
-        """
-        Feed audio to ffmpeg stdin at exactly 50 fps (one 20 ms frame per tick).
-
-        Uses select() instead of a non-blocking read + sleep pair.  The old
-        pattern read the FIFO immediately and slept for the remainder; if
-        MixMonitor hadn't written yet the relay injected silence — then the
-        real audio arrived mid-sleep and was delayed one frame, producing a
-        periodic 20 ms click at the silence→audio boundary.
-
-        With select() the relay waits up to 20 ms FOR data.  If audio arrives
-        at t=18 ms it is read immediately at t=18 ms (no silence injected).
-        Silence is only injected when nothing arrives in the full 20 ms window.
-        select() also releases the GIL during the wait, reducing contention
-        with Gunicorn's gthread workers.
-
-        stdin.raw.write() bypasses Python's BufferedWriter so each 320-byte
-        frame is written to the ffmpeg pipe in one syscall with no flush().
-        """
-        import select as _select_mod
-
-        real_bytes    = 0
-        silence_bytes = 0
-        last_stats    = time.monotonic()
-        deadline      = time.monotonic()
-
-        log('DEBUG', f'[AUDIO] relay started for node {self.node}')
-
-        while not self._dead:
-            # Advance the per-frame deadline; if we have fallen more than two
-            # frames behind (≥ 40 ms late) reset rather than issuing a burst
-            # of back-to-back writes that would create a client-side lump.
-            deadline += _AUDIO_FRAME_INTERVAL
-            now  = time.monotonic()
-            wait = deadline - now
-            if wait < -(_AUDIO_FRAME_INTERVAL * 2):
-                deadline = now + _AUDIO_FRAME_INTERVAL
-                wait     = _AUDIO_FRAME_INTERVAL
-
-            # Block until audio data arrives or the window expires.
-            # This is the critical difference from the old design: we wait
-            # FOR data rather than reading immediately and sleeping afterward.
-            try:
-                r, _, _ = _select_mod.select([self.fifo_fd], [], [], max(0.0, wait))
-            except (OSError, ValueError) as exc:
-                log('WARN', f'[AUDIO] relay select error for {self.node}: {exc}')
-                break
-
-            if r:
-                try:
-                    data = os.read(self.fifo_fd, _AUDIO_FRAME_BYTES)
-                    if not data:
-                        break  # write end closed (MixMonitor stopped)
-                    if len(data) < _AUDIO_FRAME_BYTES:
-                        data += _AUDIO_SILENCE_FRAME[len(data):]
-                    real_bytes += len(data)
-                except BlockingIOError:
-                    # select() said readable but read returned EAGAIN (spurious
-                    # wakeup); treat this tick as silence.
-                    data = _AUDIO_SILENCE_FRAME
-                    silence_bytes += _AUDIO_FRAME_BYTES
-                except OSError as exc:
-                    log('WARN', f'[AUDIO] relay FIFO read error for {self.node}: {exc}')
-                    break
-            else:
-                # Timeout: no audio in this 20 ms window — fill with silence.
-                data = _AUDIO_SILENCE_FRAME
-                silence_bytes += _AUDIO_FRAME_BYTES
-
-            try:
-                # raw.write() goes straight to the pipe fd — no BufferedWriter
-                # buffering and no flush() syscall needed.
-                self.ffmpeg_proc.stdin.raw.write(data)
-            except (BrokenPipeError, OSError) as exc:
-                log('WARN', f'[AUDIO] relay ffmpeg stdin closed for {self.node}: {exc}')
-                break
-
-            # Periodic stats (INFO so visible without LOG_LEVEL=DEBUG)
-            now = time.monotonic()
-            if now - last_stats >= 30:
-                total = real_bytes + silence_bytes
-                pct   = (real_bytes / total * 100) if total else 0.0
-                log('INFO', f'[AUDIO] node {self.node} last 30 s: '
-                            f'{real_bytes}B audio ({pct:.0f}%), '
-                            f'{silence_bytes}B silence injected')
-                real_bytes = silence_bytes = 0
-                last_stats = now
-
-        try:
-            self.ffmpeg_proc.stdin.close()
-        except Exception:
-            pass
-        log('DEBUG', f'[AUDIO] relay ended for node {self.node}')
-
     def _stderr_loop(self):
         """Forward ffmpeg stderr to the application log at WARN level."""
         try:
@@ -3900,6 +3817,16 @@ class _AudioBroadcast:
                 line = raw_line.decode('utf-8', errors='replace').rstrip()
                 if line:
                     log('WARN', f'[AUDIO] ffmpeg [{self.node}]: {line}')
+        except Exception:
+            pass
+
+    def _relay_stderr_loop(self):
+        """Forward the audio_relay.py process's stderr to the app log."""
+        try:
+            for raw_line in self.relay_proc.stderr:
+                line = raw_line.decode('utf-8', errors='replace').rstrip()
+                if line:
+                    log('WARN', f'[AUDIO] relay [{self.node}]: {line}')
         except Exception:
             pass
 
@@ -3930,12 +3857,20 @@ class _AudioBroadcast:
         with self._lock:
             self._clients.clear()
 
-        # Closing stdin signals the relay loop to stop writing,
-        # which ends ffmpeg cleanly (stdin EOF → encoder flush → process exit).
+        # Stop the relay process first: it holds the only writer fd on the
+        # paced FIFO, so once it exits ffmpeg's read hits EOF and it flushes
+        # and exits on its own. We still explicitly wait/terminate both below
+        # rather than relying purely on that cascade.
         try:
-            self.ffmpeg_proc.stdin.close()
+            self.relay_proc.terminate()
+            self.relay_proc.wait(timeout=2)
         except Exception:
-            pass
+            try:
+                self.relay_proc.kill()
+                self.relay_proc.wait(timeout=2)
+            except Exception:
+                pass
+
         try:
             self.ffmpeg_proc.wait(timeout=3)
         except Exception:
@@ -3945,18 +3880,14 @@ class _AudioBroadcast:
             except Exception:
                 pass
 
-        try:
-            os.close(self.fifo_fd)
-        except Exception:
-            pass
-
-        # Derive fifo_path from fd is not reliable after close; use stored attr
-        fifo_path = getattr(self, '_fifo_path', None)
-        if fifo_path:
-            try:
-                os.unlink(fifo_path)
-            except Exception:
-                pass
+        # Paths were stashed as attrs by _start_broadcast() after construction
+        for fifo_path in (getattr(self, '_fifo_in_path', None),
+                          getattr(self, '_fifo_out_path', None)):
+            if fifo_path:
+                try:
+                    os.unlink(fifo_path)
+                except Exception:
+                    pass
 
         def _stop_mm(ami):
             ami._send_action({'Action': 'StopMixMonitor', 'Channel': self.channel})
@@ -3971,9 +3902,9 @@ class _AudioBroadcast:
 
 def _start_broadcast(node):
     """
-    Apply MixMonitor to the node's existing Asterisk channel, then start a
-    Python relay that feeds the FIFO audio (plus silence when quiet) into
-    ffmpeg stdin → Ogg/Opus → HTTP streaming clients.
+    Apply MixMonitor to the node's existing Asterisk channel, spawn the
+    audio_relay.py pacing process (MixMonitor FIFO -> paced FIFO), then
+    point ffmpeg directly at the paced FIFO -> WebM/Opus -> HTTP clients.
     Raises on error.
     """
     channel = _find_node_channel(node)
@@ -3984,21 +3915,33 @@ def _start_broadcast(node):
         )
     log('INFO', f'[AUDIO] found channel {channel!r} for node {node}')
 
-    fifo_path = f'/tmp/asl3ez_audio_{node}.sln'
-    if os.path.exists(fifo_path):
-        os.unlink(fifo_path)
-    os.mkfifo(fifo_path)
-    os.chmod(fifo_path, 0o666)   # asterisk user must be able to write
-    log('DEBUG', f'[AUDIO] FIFO created at {fifo_path}')
+    fifo_in_path  = f'/tmp/asl3ez_audio_{node}.sln'
+    fifo_out_path = f'/tmp/asl3ez_audio_{node}_paced.sln'
+    for p in (fifo_in_path, fifo_out_path):
+        if os.path.exists(p):
+            os.unlink(p)
+        os.mkfifo(p)
+        os.chmod(p, 0o666)   # asterisk user must be able to write
+    log('DEBUG', f'[AUDIO] FIFOs created: {fifo_in_path}, {fifo_out_path}')
 
-    # O_RDWR keeps both read and write ends open in a single fd.
-    # This prevents ffmpeg (old design) or MixMonitor from seeing EOF.
-    # O_NONBLOCK lets the relay loop read without blocking when silent.
-    fifo_fd = os.open(fifo_path, os.O_RDWR | os.O_NONBLOCK)
+    # audio_relay.py opens both FIFOs itself (O_RDWR, so it never blocks
+    # waiting for MixMonitor/ffmpeg to open their ends first) and paces
+    # MixMonitor's raw PCM into fifo_out_path as strict 20 ms frames,
+    # injecting silence whenever the node is quiet. It runs as its own OS
+    # process specifically so its real-time frame loop is scheduled by the
+    # kernel rather than competing for this gunicorn worker's GIL — see the
+    # module-level comment above.
+    relay_proc = subprocess.Popen(
+        [sys.executable, _AUDIO_RELAY_SCRIPT, fifo_in_path, fifo_out_path],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    log('DEBUG', f'[AUDIO] relay PID {relay_proc.pid} for node {node}')
 
-    # ffmpeg reads from stdin (fed by our relay loop), writes WebM/Opus to stdout.
-    # Using stdin avoids ffmpeg ever blocking on the FIFO directly and lets us
-    # inject silence frames to keep the stream alive during quiet periods.
+    # ffmpeg reads the already-paced PCM directly from fifo_out_path (a normal
+    # blocking open on the read side waits for audio_relay.py's writer to open
+    # its end, which happens immediately above — no race).
     #
     # -application audio (NOT voip): the 'voip' mode enables Voice Activity
     # Detection (VAD) and Discontinuous Transmission (DTX).  Ham radio audio
@@ -4018,7 +3961,7 @@ def _start_broadcast(node):
         '-analyzeduration', '0',
         '-fflags', '+nobuffer',
         '-f', 's16le', '-ar', '8000', '-ac', '1', '-channel_layout', 'mono',
-        '-i', 'pipe:0',
+        '-i', fifo_out_path,
         '-ar', '48000',        # resample to Opus native rate before encoding
         '-c:a', 'libopus', '-b:a', '24k',
         '-vbr', 'off',         # CBR — keep a steady ~24 kbps byte flow even when the node
@@ -4038,14 +3981,15 @@ def _start_broadcast(node):
     log('DEBUG', f'[AUDIO] launching ffmpeg: {" ".join(ffmpeg_cmd)}')
     ffmpeg_proc = subprocess.Popen(
         ffmpeg_cmd,
-        stdin=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
     log('DEBUG', f'[AUDIO] ffmpeg PID {ffmpeg_proc.pid} for node {node}')
 
-    broadcast = _AudioBroadcast(node, channel, ffmpeg_proc, fifo_fd)
-    broadcast._fifo_path = fifo_path   # stored for cleanup in shutdown()
+    broadcast = _AudioBroadcast(node, channel, ffmpeg_proc, relay_proc)
+    broadcast._fifo_in_path  = fifo_in_path    # stored for cleanup in shutdown()
+    broadcast._fifo_out_path = fifo_out_path
 
     # Ensure app_mixmonitor.so is loaded (not in the default ASL3 module list)
     def _ensure_mm_module(ami):
@@ -4064,7 +4008,7 @@ def _start_broadcast(node):
         ami._send_action({
             'Action':  'MixMonitor',
             'Channel': channel,
-            'File':    fifo_path,
+            'File':    fifo_in_path,
             'Options': '',
         })
         raw = ami._recv_until('\r\n\r\n', timeout=ami.timeout)
