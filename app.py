@@ -180,12 +180,22 @@ log("INFO", f"  LOG_LEVEL      = {LOG_LEVEL}")
 # ---------------------------------------------------------------------------
 # Database
 # ---------------------------------------------------------------------------
+_db_ready = False   # flips True after the schema/migrations run once
+
+
 def get_db():
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    # The schema/migration statements below are idempotent but not free, and
+    # get_db() is called many times per second (poll loop, get_setting(), every
+    # request). Run them once, then hand back a bare connection. A cold-start
+    # race between first callers is harmless — every statement is CREATE TABLE
+    # IF NOT EXISTS or a guarded one-shot migration.
+    if _db_ready:
+        return conn
     conn.execute("""CREATE TABLE IF NOT EXISTS favorites (
         id      INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
@@ -342,6 +352,7 @@ def get_db():
     ]:
         conn.execute("INSERT OR IGNORE INTO settings (key,value) VALUES (?,?)", (_k, _v))
     conn.commit()
+    globals()['_db_ready'] = True
     return conn
 
 
@@ -1645,6 +1656,55 @@ def _geocode(location: str):
     return result
 
 
+# Non-blocking geocode for request hot paths (the Status Board). Returns the
+# cached coordinates immediately, or None if not yet known, and queues the
+# location for the background worker below to resolve. This keeps Nominatim's
+# 1.1s rate-limit sleep and network I/O out of the kiosk's board request, which
+# is polled frequently — the map pin just appears a second or two after a
+# location is first seen, instead of stalling the whole board response.
+_geocode_queue      = deque()
+_geocode_queue_seen = set()
+_geocode_queue_lock = threading.Lock()
+
+
+def _geocode_nonblocking(location: str):
+    if not location or not location.strip():
+        return None
+    loc = location.strip()
+    with _geocode_lock:
+        if loc in _geocode_cache:
+            return _geocode_cache[loc]
+    with _geocode_queue_lock:
+        if loc not in _geocode_queue_seen:
+            _geocode_queue_seen.add(loc)
+            _geocode_queue.append(loc)
+    return None
+
+
+def _geocode_worker_loop():
+    while True:
+        loc = None
+        with _geocode_queue_lock:
+            if _geocode_queue:
+                loc = _geocode_queue.popleft()
+        if loc is None:
+            time.sleep(1.0)
+            continue
+        try:
+            _geocode(loc)   # populates _geocode_cache (honors the rate limit)
+        except Exception as e:
+            log("WARN", f"[GEOCODE] background resolve failed for '{loc}': {e}")
+        finally:
+            with _geocode_queue_lock:
+                _geocode_queue_seen.discard(loc)
+
+
+def start_geocode_worker():
+    t = threading.Thread(target=_geocode_worker_loop, name="geocoder", daemon=True)
+    t.start()
+    log("INFO", "[GEOCODE] Background geocoder thread launched")
+
+
 # ── Global ASL activity (currently-keyed nodes network-wide) ──────────────────
 # Scrapes the public "Keyed Nodes" page, which lists every node presently
 # keyed up anywhere on the AllStarLink network — no arbitrary top-N cap,
@@ -2536,6 +2596,9 @@ def load_astdb():
     return False
 
 
+_ALLMONDB_EMPTY = {"callsign": "", "desc": "", "location": ""}
+
+
 def fetch_allmondb_node(node: str) -> dict:
     global _allmondb_cache, _allmondb_loaded
     node = str(node)
@@ -2546,6 +2609,19 @@ def fetch_allmondb_node(node: str) -> dict:
 
     if _astdb_loaded and node in _astdb_cache:
         return _astdb_cache[node]
+
+    # The allmondb is downloaded once (all ~41k nodes) and cached whole. If it
+    # has already been loaded, a node that still isn't present simply isn't in
+    # the database — do NOT re-download the entire thing. Cache a negative
+    # result so repeated lookups stay O(1). Without this, the Status Board
+    # (which calls lookup_node() for every connected node on every refresh)
+    # triggered a full-database HTTP download per unknown node per refresh —
+    # multi-second board latency and a flood of full downloads against
+    # allmondb.allstarlink.org.
+    if _allmondb_loaded:
+        with _allmondb_lock:
+            _allmondb_cache[node] = _ALLMONDB_EMPTY
+        return _ALLMONDB_EMPTY
 
     try:
         url = ALLMONDB_URL
@@ -2572,11 +2648,16 @@ def fetch_allmondb_node(node: str) -> dict:
                     count += 1
             _allmondb_loaded = True
             log("INFO", f"[ALLMONDB] Loaded {count} nodes from live API")
-            return _allmondb_cache.get(node, {"callsign": "", "desc": "", "location": ""})
+            # Negative-cache a miss so we don't reconsider this node next time.
+            result = _allmondb_cache.get(node)
+            if result is None:
+                _allmondb_cache[node] = _ALLMONDB_EMPTY
+                result = _ALLMONDB_EMPTY
+            return result
 
     except Exception as e:
         log("WARN", f"[ALLMONDB] API fetch failed: {e} — falling back to local cache")
-        return _astdb_cache.get(node, {"callsign": "", "desc": "", "location": ""})
+        return _astdb_cache.get(node, _ALLMONDB_EMPTY)
 
 
 def lookup_node(node: str) -> dict:
@@ -2596,7 +2677,40 @@ def lookup_node(node: str) -> dict:
 
 # ---------------------------------------------------------------------------
 # System info helpers
+#
+# These are called from the Status Board endpoint on every kiosk refresh (and
+# some from the 1s AMI poll loop), and several shell out to subprocesses that
+# are individually cheap but add up on a low-end box when polled frequently:
+#   get_disk_usage      -> df
+#   get_asl_version     -> dpkg -l asl3          (parses the dpkg DB — heaviest)
+#   get_asterisk_status -> systemctl is-active + asterisk -rx "core show version"
+#   get_cpu_temp        -> vcgencmd, ONLY if the /sys thermal path is missing
+# The underlying values barely change between refreshes, so each is wrapped in
+# a short TTL memo. This decouples cost from how fast the kiosk polls, so the
+# board can refresh quickly without spawning a burst of subprocesses each time.
 # ---------------------------------------------------------------------------
+def _ttl_cached(ttl):
+    """Memoize a zero-arg function's result for `ttl` seconds (thread-safe)."""
+    def deco(fn):
+        state = {"v": None, "ts": 0.0}
+        lock  = threading.Lock()
+        @wraps(fn)
+        def wrapper():
+            now = time.time()
+            with lock:
+                if state["ts"] and (now - state["ts"]) < ttl:
+                    return state["v"]
+            v = fn()   # computed outside the lock so a slow subprocess never
+                       # blocks other threads reading a still-fresh cached value
+            with lock:
+                state["v"]  = v
+                state["ts"] = time.time()
+            return v
+        return wrapper
+    return deco
+
+
+@_ttl_cached(10)
 def get_cpu_temp():
     try:
         with open("/sys/class/thermal/thermal_zone0/temp") as f:
@@ -2614,6 +2728,7 @@ def get_cpu_temp():
     return None
 
 
+@_ttl_cached(60)
 def get_disk_usage():
     try:
         r = subprocess.run(["df", "-h", "/"], capture_output=True, text=True)
@@ -2638,6 +2753,7 @@ def get_uptime():
         return "unknown"
 
 
+@_ttl_cached(3600)   # package version effectively never changes at runtime
 def get_asl_version():
     try:
         r = subprocess.run(["dpkg", "-l", "asl3"],
@@ -2650,6 +2766,7 @@ def get_asl_version():
     return "unknown"
 
 
+@_ttl_cached(10)
 def get_asterisk_status():
     try:
         r = subprocess.run([SYSTEMCTL_PATH, "is-active", "asterisk"],
@@ -3680,7 +3797,7 @@ def api_status_board():
         for cn in cached.get("connected", []):
             cn_info    = lookup_node(cn)
             cn_loc     = cn_info.get("location", "")
-            cn_coords  = _geocode(cn_loc) if cn_loc else None
+            cn_coords  = _geocode_nonblocking(cn_loc) if cn_loc else None
             ls = ls_snapshot.get(cn, {})
             # Idle-timeout info for kiosk display
             with _kiosk_temp_lock:
@@ -3716,7 +3833,7 @@ def api_status_board():
                 "permanent":      is_permanent,
             })
         location = info.get("location", "")
-        coords   = _geocode(location) if location else None
+        coords   = _geocode_nonblocking(location) if location else None
         node_data.append({
             "node":      node,
             "callsign":  info.get("callsign", ""),
@@ -3771,10 +3888,12 @@ def api_status_activity():
     with _keyed_history_lock:
         keyed = [e for e in _keyed_history if e["ts"] >= cutoff]
 
-    # Attach geocoordinates to recently-keyed entries (cache hit = instant)
+    # Attach geocoordinates to recently-keyed entries. Non-blocking: cache hits
+    # resolve instantly, misses queue for the background geocoder and fill in on
+    # a later poll rather than stalling this request on Nominatim's rate limit.
     for entry in keyed:
         if entry["lat"] is None and entry["location"]:
-            coords = _geocode(entry["location"])
+            coords = _geocode_nonblocking(entry["location"])
             if coords:
                 entry["lat"] = coords["lat"]
                 entry["lon"] = coords["lon"]
@@ -6196,6 +6315,7 @@ _db_conn_startup_cleanup()
 start_poller()
 start_favstats_poller()
 start_global_activity_poller()
+start_geocode_worker()
 start_announcer()
 start_connector_scheduler()
 start_id_monitor()

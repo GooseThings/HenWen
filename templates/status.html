@@ -2001,7 +2001,10 @@ refreshHistory();
 loadFavorites();
 checkKioskSession();
 
-setInterval(refreshBoard,    5000);    /* node status every 5s */
+setInterval(refreshBoard,    2000);    /* node status every 2s — board endpoint is
+                                          cheap (system-info calls are TTL-cached,
+                                          geocoding is non-blocking), so this snappier
+                                          keyed/connected refresh adds negligible load */
 setInterval(refreshActivity, 15000);   /* activity every 15s */
 setInterval(refreshHistory,  30000);   /* connection history every 30s */
 setInterval(refreshWeather,  600000);  /* weather every 10min */
