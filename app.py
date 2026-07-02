@@ -281,8 +281,13 @@ def get_db():
         cpu_temp_threshold INTEGER NOT NULL DEFAULT 80,
         on_node_connect    INTEGER NOT NULL DEFAULT 0,
         on_node_disconnect INTEGER NOT NULL DEFAULT 0,
-        watch_nodes        TEXT    NOT NULL DEFAULT ''
+        watch_nodes        TEXT    NOT NULL DEFAULT '',
+        on_dns_stuck       INTEGER NOT NULL DEFAULT 1
     )""")
+    _alert_cols = {r[1] for r in conn.execute("PRAGMA table_info(alert_config)").fetchall()}
+    if 'on_dns_stuck' not in _alert_cols:
+        conn.execute("ALTER TABLE alert_config ADD COLUMN on_dns_stuck INTEGER NOT NULL DEFAULT 1")
+    conn.commit()
     conn.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -448,6 +453,21 @@ def check_auth():
         return redirect(url_for('status_board'))
 
     return None
+
+
+@app.after_request
+def _no_cache_auth_pages(resp):
+    """
+    Login, logout, and the Manager shell must never be served from the
+    browser's cache — a cached copy of the Manager taken while logged in
+    would still render as logged in after a real logout (the page itself
+    never re-hits the server to notice the session is gone), and a cached
+    login page would carry a stale CSRF token tied to a session that no
+    longer exists.
+    """
+    if request.endpoint in ('login', 'logout', 'index'):
+        resp.headers['Cache-Control'] = 'no-store'
+    return resp
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -1153,6 +1173,7 @@ def _poll_loop():
                     pass
             # AMI state + CPU temp alerts — outside lock, OK to do network I/O here
             _check_alerts(_ami_connected, get_cpu_temp())
+            _check_asterisk_dns_health()
 
         except Exception as outer:
             log("ERROR", f"[AMI-POLL] Unexpected outer error: {outer}")
@@ -1302,6 +1323,23 @@ _kiosk_temp_lock  = threading.Lock()
 # ── Alert state ───────────────────────────────────────────────────────────────
 _alert_prev_ami    = None   # None=unknown, True=was connected, False=was disconnected
 _alert_cpu_alerted = False
+
+# ── Asterisk DNS-stuck detection ──────────────────────────────────────────────
+# Asterisk's own resolver can get stuck unable to resolve register.allstarlink.org /
+# stats.allstarlink.org (seen after a transient network blip — the OS resolver
+# recovers but Asterisk's cached state doesn't, and it silently fails every
+# ilink connect attempt from then on without any obvious error to the user).
+# Detected by tailing Asterisk's log for the failure signature; a plain
+# `systemctl restart asterisk` clears it.
+_DNS_FAIL_RE          = re.compile(r'Could not resolve host|Temporary failure in name resolution|Unable to lookup')
+_dns_log_pos          = None   # byte offset already scanned; None = not yet initialized
+_dns_fail_times       = []     # epoch timestamps of recent failure lines
+_dns_alert_active     = False
+_dns_last_check       = 0.0
+_DNS_CHECK_INTERVAL   = 20      # seconds between log scans (self-throttled; poll loop calls this every 1s)
+_DNS_FAIL_WINDOW_SEC  = 600     # only count failures within the last 10 minutes
+_DNS_FAIL_THRESHOLD   = 3       # this many failures in the window = "stuck", not a one-off blip
+_DNS_RECOVER_SEC      = 600     # 10 minutes with no new failures = recovered
 
 # ── Active session tracking (for the "logged in users" footer count) ─────────
 # Flask sessions are signed cookies with no server-side store, so we track
@@ -1496,6 +1534,67 @@ def _check_alerts(ami_ok, cpu_temp):
             _alert_cpu_alerted = True
         elif cpu_temp <= thr:
             _alert_cpu_alerted = False
+
+
+def _check_asterisk_dns_health():
+    """
+    Tail Asterisk's own log for its DNS-resolution failure signature and alert
+    if it looks stuck (repeated failures rather than one transient blip).
+    Self-throttled to _DNS_CHECK_INTERVAL even though the caller may run every
+    1s; cheap no-op the rest of the time (just an mtime-free size check).
+    """
+    global _dns_log_pos, _dns_fail_times, _dns_alert_active, _dns_last_check
+    now = time.time()
+    if now - _dns_last_check < _DNS_CHECK_INTERVAL:
+        return
+    _dns_last_check = now
+
+    cfg = _get_alert_config()
+    if not cfg or not cfg["enabled"] or not cfg["on_dns_stuck"]:
+        return
+    try:
+        if not os.path.exists(ASTERISK_LOG_PATH):
+            return
+        size = os.path.getsize(ASTERISK_LOG_PATH)
+        if _dns_log_pos is None or size < _dns_log_pos:
+            # First check since startup, or the log was rotated/truncated —
+            # start from the current end so we don't replay old history as
+            # if it just happened.
+            _dns_log_pos = size
+            return
+        if size == _dns_log_pos:
+            new_text = ""
+        else:
+            with open(ASTERISK_LOG_PATH, "rb") as f:
+                f.seek(_dns_log_pos)
+                new_text = f.read(size - _dns_log_pos).decode("utf-8", errors="replace")
+            _dns_log_pos = size
+
+        for line in new_text.splitlines():
+            if "allstarlink.org" in line and _DNS_FAIL_RE.search(line):
+                _dns_fail_times.append(now)
+
+        _dns_fail_times = [t for t in _dns_fail_times if now - t < _DNS_FAIL_WINDOW_SEC]
+
+        if not _dns_alert_active and len(_dns_fail_times) >= _DNS_FAIL_THRESHOLD:
+            _dns_alert_active = True
+            log("WARN", "[ALERTS] Asterisk DNS resolution appears stuck "
+                        f"({len(_dns_fail_times)} failures in the last "
+                        f"{_DNS_FAIL_WINDOW_SEC // 60} min)")
+            _send_alert(
+                "HenWen: Asterisk DNS Stuck",
+                "Asterisk can't resolve register.allstarlink.org / stats.allstarlink.org — "
+                "node connects will silently fail. Restarting the Asterisk service "
+                "usually clears it (sudo systemctl restart asterisk).",
+                "high")
+        elif _dns_alert_active and (not _dns_fail_times or now - _dns_fail_times[-1] > _DNS_RECOVER_SEC):
+            _dns_alert_active = False
+            _dns_fail_times   = []
+            log("INFO", "[ALERTS] Asterisk DNS resolution recovered")
+            _send_alert("HenWen: Asterisk DNS Recovered",
+                        "Asterisk is resolving AllStarLink hostnames again.", "default")
+    except Exception as e:
+        log("ERROR", f"[ALERTS] _check_asterisk_dns_health error: {e}")
 
 
 # ── Nominatim geocoding cache ─────────────────────────────────────────────────
@@ -3089,6 +3188,7 @@ def api_alerts_get_config():
             "on_ami_disconnect": 1, "on_ami_reconnect": 0,
             "on_cpu_temp_high": 1, "cpu_temp_threshold": 80,
             "on_node_connect": 0, "on_node_disconnect": 0, "watch_nodes": "",
+            "on_dns_stuck": 1,
         })
     return jsonify(dict(cfg))
 
@@ -3101,8 +3201,8 @@ def api_alerts_save_config():
         """INSERT OR REPLACE INTO alert_config
            (id, enabled, provider, ntfy_topic, pushover_token, pushover_user,
             on_ami_disconnect, on_ami_reconnect, on_cpu_temp_high, cpu_temp_threshold,
-            on_node_connect, on_node_disconnect, watch_nodes)
-           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            on_node_connect, on_node_disconnect, watch_nodes, on_dns_stuck)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             1 if data.get("enabled")           else 0,
             str(data.get("provider",           "ntfy")),
@@ -3116,6 +3216,7 @@ def api_alerts_save_config():
             1 if data.get("on_node_connect")   else 0,
             1 if data.get("on_node_disconnect") else 0,
             str(data.get("watch_nodes",        "")),
+            1 if data.get("on_dns_stuck")      else 0,
         )
     )
     db.commit()

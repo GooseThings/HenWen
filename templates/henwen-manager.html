@@ -928,6 +928,10 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
             <label class="switch"><input type="checkbox" id="al-cpu-high"><span class="slider"></span></label>
           </div>
           <div class="toggle-row">
+            <div class="toggle-info"><div class="toggle-key">Asterisk DNS Stuck</div><div class="toggle-desc">Asterisk can't resolve AllStarLink hostnames — node connects silently fail until it's restarted</div></div>
+            <label class="switch"><input type="checkbox" id="al-dns-stuck"><span class="slider"></span></label>
+          </div>
+          <div class="toggle-row">
             <div class="toggle-info"><div class="toggle-key">Node Connect</div><div class="toggle-desc">A node links to this server</div></div>
             <label class="switch"><input type="checkbox" id="al-node-conn" onchange="alToggleWatchNodes()"><span class="slider"></span></label>
           </div>
@@ -2967,6 +2971,7 @@ async function alLoad() {
   document.getElementById('al-ami-rc').checked    = !!d.on_ami_reconnect;
   document.getElementById('al-cpu-high').checked  = !!d.on_cpu_temp_high;
   document.getElementById('al-cpu-thr').value     = d.cpu_temp_threshold || 80;
+  document.getElementById('al-dns-stuck').checked = !!d.on_dns_stuck;
   document.getElementById('al-node-conn').checked = !!d.on_node_connect;
   document.getElementById('al-node-dc').checked   = !!d.on_node_disconnect;
   document.getElementById('al-watch-nodes').value = d.watch_nodes || '';
@@ -2998,6 +3003,7 @@ async function alSave() {
     on_ami_reconnect:   document.getElementById('al-ami-rc').checked    ? 1 : 0,
     on_cpu_temp_high:   document.getElementById('al-cpu-high').checked  ? 1 : 0,
     cpu_temp_threshold: parseInt(document.getElementById('al-cpu-thr').value) || 80,
+    on_dns_stuck:       document.getElementById('al-dns-stuck').checked ? 1 : 0,
     on_node_connect:    document.getElementById('al-node-conn').checked ? 1 : 0,
     on_node_disconnect: document.getElementById('al-node-dc').checked   ? 1 : 0,
     watch_nodes:        document.getElementById('al-watch-nodes').value.trim(),
