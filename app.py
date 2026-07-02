@@ -144,6 +144,36 @@ app.config['WTF_CSRF_TIME_LIMIT']     = None  # tokens don't expire; rely on ses
 csrf    = CSRFProtect(app)
 limiter = Limiter(app=app, key_func=get_remote_address, default_limits=[])
 
+
+# ---------------------------------------------------------------------------
+# Local TLS proxy support
+#
+# Remote HTTPS access runs through an Apache vhost on this same machine that
+# proxies to 127.0.0.1:5000. Honor X-Forwarded-For/-Proto only when the TCP
+# peer is that local proxy, so the login rate limiter, active-session
+# tracking, and [AUDIO] logs see the real client address — while a client
+# connecting straight to :5000 can't spoof those headers to dodge the
+# limiter.
+# ---------------------------------------------------------------------------
+class _LocalProxyFix:
+    def __init__(self, wsgi_app):
+        self.wsgi_app = wsgi_app
+
+    def __call__(self, environ, start_response):
+        if environ.get('REMOTE_ADDR') in ('127.0.0.1', '::1'):
+            xff = environ.get('HTTP_X_FORWARDED_FOR', '')
+            if xff:
+                # The last entry is the one Apache itself appended (its actual
+                # TCP peer); anything before it is client-supplied and untrusted.
+                environ['REMOTE_ADDR'] = xff.split(',')[-1].strip()
+            proto = environ.get('HTTP_X_FORWARDED_PROTO', '')
+            if proto in ('http', 'https'):
+                environ['wsgi.url_scheme'] = proto
+        return self.wsgi_app(environ, start_response)
+
+
+app.wsgi_app = _LocalProxyFix(app.wsgi_app)
+
 # ---------------------------------------------------------------------------
 # Logging  (verbose, timestamp-prefixed, written to stdout for journald)
 # ---------------------------------------------------------------------------
@@ -488,6 +518,11 @@ def _no_cache_auth_pages(resp):
     """
     if request.endpoint in ('login', 'logout', 'index'):
         resp.headers['Cache-Control'] = 'no-store'
+    elif request.endpoint in ('status_board', 'status_board_redirect'):
+        # The Status Board is a self-contained SPA with all its JS inline —
+        # served without this, browsers heuristically cache it and keep
+        # running stale player code long after a fix is deployed.
+        resp.headers['Cache-Control'] = 'no-cache'
     return resp
 
 
