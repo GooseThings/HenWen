@@ -79,6 +79,29 @@ fi
 cp "$INSTALL_DIR/ASL3-EZ.service" /etc/systemd/system/
 systemctl daemon-reload
 
+# ── Cap systemd journal size ──────────────────────────────
+# HenWen logs to stdout, which journald persists to /var/log/journal.
+# Without a limit journald defaults to ~10% of the disk; cap it so logs
+# can never crowd the disk on a small node. Applies to ALL services, not
+# just HenWen. Only created if absent, so an operator's tuned value or a
+# pre-existing site policy is left untouched.
+JOURNALD_CAP=/etc/systemd/journald.conf.d/99-henwen-cap.conf
+if [ ! -f "$JOURNALD_CAP" ]; then
+    echo "      Capping systemd journal size (SystemMaxUse=1G)..."
+    mkdir -p /etc/systemd/journald.conf.d
+    cat > "$JOURNALD_CAP" <<'JCONF'
+# Cap total systemd journal disk usage so logs can't fill the disk.
+# Applies to ALL services' journald data, not just HenWen. Remove or
+# raise these to keep more history.
+[Journal]
+SystemMaxUse=1G
+SystemKeepFree=2G
+JCONF
+    systemctl restart systemd-journald 2>/dev/null || true
+else
+    echo "      Journal cap already present ($JOURNALD_CAP) — leaving as-is."
+fi
+
 # ── Firewall ──────────────────────────────────────────────
 echo "      Opening firewall port $PORT..."
 if command -v firewall-cmd &>/dev/null; then
