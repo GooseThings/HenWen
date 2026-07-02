@@ -1593,8 +1593,22 @@ var _LISTEN_START_MS = 12000;  // give up on a stalled connection after 12 s
      T+0.75…T+1.75s       → 1.12× (barely noticeable)
      T+1.75…T+JUMP_LAG    → 1.25× (fast but still smooth via WSOLA — no pop)
      > T+_LISTEN_JUMP_LAG → hard jump to liveEdge−T (last resort, cooldown-gated) */
-var _LISTEN_TARGET_S   = 0.5;            // desired playback latency behind the live edge
+var _LISTEN_TARGET_S   = 0.5;            // baseline playback latency behind the live edge
 var _LISTEN_STARTUP_S  = 0.5;            // pre-buffer this much before the first play()
+
+/* Adaptive latency: some remote networks (traffic shapers, TLS-inspecting
+   middleboxes) deliver the stream in multi-second bursts rather than the
+   steady 200 ms cadence the server emits. A fixed 0.5 s cushion underruns on
+   every burst gap — audibly choppy. So the cushion grows each time playback
+   actually stalls and decays back toward the baseline only after a sustained
+   stall-free stretch: smooth links keep near-live latency, bursty links trade
+   a few seconds of delay for continuous audio. */
+var _LISTEN_TARGET_MAX_S    = 4.0;       // adaptive cushion ceiling
+var _LISTEN_TARGET_STEP_S   = 0.75;      // cushion added after each underrun
+var _LISTEN_TARGET_DECAY_MS = 45000;     // stall-free ms before shaving cushion
+var _LISTEN_TARGET_DECAY_S  = 0.25;      // amount shaved per decay step
+var _listenTargetS     = _LISTEN_TARGET_S; // current cushion (adapts per link)
+var _listenLastStallTs = 0;              // performance.now() of last underrun/decay step
 var _LISTEN_KEEPBUF_S  = 3.0;            // trim buffer older than this behind playhead
 var _LISTEN_RATE_MS    = 150;            // how often (ms) to run the rate controller
 var _LISTEN_RENEW_MS   = 30 * 60 * 1000;
@@ -1619,7 +1633,12 @@ function _audioClientLog(node, type, detail) {
 }
 
 function toggleListen() {
-  if (_listenActive) { _stopListen(); } else { _startListen(); }
+  if (_listenActive) { _stopListen(); return; }
+  /* Fresh manual start: relearn the link's cushion from the baseline.
+     (Auto-reconnects call _startListen directly and keep the learned value.) */
+  _listenTargetS     = _LISTEN_TARGET_S;
+  _listenLastStallTs = 0;
+  _startListen();
 }
 
 function _listenSetBtn(html, color, disabled) {
@@ -1699,6 +1718,28 @@ function _doStartListenMSE(audio, node) {
   var url = URL.createObjectURL(ms);
   _listenObjURL = url;
 
+  /* Stream-arrival counters for the periodic telemetry report (filled by
+     pump(), reset each report). maxGapMs is the worst inter-chunk arrival
+     gap — the direct measure of how bursty this network path is. */
+  var _tm = { chunks: 0, bytes: 0, lastArr: 0, maxGapMs: 0 };
+
+  function _now() {
+    return (window.performance && performance.now) ? performance.now() : Date.now();
+  }
+
+  function _rangesRel(sbuf, ct) {
+    /* Buffered ranges relative to the playhead, e.g. "-3.00..2.48" —
+       a second range after a gap shows up as "-3.00..0.00 0.35..2.10". */
+    var out = '';
+    try {
+      for (var i = 0; i < sbuf.buffered.length; i++) {
+        out += (i ? ' ' : '') + (sbuf.buffered.start(i) - ct).toFixed(2) +
+               '..' + (sbuf.buffered.end(i) - ct).toFixed(2);
+      }
+    } catch (e) { out = '?'; }
+    return out;
+  }
+
   /* pending: Uint8Arrays waiting to be appended to the SourceBuffer.
      cleaning: true while a sb.remove() is in progress (also blocks appendBuffer). */
   var pending  = [];
@@ -1767,25 +1808,37 @@ function _doStartListenMSE(audio, node) {
       var liveEdge = sb.buffered.end(sb.buffered.length - 1);
       var lag      = liveEdge - audio.currentTime;
       var nowMs    = (window.performance && performance.now) ? performance.now() : Date.now();
+
+      /* Adaptive-latency decay: after a sustained stall-free stretch, shave
+         the cushion back toward baseline one step at a time (each step
+         restarts the stall-free clock, so shrinking is gradual). */
+      if (_listenTargetS > _LISTEN_TARGET_S &&
+          (nowMs - _listenLastStallTs) > _LISTEN_TARGET_DECAY_MS) {
+        _listenTargetS = Math.max(_LISTEN_TARGET_S,
+                                  _listenTargetS - _LISTEN_TARGET_DECAY_S);
+        _listenLastStallTs = nowMs;
+        console.log('[AUDIO] link stable — cushion now ' + _listenTargetS.toFixed(2) + 's');
+      }
+
       var rate;
-      if (lag > _LISTEN_TARGET_S + _LISTEN_JUMP_LAG &&
+      if (lag > _listenTargetS + _LISTEN_JUMP_LAG &&
           (nowMs - _listenLastJumpTs) > _LISTEN_JUMP_COOLDOWN_MS) {
         /* Last resort: so far behind that even 1.25× catch-up would take too
            long (typically the tab was backgrounded/throttled). One hard seek,
            cooldown-gated so a lag hovering near the threshold can't pop
            repeatedly — within the cooldown we ride the max rate band instead. */
-        var _skipped = lag - _LISTEN_TARGET_S;
-        audio.currentTime = liveEdge - _LISTEN_TARGET_S;
+        var _skipped = lag - _listenTargetS;
+        audio.currentTime = liveEdge - _listenTargetS;
         _listenLastJumpTs = nowMs;
         rate = 1.0;
         console.log('[AUDIO] emergency jump: lag=' + lag.toFixed(3) + 's');
         _audioClientLog(node, 'emergency_jump',
           'lag=' + lag.toFixed(3) + 's skipped=' + _skipped.toFixed(3) + 's');
-      } else if (lag > _LISTEN_TARGET_S + 1.75) {
+      } else if (lag > _listenTargetS + 1.75) {
         rate = 1.25;   // fast catch-up, still smooth via WSOLA — avoids a pop
-      } else if (lag > _LISTEN_TARGET_S + 0.75) {
+      } else if (lag > _listenTargetS + 0.75) {
         rate = 1.12;
-      } else if (lag > _LISTEN_TARGET_S + 0.20) {
+      } else if (lag > _listenTargetS + 0.20) {
         rate = 1.05;
       } else {
         rate = 1.0;
@@ -1795,6 +1848,45 @@ function _doStartListenMSE(audio, node) {
         if (rate !== 1.0) console.log('[AUDIO] rate=' + rate + ' lag=' + lag.toFixed(3) + 's');
       }
     }, _LISTEN_RATE_MS);
+
+    /* Telemetry: every 10 s ship a snapshot of what playback actually did.
+       playedRatio ~1.0 means the <audio> element played continuously (chop
+       heard by the listener is baked into the received audio — look
+       upstream); well below 1.0 means playback itself kept pausing (delivery
+       or client-side problem). maxArrGap exposes bursty delivery; jank
+       exposes main-thread blocking (the board refresh shares this thread
+       with our appendBuffer pump). */
+    var _tmLastCT   = 0;
+    var _tmLastWall = _now();
+    var _tmJankMax  = 0;
+    var _tmJankLast = _tmLastWall;
+    var _jankTimer  = setInterval(function() {
+      var n = _now();
+      _tmJankMax  = Math.max(_tmJankMax, n - _tmJankLast - 250);
+      _tmJankLast = n;
+    }, 250);
+    var _tmTimer = setInterval(function() {
+      if (ctrl.signal.aborted) {
+        clearInterval(_tmTimer); clearInterval(_jankTimer);
+        return;
+      }
+      var n       = _now();
+      var wallS   = (n - _tmLastWall) / 1000;
+      var playedS = audio.currentTime - _tmLastCT;
+      _audioClientLog(node, 'telemetry',
+        'playedRatio=' + (wallS > 0 ? (playedS / wallS).toFixed(2) : '?') +
+        ' chunks=' + _tm.chunks +
+        ' kB=' + (_tm.bytes / 1024).toFixed(1) +
+        ' maxArrGap=' + _tm.maxGapMs.toFixed(0) + 'ms' +
+        ' jank=' + _tmJankMax.toFixed(0) + 'ms' +
+        ' rate=' + audio.playbackRate.toFixed(2) +
+        ' target=' + _listenTargetS.toFixed(2) + 's' +
+        ' readyState=' + audio.readyState +
+        ' ranges(rel)=' + (sb ? _rangesRel(sb, audio.currentTime) : '?'));
+      _tmLastCT   = audio.currentTime;
+      _tmLastWall = n;
+      _tm.chunks = 0; _tm.bytes = 0; _tm.maxGapMs = 0; _tmJankMax = 0;
+    }, 10000);
 
     /* Fetch the stream and pump chunks into the SourceBuffer */
     apiFetch('/api/audio/stream/' + node, { signal: ctrl.signal })
@@ -1815,6 +1907,11 @@ function _doStartListenMSE(audio, node) {
               try { ms.endOfStream(); } catch(e) {}
               return;
             }
+            var nowA = _now();
+            if (_tm.lastArr) _tm.maxGapMs = Math.max(_tm.maxGapMs, nowA - _tm.lastArr);
+            _tm.lastArr = nowA;
+            _tm.chunks++;
+            _tm.bytes += result.value.length;
             pending.push(result.value);
             appendNext();
             pump();
@@ -1861,9 +1958,24 @@ function _doStartListenMSE(audio, node) {
   audio.addEventListener('waiting', function() {
     if (!_listenActive || ctrl.signal.aborted) return;
     if (_rebufferTimer) return;
-    console.log('[AUDIO] stalled — waiting for rebuffer');
+    /* Underrun: this link needs a bigger cushion than we're keeping. Grow it
+       (capped) so the rate controller stops chasing a live edge the network
+       can't sustain, and so the rebuffer below waits for the bigger cushion. */
+    _listenLastStallTs = (window.performance && performance.now) ? performance.now() : Date.now();
+    _listenTargetS = Math.min(_LISTEN_TARGET_MAX_S, _listenTargetS + _LISTEN_TARGET_STEP_S);
+    console.log('[AUDIO] stalled — waiting for rebuffer (cushion now ' +
+                _listenTargetS.toFixed(2) + 's)');
     var _stallStart = audio.currentTime;
-    _audioClientLog(node, 'stalled', 'currentTime=' + _stallStart.toFixed(3) + 's');
+    var _stallAhead = 0;
+    try {
+      if (sb && sb.buffered.length) {
+        _stallAhead = sb.buffered.end(sb.buffered.length - 1) - _stallStart;
+      }
+    } catch (e) {}
+    _audioClientLog(node, 'stalled', 'currentTime=' + _stallStart.toFixed(3) +
+                    's newTarget=' + _listenTargetS.toFixed(2) + 's' +
+                    ' ahead=' + _stallAhead.toFixed(2) + 's' +
+                    ' ranges(rel)=' + (sb ? _rangesRel(sb, _stallStart) : '?'));
     _rebufferTimer = setInterval(function() {
       if (!_listenActive || ctrl.signal.aborted) {
         clearInterval(_rebufferTimer); _rebufferTimer = null; return;
@@ -1871,7 +1983,7 @@ function _doStartListenMSE(audio, node) {
       if (!sb || !sb.buffered.length) return;
       var liveEdge3  = sb.buffered.end(sb.buffered.length - 1);
       var ahead = liveEdge3 - audio.currentTime;
-      if (ahead >= _LISTEN_TARGET_S) {
+      if (ahead >= _listenTargetS) {
         clearInterval(_rebufferTimer); _rebufferTimer = null;
         var _preJumpTime = audio.currentTime;
         var _behind = liveEdge3 - audio.currentTime;
@@ -1879,12 +1991,28 @@ function _doStartListenMSE(audio, node) {
            the rate controller speed-catch inaudibly (WSOLA), whereas seeking
            is an audible pop. Only seek when we're so far behind that catch-up
            would take too long (matches the rate controller's last-resort). */
-        if (_behind > _LISTEN_TARGET_S + _LISTEN_JUMP_LAG) {
-          audio.currentTime = liveEdge3 - _LISTEN_TARGET_S;
+        if (_behind > _listenTargetS + _LISTEN_JUMP_LAG) {
+          audio.currentTime = liveEdge3 - _listenTargetS;
           _listenLastJumpTs = (window.performance && performance.now) ? performance.now() : Date.now();
+        } else {
+          /* If the stall was a gap in the buffer (data ahead of the playhead
+             but discontinuous), resuming in place just stalls again on the
+             same gap edge — hop to the start of the next range instead. */
+          try {
+            for (var gi = 0; gi < sb.buffered.length - 1; gi++) {
+              if (audio.currentTime >= sb.buffered.start(gi) - 0.1 &&
+                  audio.currentTime <= sb.buffered.end(gi) + 0.1) {
+                audio.currentTime = sb.buffered.start(gi + 1) + 0.05;
+                _audioClientLog(node, 'gap_skip',
+                  'from=' + _preJumpTime.toFixed(3) + 's to=' +
+                  audio.currentTime.toFixed(3) + 's');
+                break;
+              }
+            }
+          } catch (e) {}
         }
         console.log('[AUDIO] rebuffered — resuming' +
-          (_behind > _LISTEN_TARGET_S + _LISTEN_JUMP_LAG ? ' near live edge' : ' (rate-catch)'));
+          (_behind > _listenTargetS + _LISTEN_JUMP_LAG ? ' near live edge' : ' (rate-catch)'));
         _audioClientLog(node, 'rebuffered',
           'stalledFor=' + (_preJumpTime - _stallStart).toFixed(3) + 's' +
           ' skipped=' + (audio.currentTime - _preJumpTime).toFixed(3) + 's');
