@@ -505,7 +505,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     <button class="nav-item" onclick="showPage('conn-history')">Conn. History</button>
     <button class="nav-item" onclick="showPage('alerts')">Alerts</button>
     <button class="nav-item" onclick="showPage('ami-diag')">AMI Diagnostics</button>
-    <button class="nav-item" onclick="showPage('ast-console')">Asterisk Console</button>
+    <button class="nav-item" id="nav-ast-console" onclick="showPage('ast-console')">Asterisk Console</button>
     <button class="nav-item" onclick="showPage('kiosk-settings')">Kiosk Settings</button>
     <button class="nav-item" onclick="showPage('settings')">Settings</button>
     <button class="nav-item" onclick="showPage('user-mgmt')">User Management</button>
@@ -1814,7 +1814,8 @@ sudo asterisk -rx "module reload manager"</pre>
             <tr><td>General Settings, DTMF, Node ID</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
             <tr><td>Announcements, Smart Connector</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
             <tr><td>Backups, Alerts, Conn. History</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>AMI Diagnostics, Asterisk Console</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>AMI Diagnostics</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Asterisk Console</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
             <tr><td>Kiosk Settings</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
             <tr><td>User Management (create Users)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
             <tr><td>User Management (create Admins/Superusers)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
@@ -3845,9 +3846,11 @@ async function applyRoleNav() {
   if (!r.ok) return;
   var d = await r.json();
   var role = d.role || '';
-  /* Only superuser sees Raw Editor */
+  /* Only superuser sees Raw Editor and Asterisk Console */
   var rawBtn = document.getElementById('nav-raw-editor');
   if (rawBtn) rawBtn.style.display = (role === 'superuser') ? '' : 'none';
+  var consoleBtn = document.getElementById('nav-ast-console');
+  if (consoleBtn) consoleBtn.style.display = (role === 'superuser') ? '' : 'none';
 }
 
 window.addEventListener('DOMContentLoaded', function() {

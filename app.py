@@ -4394,6 +4394,8 @@ def api_asterisk_log():
       lines  (int, default 100, max 2000)
       filter (str, optional) — case-insensitive substring filter
     """
+    if session.get('role') != 'superuser':
+        return jsonify({"error": "Superuser access required"}), 403
     try:
         n = min(int(request.args.get("lines", 100)), 2000)
     except (ValueError, TypeError):
@@ -4435,6 +4437,8 @@ def api_asterisk_verbose():
     Body: {"level": N}  where N is 0–9.
     Equivalent to running 'asterisk -rvvv' (level=3) from the command line.
     """
+    if session.get('role') != 'superuser':
+        return jsonify({"error": "Superuser access required"}), 403
     data = request.get_json(force=True)
     try:
         level = int(data.get("level", 3))
@@ -4463,6 +4467,8 @@ def api_asterisk_command():
     A small blocklist prevents commands that could stop or restart Asterisk
     from the CLI page (dedicated buttons exist for restart/reload).
     """
+    if session.get('role') != 'superuser':
+        return jsonify({"error": "Superuser access required"}), 403
     data = request.get_json(force=True)
     cmd  = str(data.get("command", "")).strip()
 
