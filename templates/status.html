@@ -123,14 +123,14 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .weather-item strong { color: var(--text); }
 .weather-loading { color: var(--text2); font-style: italic; }
 
-/* ── Content area: Global Activity | Node info | Connected/Map | Favorites (outer 2 + node full height) ── */
-.content-area { display: grid; grid-template-columns: 345px 210px 1fr 280px; grid-template-rows: 55fr 45fr; gap: 10px; flex: 1; min-height: 0; }
+/* ── Content area: Node info | Connected/Map | Favorites | Global Activity (outer 2 + node full height) ── */
+.content-area { display: grid; grid-template-columns: 210px 1fr 280px 280px; grid-template-rows: 55fr 45fr; gap: 10px; flex: 1; min-height: 0; }
 
-.connected-card { grid-column: 3; grid-row: 1; }
+.connected-card { grid-column: 2; grid-row: 1; }
 
 /* ── Node status card: full height, matching Global Activity / Favorites ── */
 .node-card {
-  grid-column: 2; grid-row: 1 / span 2;
+  grid-column: 1; grid-row: 1 / span 2;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   padding: 16px 12px; display: flex; flex-direction: column;
   gap: 8px; overflow: hidden; min-height: 0;
@@ -213,9 +213,9 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .nr-meta span { white-space: nowrap; }
 .nr-meta strong { color: var(--text); }
 
-/* ── Activity panel: full-height left column, matching Favorites' height ── */
+/* ── Activity panel: full-height column, right of Favorites, matching its height ── */
 .activity-card {
-  grid-column: 1; grid-row: 1 / span 2;
+  grid-column: 4; grid-row: 1 / span 2;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
@@ -243,7 +243,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .act-badge.global { background: rgba(88,166,255,.12); color: var(--accent); }
 
 /* ── Map ── */
-.map-card { grid-column: 3; grid-row: 2; min-height: 0;
+.map-card { grid-column: 2; grid-row: 2; min-height: 0;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; }
 #map { flex: 1; background: #0d1117; }
@@ -263,7 +263,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
 /* ── Favorites sidebar ── */
 .favorites-card {
-  grid-column: 4; grid-row: 1 / span 2;
+  grid-column: 3; grid-row: 1 / span 2;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
@@ -391,18 +391,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   <!-- Content -->
   <div class="content-area">
 
-    <!-- Global Activity: full-height left column, matching Favorites' height -->
-    <div class="activity-card">
-      <div class="card-header">
-        <span class="card-title">Global Activity</span>
-        <span class="card-count" id="act-count"></span>
-        <span id="act-updated" style="font-size:0.65rem;color:var(--text2);font-style:italic;margin-left:auto"></span>
-      </div>
-      <div class="activity-list" id="activity-list">
-        <div class="empty-msg">Loading&hellip;</div>
-      </div>
-    </div>
-
     <!-- Node status: full-height column matching Global Activity / Favorites -->
     <div class="node-card">
       <div id="node-info">
@@ -473,6 +461,18 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         &#9888; Disconnect all nodes first
       </div>
       <div class="fav-list" id="fav-list">
+        <div class="empty-msg">Loading&hellip;</div>
+      </div>
+    </div>
+
+    <!-- Global Activity: full-height column, right of Favorites, matching its height -->
+    <div class="activity-card">
+      <div class="card-header">
+        <span class="card-title">Global Activity</span>
+        <span class="card-count" id="act-count"></span>
+        <span id="act-updated" style="font-size:0.65rem;color:var(--text2);font-style:italic;margin-left:auto"></span>
+      </div>
+      <div class="activity-list" id="activity-list">
         <div class="empty-msg">Loading&hellip;</div>
       </div>
     </div>
