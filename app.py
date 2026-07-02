@@ -28,6 +28,7 @@ FIXES in this version:
 
 import os
 import re
+import html
 import subprocess
 import shutil
 import socket
@@ -41,6 +42,7 @@ import sys
 import pwd
 import grp
 import secrets
+import traceback
 from datetime import datetime
 from functools import wraps
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for, send_file, Response, stream_with_context
@@ -361,19 +363,22 @@ def check_auth():
     _PUBLIC          = {'login', 'logout', 'static', None,
                         'status_board', 'status_board_redirect',
                         'api_status_board', 'api_status_weather', 'api_status_activity',
+                        'api_status_history',
                         'api_login', 'api_session', 'api_csrf_token',
                         'api_favorites', 'api_favorites_status',
                         'api_kiosk_settings_get',
-                        'api_audio_stream', 'api_audio_check', 'api_audio_stop'}
+                        'api_audio_stream', 'api_audio_check', 'api_audio_stop',
+                        'api_audio_client_log'}
     # Any logged-in user (superuser / admin / user)
     _USER_OR_ABOVE = {'api_status_connect', 'api_status_disconnect',
                       'api_fav_add', 'api_fav_delete', 'api_fav_label'}
 
-    endpoint = request.endpoint
-    if endpoint in _PUBLIC:
-        return None
+    endpoint  = request.endpoint
+    is_public = endpoint in _PUBLIC
 
     if not is_auth_configured():
+        if is_public:
+            return None
         if request.path.startswith('/api/'):
             return jsonify({"error": "Setup required", "setup_url": "/login"}), 503
         return redirect(url_for('login'))
@@ -384,17 +389,36 @@ def check_auth():
     # Idle session timeout: expire sessions inactive for too long.
     # idle_timeout is stored in the session at login (per-user value or global default).
     # 0 means never expire.
+    #
+    # This — and the active-session touch below — must run for every
+    # logged-in request, *including* public endpoints. The Status Board's
+    # normal polling (api_status_board, api_status_activity, favorites,
+    # etc.) is all public, since the board itself needs no login. A kiosk/
+    # user account that just sits on the board and never hits a protected
+    # endpoint would otherwise never get touched, so it'd never show up in
+    # the "Logged in" footer count and would never idle-expire on its own.
     if logged_in:
         now          = time.time()
         last_active  = session.get('last_active', now)
         idle_timeout = session.get('idle_timeout', SESSION_IDLE_TIMEOUT)
         if idle_timeout and now - last_active > idle_timeout:
+            remove_active_session(session.get('sid'))
             session.clear()
             logged_in = False
-            if request.path.startswith('/api/'):
-                return jsonify({"error": "Session expired", "timeout": True}), 401
-            return redirect(url_for('login'))
-        session['last_active'] = now
+            if not is_public:
+                if request.path.startswith('/api/'):
+                    return jsonify({"error": "Session expired", "timeout": True}), 401
+                return redirect(url_for('login'))
+        else:
+            session['last_active'] = now
+            sid = session.get('sid')
+            if not sid:
+                sid = secrets.token_hex(16)
+                session['sid'] = sid
+            touch_active_session(sid, session.get('username', ''))
+
+    if is_public:
+        return None
 
     # Refresh role from DB if missing or if 'admin' (the pre-v3 role that was
     # migrated to 'superuser' in the DB but not in existing sessions).
@@ -457,6 +481,8 @@ def login():
             session["role"]         = "superuser"
             session["user_id"]      = new_user["id"]
             session["idle_timeout"] = new_user["session_idle_timeout"] if new_user["session_idle_timeout"] is not None else SESSION_IDLE_TIMEOUT
+            session["sid"] = secrets.token_hex(16)
+            touch_active_session(session["sid"], username)
             log("INFO", f"[AUTH] Initial account created for '{username}'")
             return redirect(url_for('index'))
 
@@ -469,6 +495,8 @@ def login():
             session["role"]         = user["role"]
             session["user_id"]      = user["id"]
             session["idle_timeout"] = user["session_idle_timeout"] if user["session_idle_timeout"] is not None else SESSION_IDLE_TIMEOUT
+            session["sid"] = secrets.token_hex(16)
+            touch_active_session(session["sid"], username)
             log("INFO", f"[AUTH] Login: '{username}' (role={user['role']})")
             if user["role"] == "user":
                 return redirect(url_for('status_board'))
@@ -486,6 +514,7 @@ def login():
 @app.route("/logout")
 def logout():
     username = session.get("username", "unknown")
+    remove_active_session(session.get("sid"))
     session.clear()
     log("INFO", f"[AUTH] Logout: '{username}'")
     return redirect(url_for('login'))
@@ -506,6 +535,8 @@ def api_login():
         session["role"]         = user["role"]
         session["user_id"]      = user["id"]
         session["idle_timeout"] = user["session_idle_timeout"] if user["session_idle_timeout"] is not None else SESSION_IDLE_TIMEOUT
+        session["sid"] = secrets.token_hex(16)
+        touch_active_session(session["sid"], username)
         log("INFO", f"[AUTH] API Login: '{username}' (role={user['role']})")
         # session.clear() above invalidated the CSRF token that was baked into
         # the already-loaded status page meta tag.  Return the fresh token so
@@ -1272,6 +1303,35 @@ _kiosk_temp_lock  = threading.Lock()
 _alert_prev_ami    = None   # None=unknown, True=was connected, False=was disconnected
 _alert_cpu_alerted = False
 
+# ── Active session tracking (for the "logged in users" footer count) ─────────
+# Flask sessions are signed cookies with no server-side store, so we track
+# active logins ourselves via a random per-session id stashed in the cookie.
+# key: session id, val: {'username': str, 'last_active': float (epoch)}
+_active_sessions      = {}
+_active_sessions_lock = threading.Lock()
+ACTIVE_SESSION_WINDOW = 90  # seconds of inactivity before a session drops out of the count
+
+
+def touch_active_session(sid, username):
+    with _active_sessions_lock:
+        _active_sessions[sid] = {'username': username, 'last_active': time.time()}
+
+
+def remove_active_session(sid):
+    if not sid:
+        return
+    with _active_sessions_lock:
+        _active_sessions.pop(sid, None)
+
+
+def get_active_user_count():
+    cutoff = time.time() - ACTIVE_SESSION_WINDOW
+    with _active_sessions_lock:
+        stale = [sid for sid, info in _active_sessions.items() if info['last_active'] < cutoff]
+        for sid in stale:
+            del _active_sessions[sid]
+        return len(_active_sessions)
+
 
 def _record_keyed(node: str):
     """Prepend a node to the keyed history (dedup consecutive same-node entries)."""
@@ -1476,72 +1536,66 @@ def _geocode(location: str):
     return result
 
 
-# ── Global ASL activity (nodes connected to major public hubs) ────────────────
-# Instead of the 9.7 MB full-node-list endpoint (which triggers rate limits),
-# we poll a small curated list of major public hub nodes. Each request is ~3 KB.
-# From each hub's linkedNodes list we extract nodes with server lat/lon.
-# Polled every 5 minutes; 1-second gap between hub requests.
-ASL_HUB_STATS_URL     = "https://stats.allstarlink.org/api/stats/{}"
-GLOBAL_ACTIVITY_INTERVAL = 300.0   # 5 minutes between full hub sweeps
+# ── Global ASL activity (currently-keyed nodes network-wide) ──────────────────
+# Scrapes the public "Keyed Nodes" page, which lists every node presently
+# keyed up anywhere on the AllStarLink network — no arbitrary top-N cap,
+# we take every row the page lists. Polled every 2 minutes.
+ASL_KEYED_STATS_URL      = "https://stats.allstarlink.org/stats/keyed"
+GLOBAL_ACTIVITY_INTERVAL = 120.0   # 2 minutes between sweeps
 
-# Well-known public hubs with confirmed active linkedNodes populations.
-# The poller gracefully skips any that return no data.
-_ASL_HUBS = [27339, 41522, 2000, 55143, 3109050, 9050, 436000, 460220]
+# Only the most recent activity matters for display — the keyed page is a
+# live snapshot, not a history, so there's no reason to retain entries past
+# the display window itself.
+_GLOBAL_DISPLAY_WINDOW_SEC = 15 * 60   # 15 minutes
+_GLOBAL_MAX_AGE_SEC        = _GLOBAL_DISPLAY_WINDOW_SEC
 
 _global_nodes_cache = []   # rolling history, newest first, de-duped by node
 _global_nodes_ts    = 0.0
 _global_nodes_lock  = threading.Lock()
-_GLOBAL_MAX_AGE_SEC = 480 * 60  # prune entries older than max pin duration (8 h)
+
+_KEYED_ROW_RE = re.compile(r'<tr>(.*?)</tr>', re.S)
+_KEYED_TD_RE  = re.compile(r'<td>(.*?)</td>', re.S)
+_KEYED_NODE_RE     = re.compile(r'>([^<]+)</a>')
+_KEYED_CALLSIGN_RE = re.compile(r'callsign=([^"]+)"')
 
 
-def _fetch_hub_linked_nodes():
+def _fetch_keyed_nodes():
     """
-    Query each hub in _ASL_HUBS for ALL of its linkedNodes.
-    Collect every unique node across all hubs, then return the 10 whose
-    regseconds (last-connected-to-hub timestamp) are most recent.
-    This means the returned batch changes sweep-to-sweep as nodes
-    reconnect, allowing the accumulation history to grow over time.
+    Scrape https://stats.allstarlink.org/stats/keyed for every node
+    currently keyed up network-wide. Returns one entry per row on the
+    page — the page itself only lists presently-active nodes, so there
+    is no separate "top N" cap to apply here.
     """
-    seen  = set()
-    pool  = []
-    now   = time.time()
-    for hub in _ASL_HUBS:
-        try:
-            url = ASL_HUB_STATS_URL.format(hub)
-            req = urlreq.Request(url, headers={"User-Agent": "HenWen/1.0 (hub monitor)"})
-            with urlreq.urlopen(req, timeout=10) as resp:
-                d = json.loads(resp.read())
-            linked = (d.get("stats") or {}).get("data") or {}
-            linked = linked.get("linkedNodes") or []
-            for n in linked:
-                name = str(n.get("name", ""))
-                if not name or name in seen:
-                    continue
-                seen.add(name)
-                srv = n.get("server") or {}
-                lat = lon = None
-                try:
-                    if srv.get("Latitude") and srv.get("Logitude"):
-                        lat = float(srv["Latitude"])
-                        lon = float(srv["Logitude"])  # AllStarLink API typo
-                except (ValueError, TypeError):
-                    pass
-                pool.append({
-                    "node":     name,
-                    "callsign": n.get("callsign", ""),
-                    "location": srv.get("Location", "") or n.get("node_frequency", ""),
-                    "lat":      lat,
-                    "lon":      lon,
-                    "reg_ts":   int(n.get("regseconds", 0) or 0),
-                    "ts":       now,   # observation time — used for retention/display
-                })
-        except Exception as e:
-            log("DEBUG", f"[GLOBAL-ACTIVITY] Hub {hub}: {e}")
-        time.sleep(1.0)   # 1 s gap between hub requests
+    now  = time.time()
+    pool = []
+    try:
+        req = urlreq.Request(ASL_KEYED_STATS_URL, headers={"User-Agent": "HenWen/1.0 (keyed monitor)"})
+        with urlreq.urlopen(req, timeout=10) as resp:
+            page = resp.read().decode("utf-8", "replace")
+    except Exception as e:
+        log("DEBUG", f"[GLOBAL-ACTIVITY] Keyed page fetch failed: {e}")
+        return pool
 
-    # Top 10 across all hubs by most-recently-connected-to-hub
-    pool.sort(key=lambda x: x["reg_ts"], reverse=True)
-    return pool[:10]
+    for row in _KEYED_ROW_RE.findall(page):
+        tds = _KEYED_TD_RE.findall(row)
+        if len(tds) < 6:
+            continue
+        node_m = _KEYED_NODE_RE.search(tds[0])
+        node   = node_m.group(1).strip() if node_m else ""
+        if not node:
+            continue
+        call_m   = _KEYED_CALLSIGN_RE.search(tds[2])
+        callsign = html.unescape(urlparse.unquote(call_m.group(1))).strip() if call_m else ""
+        location = html.unescape(re.sub(r'<[^>]+>', '', tds[5])).strip()
+        pool.append({
+            "node":     node,
+            "callsign": callsign,
+            "location": location,
+            "lat":      None,
+            "lon":      None,
+            "ts":       now,   # observation time — used for retention/display
+        })
+    return pool
 
 
 def _global_activity_poll_loop():
@@ -1551,7 +1605,14 @@ def _global_activity_poll_loop():
     backoff = 0
     while True:
         try:
-            nodes = _fetch_hub_linked_nodes()
+            nodes = _fetch_keyed_nodes()
+            # Geocode locations to lat/lon (cached — only new locations hit Nominatim)
+            for n in nodes:
+                if n["location"]:
+                    coords = _geocode(n["location"])
+                    if coords:
+                        n["lat"] = coords["lat"]
+                        n["lon"] = coords["lon"]
             now    = time.time()
             cutoff = now - _GLOBAL_MAX_AGE_SEC
             new_ids = {n["node"] for n in nodes}
@@ -2986,6 +3047,35 @@ def api_conn_history_clear():
     return jsonify({"ok": True})
 
 
+@app.route("/api/status/history")
+def api_status_history():
+    """
+    Condensed recent connection history for the Status Board (kiosk).
+    Scoped to this server's own hosted node(s) only, completed
+    connections only (still-live ones belong in the Connected Nodes
+    panel, not here), last 5. The full searchable/paginated history
+    (any node, live or not, clear button) lives in the Manager's
+    Conn. History tab via /api/connection-history.
+    """
+    content = read_conf_file(RPT_CONF_PATH)
+    nodes   = get_node_numbers(content) if content else []
+    if not nodes:
+        return jsonify({"rows": []})
+
+    db     = get_db()
+    marks  = ",".join("?" * len(nodes))
+    rows   = db.execute(
+        f"SELECT peer_node, peer_callsign, peer_location, direction, "
+        f"connected_at, disconnected_at, duration_seconds FROM connection_history "
+        f"WHERE local_node IN ({marks}) AND disconnected_at IS NOT NULL "
+        f"ORDER BY connected_at DESC LIMIT 5",
+        [str(n) for n in nodes]
+    ).fetchall()
+    resp = jsonify({"rows": [dict(r) for r in rows]})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 # ── Alerts API ─────────────────────────────────────────────────────────────────
 
 @app.route("/api/alerts/config")
@@ -3485,26 +3575,32 @@ def api_status_board():
             with _kiosk_temp_lock:
                 tc = _kiosk_temp_conns.get((node_str_local, cn))
             if tc and not tc.get('permanent'):
-                idle_remaining = max(0, int(idle_timeout - (time.time() - tc['last_active'])))
+                idle_elapsed   = max(0, int(time.time() - tc['last_active']))
+                idle_remaining = max(0, idle_timeout - idle_elapsed)
                 is_permanent   = False
             elif tc and tc.get('permanent'):
+                idle_elapsed   = None
                 idle_remaining = None
                 is_permanent   = True
             else:
+                idle_elapsed   = None
                 idle_remaining = None
                 is_permanent   = None  # not tracked (pre-existing connection)
+            link_info = cached.get("links", {}).get(cn, {})
             connected_details.append({
                 "node":           cn,
                 "callsign":       cn_info.get("callsign", ""),
                 "desc":           cn_info.get("desc", ""),
                 "location":       cn_loc,
-                "keyed":          cached.get("links", {}).get(cn, {}).get("keyed", False),
+                "keyed":          link_info.get("keyed", False),
+                "mode":           link_info.get("mode", ""),  # 'T' = transmit/transceive, 'R' = monitor/receive-only
                 "connect_time":   lct.get(cn, ""),
                 "keyups":         ls.get("keyups", 0),
                 "last_keyed":     ls.get("last_keyed"),
                 "lat":            cn_coords["lat"] if cn_coords else None,
                 "lon":            cn_coords["lon"] if cn_coords else None,
                 "connect_state":  cached.get("link_connect_state", {}).get(cn, "ESTABLISHED"),
+                "idle_elapsed":   idle_elapsed,
                 "idle_remaining": idle_remaining,
                 "permanent":      is_permanent,
             })
@@ -3531,6 +3627,7 @@ def api_status_board():
         "cpu_temp":         get_cpu_temp(),
         "disk":             get_disk_usage(),
         "ami_connected":    _ami_connected,
+        "active_users":     get_active_user_count(),
     })
     resp.headers["Cache-Control"] = "no-store"
     return resp
@@ -3554,8 +3651,8 @@ def api_status_activity():
     """
     Combined activity feed for the Status Board:
     - recently_keyed: nodes observed keying via this node's AMI (real-time)
-    - global_nodes:   top 10 most recently registered ASL nodes worldwide
-                      (polled every 5 min from stats.allstarlink.org)
+    - global_nodes:   every node currently keyed network-wide, last 15 min
+                      (polled every 2 min from stats.allstarlink.org/stats/keyed)
     """
     pin_min = int(get_setting('kiosk_map_pin_duration_min', '60') or 60)
     cutoff  = time.time() - pin_min * 60
@@ -3571,15 +3668,19 @@ def api_status_activity():
                 entry["lat"] = coords["lat"]
                 entry["lon"] = coords["lon"]
 
+    # Global nodes always use a fixed 15-minute window, independent of the
+    # (locally configurable) pin duration used for this node's own keyed history.
+    global_cutoff = time.time() - _GLOBAL_DISPLAY_WINDOW_SEC
     with _global_nodes_lock:
-        global_nodes = [e for e in _global_nodes_cache if e["ts"] >= cutoff]
+        global_nodes = [e for e in _global_nodes_cache if e["ts"] >= global_cutoff]
         global_ts    = _global_nodes_ts
 
     resp = jsonify({
-        "recently_keyed":    keyed,
-        "global_nodes":      global_nodes,
-        "global_updated":    global_ts,
-        "pin_duration_min":  pin_min,
+        "recently_keyed":     keyed,
+        "global_nodes":       global_nodes,
+        "global_updated":     global_ts,
+        "pin_duration_min":   pin_min,
+        "global_window_min":  _GLOBAL_DISPLAY_WINDOW_SEC / 60,
     })
     resp.headers["Cache-Control"] = "no-store"
     return resp
@@ -3597,6 +3698,12 @@ def api_status_connect():
         return jsonify({"error": "Invalid remote_node"}), 400
     # Only admin/superuser may request a permanent connection
     caller_role = session.get('role', '')
+    # Kiosk/user accounts are limited to one connection at a time — the
+    # Status Board UI disables Connect/Monitor once any node is connected,
+    # but that's client-side only, so enforce it here too (a user-role
+    # session could otherwise hit this endpoint directly and stack links).
+    if caller_role == 'user' and get_cached_status(local_node).get('connected'):
+        return jsonify({"error": "Only one connection at a time is allowed for your account. Disconnect the current node first."}), 403
     permanent   = bool(data.get("permanent", False)) and caller_role in ('admin', 'superuser')
     monitor     = bool(data.get("monitor", False))
     # ilink 3  = transient transceive (default — remote can drop it, no auto-reconnect)
@@ -3681,34 +3788,65 @@ def api_status_squash_idle():
     return jsonify({"ok": True})
 
 
+@app.route("/api/status/reset-idle", methods=["POST"])
+def api_status_reset_idle():
+    """Reset the idle-timeout clock for a temporary connection back to zero, without
+    making it permanent — the connection still auto-disconnects after the configured
+    idle timeout, just measured from now instead of whenever it last went idle."""
+    if session.get('role') not in ('admin', 'superuser'):
+        return jsonify({"error": "Admin access required"}), 403
+    data        = request.json or {}
+    local_node  = str(data.get("local_node",  "")).strip()
+    remote_node = str(data.get("remote_node", "")).strip()
+    if not re.match(r'^\d{4,7}$', local_node):
+        return jsonify({"error": "Invalid local_node"}), 400
+    if not re.match(r'^\d{4,7}$', remote_node):
+        return jsonify({"error": "Invalid remote_node"}), 400
+    key = (local_node, remote_node)
+    with _kiosk_temp_lock:
+        if key not in _kiosk_temp_conns or _kiosk_temp_conns[key].get('permanent'):
+            return jsonify({"error": "Not a tracked temporary connection"}), 404
+        _kiosk_temp_conns[key]['last_active'] = time.time()
+    log("INFO", f"[API] /api/status/reset-idle {local_node} -> {remote_node}: idle timer reset")
+    return jsonify({"ok": True})
+
+
 # ---------------------------------------------------------------------------
 # Audio monitoring — one ffmpeg per node, broadcast to N simultaneous clients
 #
 # Architecture:
-#   Asterisk MixMonitor → FIFO → Python relay thread → ffmpeg stdin → Ogg/Opus
+#   Asterisk MixMonitor → in-FIFO → audio_relay.py (own process) → paced-FIFO
+#                                                                       ↓
+#                                                              ffmpeg (reads
+#                                                              paced-FIFO directly)
 #                                                                       ↓
 #                                                         _read_loop fans stdout
 #                                                         to N client queues
 #
-# The Python relay is the critical piece for remote clients: it reads audio
-# from the FIFO non-blocking and injects 20 ms silence frames whenever the
-# node is quiet.  Without this, a silent node produces no TCP data and any
-# NAT device between the browser and server (home router, ISP, VPN) will
-# drop the idle connection after 30–90 s.  With continuous silence output
-# the stream stays alive indefinitely.
+# The frame-pacing relay (audio_relay.py) used to run as a Python thread
+# inside this gunicorn worker, sharing a GIL with Flask request handlers,
+# the AMI poller, and every other background thread. Any of those holding
+# the GIL for even a few milliseconds during a 20 ms frame window delayed
+# the next write — audibly, as a click or stutter. It now runs as its own
+# OS process so the kernel schedules its real-time frame loop independently
+# of everything else this worker is doing; ffmpeg reads the paced output
+# directly from a second FIFO rather than via a stdin pipe fed from within
+# this process.
 #
-# ffmpeg stderr (previously /dev/null) is now captured and emitted at WARN
-# so codec errors, format mismatches, etc. appear in journalctl.
+# The relay still injects 20 ms silence frames whenever the node is quiet:
+# without continuous output, a silent node produces no TCP data and any NAT
+# device between the browser and server (home router, ISP, VPN) will drop
+# the idle connection after 30–90 s.
+#
+# ffmpeg stderr is captured and emitted at WARN so codec errors, format
+# mismatches, etc. appear in journalctl.
 # ---------------------------------------------------------------------------
 import queue as _queue_mod
 
 _audio_lock   = threading.Lock()
 _audio_active = {}   # node -> _AudioBroadcast
 
-# 20 ms frame at 8 kHz mono s16le = 160 samples × 2 bytes
-_AUDIO_FRAME_BYTES    = 320
-_AUDIO_FRAME_INTERVAL = 0.020   # seconds
-_AUDIO_SILENCE_FRAME  = b'\x00' * _AUDIO_FRAME_BYTES
+_AUDIO_RELAY_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'audio_relay.py')
 
 
 def _find_node_channel(node):
@@ -3732,37 +3870,49 @@ def _find_node_channel(node):
 
 class _AudioBroadcast:
     """
-    Owns one ffmpeg process and fans its Ogg/Opus output to any number of
-    simultaneous HTTP streaming clients, each backed by its own Queue.
+    Owns one ffmpeg process (plus its dedicated audio_relay.py pacing process)
+    and fans ffmpeg's WebM/Opus output to any number of simultaneous HTTP
+    streaming clients, each backed by its own Queue.
 
     Lifecycle:
       - Created by the first listener for a node.
-      - _relay_loop reads audio from the FIFO and writes it (or silence) to
-        ffmpeg stdin, ensuring a continuous byte stream regardless of activity.
+      - relay_proc (audio_relay.py) paces MixMonitor's raw PCM into a second
+        FIFO that ffmpeg reads directly — see the module-level comment above
+        for why this runs out-of-process rather than as a thread here.
       - _read_loop reads ffmpeg stdout and puts chunks into every client queue.
       - _stderr_loop drains ffmpeg stderr to the application log.
+      - _relay_stderr_loop drains the relay process's stderr to the log.
       - When a client disconnects, remove_client() is called; if it was the
         last one, shutdown() tears everything down.
     """
 
-    def __init__(self, node, channel, ffmpeg_proc, fifo_fd):
+    def __init__(self, node, channel, ffmpeg_proc, relay_proc):
         self.node        = node
         self.channel     = channel
         self.ffmpeg_proc = ffmpeg_proc
-        self.fifo_fd     = fifo_fd     # O_RDWR | O_NONBLOCK fd to the FIFO
+        self.relay_proc  = relay_proc
         self._lock       = threading.Lock()
-        self._clients    = []
+        self._clients    = []       # list of Queue
+        self._client_meta = {}      # id(q) -> {'remote':.., 'connected_at':.., 'drops':0}
         self._dead       = False
 
-        self._relay  = threading.Thread(target=self._relay_loop,  daemon=True,
-                                        name=f'audio-relay-{node}')
-        self._reader = threading.Thread(target=self._read_loop,   daemon=True,
+        self._started_at   = time.monotonic()
+        self._chunks_out   = 0
+        self._bytes_out    = 0
+        self._total_drops  = 0
+
+        self._reader = threading.Thread(target=self._read_loop, daemon=True,
                                         name=f'audio-reader-{node}')
         self._stderr = threading.Thread(target=self._stderr_loop, daemon=True,
                                         name=f'audio-stderr-{node}')
-        self._relay.start()
+        self._relay_stderr = threading.Thread(target=self._relay_stderr_loop, daemon=True,
+                                        name=f'audio-relay-stderr-{node}')
+        self._stats  = threading.Thread(target=self._stats_loop, daemon=True,
+                                        name=f'audio-stats-{node}')
         self._reader.start()
         self._stderr.start()
+        self._relay_stderr.start()
+        self._stats.start()
 
     # ── client management ────────────────────────────────────────────────────
 
@@ -3770,8 +3920,14 @@ class _AudioBroadcast:
         q = _queue_mod.Queue(maxsize=150)  # ~3 s of audio; drop oldest if client stalls
         with self._lock:
             self._clients.append(q)
+            self._client_meta[id(q)] = {
+                'remote':       remote_addr,
+                'connected_at': time.monotonic(),
+                'drops':        0,
+            }
+            count = len(self._clients)
         log('INFO', f'[AUDIO] {remote_addr} connected to node {self.node} '
-                    f'({len(self._clients)} total listener(s))')
+                    f'({count} total listener(s))')
         return q
 
     def remove_client(self, q, remote_addr='?'):
@@ -3780,9 +3936,13 @@ class _AudioBroadcast:
                 self._clients.remove(q)
             except ValueError:
                 pass
+            meta = self._client_meta.pop(id(q), None)
             remaining = len(self._clients)
+        duration = time.monotonic() - meta['connected_at'] if meta else 0.0
+        drops    = meta['drops'] if meta else 0
         log('INFO', f'[AUDIO] {remote_addr} disconnected from node {self.node} '
-                    f'({remaining} listener(s) remaining)')
+                    f'after {duration:.1f}s ({drops} frame(s) dropped for this client), '
+                    f'{remaining} listener(s) remaining')
         if remaining == 0:
             self.shutdown()
 
@@ -3798,100 +3958,39 @@ class _AudioBroadcast:
                     except _queue_mod.Empty: pass
                     try: q.put_nowait(item)
                     except _queue_mod.Full: pass
+                    meta = self._client_meta.get(id(q))
+                    if meta is not None:
+                        meta['drops'] += 1
+                    self._total_drops += 1
+                    if meta and meta['drops'] % 50 == 1:
+                        # Log the 1st, 51st, 101st... drop per client so a
+                        # slow/stalled listener is visible without spamming
+                        # the log once per dropped 20ms frame.
+                        log('DEBUG', f'[AUDIO] queue full for {meta["remote"]} on '
+                                    f'node {self.node}, dropping oldest frame '
+                                    f'(client is {meta["drops"]} frame(s) behind)')
 
-    def _relay_loop(self):
+    def _stats_loop(self):
         """
-        Feed audio to ffmpeg stdin at exactly 50 fps (one 20 ms frame per tick).
-
-        Uses select() instead of a non-blocking read + sleep pair.  The old
-        pattern read the FIFO immediately and slept for the remainder; if
-        MixMonitor hadn't written yet the relay injected silence — then the
-        real audio arrived mid-sleep and was delayed one frame, producing a
-        periodic 20 ms click at the silence→audio boundary.
-
-        With select() the relay waits up to 20 ms FOR data.  If audio arrives
-        at t=18 ms it is read immediately at t=18 ms (no silence injected).
-        Silence is only injected when nothing arrives in the full 20 ms window.
-        select() also releases the GIL during the wait, reducing contention
-        with Gunicorn's gthread workers.
-
-        stdin.raw.write() bypasses Python's BufferedWriter so each 320-byte
-        frame is written to the ffmpeg pipe in one syscall with no flush().
+        Every 10s while the broadcast is alive, log a heartbeat: uptime,
+        total bytes/chunks shipped, current listener count, and per-client
+        queue depth (how far each client is from being caught up) — the
+        thing you actually want visibility into over a long-running stream,
+        since a slow client shows up here as a growing queue depth well
+        before it starts audibly dropping frames.
         """
-        import select as _select_mod
-
-        real_bytes    = 0
-        silence_bytes = 0
-        last_stats    = time.monotonic()
-        deadline      = time.monotonic()
-
-        log('DEBUG', f'[AUDIO] relay started for node {self.node}')
-
-        while not self._dead:
-            # Advance the per-frame deadline; if we have fallen more than two
-            # frames behind (≥ 40 ms late) reset rather than issuing a burst
-            # of back-to-back writes that would create a client-side lump.
-            deadline += _AUDIO_FRAME_INTERVAL
-            now  = time.monotonic()
-            wait = deadline - now
-            if wait < -(_AUDIO_FRAME_INTERVAL * 2):
-                deadline = now + _AUDIO_FRAME_INTERVAL
-                wait     = _AUDIO_FRAME_INTERVAL
-
-            # Block until audio data arrives or the window expires.
-            # This is the critical difference from the old design: we wait
-            # FOR data rather than reading immediately and sleeping afterward.
-            try:
-                r, _, _ = _select_mod.select([self.fifo_fd], [], [], max(0.0, wait))
-            except (OSError, ValueError) as exc:
-                log('WARN', f'[AUDIO] relay select error for {self.node}: {exc}')
-                break
-
-            if r:
-                try:
-                    data = os.read(self.fifo_fd, _AUDIO_FRAME_BYTES)
-                    if not data:
-                        break  # write end closed (MixMonitor stopped)
-                    if len(data) < _AUDIO_FRAME_BYTES:
-                        data += _AUDIO_SILENCE_FRAME[len(data):]
-                    real_bytes += len(data)
-                except BlockingIOError:
-                    # select() said readable but read returned EAGAIN (spurious
-                    # wakeup); treat this tick as silence.
-                    data = _AUDIO_SILENCE_FRAME
-                    silence_bytes += _AUDIO_FRAME_BYTES
-                except OSError as exc:
-                    log('WARN', f'[AUDIO] relay FIFO read error for {self.node}: {exc}')
-                    break
-            else:
-                # Timeout: no audio in this 20 ms window — fill with silence.
-                data = _AUDIO_SILENCE_FRAME
-                silence_bytes += _AUDIO_FRAME_BYTES
-
-            try:
-                # raw.write() goes straight to the pipe fd — no BufferedWriter
-                # buffering and no flush() syscall needed.
-                self.ffmpeg_proc.stdin.raw.write(data)
-            except (BrokenPipeError, OSError) as exc:
-                log('WARN', f'[AUDIO] relay ffmpeg stdin closed for {self.node}: {exc}')
-                break
-
-            # Periodic stats (INFO so visible without LOG_LEVEL=DEBUG)
-            now = time.monotonic()
-            if now - last_stats >= 30:
-                total = real_bytes + silence_bytes
-                pct   = (real_bytes / total * 100) if total else 0.0
-                log('INFO', f'[AUDIO] node {self.node} last 30 s: '
-                            f'{real_bytes}B audio ({pct:.0f}%), '
-                            f'{silence_bytes}B silence injected')
-                real_bytes = silence_bytes = 0
-                last_stats = now
-
-        try:
-            self.ffmpeg_proc.stdin.close()
-        except Exception:
-            pass
-        log('DEBUG', f'[AUDIO] relay ended for node {self.node}')
+        while True:
+            time.sleep(10.0)
+            with self._lock:
+                if self._dead:
+                    return
+                depths = [(self._client_meta.get(id(q), {}).get('remote', '?'), q.qsize())
+                          for q in self._clients]
+            uptime = time.monotonic() - self._started_at
+            log('DEBUG', f'[AUDIO] heartbeat node={self.node} uptime={uptime:.0f}s '
+                        f'listeners={len(depths)} chunks_out={self._chunks_out} '
+                        f'bytes_out={self._bytes_out} total_drops={self._total_drops} '
+                        f'queue_depths={depths}')
 
     def _stderr_loop(self):
         """Forward ffmpeg stderr to the application log at WARN level."""
@@ -3903,24 +4002,62 @@ class _AudioBroadcast:
         except Exception:
             pass
 
+    def _relay_stderr_loop(self):
+        """
+        Forward the audio_relay.py process's stderr to the app log.
+
+        Lines prefixed 'STATS' are the relay's periodic frame/silence/drift
+        heartbeat (only emitted when AUDIO_RELAY_DEBUG=1, i.e. when we're
+        running at LOG_LEVEL=DEBUG) and are logged at DEBUG; anything else
+        from that process is unexpected and logged at WARN.
+        """
+        try:
+            for raw_line in self.relay_proc.stderr:
+                line = raw_line.decode('utf-8', errors='replace').rstrip()
+                if not line:
+                    continue
+                if line.startswith('STATS '):
+                    log('DEBUG', f'[AUDIO-RELAY] [{self.node}]: {line[len("STATS "):]}')
+                else:
+                    log('WARN', f'[AUDIO] relay [{self.node}]: {line}')
+        except Exception:
+            pass
+
     def _read_loop(self):
+        first_chunk = True
         try:
             while True:
                 chunk = self.ffmpeg_proc.stdout.read1(2048)
                 if not chunk:
+                    log('DEBUG', f'[AUDIO] ffmpeg stdout EOF for node {self.node} '
+                                f'after {self._chunks_out} chunk(s), '
+                                f'{self._bytes_out} byte(s)')
                     break
+                if first_chunk:
+                    ttfb = time.monotonic() - self._started_at
+                    log('DEBUG', f'[AUDIO] first ffmpeg chunk for node {self.node} '
+                                f'after {ttfb:.3f}s ({len(chunk)} bytes)')
+                    first_chunk = False
+                self._chunks_out += 1
+                self._bytes_out  += len(chunk)
                 self._fanout(chunk)
         finally:
             self._fanout(None)   # unblock every waiting generate()
             rc = self.ffmpeg_proc.poll()
+            uptime = time.monotonic() - self._started_at
             log('INFO', f'[AUDIO] ffmpeg for node {self.node} exited '
-                        f'(returncode={rc})')
+                        f'(returncode={rc}) after {uptime:.1f}s, '
+                        f'{self._chunks_out} chunk(s), {self._bytes_out} byte(s) total')
 
     def shutdown(self):
         with self._lock:
             if self._dead:
                 return
             self._dead = True
+        uptime = time.monotonic() - self._started_at
+        log('DEBUG', f'[AUDIO] shutting down broadcast for node {self.node}: '
+                    f'uptime={uptime:.1f}s chunks_out={self._chunks_out} '
+                    f'bytes_out={self._bytes_out} total_drops={self._total_drops}')
 
         with _audio_lock:
             if _audio_active.get(self.node) is self:
@@ -3930,12 +4067,20 @@ class _AudioBroadcast:
         with self._lock:
             self._clients.clear()
 
-        # Closing stdin signals the relay loop to stop writing,
-        # which ends ffmpeg cleanly (stdin EOF → encoder flush → process exit).
+        # Stop the relay process first: it holds the only writer fd on the
+        # paced FIFO, so once it exits ffmpeg's read hits EOF and it flushes
+        # and exits on its own. We still explicitly wait/terminate both below
+        # rather than relying purely on that cascade.
         try:
-            self.ffmpeg_proc.stdin.close()
+            self.relay_proc.terminate()
+            self.relay_proc.wait(timeout=2)
         except Exception:
-            pass
+            try:
+                self.relay_proc.kill()
+                self.relay_proc.wait(timeout=2)
+            except Exception:
+                pass
+
         try:
             self.ffmpeg_proc.wait(timeout=3)
         except Exception:
@@ -3945,18 +4090,14 @@ class _AudioBroadcast:
             except Exception:
                 pass
 
-        try:
-            os.close(self.fifo_fd)
-        except Exception:
-            pass
-
-        # Derive fifo_path from fd is not reliable after close; use stored attr
-        fifo_path = getattr(self, '_fifo_path', None)
-        if fifo_path:
-            try:
-                os.unlink(fifo_path)
-            except Exception:
-                pass
+        # Paths were stashed as attrs by _start_broadcast() after construction
+        for fifo_path in (getattr(self, '_fifo_in_path', None),
+                          getattr(self, '_fifo_out_path', None)):
+            if fifo_path:
+                try:
+                    os.unlink(fifo_path)
+                except Exception:
+                    pass
 
         def _stop_mm(ami):
             ami._send_action({'Action': 'StopMixMonitor', 'Channel': self.channel})
@@ -3971,34 +4112,56 @@ class _AudioBroadcast:
 
 def _start_broadcast(node):
     """
-    Apply MixMonitor to the node's existing Asterisk channel, then start a
-    Python relay that feeds the FIFO audio (plus silence when quiet) into
-    ffmpeg stdin → Ogg/Opus → HTTP streaming clients.
+    Apply MixMonitor to the node's existing Asterisk channel, spawn the
+    audio_relay.py pacing process (MixMonitor FIFO -> paced FIFO), then
+    point ffmpeg directly at the paced FIFO -> WebM/Opus -> HTTP clients.
     Raises on error.
     """
+    _t0 = time.monotonic()
     channel = _find_node_channel(node)
     if not channel:
         raise RuntimeError(
             f'No active Asterisk channel found for node {node}. '
             'Is the node running?'
         )
-    log('INFO', f'[AUDIO] found channel {channel!r} for node {node}')
+    log('INFO', f'[AUDIO] found channel {channel!r} for node {node} '
+                f'({time.monotonic() - _t0:.3f}s)')
 
-    fifo_path = f'/tmp/asl3ez_audio_{node}.sln'
-    if os.path.exists(fifo_path):
-        os.unlink(fifo_path)
-    os.mkfifo(fifo_path)
-    os.chmod(fifo_path, 0o666)   # asterisk user must be able to write
-    log('DEBUG', f'[AUDIO] FIFO created at {fifo_path}')
+    fifo_in_path  = f'/tmp/asl3ez_audio_{node}.sln'
+    fifo_out_path = f'/tmp/asl3ez_audio_{node}_paced.sln'
+    for p in (fifo_in_path, fifo_out_path):
+        if os.path.exists(p):
+            os.unlink(p)
+        os.mkfifo(p)
+        os.chmod(p, 0o666)   # asterisk user must be able to write
+    log('DEBUG', f'[AUDIO] FIFOs created: {fifo_in_path}, {fifo_out_path}')
 
-    # O_RDWR keeps both read and write ends open in a single fd.
-    # This prevents ffmpeg (old design) or MixMonitor from seeing EOF.
-    # O_NONBLOCK lets the relay loop read without blocking when silent.
-    fifo_fd = os.open(fifo_path, os.O_RDWR | os.O_NONBLOCK)
+    # audio_relay.py opens both FIFOs itself (O_RDWR, so it never blocks
+    # waiting for MixMonitor/ffmpeg to open their ends first) and paces
+    # MixMonitor's raw PCM into fifo_out_path as strict 20 ms frames,
+    # injecting silence whenever the node is quiet. It runs as its own OS
+    # process specifically so its real-time frame loop is scheduled by the
+    # kernel rather than competing for this gunicorn worker's GIL — see the
+    # module-level comment above.
+    _relay_env = os.environ.copy()
+    if LOG_LEVEL == 'DEBUG':
+        # Only ask the relay for its per-5s frame/silence/drift heartbeat when
+        # we're actually running at DEBUG ourselves — otherwise the lines
+        # would just be dropped by _relay_stderr_loop below anyway.
+        _relay_env['AUDIO_RELAY_DEBUG'] = '1'
+    relay_proc = subprocess.Popen(
+        [sys.executable, _AUDIO_RELAY_SCRIPT, fifo_in_path, fifo_out_path],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        env=_relay_env,
+    )
+    log('DEBUG', f'[AUDIO] relay PID {relay_proc.pid} for node {node} '
+                f'(heartbeat={"on" if _relay_env.get("AUDIO_RELAY_DEBUG") else "off"})')
 
-    # ffmpeg reads from stdin (fed by our relay loop), writes WebM/Opus to stdout.
-    # Using stdin avoids ffmpeg ever blocking on the FIFO directly and lets us
-    # inject silence frames to keep the stream alive during quiet periods.
+    # ffmpeg reads the already-paced PCM directly from fifo_out_path (a normal
+    # blocking open on the read side waits for audio_relay.py's writer to open
+    # its end, which happens immediately above — no race).
     #
     # -application audio (NOT voip): the 'voip' mode enables Voice Activity
     # Detection (VAD) and Discontinuous Transmission (DTX).  Ham radio audio
@@ -4018,7 +4181,7 @@ def _start_broadcast(node):
         '-analyzeduration', '0',
         '-fflags', '+nobuffer',
         '-f', 's16le', '-ar', '8000', '-ac', '1', '-channel_layout', 'mono',
-        '-i', 'pipe:0',
+        '-i', fifo_out_path,
         '-ar', '48000',        # resample to Opus native rate before encoding
         '-c:a', 'libopus', '-b:a', '24k',
         '-vbr', 'off',         # CBR — keep a steady ~24 kbps byte flow even when the node
@@ -4038,14 +4201,15 @@ def _start_broadcast(node):
     log('DEBUG', f'[AUDIO] launching ffmpeg: {" ".join(ffmpeg_cmd)}')
     ffmpeg_proc = subprocess.Popen(
         ffmpeg_cmd,
-        stdin=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
     log('DEBUG', f'[AUDIO] ffmpeg PID {ffmpeg_proc.pid} for node {node}')
 
-    broadcast = _AudioBroadcast(node, channel, ffmpeg_proc, fifo_fd)
-    broadcast._fifo_path = fifo_path   # stored for cleanup in shutdown()
+    broadcast = _AudioBroadcast(node, channel, ffmpeg_proc, relay_proc)
+    broadcast._fifo_in_path  = fifo_in_path    # stored for cleanup in shutdown()
+    broadcast._fifo_out_path = fifo_out_path
 
     # Ensure app_mixmonitor.so is loaded (not in the default ASL3 module list)
     def _ensure_mm_module(ami):
@@ -4064,7 +4228,7 @@ def _start_broadcast(node):
         ami._send_action({
             'Action':  'MixMonitor',
             'Channel': channel,
-            'File':    fifo_path,
+            'File':    fifo_in_path,
             'Options': '',
         })
         raw = ami._recv_until('\r\n\r\n', timeout=ami.timeout)
@@ -4080,7 +4244,8 @@ def _start_broadcast(node):
         broadcast.shutdown()
         raise RuntimeError(f'MixMonitor failed: {e}')
 
-    log('INFO', f'[AUDIO] MixMonitor started on {channel} for node {node}')
+    log('INFO', f'[AUDIO] MixMonitor started on {channel} for node {node}, '
+                f'broadcast setup took {time.monotonic() - _t0:.3f}s total')
     return broadcast
 
 
@@ -4090,6 +4255,9 @@ def api_audio_stream(node):
         return jsonify({'error': 'invalid node'}), 400
 
     remote = request.remote_addr or '?'
+    ua     = request.headers.get('User-Agent', '?')
+    log('DEBUG', f'[AUDIO] stream request for node {node} from {remote} '
+                f'(UA: {ua})')
     try:
         with _audio_lock:
             broadcast = _audio_active.get(node)
@@ -4098,18 +4266,30 @@ def api_audio_stream(node):
                             f'(first request from {remote})')
                 broadcast = _start_broadcast(node)
                 _audio_active[node] = broadcast
+            else:
+                log('DEBUG', f'[AUDIO] reusing existing broadcast for node {node} '
+                            f'for {remote}')
             client_q = broadcast.add_client(remote)
     except Exception as e:
-        log('ERROR', f'[AUDIO] stream setup failed for {node} ({remote}): {e}')
+        log('ERROR', f'[AUDIO] stream setup failed for {node} ({remote}): {e}\n'
+                    f'{traceback.format_exc()}')
         return jsonify({'error': str(e)}), 500
 
     def generate():
+        yielded = 0
         try:
             while True:
                 chunk = client_q.get()
                 if chunk is None:
+                    log('DEBUG', f'[AUDIO] {remote} generator unblocked by shutdown '
+                                f'sentinel for node {node} after {yielded} chunk(s)')
                     break
+                yielded += 1
                 yield chunk
+        except GeneratorExit:
+            log('DEBUG', f'[AUDIO] {remote} client generator closed (browser '
+                        f'disconnected) for node {node} after {yielded} chunk(s)')
+            raise
         finally:
             broadcast.remove_client(client_q, remote)
 
@@ -4131,6 +4311,8 @@ def api_audio_stop():
         return jsonify({'error': 'invalid node'}), 400
     with _audio_lock:
         broadcast = _audio_active.get(node)
+    log('DEBUG', f'[AUDIO] explicit stop requested for node {node} '
+                f'(broadcast active={broadcast is not None})')
     if broadcast:
         broadcast.shutdown()
     return jsonify({'ok': True})
@@ -4171,6 +4353,25 @@ def api_audio_check(node):
         'channel': channel,
         'node':    node,
     })
+
+
+@app.route('/api/audio/client-log', methods=['POST'])
+@limiter.limit("60 per minute")
+def api_audio_client_log():
+    """Receives MSE playback glitch reports (lag jumps, stalls, rebuffers,
+    errors) from the kiosk's audio player and logs them under [AUDIO-CLIENT]
+    so they interleave with the [AUDIO]/[AUDIO-RELAY] server-side lines in
+    journalctl — lets a listener-reported glitch be correlated to the exact
+    moment in the pipeline without needing browser devtools open live."""
+    body   = request.json or {}
+    node   = str(body.get('node', ''))[:16]
+    etype  = str(body.get('type', ''))[:40]
+    detail = str(body.get('detail', ''))[:200]
+    if not re.match(r'^\d{4,7}$', node) or not etype:
+        return jsonify({'error': 'invalid payload'}), 400
+    remote = request.remote_addr or '?'
+    log('INFO', f'[AUDIO-CLIENT] {remote} node={node} {etype}: {detail}')
+    return jsonify({'ok': True})
 
 
 @app.route("/")

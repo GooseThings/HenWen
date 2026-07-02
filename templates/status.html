@@ -100,25 +100,9 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .header-brand strong { color: var(--accent); font-size: 1rem; }
 .header-logo { height: 69px; width: 69px; object-fit: contain; flex-shrink: 0;
   filter: drop-shadow(0 0 6px rgba(63,185,80,.35)); }
-.hb-dot {
-  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
-  background: var(--green); opacity: 0.25; margin-left: 2px;
-}
-.hb-dot.pulse { animation: hb-pulse .9s ease-out 1 forwards; }
-@keyframes hb-pulse {
-  0%   { opacity: 1; transform: scale(1.6); box-shadow: 0 0 9px rgba(63,185,80,.9); }
-  60%  { opacity: .6; transform: scale(1.1); box-shadow: 0 0 4px rgba(63,185,80,.4); }
-  100% { opacity: .25; transform: scale(1);  box-shadow: none; }
-}
 .header-clock { font-size: 2.6rem; font-weight: 300; font-variant-numeric: tabular-nums;
   letter-spacing: 0.04em; }
 .header-actions { display: flex; align-items: center; gap: 10px; }
-
-.ast-pill { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px;
-  border-radius: 20px; font-size: 0.8rem; font-weight: 600; border: 1px solid var(--border); }
-.ast-pill.running { border-color: var(--green); color: var(--green); }
-.ast-pill.stopped { border-color: var(--danger); color: var(--danger); }
-.ast-pill .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 
 .btn-icon { background: var(--bg3); border: 1px solid var(--border); color: var(--text2);
   border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 0.82rem;
@@ -139,52 +123,65 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .weather-item strong { color: var(--text); }
 .weather-loading { color: var(--text2); font-style: italic; }
 
-/* ── Main two-row content area ── */
-.content-area { display: grid; grid-template-columns: 1fr 280px; grid-template-rows: 55fr 45fr; gap: 10px; flex: 1; min-height: 0; }
+/* ── Content area: Global Activity | Node info | Connected/Map | Favorites (outer 2 + node full height) ── */
+.content-area { display: grid; grid-template-columns: 345px 210px 1fr 280px; grid-template-rows: 55fr 45fr; gap: 10px; flex: 1; min-height: 0; }
 
-/* ── Top row: node + connected ── */
-.top-row { display: grid; grid-template-columns: 260px 1fr; gap: 10px; flex: 55; min-height: 0; }
+.connected-card { grid-column: 3; grid-row: 1; }
 
-/* ── Node status card ── */
+/* ── Node status card: full height, matching Global Activity / Favorites ── */
 .node-card {
+  grid-column: 2; grid-row: 1 / span 2;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
-  padding: 18px 16px; display: flex; flex-direction: column; align-items: center;
-  gap: 8px; overflow: hidden;
+  padding: 16px 12px; display: flex; flex-direction: column;
+  gap: 8px; overflow: hidden; min-height: 0;
 }
+#node-info { display: flex; flex-direction: column; align-items: center; gap: 8px; flex-shrink: 0; }
+.node-history {
+  width: 100%; flex: 1; min-height: 0; display: flex; flex-direction: column;
+  justify-content: flex-end;   /* push title + list together to the bottom of the card */
+  margin-top: 4px;
+}
+.node-history-title { flex-shrink: 0; margin-bottom: 4px; border-top: 1px solid var(--border); padding-top: 8px; }
+.node-history-list { flex-shrink: 1; overflow-y: auto; display: flex; flex-direction: column; justify-content: flex-end; }
+.node-history-list::-webkit-scrollbar { width: 3px; }
+.node-history-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.hist-row { padding: 6px 2px; border-bottom: 1px solid var(--border); }
+.hist-row:last-child { border-bottom: none; }
+.hist-top { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.hist-num { font-size: 0.85rem; font-weight: 700; font-family: var(--mono); color: var(--accent); text-decoration: none; }
+.hist-call { font-size: 0.72rem; font-weight: 600; color: var(--text); }
+.hist-meta { display: flex; justify-content: space-between; gap: 6px; font-size: 0.68rem; color: var(--text2); margin-top: 1px; }
 .node-label { font-size: 0.68rem; letter-spacing: 0.12em; color: var(--text2); text-transform: uppercase; }
-.node-number { font-size: 2.4rem; font-weight: 700; line-height: 1; }
-.node-callsign { font-size: 1.25rem; font-weight: 600; color: var(--accent); letter-spacing: 0.04em; }
+.node-number { font-size: 2.4rem; font-weight: 700; line-height: 1; color: var(--accent); text-decoration: none; }
+.node-callsign { font-size: 1.25rem; font-weight: 600; color: var(--text); letter-spacing: 0.04em; }
 .node-location { font-size: 0.78rem; color: var(--text2); text-align: center; }
 
 .keyed-wrap { display: flex; flex-direction: column; align-items: center; gap: 6px; margin: 6px 0 2px; }
 .keyed-dot { width: 56px; height: 56px; border-radius: 50%; background: #222;
-  border: 3px solid #333; transition: background .4s, border-color .4s, box-shadow .4s; }
-.keyed-dot.keyed { background: var(--green); border-color: #5de073;
+  border: 3px solid #333; transition: background .4s, border-color .4s, box-shadow .4s;
+  display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.keyed-dot-logo { width: 100%; height: 100%; object-fit: contain; opacity: 0.3; }
+.keyed-dot.healthy { background: var(--green); border-color: #5de073;
   box-shadow: 0 0 24px rgba(63,185,80,.65), 0 0 56px rgba(63,185,80,.25);
-  animation: pulse-k 1.4s ease-in-out infinite; }
+  animation: pulse-k 2.8s ease-in-out infinite; }
+.keyed-dot.down { background: var(--danger); border-color: var(--danger);
+  box-shadow: 0 0 24px rgba(219,68,55,.65), 0 0 56px rgba(219,68,55,.25);
+  animation: none; }
 @keyframes pulse-k {
   0%,100% { box-shadow: 0 0 24px rgba(63,185,80,.65), 0 0 56px rgba(63,185,80,.25); }
   50%      { box-shadow: 0 0 38px rgba(63,185,80,.9),  0 0 75px rgba(63,185,80,.4);  }
 }
 .keyed-label { font-size: 1rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
   color: var(--text2); }
-.keyed-label.keyed { color: var(--green); }
+.keyed-label.healthy { color: var(--green); }
+.keyed-label.down { color: var(--danger); }
 .link-count { font-size: 0.82rem; color: var(--text2); }
 .link-count span { color: var(--text); font-weight: 600; }
-
-.vitals { width: 100%; margin-top: auto; border-top: 1px solid var(--border); padding-top: 10px; }
-.vrow { display: flex; justify-content: space-between; padding: 4px 0;
-  border-bottom: 1px solid var(--border); font-size: 0.82rem; }
-.vrow:last-child { border-bottom: none; }
-.vk { color: var(--text2); }
-.vv { font-weight: 600; }
-.vv.ok   { color: var(--green); }
-.vv.warn { color: var(--warn); }
 
 /* ── Connected nodes ── */
 .connected-card {
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
-  display: flex; flex-direction: column; overflow: hidden;
+  display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
 .card-header { padding: 12px 18px 8px; border-bottom: 1px solid var(--border);
   display: flex; align-items: baseline; gap: 10px; flex-shrink: 0; }
@@ -207,8 +204,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   box-shadow: 0 0 5px rgba(224,68,68,.7); }
 .nr-dot.connecting { background: #d9a520; border-color: #d9a520;
   box-shadow: 0 0 5px rgba(217,165,32,.6); }
-.nr-num  { font-size: 1.05rem; font-weight: 700; font-family: var(--mono); }
-.nr-call { font-size: 0.95rem; font-weight: 600; color: var(--accent); letter-spacing: .03em; }
+.nr-num  { font-size: 1.05rem; font-weight: 700; font-family: var(--mono); color: var(--accent); text-decoration: none; }
+.nr-call { font-size: 0.95rem; font-weight: 600; color: var(--text); letter-spacing: .03em; }
 .nr-right { display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
 .nr-loc  { font-size: 0.82rem; color: var(--text2); white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; }
@@ -216,40 +213,38 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .nr-meta span { white-space: nowrap; }
 .nr-meta strong { color: var(--text); }
 
-/* ── Bottom row: activity + map ── */
-.bottom-row { display: grid; grid-template-columns: 345px 1fr; gap: 10px; flex: 45; min-height: 0; }
-
-/* ── Activity panel ── */
+/* ── Activity panel: full-height left column, matching Favorites' height ── */
 .activity-card {
+  grid-column: 1; grid-row: 1 / span 2;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
-  display: flex; flex-direction: column; overflow: hidden;
+  display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
 .activity-list { flex: 1; overflow-y: auto; }
 .activity-list::-webkit-scrollbar { width: 3px; }
 .activity-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
-.act-row { display: grid; grid-template-columns: 8px 1fr auto; gap: 0 10px;
+.act-row { display: grid; grid-template-columns: 1fr auto; gap: 0 10px;
   align-items: center; padding: 8px 14px;
   border-bottom: 1px solid var(--border); transition: background .15s; }
 .act-row:last-child { border-bottom: none; }
 .act-row:hover { background: var(--bg3); }
-.act-dot { width: 7px; height: 7px; border-radius: 50%; }
+.act-dot { width: 7px; height: 7px; border-radius: 50%; align-self: center; flex-shrink: 0; }
 .act-dot.local  { background: var(--green); box-shadow: 0 0 4px rgba(63,185,80,.7); }
-.act-dot.global { background: var(--accent); box-shadow: 0 0 4px rgba(88,166,255,.5); }
 .act-body { display: flex; flex-direction: column; gap: 1px; overflow: hidden; }
 .act-top { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
-.act-node { font-size: 0.95rem; font-weight: 700; font-family: var(--mono); }
-.act-call { font-size: 0.88rem; font-weight: 600; color: var(--accent); }
-.act-loc  { font-size: 0.75rem; color: var(--text2); white-space: nowrap; overflow: hidden;
+.act-node { font-size: 0.9rem; font-weight: 700; font-family: var(--mono); color: var(--accent); text-decoration: none; }
+.act-call { font-size: 0.75rem; font-weight: 600; color: var(--text); }
+.act-loc  { font-size: 0.67rem; color: var(--text2); white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; }
-.act-ts   { font-size: 0.7rem; color: var(--text2); margin-left: auto; }
+.act-ts   { font-size: 0.67rem; color: var(--text2); margin-left: auto; }
 .act-badge { font-size: 0.65rem; padding: 1px 5px; border-radius: 3px; font-weight: 600;
   letter-spacing: .04em; }
 .act-badge.local  { background: rgba(63,185,80,.15); color: var(--green); }
 .act-badge.global { background: rgba(88,166,255,.12); color: var(--accent); }
 
 /* ── Map ── */
-.map-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+.map-card { grid-column: 3; grid-row: 2; min-height: 0;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; }
 #map { flex: 1; background: #0d1117; }
 .leaflet-container { background: #0d1117 !important; }
@@ -264,10 +259,11 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   border-radius: 4px; padding: 2px 8px; font-size: 0.7rem; font-weight: 600;
   cursor: pointer; letter-spacing: .04em; transition: all .15s; white-space: nowrap; }
 .map-btn.on { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+.popup-node-link { color: var(--accent); font-weight: 600; text-decoration: none; }
 
 /* ── Favorites sidebar ── */
 .favorites-card {
-  grid-column: 2; grid-row: 1 / span 2;
+  grid-column: 4; grid-row: 1 / span 2;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
@@ -292,8 +288,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
   background: var(--green); box-shadow: 0 0 4px rgba(63,185,80,.7);
 }
-.fav-num  { font-size: 0.9rem; font-weight: 700; font-family: var(--mono); }
-.fav-call { font-size: 0.75rem; font-weight: 600; color: var(--accent); }
+.fav-num  { font-size: 0.9rem; font-weight: 700; font-family: var(--mono); color: var(--accent); text-decoration: none; }
+.fav-call { font-size: 0.75rem; font-weight: 600; color: var(--text); }
 .fav-loc  { font-size: 0.67rem; color: var(--text2); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
 .fav-actions { display: flex; flex-direction: column; gap: 3px; align-items: stretch; width: fit-content; }
@@ -337,6 +333,14 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   background: rgba(63,185,80,.08); border: 1px solid rgba(63,185,80,.3); color: var(--green);
   cursor: pointer; white-space: nowrap; }
 .idle-squash-btn:hover { background: rgba(63,185,80,.22); }
+.idle-reset-btn { background: none; border: none; color: var(--text2); cursor: pointer;
+  font-size: 0.8rem; padding: 0 2px; line-height: 1; opacity: 0.6; }
+.idle-reset-btn:hover { color: var(--warn); opacity: 1; }
+
+/* Transmit / Monitor mode badge in node rows */
+.mode-badge { font-size: 0.65rem; padding: 1px 6px; border-radius: 3px; font-weight: 600; white-space: nowrap; }
+.mode-badge.tx  { background: rgba(63,185,80,.1);  color: var(--green); }
+.mode-badge.mon { background: rgba(88,166,255,.1); color: var(--accent); }
 
 /* toast notification */
 #sb-toast { position: fixed; bottom: 64px; left: 50%; transform: translateX(-50%);
@@ -362,18 +366,17 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   <header class="header">
     <div class="header-brand">
       <img class="header-logo" src="/static/logo-512.png" alt="HenWen">
-      <strong>HenWen</strong> <span>KIOSK</span><span class="hb-dot" id="hb-dot"></span>
+      <strong>HenWen</strong> <span>KIOSK</span>
     </div>
     <div class="header-clock" id="clock">--:--:--</div>
     <div class="header-actions">
-      <div class="ast-pill" id="ast-pill"><div class="dot"></div><span id="ast-text">Asterisk</span></div>
       <div id="kiosk-user-bar" style="display:none;align-items:center;gap:8px;font-size:0.75rem">
         <span id="kiosk-username" style="color:var(--text2)"></span>
         <button class="btn-icon" onclick="kioskLogout()">Logout</button>
       </div>
       <button class="btn-icon" id="kiosk-login-btn" onclick="openKioskLogin()" style="display:none">Login</button>
       <button class="btn-icon" onclick="toggleFS()" title="Fullscreen">&#x26F6; Fullscreen</button>
-      <a class="btn-icon" href="/henwen-manager">&#8592; Manager</a>
+      <a class="btn-icon" href="/henwen-manager" target="_blank" rel="noopener">&#8592; Manager</a>
       <audio id="node-audio" preload="none">
         <source type="audio/webm; codecs=opus">
       </audio>
@@ -388,74 +391,76 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   <!-- Content -->
   <div class="content-area">
 
-    <!-- Top row: node status + connected nodes -->
-    <div class="top-row">
+    <!-- Global Activity: full-height left column, matching Favorites' height -->
+    <div class="activity-card">
+      <div class="card-header">
+        <span class="card-title">Global Activity</span>
+        <span class="card-count" id="act-count"></span>
+        <span id="act-updated" style="font-size:0.65rem;color:var(--text2);font-style:italic;margin-left:auto"></span>
+      </div>
+      <div class="activity-list" id="activity-list">
+        <div class="empty-msg">Loading&hellip;</div>
+      </div>
+    </div>
 
-      <div class="node-card" id="node-card">
+    <!-- Node status: full-height column matching Global Activity / Favorites -->
+    <div class="node-card">
+      <div id="node-info">
         <div class="node-label">NODE</div>
         <div style="color:var(--text2);font-size:.9rem">Loading&hellip;</div>
       </div>
-
-      <div class="connected-card">
-        <div class="card-header">
-          <span class="card-title">Connected Nodes</span>
-          <span class="card-count" id="conn-count"></span>
-          <span style="margin-left:auto;display:flex;align-items:center;gap:6px">
-            <span id="listen-delay-note" style="font-size:0.65rem;color:var(--text2);font-style:italic;display:none">~1s delay</span>
-            <button class="btn-icon" id="listen-btn" onclick="toggleListen()" title="Stream live audio from this node — expect ~1 second delay">&#9834; Listen</button>
-          </span>
-        </div>
-        <div class="conn-form-bar" id="conn-form-bar">
-          <input id="conn-form-node" type="text" placeholder="Node #" maxlength="7"
-                 onkeydown="if(event.key==='Enter')statusConnectNew()">
-          <button class="sb-btn connect" onclick="statusConnectNew()">Connect</button>
-          <button class="sb-btn monitor" onclick="statusMonitorNew()">Monitor</button>
-          <button class="sb-btn fav" id="fav-add-btn" onclick="addToFavorites()" title="Add node to your Favorites list">&#9733; Fav</button>
-          <label class="perm-label" id="perm-label" style="display:none">
-            <input type="checkbox" id="conn-perm-chk"> Permanent
-          </label>
-          <span id="conn-form-msg" style="font-size:0.75rem;color:var(--text2)"></span>
-        </div>
-        <div class="node-list" id="node-list">
-          <div class="empty-msg">Loading&hellip;</div>
+      <div class="node-history">
+        <div class="node-history-title card-title">Recent Connections</div>
+        <div class="node-history-list" id="node-history-list">
+          <div class="empty-msg" style="font-size:.75rem">Loading&hellip;</div>
         </div>
       </div>
-
     </div>
 
-    <!-- Bottom row: activity + map -->
-    <div class="bottom-row">
+    <!-- Connected nodes -->
+    <div class="connected-card">
+      <div class="card-header">
+        <span class="card-title">Connected Nodes</span>
+        <span class="card-count" id="conn-count"></span>
+        <span style="margin-left:auto;display:flex;align-items:center;gap:6px">
+          <span id="listen-delay-note" style="font-size:0.65rem;color:var(--text2);font-style:italic;display:none">~1s delay</span>
+          <button class="btn-icon" id="listen-btn" onclick="toggleListen()" title="Stream live audio from this node — expect ~1 second delay">&#9834; Listen</button>
+        </span>
+      </div>
+      <div class="conn-form-bar" id="conn-form-bar">
+        <input id="conn-form-node" type="text" placeholder="Node #" maxlength="7"
+               onkeydown="if(event.key==='Enter')statusConnectNew()">
+        <button class="sb-btn connect" onclick="statusConnectNew()">Connect</button>
+        <button class="sb-btn monitor" onclick="statusMonitorNew()">Monitor</button>
+        <button class="sb-btn fav" id="fav-add-btn" onclick="addToFavorites()" title="Add node to your Favorites list">&#9733; Fav</button>
+        <label class="perm-label" id="perm-label" style="display:none">
+          <input type="checkbox" id="conn-perm-chk"> Permanent
+        </label>
+        <span id="conn-form-msg" style="font-size:0.75rem;color:var(--text2)"></span>
+      </div>
+      <div class="node-list" id="node-list">
+        <div class="empty-msg">Loading&hellip;</div>
+      </div>
+    </div>
 
-      <div class="activity-card">
-        <div class="card-header">
-          <span class="card-title">Global Activity</span>
-          <span class="card-count" id="act-count"></span>
-          <span id="act-updated" style="font-size:0.65rem;color:var(--text2);font-style:italic;margin-left:auto"></span>
-        </div>
-        <div class="activity-list" id="activity-list">
-          <div class="empty-msg">Loading&hellip;</div>
+    <!-- Map -->
+    <div class="map-card">
+      <div class="card-header">
+        <span class="card-title">Network Map</span><span id="map-pin-dur-label" style="font-size:0.65rem;color:var(--text2);font-style:italic;margin-left:6px"></span>
+        <div class="map-ctl">
+          <select class="map-ctl-sel" id="map-tile-sel" onchange="changeTiles(this.value)">
+            <option value="dark">OSM Dark</option>
+            <option value="carto-dk">Dark (CartoDB)</option>
+            <option value="carto-lt">Light</option>
+            <option value="topo">Topography</option>
+            <option value="satellite">Satellite</option>
+          </select>
+          <button class="map-btn on" id="btn-global"   onclick="toggleLayer('global',this)">Global</button>
+          <button class="map-btn on" id="btn-lines"    onclick="toggleLayer('lines',this)">Lines</button>
+          <button class="map-btn on" id="btn-grayline" onclick="toggleLayer('grayline',this)">Grayline</button>
         </div>
       </div>
-
-      <div class="map-card">
-        <div class="card-header">
-          <span class="card-title">Network Map</span><span id="map-pin-dur-label" style="font-size:0.65rem;color:var(--text2);font-style:italic;margin-left:6px"></span>
-          <div class="map-ctl">
-            <select class="map-ctl-sel" id="map-tile-sel" onchange="changeTiles(this.value)">
-              <option value="dark">OSM Dark</option>
-              <option value="carto-dk">Dark (CartoDB)</option>
-              <option value="carto-lt">Light</option>
-              <option value="topo">Topography</option>
-              <option value="satellite">Satellite</option>
-            </select>
-            <button class="map-btn on" id="btn-global"   onclick="toggleLayer('global',this)">Global</button>
-            <button class="map-btn on" id="btn-lines"    onclick="toggleLayer('lines',this)">Lines</button>
-            <button class="map-btn on" id="btn-grayline" onclick="toggleLayer('grayline',this)">Grayline</button>
-          </div>
-        </div>
-        <div id="map"></div>
-      </div>
-
+      <div id="map"></div>
     </div>
 
     <!-- Favorites sidebar -->
@@ -476,7 +481,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
   <!-- Footer -->
   <footer class="footer">
-    <span>Uptime: <strong id="f-uptime">—</strong></span>
+    <span>Logged in: <strong id="f-active-users">—</strong></span>
     <span><a href="https://github.com/GooseThings/HenWen" target="_blank" rel="noopener"
              style="color:var(--text2);text-decoration:none" title="HenWen on GitHub">HenWen</a></span>
   </footer>
@@ -509,6 +514,12 @@ function esc(s) {
   return String(s||'')
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
     .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+/* Node number rendered as a link to its AllStarLink stats page */
+function nodeLink(node, cssClass) {
+  return '<a class="' + cssClass + '" href="https://stats.allstarlink.org/stats/' +
+    encodeURIComponent(node) + '" target="_blank" rel="noopener">' + esc(node) + '</a>';
 }
 
 var _csrfToken = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
@@ -608,6 +619,7 @@ var _showGrayline = true;
 var _hostedNodes        = [];  /* [{node,callsign,location,lat,lon}] from board refresh */
 var _connectedNodes     = [];  /* [{node,callsign,location,lat,lon,host_lat,host_lon}] */
 var _lastActivityPoints = [];  /* combined activity list */
+var _globalWindowMin    = 15;  /* global-activity display window, from the server */
 var _mapFitted          = false;
 
 /* Tile layer definitions: darkFilter=true means keep OSM invert CSS */
@@ -676,12 +688,28 @@ function starSize() {
   return [36, 36];
 }
 
-function makeIcon(color) {
-  var s = pinSize();
+function makeIcon(color, opacity) {
+  var s  = pinSize();
+  var op = (opacity == null) ? 0.9 : opacity;
   var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + s[0] + '" height="' + s[1] +
     '" viewBox="0 0 20 30"><path d="M10 0C4.5 0 0 4.5 0 10c0 7.5 10 20 10 20S20 17.5 20 10C20 4.5 15.5 0 10 0z"' +
-    ' fill="' + color + '" opacity="0.9"/><circle cx="10" cy="10" r="4" fill="white" opacity="0.9"/></svg>';
+    ' fill="' + color + '" opacity="' + op + '"/><circle cx="10" cy="10" r="4" fill="white" opacity="' + op + '"/></svg>';
   return L.divIcon({ html:svg, iconSize:s, iconAnchor:[s[0]/2,s[1]], popupAnchor:[0,-s[1]], className:'' });
+}
+
+/* Global (blue) activity pins start bright and mute toward a dim blue-gray
+   as they age, fading out entirely by the time they fall out of the
+   global-activity display window (where they're dropped from the feed). */
+var GLOBAL_PIN_BRIGHT = [88, 166, 255];   /* #58a6ff */
+var GLOBAL_PIN_MUTED  = [70, 80, 95];     /* dim, desaturated blue-gray */
+
+function globalPinStyle(ageSec) {
+  var windowSec = Math.max(1, _globalWindowMin * 60);
+  var frac = Math.max(0, Math.min(1, ageSec / windowSec));
+  var rgb = GLOBAL_PIN_BRIGHT.map(function(c, i) {
+    return Math.round(c + (GLOBAL_PIN_MUTED[i] - c) * frac);
+  });
+  return { color: 'rgb(' + rgb.join(',') + ')', opacity: 0.9 - 0.6 * frac };
 }
 
 function makeStarIcon(color) {
@@ -741,6 +769,9 @@ function updateGrayline() {
 function updateMap() {
   if (!_map) return;
 
+  var localNode = (window._lastBoardNodes && window._lastBoardNodes[0])
+                  ? window._lastBoardNodes[0].node : '';
+
   /* Clear markers and lines */
   _markers.forEach(function(m) { _map.removeLayer(m); });
   _markers = [];
@@ -748,31 +779,39 @@ function updateMap() {
   _lines = [];
 
   var allPinned = [];
+  /* Mirrors the grayline's world-copy wrap so pins still show up on the
+     repeated map copies Leaflet renders at low zoom, instead of only
+     appearing once at their true longitude. */
+  var WORLD_OFFSETS = [-360, 0, 360];
 
   /* 1. Hosted-node gold stars */
   _hostedNodes.forEach(function(n) {
     if (n.lat == null || n.lon == null) return;
-    var m = L.marker([n.lat, n.lon], {icon:makeStarIcon('#ffd700'), zIndexOffset:1000})
-      .bindPopup('<b>&#11088; ' + esc(n.callsign||n.node) + '</b><br>' +
-                 esc(n.location||'') + '<br><small>Node ' + esc(n.node) + ' &mdash; this server</small>');
-    m.addTo(_map); _markers.push(m);
     allPinned.push(n);
+    WORLD_OFFSETS.forEach(function(off) {
+      var m = L.marker([n.lat, n.lon + off], {icon:makeStarIcon('#ffd700'), zIndexOffset:1000})
+        .bindPopup('<b>&#11088; ' + esc(n.callsign||n.node) + '</b><br>' +
+                   esc(n.location||'') + '<br><small>Node ' + nodeLink(n.node, 'popup-node-link') + ' &mdash; this server</small>');
+      m.addTo(_map); _markers.push(m);
+    });
   });
 
   /* 2. Connected-node red pins + dashed lines to their hosted node */
   _connectedNodes.forEach(function(c) {
     if (c.lat == null || c.lon == null) return;
-    var m = L.marker([c.lat, c.lon], {icon:makeIcon('#e74c3c'), zIndexOffset:500})
-      .bindPopup('<b>' + esc(c.callsign||c.node) + '</b><br>' +
-                 esc(c.location||'') + '<br><small>Node ' + esc(c.node) + ' &mdash; connected</small>');
-    m.addTo(_map); _markers.push(m);
     allPinned.push(c);
-    if (_showLines && c.host_lat != null && c.host_lon != null) {
-      var line = L.polyline([[c.lat, c.lon], [c.host_lat, c.host_lon]], {
-        color:'#e74c3c', weight:1.5, opacity:0.55, dashArray:'5 6', interactive:false
-      }).addTo(_map);
-      _lines.push(line);
-    }
+    WORLD_OFFSETS.forEach(function(off) {
+      var m = L.marker([c.lat, c.lon + off], {icon:makeIcon('#e74c3c'), zIndexOffset:500})
+        .bindPopup('<b>' + esc(c.callsign||c.node) + '</b><br>' +
+                   esc(c.location||'') + '<br><small>Node ' + nodeLink(c.node, 'popup-node-link') + ' &mdash; connected</small>');
+      m.addTo(_map); _markers.push(m);
+      if (_showLines && c.host_lat != null && c.host_lon != null) {
+        var line = L.polyline([[c.lat, c.lon + off], [c.host_lat, c.host_lon + off]], {
+          color:'#e74c3c', weight:1.5, opacity:0.55, dashArray:'5 6', interactive:false
+        }).addTo(_map);
+        _lines.push(line);
+      }
+    });
   });
 
   /* 3. Activity pins: local (green) always shown; global (blue) only if _showGlobal */
@@ -781,12 +820,29 @@ function updateMap() {
   });
   actPts.forEach(function(p) {
     var color = p.type === 'local' ? '#3fb950' : '#58a6ff';
-    var m = L.marker([p.lat, p.lon], {icon:makeIcon(color)})
-      .bindPopup('<b>' + esc(p.callsign||p.node) + '</b><br>' +
-                 esc(p.location||'') + '<br><small>Node ' + esc(p.node) +
-                 (p.type==='local' ? ' &mdash; keyed' : ' &mdash; online') + '</small>');
-    m.addTo(_map); _markers.push(m);
+    var opacity;
+    if (p.type === 'global') {
+      var ageSec = Math.max(0, (Date.now() / 1000) - (p.ts || 0));
+      var style  = globalPinStyle(ageSec);
+      color = style.color; opacity = style.opacity;
+    }
     allPinned.push(p);
+    var pinConnBtns = localNode
+      ? '<div style="margin-top:6px;display:flex;gap:6px">' +
+          '<button class="sb-btn connect" onclick="sbConnect(\'' +
+            esc(localNode) + '\',\'' + esc(p.node) + '\',this,false,false)">Connect</button>' +
+          '<button class="sb-btn monitor" onclick="sbConnect(\'' +
+            esc(localNode) + '\',\'' + esc(p.node) + '\',this,false,true)">Monitor</button>' +
+        '</div>'
+      : '';
+    WORLD_OFFSETS.forEach(function(off) {
+      var m = L.marker([p.lat, p.lon + off], {icon:makeIcon(color, opacity)})
+        .bindPopup('<b>' + esc(p.callsign||p.node) + '</b><br>' +
+                   esc(p.location||'') + '<br><small>Node ' + nodeLink(p.node, 'popup-node-link') +
+                   (p.type==='local' ? ' &mdash; keyed' : ' &mdash; online') + '</small>' +
+                   pinConnBtns);
+      m.addTo(_map); _markers.push(m);
+    });
   });
 
   /* Auto-fit on first data load only */
@@ -842,40 +898,29 @@ async function refreshBoard() {
     if (!r.ok) return;
     var data = await r.json();
 
-    /* Asterisk pill */
-    var pill = document.getElementById('ast-pill');
-    pill.className = 'ast-pill ' + (data.asterisk_active ? 'running' : 'stopped');
-    document.getElementById('ast-text').textContent =
-      data.asterisk_active ? 'Asterisk Running' : 'Asterisk Stopped';
-
     /* Node card */
     var nodes = data.nodes || [];
     window._lastBoardNodes = nodes;
-    var nc = document.getElementById('node-card');
+    var nc = document.getElementById('node-info');
     if (!nodes.length) {
       nc.innerHTML = '<div class="node-label">NODE</div><div style="color:var(--text2)">No nodes configured</div>';
     } else {
-      var n = nodes[0]; var keyed = n.keyed;
-      var temp = data.cpu_temp != null ? data.cpu_temp + ' °C' : 'N/A';
-      var tcls = data.cpu_temp != null ? (data.cpu_temp > 75 ? 'warn' : 'ok') : '';
-      var disk = data.disk ? data.disk.used+'/'+data.disk.total+' ('+data.disk.pct+')' : 'N/A';
+      var n = nodes[0];
+      /* Health circle: green pulse only when Asterisk is running, AMI is
+         connected, and this node's AMI data isn't stale. Any one down = solid red. */
+      var healthy = !!data.asterisk_active && !!data.ami_connected && !n.stale;
       nc.innerHTML =
         '<div class="node-label">NODE</div>' +
-        '<div class="node-number">' + esc(n.node) + '</div>' +
+        nodeLink(n.node, 'node-number') +
         (n.callsign ? '<div class="node-callsign">' + esc(n.callsign) + '</div>' : '') +
         (n.location ? '<div class="node-location">' + esc(n.location) + '</div>' : '') +
         '<div class="keyed-wrap">' +
-          '<div class="keyed-dot' + (keyed ? ' keyed' : '') + '"></div>' +
-          '<div class="keyed-label' + (keyed ? ' keyed' : '') + '">' + (keyed ? 'KEYED' : 'IDLE') + '</div>' +
+          '<div class="keyed-dot ' + (healthy ? 'healthy' : 'down') + '">' +
+            '<img class="keyed-dot-logo" src="/static/logo-512.png" alt="">' +
+          '</div>' +
+          '<div class="keyed-label ' + (healthy ? 'healthy' : 'down') + '">' + (healthy ? 'ONLINE' : 'OFFLINE') + '</div>' +
         '</div>' +
-        '<div class="link-count">Linked: <span>' + (n.connected ? n.connected.length : 0) + '</span></div>' +
-        (n.stale ? '<div style="font-size:.7rem;color:var(--warn)">&#9888; Stale</div>' : '') +
-        '<div class="vitals">' +
-          '<div class="vrow"><span class="vk">Uptime</span><span class="vv">' + esc(data.uptime||'—') + '</span></div>' +
-          '<div class="vrow"><span class="vk">CPU Temp</span><span class="vv ' + tcls + '">' + esc(temp) + '</span></div>' +
-          '<div class="vrow"><span class="vk">Disk</span><span class="vv">' + esc(disk) + '</span></div>' +
-          '<div class="vrow"><span class="vk">AMI</span><span class="vv ' + (data.ami_connected ? 'ok':'warn') + '">' + (data.ami_connected ? 'Connected':'Connecting') + '</span></div>' +
-        '</div>';
+        '<div class="link-count">Linked: <span>' + (n.connected ? n.connected.length : 0) + '</span></div>';
     }
 
     /* Update hosted-node star pins */
@@ -912,16 +957,22 @@ async function refreshBoard() {
         var meta = [];
         var isConn = (c.connect_state || 'ESTABLISHED') === 'ESTABLISHED';
         if (c.connect_time) meta.push('Conn: <strong>' + esc(c.connect_time) + '</strong>');
-        if (c.keyups)       meta.push('Keys: <strong>' + c.keyups + '</strong>');
+        meta.push('Keyups: <strong>' + (c.keyups || 0) + '</strong>');
         if (c.last_keyed)   meta.push('Last: <strong>' + relTime(c.last_keyed) + '</strong>');
+        var modeBadge = '';
+        if (c.mode === 'T') modeBadge = '<span class="mode-badge tx">Transmit</span>';
+        else if (c.mode === 'R') modeBadge = '<span class="mode-badge mon">Monitor</span>';
         var idleBadge = '';
-        if (c.permanent === false && typeof c.idle_remaining === 'number') {
-          var mins = Math.floor(c.idle_remaining / 60);
-          var secs = c.idle_remaining % 60;
+        if (c.permanent === false && typeof c.idle_elapsed === 'number') {
+          var mins = Math.floor(c.idle_elapsed / 60);
+          var secs = c.idle_elapsed % 60;
           var ts   = mins + ':' + (secs < 10 ? '0' : '') + secs;
-          var warn = c.idle_remaining < 120;
+          var warn = (typeof c.idle_remaining === 'number') && c.idle_remaining < 120;
           idleBadge = '<span class="idle-badge' + (warn ? ' warn' : '') + '">Idle: ' + ts + '</span>';
           if (window._kioskRole === 'admin' || window._kioskRole === 'superuser') {
+            idleBadge += '<button class="idle-reset-btn" onclick="sbResetIdle(\'' +
+              esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)" ' +
+              'title="Reset idle timer to zero — stays a temporary connection">&#10005;</button>';
             idleBadge += '<button class="idle-squash-btn" onclick="sbSquashIdle(\'' +
               esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)" ' +
               'title="Upgrade to permanent connection — disables idle timeout and auto-reconnects if dropped">No Timeout</button>';
@@ -929,16 +980,17 @@ async function refreshBoard() {
         } else if (c.permanent === true) {
           idleBadge = '<span class="idle-badge">Permanent</span>';
         }
+        var badges = modeBadge + idleBadge;
         var dotClass = !isConn ? ' connecting' : (c.keyed ? ' keyed' : '');
         var dcBtn = '<button class="sb-btn disconnect" onclick="sbDisconnect(\'' +
           esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)">Disconnect</button>';
         return '<div class="node-row">' +
           '<div class="nr-dot' + dotClass + '"></div>' +
-          '<div class="nr-num">' + esc(c.node) + '</div>' +
+          nodeLink(c.node, 'nr-num') +
           '<div class="nr-call">' + esc(c.callsign||'—') + '</div>' +
           '<div class="nr-right">' +
             '<div class="nr-loc">' + esc(c.location||c.desc||'') + '</div>' +
-            (meta.length ? '<div class="nr-meta"><span>' + meta.join('</span><span>') + '</span>' + idleBadge + '</div>' : (idleBadge ? '<div class="nr-meta">' + idleBadge + '</div>' : '')) +
+            (meta.length ? '<div class="nr-meta"><span>' + meta.join('</span><span>') + '</span>' + badges + '</div>' : (badges ? '<div class="nr-meta">' + badges + '</div>' : '')) +
             (!isConn ? '<div class="nr-meta" style="color:var(--warn)">Connecting…</div>' : '') +
           '</div>' +
           dcBtn +
@@ -947,16 +999,51 @@ async function refreshBoard() {
     }
 
     /* Footer */
-    var elUptime = document.getElementById('f-uptime');
-    if (elUptime) elUptime.textContent = data.uptime || '—';
+    var elActiveUsers = document.getElementById('f-active-users');
+    if (elActiveUsers) elActiveUsers.textContent = (data.active_users != null) ? data.active_users : '—';
 
     /* Re-render map whenever board data changes */
     updateMap();
 
     /* Keep favorites sidebar in sync with connected state */
     renderFavorites();
+  } catch(e) {}
+}
 
-    triggerHeartbeat();
+/* ── Recent connection history (condensed, in the Node card) ── */
+function _histDuration(sec) {
+  sec = Math.round(sec);
+  var h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60;
+  if (h) return h + 'h ' + m + 'm';
+  if (m) return m + 'm';
+  return s + 's';
+}
+
+async function refreshHistory() {
+  try {
+    var r = await apiFetch('/api/status/history', {cache: 'no-store'});
+    if (!r.ok) return;
+    var data = await r.json();
+    var rows = data.rows || [];
+    var hl = document.getElementById('node-history-list');
+    if (!hl) return;
+    if (!rows.length) {
+      hl.innerHTML = '<div class="empty-msg" style="font-size:.75rem">No connections yet</div>';
+      return;
+    }
+    hl.innerHTML = rows.map(function(row) {
+      var status = '<span>' + _histDuration(row.duration_seconds || 0) + '</span>';
+      return '<div class="hist-row">' +
+        '<div class="hist-top">' +
+          nodeLink(row.peer_node, 'hist-num') +
+          (row.peer_callsign ? '<span class="hist-call">' + esc(row.peer_callsign) + '</span>' : '') +
+        '</div>' +
+        '<div class="hist-meta">' +
+          '<span>' + relTime(row.connected_at) + '</span>' +
+          status +
+        '</div>' +
+      '</div>';
+    }).join('');
   } catch(e) {}
 }
 
@@ -996,7 +1083,7 @@ async function refreshActivity() {
     var al = document.getElementById('activity-list');
     document.getElementById('act-count').textContent = combined.length ? combined.length + ' nodes' : '';
     var updEl = document.getElementById('act-updated');
-    if (updEl && data.global_updated) updEl.textContent = 'hub sweep ' + relTime(data.global_updated);
+    if (updEl && data.global_updated) updEl.textContent = 'global sweep ' + relTime(data.global_updated);
     if (!combined.length) {
       al.innerHTML = '<div class="empty-msg">No activity data yet</div>';
     } else {
@@ -1012,10 +1099,10 @@ async function refreshActivity() {
             '</div>'
           : '';
         return '<div class="act-row">' +
-          '<div class="act-dot ' + e.type + '"></div>' +
           '<div class="act-body">' +
             '<div class="act-top">' +
-              '<span class="act-node">' + esc(e.node) + '</span>' +
+              (e.type === 'local' ? '<div class="act-dot local"></div>' : '') +
+              nodeLink(e.node, 'act-node') +
               (e.callsign ? '<span class="act-call">' + esc(e.callsign) + '</span>' : '') +
               '<span class="act-ts">' + (e.ts ? relTime(e.ts) : '') + '</span>' +
             '</div>' +
@@ -1027,6 +1114,7 @@ async function refreshActivity() {
     }
 
     _lastActivityPoints = combined;
+    _globalWindowMin = data.global_window_min || 15;
     updateMap();
 
     var pinMin = data.pin_duration_min || 60;
@@ -1119,6 +1207,28 @@ async function sbSquashIdle(localNode, remoteNode, btn) {
   }
 }
 
+async function sbResetIdle(localNode, remoteNode, btn) {
+  if (btn) { btn.disabled = true; }
+  try {
+    var r = await apiFetch('/api/status/reset-idle', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({local_node: localNode, remote_node: remoteNode})
+    });
+    var d = await r.json();
+    if (r.ok && d.ok) {
+      sbToast('Idle timer reset for ' + remoteNode, true);
+      setTimeout(refreshBoard, 500);
+    } else {
+      sbToast('Failed: ' + (d.error || r.status), false);
+      if (btn) { btn.disabled = false; }
+    }
+  } catch(e) {
+    sbToast('Error: ' + e.message, false);
+    if (btn) { btn.disabled = false; }
+  }
+}
+
 async function statusConnectNew() {
   var inp = document.getElementById('conn-form-node');
   if (!inp) return;
@@ -1148,6 +1258,7 @@ async function statusConnectNew() {
     setTimeout(refreshBoard, 1500);
   } else {
     document.getElementById('conn-form-msg').textContent = d.error || ('Error ' + r.status);
+    sbToast('Connect failed: ' + (d.error || r.status), false);
   }
 }
 
@@ -1177,6 +1288,7 @@ async function statusMonitorNew() {
     setTimeout(refreshBoard, 1500);
   } else {
     document.getElementById('conn-form-msg').textContent = d.error || ('Error ' + r.status);
+    sbToast('Monitor failed: ' + (d.error || r.status), false);
   }
 }
 
@@ -1223,6 +1335,7 @@ async function kioskLogin() {
     updateKioskUserBar(d.username, d.role);
     var pl = document.getElementById('perm-label');
     if (pl) pl.style.display = (d.role === 'admin' || d.role === 'superuser') ? '' : 'none';
+    loadFavorites();
     if (_pendingAction) {
       _pendingAction.fn.apply(null, _pendingAction.args);
       _pendingAction = null;
@@ -1244,7 +1357,7 @@ async function kioskLogout() {
   } catch(e) { /* non-fatal — a page reload would also fix it */ }
   window._kioskRole = '';
   updateKioskUserBar(null, null);
-  renderFavorites();
+  loadFavorites();
   sbToast('Logged out', true);
 }
 
@@ -1274,15 +1387,6 @@ async function checkKioskSession() {
   /* Show Permanent checkbox only for admin/superuser */
   var pl = document.getElementById('perm-label');
   if (pl) pl.style.display = (window._kioskRole === 'admin' || window._kioskRole === 'superuser') ? '' : 'none';
-}
-
-/* ── Heartbeat indicator ── */
-function triggerHeartbeat() {
-  var dot = document.getElementById('hb-dot');
-  if (!dot) return;
-  dot.classList.remove('pulse');
-  void dot.offsetWidth; /* force reflow to restart animation */
-  dot.classList.add('pulse');
 }
 
 /* ── Favorites sidebar ── */
@@ -1353,7 +1457,7 @@ function renderFavorites() {
     return '<div class="fav-row">' +
       '<div class="fav-body">' +
         '<div class="fav-top">' + dot +
-          '<span class="fav-num">' + esc(f.node) + '</span>' +
+          nodeLink(f.node, 'fav-num') +
           (name ? '<span class="fav-call">' + esc(name) + '</span>' : '') +
           '<button class="fav-del-btn" onclick="removeFavorite(\'' + esc(f.node) + '\')" title="Remove from Favorites">✕</button>' +
         '</div>' +
@@ -1462,6 +1566,21 @@ var _LISTEN_STARTUP_S  = 0.5;            // pre-buffer this much before the firs
 var _LISTEN_KEEPBUF_S  = 3.0;            // trim buffer older than this behind playhead
 var _LISTEN_RATE_MS    = 150;            // how often (ms) to run the rate controller
 var _LISTEN_RENEW_MS   = 30 * 60 * 1000;
+
+/* Reports MSE playback glitches (lag jumps, stalls, rebuffers) to the server
+   so they land in journalctl next to the [AUDIO]/[AUDIO-RELAY] server-side
+   log lines — lets a listener-reported "chopped audio" moment be correlated
+   against the pipeline without needing devtools open during a live test. */
+function _audioClientLog(node, type, detail) {
+  try {
+    apiFetch('/api/audio/client-log', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({node: node, type: type, detail: detail}),
+      keepalive: true
+    }).catch(function() {});
+  } catch (e) {}
+}
 
 function toggleListen() {
   if (_listenActive) { _stopListen(); } else { _startListen(); }
@@ -1613,9 +1732,12 @@ function _doStartListenMSE(audio, node) {
       var lag      = liveEdge - audio.currentTime;
       var rate;
       if (lag > _LISTEN_TARGET_S + 2.5) {
+        var _skipped = lag - _LISTEN_TARGET_S;
         audio.currentTime = liveEdge - _LISTEN_TARGET_S;
         rate = 1.0;
         console.log('[AUDIO] emergency jump: lag=' + lag.toFixed(3) + 's');
+        _audioClientLog(node, 'emergency_jump',
+          'lag=' + lag.toFixed(3) + 's skipped=' + _skipped.toFixed(3) + 's');
       } else if (lag > _LISTEN_TARGET_S + 0.6) {
         rate = 1.12;
       } else if (lag > _LISTEN_TARGET_S + 0.15) {
@@ -1678,6 +1800,8 @@ function _doStartListenMSE(audio, node) {
     var msg  = audio.error ? audio.error.message : '';
     console.error('[AUDIO] error', code, msg,
                   'networkState='+audio.networkState, 'readyState='+audio.readyState);
+    _audioClientLog(node, 'error', code + (msg ? ' — ' + msg : '') +
+      ' networkState=' + audio.networkState + ' readyState=' + audio.readyState);
     _listenActive = false;
     _listenSetBtn('&#9834; Listen', '', false);
     sbToast('Audio error: ' + code + (msg ? ' — ' + msg : ''), false);
@@ -1693,6 +1817,8 @@ function _doStartListenMSE(audio, node) {
     if (!_listenActive || ctrl.signal.aborted) return;
     if (_rebufferTimer) return;
     console.log('[AUDIO] stalled — waiting for rebuffer');
+    var _stallStart = audio.currentTime;
+    _audioClientLog(node, 'stalled', 'currentTime=' + _stallStart.toFixed(3) + 's');
     _rebufferTimer = setInterval(function() {
       if (!_listenActive || ctrl.signal.aborted) {
         clearInterval(_rebufferTimer); _rebufferTimer = null; return;
@@ -1702,9 +1828,13 @@ function _doStartListenMSE(audio, node) {
       var ahead = liveEdge3 - audio.currentTime;
       if (ahead >= _LISTEN_TARGET_S) {
         clearInterval(_rebufferTimer); _rebufferTimer = null;
+        var _preJumpTime = audio.currentTime;
         /* Jump to near live edge so we don't have to speed-catch. */
         audio.currentTime = Math.max(audio.currentTime, liveEdge3 - _LISTEN_TARGET_S);
         console.log('[AUDIO] rebuffered — resuming near live edge');
+        _audioClientLog(node, 'rebuffered',
+          'stalledFor=' + (_preJumpTime - _stallStart).toFixed(3) + 's' +
+          ' skipped=' + (audio.currentTime - _preJumpTime).toFixed(3) + 's');
         audio.play().catch(function() {});
       }
     }, 100);
@@ -1814,11 +1944,13 @@ initMap();
 refreshBoard();
 refreshWeather();
 refreshActivity();
+refreshHistory();
 loadFavorites();
 checkKioskSession();
 
 setInterval(refreshBoard,    5000);    /* node status every 5s */
 setInterval(refreshActivity, 15000);   /* activity every 15s */
+setInterval(refreshHistory,  30000);   /* connection history every 30s */
 setInterval(refreshWeather,  600000);  /* weather every 10min */
 setInterval(updateGrayline,  120000);  /* grayline advances ~0.5° every 2min */
 </script>
