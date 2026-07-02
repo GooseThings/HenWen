@@ -15,7 +15,7 @@ There is no build step. The app runs directly via gunicorn.
 
 **Deploy changes to the live service:**
 ```bash
-sudo cp -r app.py templates static /opt/ASL3-EZ/
+sudo cp -r app.py audio_relay.py templates static /opt/ASL3-EZ/
 sudo systemctl restart ASL3-EZ
 ```
 
@@ -69,7 +69,9 @@ Custom parser (not `configparser`) — `_collect_stanzas()`, `parse_stanza_setti
 
 ### Audio streaming
 
-`_AudioBroadcast` class (~line 3733) spawns an ffmpeg subprocess that taps Asterisk's MixMonitor channel and pipes WebM/Opus to a `deque`. The `/api/audio/stream/<node>` SSE endpoint relays from that deque to browser clients. The MSE live-edge controller in `status.html` keeps the browser at 0.6–1.5s behind live edge using `playbackRate` adjustment.
+Asterisk `MixMonitor` writes raw PCM to a FIFO (`/tmp/asl3ez_audio_<node>.sln`). `audio_relay.py` — a standalone process spawned by `_start_broadcast()` (~line 3902 in `app.py`), not a thread inside gunicorn — paces that PCM into strict 20ms frames (injecting silence when the node is quiet) and writes them to a second FIFO (`..._paced.sln`). ffmpeg reads that second FIFO directly and encodes WebM/Opus to its stdout. `_AudioBroadcast._read_loop` fans ffmpeg's stdout out to each client's `Queue`, and `/api/audio/stream/<node>` streams from that queue to the browser.
+
+The pacing loop runs in its own OS process specifically to avoid GIL contention: gunicorn's request handlers, the AMI poller, and other background threads sharing this worker's GIL can stall a real-time 20ms deadline long enough to be audible as a click or stutter. Running the frame loop in a separate process lets the kernel schedule it independently. The MSE live-edge controller in `status.html` keeps the browser at ~0.5s behind live edge using `playbackRate` adjustment, with a startup watchdog and stall-recovery rebuffer logic.
 
 ### Templates
 
