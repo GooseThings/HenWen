@@ -1,6 +1,8 @@
 # Changelog
 
-## Recent Changes
+## v2026.07.02
+
+First versioned release. Everything below covers changes since the initial Beta upload.
 
 - **Fixed: Listen stream choppiness under load (process isolation).** The 20ms real-time frame-pacing loop that keeps the Listen audio stream smooth previously ran as a Python thread inside the same gunicorn worker process as Flask's request handlers and the AMI poller. Under load, any of those holding the GIL for even a few milliseconds during a pacing tick delayed the next audio frame — audible as a click or stutter. The pacing loop now runs in its own standalone OS process (`audio_relay.py`), so the kernel schedules it independently of everything else the app is doing. ffmpeg now reads the already-paced audio directly from a FIFO instead of via a stdin pipe fed from within the web process. The pacing loop also always waits out each frame's 20ms slot before consuming data instead of draining whatever's buffered as fast as the CPU allows, fixing a bug where a burst of buffered audio played back at roughly 2x speed.
 - **Added: MSE playback glitch reporting (`[AUDIO-CLIENT]`).** The kiosk's audio player now reports lag jumps, stalls, rebuffers, and playback errors to a new `/api/audio/client-log` endpoint, logged under `[AUDIO-CLIENT]` alongside the existing `[AUDIO]`/`[AUDIO-RELAY]` server-side lines — lets a listener-reported glitch be correlated to the exact moment in the pipeline without needing browser devtools open during a live session.
