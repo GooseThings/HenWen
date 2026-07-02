@@ -198,6 +198,8 @@ Features: live node status, connected node list, global activity feed, network m
 
 Admin and Superuser accounts can connect/disconnect nodes directly from the Status Board. Kiosk (User) accounts see a login prompt and are limited to one active connection at a time.
 
+The footer shows how many users are currently logged in across the app. The **Manager** link in the header opens the manager in a new tab, so the kiosk display keeps running undisturbed.
+
 To set it up on a dedicated display, open `http://YOUR_NODE_IP:5000/status` in a browser and press F11 for fullscreen. Configure the map, themes, and pin duration under **Manager → Kiosk Settings**.
 
 ---

@@ -89,9 +89,12 @@ Key env vars: `AMI_USER`, `AMI_SECRET`, `SECRET_KEY`, `DB_PATH`, `SOUNDS_DIR`, `
 
 Flask-WTF CSRF on all mutating routes. Flask-Limiter on login. Three roles: Superuser (full access + raw rpt.conf editor), Admin (full access minus raw editor), User/Kiosk (connect/disconnect only). Role is stored in the SQLite `users` table and checked by `check_auth()` decorator.
 
+Sessions are plain signed cookies — there is no server-side session store. To show a live "logged in users" count on the Status Board footer, `check_auth()` stamps each session with a random `sid` and touches an in-process dict (`_active_sessions`, guarded by `_active_sessions_lock`) on every authenticated request; `get_active_user_count()` prunes entries idle more than `ACTIVE_SESSION_WINDOW` (90s) and is called from `/api/status/board`. This state is per-worker-process — fine today since gunicorn runs `--workers 1`, but would need to move to the DB or a shared store if worker count is ever increased.
+
 ### External dependencies
 
 - `https://stats.allstarlink.org/api/stats/{node}` — node keyed/connected counts
+- `https://stats.allstarlink.org/stats/keyed` — scraped (regex, no HTML parser dependency) for the global activity feed on the kiosk map; every node currently keyed network-wide, polled every 2 min
 - `https://allmondb.allstarlink.org/allmondb.php` — node callsign/location database
 - `astdb.txt` — local copy of ASL node DB written by `asl3-update-nodelist` package
 
