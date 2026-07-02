@@ -126,7 +126,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 /* ── Content area: Node info | Connected/Map | Favorites | Global Activity (outer 2 + node full height) ── */
 .content-area { display: grid; grid-template-columns: 210px 1fr 280px 280px; grid-template-rows: 55fr 45fr; gap: 10px; flex: 1; min-height: 0; }
 
-.connected-card { grid-column: 2; grid-row: 1; }
+.connected-card { grid-column: 2 / 4; grid-row: 1; }
 
 /* ── Node status card: full height, matching Global Activity / Favorites ── */
 .node-card {
@@ -213,9 +213,9 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .nr-meta span { white-space: nowrap; }
 .nr-meta strong { color: var(--text); }
 
-/* ── Activity panel: full-height column, right of Favorites, matching its height ── */
+/* ── Activity panel: sits under Connected Nodes, right of the map, matching the map's height ── */
 .activity-card {
-  grid-column: 4; grid-row: 1 / span 2;
+  grid-column: 3; grid-row: 2;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
@@ -263,7 +263,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
 /* ── Favorites sidebar ── */
 .favorites-card {
-  grid-column: 3; grid-row: 1 / span 2;
+  grid-column: 4; grid-row: 1 / span 2;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
@@ -451,6 +451,17 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       <div id="map"></div>
     </div>
 
+    <!-- Global Activity: under Connected Nodes, right of the map, matching the map's height -->
+    <div class="activity-card">
+      <div class="card-header">
+        <span class="card-title">Global Activity</span>
+        <span class="card-count" id="act-count"></span>
+      </div>
+      <div class="activity-list" id="activity-list">
+        <div class="empty-msg">Loading&hellip;</div>
+      </div>
+    </div>
+
     <!-- Favorites sidebar -->
     <div class="favorites-card">
       <div class="card-header">
@@ -461,18 +472,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         &#9888; Disconnect all nodes first
       </div>
       <div class="fav-list" id="fav-list">
-        <div class="empty-msg">Loading&hellip;</div>
-      </div>
-    </div>
-
-    <!-- Global Activity: full-height column, right of Favorites, matching its height -->
-    <div class="activity-card">
-      <div class="card-header">
-        <span class="card-title">Global Activity</span>
-        <span class="card-count" id="act-count"></span>
-        <span id="act-updated" style="font-size:0.65rem;color:var(--text2);font-style:italic;margin-left:auto"></span>
-      </div>
-      <div class="activity-list" id="activity-list">
         <div class="empty-msg">Loading&hellip;</div>
       </div>
     </div>
@@ -1082,8 +1081,6 @@ async function refreshActivity() {
     /* Activity list — no keyed/online badge, just source dot + node info + connect btn */
     var al = document.getElementById('activity-list');
     document.getElementById('act-count').textContent = combined.length ? combined.length + ' nodes' : '';
-    var updEl = document.getElementById('act-updated');
-    if (updEl && data.global_updated) updEl.textContent = 'global sweep ' + relTime(data.global_updated);
     if (!combined.length) {
       al.innerHTML = '<div class="empty-msg">No activity data yet</div>';
     } else {
@@ -1094,8 +1091,12 @@ async function refreshActivity() {
           ? '<div style="display:flex;flex-direction:column;gap:3px;align-items:stretch">' +
               '<button class="sb-btn connect" onclick="sbConnect(\'' +
                 esc(localNode) + '\',\'' + esc(e.node) + '\',this,false,false)">Connect</button>' +
-              '<button class="sb-btn monitor" onclick="sbConnect(\'' +
-                esc(localNode) + '\',\'' + esc(e.node) + '\',this,false,true)">Monitor</button>' +
+              '<div style="display:flex;gap:3px">' +
+                '<button class="sb-btn fav" style="flex:0 0 auto" onclick="sbAddFavorite(\'' +
+                  esc(e.node) + '\',this)" title="Add node to your Favorites list">&#9733;</button>' +
+                '<button class="sb-btn monitor" style="flex:1" onclick="sbConnect(\'' +
+                  esc(localNode) + '\',\'' + esc(e.node) + '\',this,false,true)">Monitor</button>' +
+              '</div>' +
             '</div>'
           : '';
         return '<div class="act-row">' +
@@ -1157,6 +1158,32 @@ async function sbConnect(localNode, remoteNode, btn, permanent, monitor) {
   } catch(e) {
     sbToast(label + ' error: ' + e.message, false);
     if (btn) { btn.disabled = false; btn.textContent = label; }
+  }
+}
+
+async function sbAddFavorite(node, btn) {
+  if (btn) { btn.disabled = true; }
+  try {
+    var r = await apiFetch('/api/favorites/add', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({node: node})
+    });
+    var d = await r.json();
+    if (r.ok && d.success) {
+      sbToast('Added ' + node + ' to your Favorites', true);
+      loadFavorites();
+      if (btn) { btn.disabled = false; }
+    } else if (r.status === 401) {
+      if (btn) { btn.disabled = false; }
+      openKioskLogin(sbAddFavorite, [node, null]);
+    } else {
+      sbToast('Add favorite failed: ' + (d.error || r.status), false);
+      if (btn) { btn.disabled = false; }
+    }
+  } catch(e) {
+    sbToast('Add favorite error: ' + e.message, false);
+    if (btn) { btn.disabled = false; }
   }
 }
 
