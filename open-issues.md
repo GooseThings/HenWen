@@ -72,8 +72,17 @@ Scope reviewed: `app.py` (all ~6,100 lines), `templates/status.html`, `templates
 
 ## Audio: clicks / pops (under investigation)
 
-- [ ] **[A1] Investigate audible clicks/pops in the live audio stream.**
-  Reported by the user. Pipeline: Asterisk MixMonitor → in-FIFO → `audio_relay.py` (20 ms frame pacing + silence injection) → paced-FIFO → `ffmpeg` (libopus) → browser MSE. Findings will be appended below as they are confirmed. (See the follow-up section this session for detailed notes.)
+- [ ] **[A1] Clicks/pops — root cause: `audio_relay.py` has no jitter/accumulation buffer (High for audio quality).**
+  The pacer reads *at most* one 320-byte (20 ms) frame per 20 ms slot with a single non-blocking `os.read` (`audio_relay.py:104-117`) and makes a silence/real decision from that one snapshot. MixMonitor does **not** deliver PCM as a smooth 20 ms trickle — pipes deliver in bursts — so this design manufactures artifacts two ways:
+  1. **Spurious mid-speech silence frames.** When a given 20 ms window happens to have nothing readable yet (`BlockingIOError` → `data = SILENCE_FRAME`, line 116-117), a full silence frame is spliced into what is actually continuous audio; the delayed bytes then arrive a slot later. During steady speech you get real / silence / backlog / real interleaving — each inserted silence frame is a discontinuity = a click.
+  2. **Short-read padding corrupts frame alignment.** `if len(data) < FRAME_BYTES: data += SILENCE_FRAME[len(data):]` (line 111-113) pads a partially-read frame with silence and moves on, leaving the rest of that frame's real bytes in the FIFO. That inserts a silence gap mid-waveform (click), and if the short read is an **odd** byte count it permanently byte-shifts the s16le stream from then on (every subsequent sample reads high/low byte swapped → loud noise until the broadcast restarts).
+  **Fix:** Give the relay a byte buffer. Each slot, drain *all* currently-available bytes from `in_fd` (loop `os.read` until `BlockingIOError`) into the buffer; if `len(buf) >= FRAME_BYTES`, emit `buf[:320]` and keep the remainder; only emit `SILENCE_FRAME` when the buffer is genuinely below one frame after draining. Cap the buffer (e.g. ~10 frames) and drop oldest on overflow to bound latency. This aligns every emitted frame to real sample boundaries and injects silence only on true underrun.
+
+- [ ] **[A2] Secondary pops on live-edge recovery: browser hard-seeks `audio.currentTime` (Med).**
+  The MSE controller in `status.html` jumps the playhead (`audio.currentTime = liveEdge - _LISTEN_TARGET_S`) both in the rate controller when lag exceeds the threshold (~`status.html:1763`) and on stall recovery (~`status.html:1860`). Each hard seek in a live Opus stream is a discontinuity/pop. If network lag oscillates around the jump threshold these repeat. Prefer nudging `playbackRate` over hard seeks except for genuinely large gaps, and widen the hysteresis so small lag swings don't trigger a seek.
+
+- [ ] **[A3] Minor: relay resync debug line always prints -0.020s, and resync doesn't drop backlog (Low).**
+  `audio_relay.py:89` computes `now - deadline` *after* `deadline` was just set to `now + FRAME_INTERVAL`, so the "fell behind by" figure is always `-0.020`. Also the resync path (line 84-89) resets timing but keeps draining one frame per slot, so a large backlog only bleeds off slowly (latency stays high). The A1 buffer fix (with a size cap that drops oldest) subsumes this.
 
 ---
 
