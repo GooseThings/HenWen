@@ -3992,6 +3992,7 @@ window.addEventListener('DOMContentLoaded', function() {
   log('No node stanzas found in rpt.conf.', 'WARN');
   {% endif %}
   refreshDashboard();
+  startDiagPolling();   // Dashboard is the initial page; showPage() isn't called on first load
   checkNodeDB();
 });
 
