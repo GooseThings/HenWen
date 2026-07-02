@@ -1,5 +1,7 @@
 # HenWen — AllStarLink 3 Node Manager & Kiosk
 
+[![Latest release](https://img.shields.io/github/v/release/GooseThings/HenWen)](https://github.com/GooseThings/HenWen/releases)
+
 A browser-based web interface for managing and using your AllStarLink 3 node. Also supports multiple users via a kiosk. Runs as a systemd service on the same machine as Asterisk.
 
 ![kiosk](kiosk-example.jpg)
@@ -151,7 +153,7 @@ The SQLite schema migrates automatically on startup, so new features need no man
 
 ### Quick update (recommended)
 
-Pulls the latest code and restarts the service. Your service file, database, and backups are all preserved.
+Pulls the latest code and restarts the service. Your service file, database, and backups are all preserved. See [Releases](https://github.com/GooseThings/HenWen/releases) or [CHANGELOG.md](CHANGELOG.md) for what's new.
 
 ```bash
 cd ~/HenWen          # the directory you originally cloned into
