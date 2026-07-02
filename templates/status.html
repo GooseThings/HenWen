@@ -1580,19 +1580,28 @@ var _LISTEN_START_MS = 12000;  // give up on a stalled connection after 12 s
 
 /* MSE live-edge tuning.
    Playback aims to sit _LISTEN_TARGET_S behind the live edge. When it drifts
-   further back we speed up playback slightly to catch up; Chrome uses
-   pitch-preserving WSOLA for playbackRate, so a small speedup is inaudible on
-   voice. A hard jump is the last resort, only for extreme stalls. Bands are
-   expressed relative to the target (T = _LISTEN_TARGET_S):
-     lag < T+0.15s   → 1.00× (comfortable — wide dead-band absorbs jitter)
-     T+0.15…T+0.6s   → 1.05× (5% faster, imperceptible)
-     T+0.6…T+2.5s    → 1.12× (12% faster, barely noticeable)
-     > T+2.5s        → hard jump to liveEdge−T (leaves runway after recovery) */
+   further back we speed up playback to catch up; Chrome/Firefox use
+   pitch-preserving WSOLA for playbackRate, so even a moderate speedup is
+   inaudible on voice — far preferable to a hard currentTime seek, which is an
+   audible click/pop. A hard jump is therefore a true last resort, used only
+   when we're so far behind that speed-catch would take too long (e.g. the tab
+   was backgrounded and throttled), and rate-limited by a cooldown so a lag
+   hovering near the threshold can't cause repeated pops. Bands are relative to
+   the target (T = _LISTEN_TARGET_S):
+     lag ≤ T+0.20s        → 1.00× (wide dead-band absorbs jitter)
+     T+0.20…T+0.75s       → 1.05× (imperceptible)
+     T+0.75…T+1.75s       → 1.12× (barely noticeable)
+     T+1.75…T+JUMP_LAG    → 1.25× (fast but still smooth via WSOLA — no pop)
+     > T+_LISTEN_JUMP_LAG → hard jump to liveEdge−T (last resort, cooldown-gated) */
 var _LISTEN_TARGET_S   = 0.5;            // desired playback latency behind the live edge
 var _LISTEN_STARTUP_S  = 0.5;            // pre-buffer this much before the first play()
 var _LISTEN_KEEPBUF_S  = 3.0;            // trim buffer older than this behind playhead
 var _LISTEN_RATE_MS    = 150;            // how often (ms) to run the rate controller
 var _LISTEN_RENEW_MS   = 30 * 60 * 1000;
+var _LISTEN_JUMP_LAG   = 6.0;            // only hard-seek when this many seconds behind the
+                                         // live edge; below this we rate-catch (no pop)
+var _LISTEN_JUMP_COOLDOWN_MS = 5000;     // min interval between hard seeks (anti-pop hysteresis)
+var _listenLastJumpTs  = 0;              // performance.now() of the last hard seek
 
 /* Reports MSE playback glitches (lag jumps, stalls, rebuffers) to the server
    so they land in journalctl next to the [AUDIO]/[AUDIO-RELAY] server-side
@@ -1757,17 +1766,26 @@ function _doStartListenMSE(audio, node) {
       if (audio.readyState < 2) return;  // skip while browser is still buffering startup
       var liveEdge = sb.buffered.end(sb.buffered.length - 1);
       var lag      = liveEdge - audio.currentTime;
+      var nowMs    = (window.performance && performance.now) ? performance.now() : Date.now();
       var rate;
-      if (lag > _LISTEN_TARGET_S + 2.5) {
+      if (lag > _LISTEN_TARGET_S + _LISTEN_JUMP_LAG &&
+          (nowMs - _listenLastJumpTs) > _LISTEN_JUMP_COOLDOWN_MS) {
+        /* Last resort: so far behind that even 1.25× catch-up would take too
+           long (typically the tab was backgrounded/throttled). One hard seek,
+           cooldown-gated so a lag hovering near the threshold can't pop
+           repeatedly — within the cooldown we ride the max rate band instead. */
         var _skipped = lag - _LISTEN_TARGET_S;
         audio.currentTime = liveEdge - _LISTEN_TARGET_S;
+        _listenLastJumpTs = nowMs;
         rate = 1.0;
         console.log('[AUDIO] emergency jump: lag=' + lag.toFixed(3) + 's');
         _audioClientLog(node, 'emergency_jump',
           'lag=' + lag.toFixed(3) + 's skipped=' + _skipped.toFixed(3) + 's');
-      } else if (lag > _LISTEN_TARGET_S + 0.6) {
+      } else if (lag > _LISTEN_TARGET_S + 1.75) {
+        rate = 1.25;   // fast catch-up, still smooth via WSOLA — avoids a pop
+      } else if (lag > _LISTEN_TARGET_S + 0.75) {
         rate = 1.12;
-      } else if (lag > _LISTEN_TARGET_S + 0.15) {
+      } else if (lag > _LISTEN_TARGET_S + 0.20) {
         rate = 1.05;
       } else {
         rate = 1.0;
@@ -1856,9 +1874,17 @@ function _doStartListenMSE(audio, node) {
       if (ahead >= _LISTEN_TARGET_S) {
         clearInterval(_rebufferTimer); _rebufferTimer = null;
         var _preJumpTime = audio.currentTime;
-        /* Jump to near live edge so we don't have to speed-catch. */
-        audio.currentTime = Math.max(audio.currentTime, liveEdge3 - _LISTEN_TARGET_S);
-        console.log('[AUDIO] rebuffered — resuming near live edge');
+        var _behind = liveEdge3 - audio.currentTime;
+        /* Prefer a smooth rate-catch over a hard seek: resuming in place lets
+           the rate controller speed-catch inaudibly (WSOLA), whereas seeking
+           is an audible pop. Only seek when we're so far behind that catch-up
+           would take too long (matches the rate controller's last-resort). */
+        if (_behind > _LISTEN_TARGET_S + _LISTEN_JUMP_LAG) {
+          audio.currentTime = liveEdge3 - _LISTEN_TARGET_S;
+          _listenLastJumpTs = (window.performance && performance.now) ? performance.now() : Date.now();
+        }
+        console.log('[AUDIO] rebuffered — resuming' +
+          (_behind > _LISTEN_TARGET_S + _LISTEN_JUMP_LAG ? ' near live edge' : ' (rate-catch)'));
         _audioClientLog(node, 'rebuffered',
           'stalledFor=' + (_preJumpTime - _stallStart).toFixed(3) + 's' +
           ' skipped=' + (audio.currentTime - _preJumpTime).toFixed(3) + 's');
