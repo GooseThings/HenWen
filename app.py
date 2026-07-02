@@ -149,13 +149,23 @@ limiter = Limiter(app=app, key_func=get_remote_address, default_limits=[])
 # ---------------------------------------------------------------------------
 _log_lock = threading.Lock()
 
+# In-memory ring of recent HenWen log lines, mirrored from log() below, so the
+# manager Dashboard's Diagnostics panel can show the service's own diagnostics
+# without needing journald read access (the service runs as the unprivileged
+# 'asterisk' user, which usually can't read the journal). Holds only lines that
+# pass the LOG_LEVEL filter — set LOG_LEVEL=DEBUG in the service file to capture
+# DEBUG lines here too. See /api/diagnostics.
+_LOG_RING = deque(maxlen=1500)   # each: {"t": epoch_float, "level": str, "msg": str}
+
 def log(level, msg):
     if _LOG_LEVELS.get(level, 1) < _LOG_LEVELS.get(LOG_LEVEL, 1):
         return
+    now = time.time()
     ts  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     out = f"[{ts}] [{level}] {msg}"
     with _log_lock:
         print(out, flush=True)
+        _LOG_RING.append({"t": now, "level": level, "msg": msg})
 
 log("INFO", "HenWen starting up")
 log("INFO", f"  RPT_CONF_PATH  = {RPT_CONF_PATH}")
@@ -4529,6 +4539,103 @@ def api_asterisk_log():
     except Exception as e:
         log("ERROR", f"[API] /api/asterisk/log error: {e}")
         return jsonify({"lines": [], "path": ASTERISK_LOG_PATH, "error": str(e)}), 500
+
+
+# Asterisk messages.log line prefix, e.g. "[2026-07-01 23:01:49] VERBOSE[123] ..."
+_AST_LOG_LINE_RE = re.compile(r'^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:\.\d+)?\]\s+([A-Z]+)')
+# Map Asterisk log levels onto the small set the Diagnostics panel colours.
+_AST_LEVEL_MAP = {"ERROR": "ERROR", "WARNING": "WARN", "NOTICE": "INFO",
+                  "VERBOSE": "AMI", "DEBUG": "DEBUG", "DTMF": "AMI"}
+
+
+@app.route("/api/diagnostics")
+def api_diagnostics():
+    """
+    Merged diagnostics feed for the Dashboard's Diagnostics panel: HenWen's own
+    recent log lines (from the in-memory ring) plus, for superusers, a tail of
+    the Asterisk log — combined and sorted chronologically. Admins see HenWen
+    lines only (Asterisk console access is superuser-only, matching
+    /api/asterisk/log).
+    """
+    role = session.get("role", "")
+    if role not in ("admin", "superuser"):
+        return jsonify({"error": "Admin access required"}), 403
+    try:
+        limit = min(int(request.args.get("lines", 400)), 1500)
+    except (ValueError, TypeError):
+        limit = 400
+
+    entries = []
+
+    # ── HenWen's own log (in-memory ring) ────────────────────────────────────
+    with _log_lock:
+        ring = list(_LOG_RING)
+    for e in ring:
+        entries.append({
+            "src":   "HENWEN",
+            "t":     e["t"],
+            "ts":    datetime.fromtimestamp(e["t"]).strftime("%H:%M:%S"),
+            "level": e["level"],
+            "msg":   e["msg"],
+        })
+
+    # ── Asterisk log tail (superuser only) ───────────────────────────────────
+    ast_available = False
+    ast_reason    = ""
+    if role == "superuser":
+        if os.path.exists(ASTERISK_LOG_PATH):
+            try:
+                with open(ASTERISK_LOG_PATH, "rb") as f:
+                    f.seek(0, 2)
+                    size = f.tell()
+                    read_size = min(size, 256 * 1024)
+                    f.seek(size - read_size)
+                    raw = f.read(read_size).decode("utf-8", errors="replace")
+                lines = raw.splitlines()
+                if size > read_size and len(lines) > 1:
+                    lines = lines[1:]   # drop the partial first line
+                last_t = None
+                for line in lines[-limit:]:
+                    m = _AST_LOG_LINE_RE.match(line)
+                    if m:
+                        try:
+                            last_t = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
+                        except ValueError:
+                            pass
+                        level = _AST_LEVEL_MAP.get(m.group(2).upper(), "INFO")
+                    else:
+                        level = ""   # continuation / unparseable line
+                    t = last_t if last_t is not None else 0.0
+                    entries.append({
+                        "src":   "ASTERISK",
+                        "t":     t,
+                        "ts":    datetime.fromtimestamp(t).strftime("%H:%M:%S") if t else "",
+                        "level": level,
+                        "msg":   line,
+                    })
+                ast_available = True
+            except PermissionError:
+                ast_reason = f"permission denied reading {ASTERISK_LOG_PATH}"
+            except Exception as ex:
+                ast_reason = str(ex)
+        else:
+            ast_reason = f"Asterisk log not found at {ASTERISK_LOG_PATH}"
+    else:
+        ast_reason = "Asterisk diagnostics require a superuser account"
+
+    # Merge chronologically. Python's sort is stable, so lines sharing a second
+    # keep their within-source order.
+    entries.sort(key=lambda e: e["t"])
+    entries = entries[-limit:]
+
+    resp = jsonify({
+        "entries":            entries,
+        "henwen_log_level":   LOG_LEVEL,
+        "asterisk_available": ast_available,
+        "asterisk_reason":    ast_reason,
+    })
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.route("/api/asterisk/verbose", methods=["POST"])

@@ -368,6 +368,10 @@ input:checked + .slider::before  { transform: translateX(16px); background: var(
 .lINFO { color: var(--accent); }
 .lDBG  { color: #5a6478; }
 .lAMI  { color: #c9a227; }
+.diag-src { display: inline-block; min-width: 30px; text-align: center; font-size: 0.68rem;
+           font-weight: 700; border-radius: 3px; padding: 0 4px; margin-right: 2px; }
+.diag-hw  { background: rgba(90,120,220,0.22); color: #8fa8ff; }
+.diag-ast { background: rgba(201,162,39,0.20); color: #d7b64a; }
 
 .alert { padding: 9px 13px; border-radius: var(--radius); border: 1px solid; margin-bottom: 12px; font-size: 0.88rem; }
 .alert-info    { background: rgba(88,166,255,0.08);  border-color: rgba(88,166,255,0.3);  color: var(--accent); }
@@ -565,9 +569,24 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
 
     <div class="card">
       <div class="card-header">
-        <h2>Debug Log</h2>
-        <button class="btn btn-sm" onclick="clearLog('main-log')">Clear</button>
+        <h2>Diagnostics <span class="muted" style="font-size:.8rem;font-weight:400">HenWen + Asterisk</span></h2>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <select id="diag-src" class="btn btn-sm" onchange="renderDiagnostics()" title="Filter by source">
+            <option value="">All sources</option>
+            <option value="HENWEN">HenWen</option>
+            <option value="ASTERISK">Asterisk</option>
+          </select>
+          <select id="diag-level" class="btn btn-sm" onchange="renderDiagnostics()" title="Minimum level">
+            <option value="">All levels</option>
+            <option value="INFO">Info+</option>
+            <option value="WARN">Warn+</option>
+            <option value="ERROR">Errors only</option>
+          </select>
+          <button class="btn btn-sm" id="diag-pause-btn" onclick="toggleDiagPause()">Pause</button>
+          <button class="btn btn-sm" onclick="diagClear()">Clear</button>
+        </div>
       </div>
+      <div id="diag-note" class="muted" style="font-size:.72rem;margin:-2px 0 6px 2px"></div>
       <div class="log-panel" id="main-log"></div>
     </div>
   </section>
@@ -1898,7 +1917,11 @@ function addLog(panelId, level, msg) {
   panel.scrollTop = panel.scrollHeight;
 }
 
-function log(msg, level)   { addLog('main-log', level || 'INFO', msg); }
+/* The Dashboard panel (#main-log) is now a live server-sourced Diagnostics
+   feed (HenWen + Asterisk) driven by refreshDiagnostics(), not a client-side
+   action trace. Route these legacy UI-narration calls to the console so they
+   remain available in devtools without overwriting the server feed. */
+function log(msg, level)   { try { if (window.console) console.log('[' + (level || 'INFO') + '] ' + msg); } catch(e) {} }
 function ncLog(msg, level) { addLog('nc-log',   level || 'INFO', msg); }
 
 function clearLog(id) {
@@ -1952,10 +1975,11 @@ function showPage(id) {
   var nav = document.getElementById('sidebar-nav');
   if (nav) nav.classList.remove('open');
 
-  // Stop live polling whenever we leave node-control or ast-console
+  // Stop live polling whenever we leave node-control, ast-console, or dashboard
   stopNcPolling();
   stopFavStatusPolling();
   astStopAutoRefresh();
+  stopDiagPolling();
 
   var page = document.getElementById('page-' + id);
   if (page) page.classList.add('active');
@@ -1966,7 +1990,7 @@ function showPage(id) {
 
   currentPage = id;
 
-  if      (id === 'dashboard')    refreshDashboard();
+  if      (id === 'dashboard')    { refreshDashboard(); startDiagPolling(); }
   else if (id === 'node-control') { loadFavorites(); startNcPolling(); startFavStatusPolling(); }
   else if (id === 'raw-editor')   rawLoad();
   else if (id === 'backups')        loadBackups();
@@ -2049,6 +2073,100 @@ async function refreshDashboard() {
     log('AMI credentials not configured. See AMI Diagnostics page.', 'ERROR');
   if (d.running_as === 'root')
     log('HenWen is running as root. Consider switching to the asterisk user for better security.', 'WARN');
+}
+
+/* ── Diagnostics feed (HenWen + Asterisk) ──────────────────────────────────
+   Repurposes the old client-side "Debug Log" into a live, server-sourced
+   feed: HenWen's own log ring merged with a tail of the Asterisk log
+   (Asterisk portion is superuser-only, mirroring the Asterisk Console).
+   Polls while the Dashboard is visible; persists across page refreshes
+   because the backend keeps the ring in memory. */
+var _diagTimer       = null;
+var _diagPaused      = false;
+var _diagEntries     = [];
+var _diagLogLevel    = '';
+var _diagAstNote     = '';
+var _diagClearBefore = 0;      // epoch seconds; Clear hides anything older
+var _DIAG_RANK       = {DEBUG:0, AMI:1, OK:1, INFO:1, WARN:2, ERROR:3};
+
+async function refreshDiagnostics(manual) {
+  if (_diagPaused && !manual) return;
+  var r = await api('/api/diagnostics?lines=400');
+  if (!r.ok) {
+    var note = document.getElementById('diag-note');
+    if (note) note.textContent = r.status === 403
+      ? 'Diagnostics require an admin or superuser account.'
+      : ('Diagnostics unavailable: ' + (r.data && r.data.error || r.status));
+    return;
+  }
+  _diagEntries  = r.data.entries || [];
+  _diagLogLevel = r.data.henwen_log_level || '';
+  _diagAstNote  = r.data.asterisk_available ? '' : (r.data.asterisk_reason || '');
+  renderDiagnostics();
+}
+
+function renderDiagnostics() {
+  var panel = document.getElementById('main-log');
+  if (!panel) return;
+  var srcSel = document.getElementById('diag-src');
+  var lvlSel = document.getElementById('diag-level');
+  var src    = srcSel ? srcSel.value : '';
+  var lvl    = lvlSel ? lvlSel.value : '';
+  var minRank = (lvl && _DIAG_RANK[lvl] != null) ? _DIAG_RANK[lvl] : -1;
+
+  var rows = _diagEntries.filter(function(e) {
+    if (src && e.src !== src) return false;
+    if (_diagClearBefore && e.t && e.t < _diagClearBefore) return false;
+    if (minRank >= 0) {
+      var rk = (_DIAG_RANK[e.level] != null) ? _DIAG_RANK[e.level] : 1;
+      if (rk < minRank) return false;
+    }
+    return true;
+  });
+
+  var clsMap = {OK:'lOK', WARN:'lWARN', ERROR:'lERR', INFO:'lINFO', DEBUG:'lDBG', AMI:'lAMI'};
+  // Preserve auto-scroll only when the user is already near the bottom.
+  var atBottom = (panel.scrollHeight - panel.scrollTop - panel.clientHeight) < 40;
+  panel.innerHTML = rows.map(function(e) {
+    var cls   = clsMap[e.level] || 'lINFO';
+    var isAst = e.src === 'ASTERISK';
+    var badge = '<span class="diag-src ' + (isAst ? 'diag-ast' : 'diag-hw') + '">'
+              + (isAst ? 'AST' : 'HW') + '</span>';
+    var lvlTag = e.level ? ('<span class="' + cls + '">[' + esc(e.level) + ']</span> ') : '';
+    return '<div><span class="lt">[' + esc(e.ts || '') + ']</span> ' + badge + ' ' + lvlTag + esc(e.msg) + '</div>';
+  }).join('');
+  if (atBottom) panel.scrollTop = panel.scrollHeight;
+
+  var note = document.getElementById('diag-note');
+  if (note) {
+    var bits = [rows.length + ' line(s)'];
+    if (_diagLogLevel) bits.push('HenWen log level: ' + _diagLogLevel
+      + (_diagLogLevel !== 'DEBUG' ? ' (set LOG_LEVEL=DEBUG for verbose)' : ''));
+    if (_diagAstNote) bits.push('Asterisk: ' + _diagAstNote);
+    note.textContent = bits.join('  ·  ');
+  }
+}
+
+function toggleDiagPause() {
+  _diagPaused = !_diagPaused;
+  var b = document.getElementById('diag-pause-btn');
+  if (b) b.textContent = _diagPaused ? 'Resume' : 'Pause';
+  if (!_diagPaused) refreshDiagnostics(true);
+}
+
+function diagClear() {
+  _diagClearBefore = Date.now() / 1000;
+  renderDiagnostics();
+}
+
+function startDiagPolling() {
+  refreshDiagnostics(true);
+  if (_diagTimer) clearInterval(_diagTimer);
+  _diagTimer = setInterval(refreshDiagnostics, 4000);
+}
+
+function stopDiagPolling() {
+  if (_diagTimer) { clearInterval(_diagTimer); _diagTimer = null; }
 }
 
 /* ── Restart / reload ───────────────────────────────────────────────────── */
