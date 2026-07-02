@@ -85,8 +85,17 @@ def main():
     # boundaries and silence is only ever sent on a true underrun, never
     # spliced into ongoing speech. The buffer is capped so a stalled
     # downstream reader can't build unbounded latency.
+    # Asterisk writes MixMonitor audio to the FIFO through a buffered stdio
+    # stream that flushes in ~32KB lumps — about 2 seconds of 8kHz s16le at a
+    # time, not a 20ms trickle. The buffer must hold at least one full lump or
+    # the excess gets dropped here, which audibly chops ~1.5s out of every 2s
+    # of speech (silence-padded by the underrun branch below). 4s of headroom
+    # absorbs a full lump plus arrival jitter; the cap now only guards against
+    # a genuinely runaway backlog (e.g. downstream reader stalled for many
+    # seconds), at the cost of up to ~2s of pipeline latency, which the
+    # browser player's live-edge controller already accounts for.
     buf           = bytearray()
-    MAX_BUF_BYTES = FRAME_BYTES * 25   # ~500ms of audio before dropping oldest
+    MAX_BUF_BYTES = FRAME_BYTES * 200  # ~4s of audio before dropping oldest
 
     deadline = time.monotonic()
     while running:
