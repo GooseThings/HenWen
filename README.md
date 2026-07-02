@@ -4,7 +4,7 @@
 
 A browser-based web interface for managing and using your AllStarLink 3 node. Also supports multiple users via a kiosk. Runs as a systemd service on the same machine as Asterisk.
 
-![kiosk](kiosk-example.jpg)
+![Pre-release example of the kiosk](kiosk-example.jpg)
 
 **Key features:**
 - Edit `rpt.conf` field-by-field (validated dropdowns and range-checked inputs sourced from the official ASL3 docs) or switch to a raw text editor
