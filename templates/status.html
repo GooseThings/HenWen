@@ -187,31 +187,46 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   display: flex; align-items: baseline; gap: 10px; flex-shrink: 0; }
 .card-title { font-size: 0.68rem; letter-spacing: .12em; color: var(--text2); text-transform: uppercase; }
 .card-count { font-size: 0.82rem; color: var(--accent); font-weight: 600; }
+.connector-warn-bar {
+  padding: 5px 18px; font-size: 0.72rem; font-weight: 600; color: var(--danger);
+  border-bottom: 1px solid rgba(244,63,94,.35); background: rgba(244,63,94,.1);
+  align-items: center; gap: 6px; flex-shrink: 0;
+}
 .node-list { flex: 1; overflow-y: auto; }
 .node-list::-webkit-scrollbar { width: 3px; }
 .node-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 .empty-msg { display: flex; align-items: center; justify-content: center; height: 100%;
   color: var(--text2); font-size: 0.95rem; min-height: 48px; }
 
-.node-row { display: grid; grid-template-columns: 10px 88px 120px 1fr auto;
-  gap: 0 14px; align-items: center; padding: 8px 18px;
+/* Everything about a connected node stays on a single line at any width —
+   fixed-size pieces (dot, number, callsign) shrink/truncate before wrapping,
+   and the meta strip (keyed count, last-heard, mode/idle badges) scrolls
+   horizontally in place rather than wrapping, so its buttons (idle reset/
+   squash) stay reachable instead of getting clipped off. */
+.node-row { display: flex; align-items: center; gap: 10px; min-width: 0;
+  padding: 8px 18px;
   border-bottom: 1px solid var(--border); transition: background .15s; }
 .node-row:last-child { border-bottom: none; }
 .node-row:hover { background: var(--bg3); }
-.nr-dot { width: 9px; height: 9px; border-radius: 50%; background: #2a2a2a; border: 1px solid #333;
-  margin-top: 4px; }
+.nr-dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; background: #2a2a2a; border: 1px solid #333; }
 .nr-dot.keyed { background: var(--danger); border-color: var(--danger);
   box-shadow: 0 0 5px rgba(224,68,68,.7); }
 .nr-dot.connecting { background: #d9a520; border-color: #d9a520;
   box-shadow: 0 0 5px rgba(217,165,32,.6); }
-.nr-num  { font-size: 1.05rem; font-weight: 700; font-family: var(--mono); color: var(--accent); text-decoration: none; }
-.nr-call { font-size: 0.95rem; font-weight: 600; color: var(--text); letter-spacing: .03em; }
-.nr-right { display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
-.nr-loc  { font-size: 0.82rem; color: var(--text2); white-space: nowrap; overflow: hidden;
+.nr-num  { flex: 0 1 auto; min-width: 2.6em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 1.05rem; font-weight: 700; font-family: var(--mono); color: var(--accent); text-decoration: none; }
+.nr-call { flex: 0 1 auto; min-width: 2.5em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 0.95rem; font-weight: 600; color: var(--text); letter-spacing: .03em; }
+.nr-right { flex: 1 1 40px; min-width: 0; display: flex; align-items: baseline; gap: 10px; overflow: hidden; }
+.nr-loc  { flex: 0 1 auto; min-width: 0; font-size: 0.82rem; color: var(--text2); white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; }
-.nr-meta { font-size: 0.72rem; color: var(--text2); display: flex; gap: 10px; flex-wrap: wrap; }
-.nr-meta span { white-space: nowrap; }
+.nr-meta { flex: 1 1 auto; min-width: 0; font-size: 0.72rem; color: var(--text2);
+  display: flex; align-items: center; gap: 10px; white-space: nowrap;
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.nr-meta::-webkit-scrollbar { display: none; }
+.nr-meta span { white-space: nowrap; flex-shrink: 0; }
 .nr-meta strong { color: var(--text); }
+.node-row > .sb-btn.disconnect { flex: 0 0 auto; }
 
 /* ── Activity panel: sits under Connected Nodes, right of the map, matching the map's height ── */
 .activity-card {
@@ -255,10 +270,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .map-ctl { display: flex; align-items: center; gap: 5px; margin-left: auto; flex-wrap: wrap; }
 .map-ctl-sel { background: var(--bg3); border: 1px solid var(--border); color: var(--text);
   border-radius: 4px; padding: 2px 5px; font-size: 0.7rem; cursor: pointer; }
-.map-btn { background: var(--bg3); border: 1px solid var(--border); color: var(--text2);
-  border-radius: 4px; padding: 2px 8px; font-size: 0.7rem; font-weight: 600;
-  cursor: pointer; letter-spacing: .04em; transition: all .15s; white-space: nowrap; }
-.map-btn.on { background: var(--accent); border-color: var(--accent); color: var(--bg); }
 .popup-node-link { color: var(--accent); font-weight: 600; text-decoration: none; }
 
 /* ── Favorites sidebar ── */
@@ -356,6 +367,77 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   flex-wrap: wrap; gap: 4px 14px; padding-top: 7px; border-top: 1px solid var(--border);
   font-size: 0.76rem; color: var(--text2); flex-shrink: 0; }
 .f-stale { color: var(--warn); font-weight: 600; }
+
+/* ── Mobile layout ──────────────────────────────────────────────────────────
+   The desktop board is a fixed-height, non-scrolling 4-column grid sized for
+   a TV/monitor. Below this width there's no room for that grid, so the page
+   switches to a normal scrolling single column instead — same cards, same
+   IDs/classes (nothing here touches markup or JS), just restacked. ── */
+@media (max-width: 860px) {
+  html, body { height: auto; overflow: visible; }
+  .board { height: auto; min-height: 100vh; padding: 12px 12px 10px; }
+
+  .header { flex-wrap: wrap; row-gap: 8px; }
+  .header-logo { height: 44px; width: 44px; }
+  .header-brand { font-size: 0.8rem; }
+  .header-brand strong { font-size: 0.92rem; }
+  .header-clock { font-size: 1.7rem; order: 3; flex-basis: 100%; text-align: center; }
+  .header-actions { gap: 6px; }
+
+  .weather-bar { min-height: 0; overflow: visible; }
+  .weather-items { overflow: visible; }
+
+  /* Single scrolling column. Order follows what a kiosk visitor checks
+     first on a phone: their own node, who's connected to it, then the
+     supporting panels. */
+  .content-area {
+    display: flex; flex-direction: column; grid-template-columns: none;
+    grid-template-rows: none; flex: none; min-height: 0;
+  }
+  .node-card, .connected-card, .map-card, .activity-card, .favorites-card {
+    grid-column: auto; grid-row: auto;
+  }
+  .node-card    { order: 1; }
+  .connected-card { order: 2; }
+  .map-card     { order: 3; }
+  .activity-card { order: 4; }
+  .favorites-card { order: 5; }
+
+  /* Cards no longer share an implicit grid-row height, so each gets its own
+     cap with an internally-scrolling list instead of flexing to fill a row. */
+  .node-card {
+    min-height: 0; max-height: none; padding: 14px 12px;
+  }
+  .node-history-list { max-height: 160px; }
+  .connected-card, .activity-card, .favorites-card { max-height: 320px; }
+  .map-card { height: 340px; flex-shrink: 0; }
+
+  .header-clock, .node-number { font-variant-numeric: tabular-nums; }
+  .node-number { font-size: 1.9rem; }
+  .node-callsign { font-size: 1.1rem; }
+  .keyed-dot { width: 46px; height: 46px; }
+  .keyed-label { font-size: 0.88rem; }
+
+  /* .node-row is already a single shrink-to-fit flex line at any width (see
+     base styles) — just tighten sizes/gaps so more of it fits before the
+     ellipsis/scroll fallbacks kick in. */
+  .node-row { gap: 6px; padding: 8px 12px; }
+  .nr-num   { min-width: 2em; font-size: 0.95rem; }
+  .nr-call  { min-width: 1.5em; font-size: 0.85rem; }
+  .nr-right { gap: 6px; }
+  .node-row > .sb-btn.disconnect { padding-left: 6px; padding-right: 6px; }
+
+  /* Activity rows: let the optional Fav/Monitor button pair drop to their
+     own line under the entry instead of squeezing beside it. With a single
+     grid column, both act-body and the button wrapper stack automatically. */
+  .act-row { grid-template-columns: 1fr; row-gap: 6px; }
+
+  /* Larger touch targets for the controls people actually tap on a phone. */
+  .sb-btn, .btn-icon { padding-top: 6px; padding-bottom: 6px; }
+  .conn-form-bar input { flex: 1 1 100px; }
+
+  #sb-toast { white-space: normal; max-width: 88vw; text-align: center; }
+}
 </style>
 </head>
 <body>
@@ -415,6 +497,9 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
           <button class="btn-icon" id="listen-btn" onclick="toggleListen()" title="Stream live audio from this node — expect ~1 second delay">&#9834; Listen</button>
         </span>
       </div>
+      <div class="connector-warn-bar" id="connector-warn-bar" style="display:none">
+        &#9888; <span id="connector-warn-text"></span>
+      </div>
       <div class="conn-form-bar" id="conn-form-bar">
         <input id="conn-form-node" type="text" placeholder="Node #" maxlength="7"
                onkeydown="if(event.key==='Enter')statusConnectNew()">
@@ -434,7 +519,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <!-- Map -->
     <div class="map-card">
       <div class="card-header">
-        <span class="card-title">Network Map</span><span id="map-pin-dur-label" style="font-size:0.65rem;color:var(--text2);font-style:italic;margin-left:6px"></span>
+        <span class="card-title">Network Map</span>
         <div class="map-ctl">
           <select class="map-ctl-sel" id="map-tile-sel" onchange="changeTiles(this.value)">
             <option value="dark">OSM Dark</option>
@@ -443,9 +528,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
             <option value="topo">Topography</option>
             <option value="satellite">Satellite</option>
           </select>
-          <button class="map-btn on" id="btn-global"   onclick="toggleLayer('global',this)">Global</button>
-          <button class="map-btn on" id="btn-lines"    onclick="toggleLayer('lines',this)">Lines</button>
-          <button class="map-btn on" id="btn-grayline" onclick="toggleLayer('grayline',this)">Grayline</button>
         </div>
       </div>
       <div id="map"></div>
@@ -482,7 +564,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   <footer class="footer">
     <span>Logged in: <strong id="f-active-users">—</strong></span>
     <span><a href="https://github.com/GooseThings/HenWen" target="_blank" rel="noopener"
-             style="color:var(--text2);text-decoration:none" title="HenWen on GitHub">HenWen</a></span>
+             style="color:var(--text2);text-decoration:none" title="HenWen on GitHub">HenWen{% if henwen_version and henwen_version != 'unknown' %} {{ henwen_version }}{% endif %}</a></span>
   </footer>
 
   <!-- Kiosk login modal -->
@@ -605,14 +687,7 @@ function toggleFS() {
 /* ── Leaflet map ── */
 var _map            = null;
 var _markers        = [];
-var _lines          = [];
-var _grayLayer      = null;
 var _currentTile    = null;
-
-/* Toggle state */
-var _showGlobal   = true;
-var _showLines    = true;
-var _showGrayline = true;
 
 /* Data state */
 var _hostedNodes        = [];  /* [{node,callsign,location,lat,lon}] from board refresh */
@@ -640,21 +715,15 @@ function changeTiles(key) {
   localStorage.setItem('henwen-maptiles', key);
 }
 
-function toggleLayer(which, btn) {
-  if (which === 'global')   _showGlobal   = !_showGlobal;
-  if (which === 'lines')    _showLines    = !_showLines;
-  if (which === 'grayline') _showGrayline = !_showGrayline;
-  btn.classList.toggle('on');
-  updateMap();
-}
-
 function initMap() {
   if (_map) return;
   _map = L.map('map', {
     zoomControl: true, attributionControl: false,
     center: [20, 0], zoom: 2, minZoom: 1,
-    /* Clamp panning to the range covered by the 3-copy grayline (-540° to +540°) */
-    maxBounds: [[-90, -540], [90, 540]],
+    /* Clamp panning to the range covered by the 3 world copies pins are
+       drawn at (WORLD_OFFSETS in updateMap, -360° to +360°), plus a little
+       slack past the edge copy. */
+    maxBounds: [[-90, -400], [90, 400]],
     maxBoundsViscosity: 1.0,
   });
 
@@ -719,51 +788,6 @@ function makeStarIcon(color) {
   return L.divIcon({ html:svg, iconSize:s, iconAnchor:[s[0]/2,s[1]/2], popupAnchor:[0,-s[1]/2], className:'' });
 }
 
-/* ── Grayline (day/night terminator) ── */
-function _solarPos() {
-  var d = new Date(), rad = Math.PI / 180;
-  var n = d.getTime() / 86400000 - 10957.5;      /* days since J2000.0 */
-  var L = (280.460 + 0.9856474 * n) % 360;
-  var g = ((357.528 + 0.9856003 * n) % 360) * rad;
-  var lam = (L + 1.915 * Math.sin(g) + 0.020 * Math.sin(2*g)) * rad;
-  var eps = (23.439 - 0.0000004 * n) * rad;
-  var dec = Math.asin(Math.sin(eps) * Math.sin(lam)) / rad;
-  var ra  = Math.atan2(Math.cos(eps) * Math.sin(lam), Math.cos(lam)) / rad;
-  var GMST = ((280.46061837 + 360.98564736629 * n) % 360 + 360) % 360;
-  var lonS = ((ra - GMST + 360) % 360);
-  if (lonS > 180) lonS -= 360;
-  return { dec: dec, lonS: lonS };
-}
-
-function _buildNightPoly() {
-  var sol = _solarPos(), rad = Math.PI / 180;
-  var dec = sol.dec, lonS = sol.lonS;
-  if (Math.abs(dec) < 0.1) dec = 0.1;
-  var pts = [];
-  for (var lon = -180; lon <= 180; lon += 2) {
-    var dL  = (lon - lonS) * rad;
-    var lat = Math.atan(-Math.cos(dL) / Math.tan(dec * rad)) / rad;
-    pts.push([lat, lon]);
-  }
-  if (dec > 0) { pts.push([-89.9, 180]); pts.push([-89.9, -180]); }
-  else         { pts.push([ 89.9, 180]); pts.push([ 89.9, -180]); }
-  return pts;
-}
-
-function updateGrayline() {
-  if (_grayLayer) { _map.removeLayer(_grayLayer); _grayLayer = null; }
-  if (!_showGrayline || !_map) return;
-  var base = _buildNightPoly();
-  var opts = { color:'transparent', fillColor:'#000020', fillOpacity:0.38, interactive:false };
-  /* Render at -360°, 0°, +360° offsets so the overlay covers all repeated world copies
-     that Leaflet shows at low zoom levels */
-  var layers = [-360, 0, 360].map(function(off) {
-    return L.polygon(base.map(function(p){ return [p[0], p[1] + off]; }), opts);
-  });
-  _grayLayer = L.layerGroup(layers).addTo(_map);
-  layers.forEach(function(l){ try { l.bringToBack(); } catch(e){} });
-}
-
 /* ── Master map renderer ── */
 function updateMap() {
   if (!_map) return;
@@ -771,11 +795,9 @@ function updateMap() {
   var localNode = (window._lastBoardNodes && window._lastBoardNodes[0])
                   ? window._lastBoardNodes[0].node : '';
 
-  /* Clear markers and lines */
+  /* Clear markers */
   _markers.forEach(function(m) { _map.removeLayer(m); });
   _markers = [];
-  _lines.forEach(function(l) { _map.removeLayer(l); });
-  _lines = [];
 
   var allPinned = [];
   /* Mirrors the grayline's world-copy wrap so pins still show up on the
@@ -795,7 +817,7 @@ function updateMap() {
     });
   });
 
-  /* 2. Connected-node red pins + dashed lines to their hosted node */
+  /* 2. Connected-node red pins */
   _connectedNodes.forEach(function(c) {
     if (c.lat == null || c.lon == null) return;
     allPinned.push(c);
@@ -804,18 +826,14 @@ function updateMap() {
         .bindPopup('<b>' + esc(c.callsign||c.node) + '</b><br>' +
                    esc(c.location||'') + '<br><small>Node ' + nodeLink(c.node, 'popup-node-link') + ' &mdash; connected</small>');
       m.addTo(_map); _markers.push(m);
-      if (_showLines && c.host_lat != null && c.host_lon != null) {
-        var line = L.polyline([[c.lat, c.lon + off], [c.host_lat, c.host_lon + off]], {
-          color:'#e74c3c', weight:1.5, opacity:0.55, dashArray:'5 6', interactive:false
-        }).addTo(_map);
-        _lines.push(line);
-      }
     });
   });
 
-  /* 3. Activity pins: local (green) always shown; global (blue) only if _showGlobal */
+  /* 3. Activity pins: local (green, nodes keyed on this server's own hosted
+     node) and global (blue, keyed elsewhere on the network) — global pins
+     fade with age toward the edge of the display window. */
   var actPts = _lastActivityPoints.filter(function(p) {
-    return p.lat != null && p.lon != null && (_showGlobal || p.type === 'local');
+    return p.lat != null && p.lon != null;
   });
   actPts.forEach(function(p) {
     var color = p.type === 'local' ? '#3fb950' : '#58a6ff';
@@ -856,9 +874,6 @@ function updateMap() {
       _mapFitted = true;
     }
   }
-
-  /* Grayline — rebuild each render so time stays current */
-  updateGrayline();
 }
 
 /* ── Weather bar ── */
@@ -949,6 +964,17 @@ async function refreshBoard() {
     });
     var nl = document.getElementById('node-list');
     document.getElementById('conn-count').textContent = allLinked.length ? allLinked.length + ' linked' : '';
+
+    var warnBar = document.getElementById('connector-warn-bar');
+    if (warnBar) {
+      if (data.connector_warning) {
+        document.getElementById('connector-warn-text').textContent =
+          data.connector_warning + ' — you will be disconnected and will need to reconnect.';
+        warnBar.style.display = 'flex';
+      } else {
+        warnBar.style.display = 'none';
+      }
+    }
     if (!allLinked.length) {
       nl.innerHTML = '<div class="empty-msg">No nodes linked</div>';
     } else {
@@ -957,12 +983,11 @@ async function refreshBoard() {
         var isConn = (c.connect_state || 'ESTABLISHED') === 'ESTABLISHED';
         if (c.connect_time) meta.push('Conn: <strong>' + esc(c.connect_time) + '</strong>');
         meta.push('Keyups: <strong>' + (c.keyups || 0) + '</strong>');
-        if (c.last_keyed)   meta.push('Last: <strong>' + relTime(c.last_keyed) + '</strong>');
         var modeBadge = '';
-        if (c.mode === 'T') modeBadge = '<span class="mode-badge tx">Transmit</span>';
-        else if (c.mode === 'R') modeBadge = '<span class="mode-badge mon">Monitor</span>';
+        if (c.mode === 'T') modeBadge = '<span class="mode-badge tx">TX</span>';
+        else if (c.mode === 'R') modeBadge = '<span class="mode-badge mon">Mon</span>';
         var idleBadge = '';
-        if (c.permanent === false && typeof c.idle_elapsed === 'number') {
+        if (c.permanent === false && c.no_timeout !== true && typeof c.idle_elapsed === 'number') {
           var mins = Math.floor(c.idle_elapsed / 60);
           var secs = c.idle_elapsed % 60;
           var ts   = mins + ':' + (secs < 10 ? '0' : '') + secs;
@@ -974,15 +999,15 @@ async function refreshBoard() {
               'title="Reset idle timer to zero — stays a temporary connection">&#10005;</button>';
             idleBadge += '<button class="idle-squash-btn" onclick="sbSquashIdle(\'' +
               esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)" ' +
-              'title="Upgrade to permanent connection — disables idle timeout and auto-reconnects if dropped">No Timeout</button>';
+              'title="Disable auto-disconnect for this connection — stays a normal, non-permanent link; won\'t auto-reconnect if the far end drops it">No Timeout</button>';
           }
         } else if (c.permanent === true) {
           idleBadge = '<span class="idle-badge">Permanent</span>';
         }
         var badges = modeBadge + idleBadge;
         var dotClass = !isConn ? ' connecting' : (c.keyed ? ' keyed' : '');
-        var dcBtn = '<button class="sb-btn disconnect" onclick="sbDisconnect(\'' +
-          esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)">Disconnect</button>';
+        var dcBtn = '<button class="sb-btn disconnect" title="Disconnect" data-label="X" onclick="sbDisconnect(\'' +
+          esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)">X</button>';
         return '<div class="node-row">' +
           '<div class="nr-dot' + dotClass + '"></div>' +
           nodeLink(c.node, 'nr-num') +
@@ -1117,10 +1142,6 @@ async function refreshActivity() {
     _lastActivityPoints = combined;
     _globalWindowMin = data.global_window_min || 15;
     updateMap();
-
-    var pinMin = data.pin_duration_min || 60;
-    var pinLabel = document.getElementById('map-pin-dur-label');
-    if (pinLabel) pinLabel.textContent = '· pins ' + pinMin + ' min';
   } catch(e) {}
 }
 
@@ -1200,15 +1221,15 @@ async function sbDisconnect(localNode, remoteNode, btn) {
       sbToast('Disconnected ' + remoteNode, true);
       setTimeout(refreshBoard, 1500);
     } else if (r.status === 401) {
-      if (btn) { btn.disabled = false; btn.textContent = 'Disconnect'; }
+      if (btn) { btn.disabled = false; btn.textContent = btn.dataset.label || 'Disconnect'; }
       openKioskLogin(sbDisconnect, [localNode, remoteNode, null]);
     } else {
       sbToast('Disconnect failed: ' + (d.error || r.status), false);
-      if (btn) { btn.disabled = false; btn.textContent = 'Disconnect'; }
+      if (btn) { btn.disabled = false; btn.textContent = btn.dataset.label || 'Disconnect'; }
     }
   } catch(e) {
     sbToast('Disconnect error: ' + e.message, false);
-    if (btn) { btn.disabled = false; btn.textContent = 'Disconnect'; }
+    if (btn) { btn.disabled = false; btn.textContent = btn.dataset.label || 'Disconnect'; }
   }
 }
 
@@ -1373,7 +1394,7 @@ async function kioskLogin() {
 }
 
 async function kioskLogout() {
-  await apiFetch('/logout');
+  await apiFetch('/logout', {method: 'POST'});
   /* /logout clears the session, invalidating the CSRF token in our meta tag.
      /login (the redirect target) regenerates one for the fresh session.
      Fetch a new token so the next login attempt succeeds without a page reload. */
@@ -1675,8 +1696,17 @@ function _startListen() {
   }, _LISTEN_START_MS);
 
   apiFetch('/api/audio/check/' + node)
-    .then(function(r) { return r.json(); })
+    .then(function(r) {
+      if (r.status === 401) {
+        if (_listenStartTimer) { clearTimeout(_listenStartTimer); _listenStartTimer = null; }
+        _listenSetBtn('&#9834; Listen', '', false);
+        openKioskLogin(_startListen, []);
+        return null;
+      }
+      return r.json();
+    })
     .then(function(d) {
+      if (!d) return;   /* 401 already handled above */
       if (!d.ok) {
         if (_listenStartTimer) { clearTimeout(_listenStartTimer); _listenStartTimer = null; }
         _listenSetBtn('&#9834; Listen', '', false);
@@ -2120,6 +2150,17 @@ function _stopListen() {
   }
 }
 
+/* Leaflet caches its container size at creation time — a phone rotation or
+   any resize crossing the mobile breakpoint changes #map's CSS height
+   without Leaflet knowing, leaving tiles misaligned until nudged. */
+var _mapResizeTimer = null;
+window.addEventListener('resize', function() {
+  clearTimeout(_mapResizeTimer);
+  _mapResizeTimer = setTimeout(function() {
+    if (_map) _map.invalidateSize();
+  }, 200);
+});
+
 /* ── Boot ── */
 initMap();
 refreshBoard();
@@ -2136,7 +2177,6 @@ setInterval(refreshBoard,    2000);    /* node status every 2s — board endpoin
 setInterval(refreshActivity, 15000);   /* activity every 15s */
 setInterval(refreshHistory,  30000);   /* connection history every 30s */
 setInterval(refreshWeather,  600000);  /* weather every 10min */
-setInterval(updateGrayline,  120000);  /* grayline advances ~0.5° every 2min */
 </script>
 </body>
 </html>

@@ -263,6 +263,7 @@ body {
 .sidebar-logout {
   color: var(--text2); text-decoration: none; white-space: nowrap; flex-shrink: 0;
   font-size: 0.78rem; opacity: 0.7;
+  background: none; border: none; padding: 0; font-family: inherit; cursor: pointer;
 }
 .sidebar-logout:hover { color: var(--danger, #e05); opacity: 1; }
 .sidebar-github {
@@ -414,6 +415,15 @@ input:checked + .slider::before  { transform: translateX(16px); background: var(
 }
 #unsaved-bar.show { display: flex; }
 
+#update-bar {
+  display: none; position: sticky; top: 0; z-index: 50;
+  background: rgba(88,166,255,0.10); border: 1px solid rgba(88,166,255,0.35);
+  border-radius: var(--radius); padding: 10px 18px; margin-bottom: 16px;
+  align-items: center; justify-content: space-between; gap: 10px;
+  font-size: 0.92rem; color: var(--accent, #58a6ff);
+}
+#update-bar.show { display: flex; }
+
 pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-size: 0.84rem; overflow-x: auto; font-family: var(--mono); white-space: pre; margin-bottom: 12px; }
 
 .help-icon {
@@ -501,7 +511,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     <div class="nav-section">Tools</div>
     <a class="nav-item" href="/" target="_blank" style="text-decoration:none">Kiosk &#8599;</a>
     <button class="nav-item" onclick="showPage('dtmf')">DTMF Control</button>
-    <button class="nav-item" onclick="showPage('node-id')">Node ID</button>
+    <button class="nav-item" id="nav-node-id" onclick="showPage('node-id')">Node ID</button>
     <button class="nav-item" onclick="showPage('announcements')">Announcements</button>
     <button class="nav-item" onclick="showPage('smart-connector')">Smart Connector</button>
     <button class="nav-item" id="nav-raw-editor" onclick="showPage('raw-editor')">Raw Editor</button>
@@ -517,7 +527,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
   <div class="sidebar-footer">
     <div class="sidebar-footer-row">
       <span class="sidebar-user">{{ session.get('username', '') }}</span>
-      <a href="/logout" class="sidebar-logout">Sign out</a>
+      <button type="button" class="sidebar-logout" onclick="doLogout()">Sign out</button>
     </div>
     <a href="https://github.com/GooseThings/HenWen" target="_blank" rel="noopener" class="sidebar-github">github.com/GooseThings/HenWen</a>
   </div>
@@ -531,6 +541,14 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     <div class="btn-row">
       <button class="btn btn-warn btn-sm" onclick="saveChanges()">Save Changes</button>
       <button class="btn btn-sm" onclick="discardChanges()">Discard</button>
+    </div>
+  </div>
+
+  <div id="update-bar">
+    <span id="update-msg"></span>
+    <div class="btn-row">
+      <a id="update-link" class="btn btn-sm" href="#" target="_blank" rel="noopener">View Release</a>
+      <button class="btn btn-sm" onclick="dismissUpdateBar()">Dismiss</button>
     </div>
   </div>
 
@@ -1132,8 +1150,9 @@ sudo asterisk -rx "module reload manager"</pre>
               <tr><td><span class="mono ast-cmd-ref" onclick="astUseCmd(this)">rpt cmd &lt;node&gt; ilink 3 &lt;remote&gt;</span></td><td>Connect remote node (transceive)</td></tr>
               <tr><td><span class="mono ast-cmd-ref" onclick="astUseCmd(this)">rpt cmd &lt;node&gt; ilink 1 &lt;remote&gt;</span></td><td>Disconnect a specific remote node</td></tr>
               <tr><td><span class="mono ast-cmd-ref" onclick="astUseCmd(this)">rpt cmd &lt;node&gt; ilink 6</span></td><td>Disconnect all linked nodes</td></tr>
-              <tr><td><span class="mono ast-cmd-ref" onclick="astUseCmd(this)">rpt cmd &lt;node&gt; cop 3</span></td><td>Force station ID</td></tr>
-              <tr><td><span class="mono ast-cmd-ref" onclick="astUseCmd(this)">rpt cmd &lt;node&gt; cop 1</span></td><td>System status report</td></tr>
+              <tr><td><span class="mono ast-cmd-ref" onclick="astUseCmd(this)">rpt cmd &lt;node&gt; status 1</span></td><td>Force station ID (this is "status", not "cop")</td></tr>
+              <tr><td><span class="mono ast-cmd-ref" onclick="astUseCmd(this)">rpt cmd &lt;node&gt; cop 13</span></td><td>Query system state (harmless status report)</td></tr>
+              <tr><td class="muted">rpt cmd &lt;node&gt; cop 1</td><td class="muted">Do not use — this is <code>killall -9 asterisk</code> in app_rpt, not a status command. It hard-kills the whole process.</td></tr>
             </tbody>
           </table>
         </details>
@@ -1293,23 +1312,31 @@ sudo asterisk -rx "module reload manager"</pre>
       <!-- Right: COP quick actions + history -->
       <div>
         <div class="card" style="margin-bottom:14px">
-          <div class="card-header"><h2>COP Quick Actions</h2></div>
+          <div class="card-header"><h2>COP / Status Quick Actions</h2></div>
           <div class="card-body" style="padding-top:6px">
-            <p class="muted" style="font-size:0.8rem;margin-bottom:10px">These execute <code>rpt cmd &lt;node&gt; cop &lt;N&gt;</code> directly — no DTMF mapping required. Numbering matches default app_rpt; your node may differ.</p>
+            <p class="muted" style="font-size:0.8rem;margin-bottom:10px">Executes <code>rpt cmd &lt;node&gt; cop &lt;N&gt;</code> or <code>status &lt;N&gt;</code> directly — no DTMF mapping required. Function numbers verified against AllStarLink's app_rpt source (apps/app_rpt/rpt_functions.c); default numbering, your node may differ if customized.</p>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
-              <button class="btn btn-sm" style="text-align:left" onclick="dtmfCop(3)">Force ID <span class="muted" style="float:right">cop 3</span></button>
-              <button class="btn btn-sm" style="text-align:left" onclick="dtmfCop(6)">Report Time <span class="muted" style="float:right">cop 6</span></button>
-              <button class="btn btn-sm" style="text-align:left" onclick="dtmfCop(15)">Full Startup <span class="muted" style="float:right">cop 15</span></button>
-              <button class="btn btn-sm" style="text-align:left" onclick="dtmfCop(16)">Partial Shutdown <span class="muted" style="float:right">cop 16</span></button>
-              <button class="btn btn-sm" style="text-align:left" onclick="dtmfCop(14)">Full Shutdown <span class="muted" style="float:right">cop 14</span></button>
-              <button class="btn btn-sm" style="text-align:left" onclick="dtmfCop(13)">Disconnect All Links <span class="muted" style="float:right">cop 13</span></button>
-              <button class="btn btn-sm" style="text-align:left" onclick="dtmfCop(21)">Enable Telemetry <span class="muted" style="float:right">cop 21</span></button>
-              <button class="btn btn-sm" style="text-align:left" onclick="dtmfCop(22)">Disable Telemetry <span class="muted" style="float:right">cop 22</span></button>
-              <button class="btn btn-sm" style="text-align:left" onclick="dtmfCop(12)">Enable TX <span class="muted" style="float:right">cop 12</span></button>
-              <button class="btn btn-sm" style="text-align:left" onclick="dtmfCop(11)">Disable TX <span class="muted" style="float:right">cop 11</span></button>
-              <button class="btn btn-sm" style="text-align:left" onclick="dtmfCop(1)">System Status <span class="muted" style="float:right">cop 1</span></button>
-              <button class="btn btn-sm" style="text-align:left" onclick="dtmfCop(10)">Stop Audio <span class="muted" style="float:right">cop 10</span></button>
+              <button class="btn btn-sm" style="text-align:left" onclick="dtmfFunction('status',1)">Force ID <span class="muted" style="float:right">status 1</span></button>
+              <button class="btn btn-sm" style="text-align:left" onclick="dtmfFunction('cop',13)">Query System State <span class="muted" style="float:right">cop 13</span></button>
+              <button class="btn btn-sm" style="text-align:left" onclick="dtmfFunction('cop',2)">TX Enable <span class="muted" style="float:right">cop 2</span></button>
+              <button class="btn btn-sm" style="text-align:left" onclick="dtmfFunction('cop',3)">TX Disable <span class="muted" style="float:right">cop 3</span></button>
+              <button class="btn btn-sm" style="text-align:left" onclick="dtmfFunction('cop',11)">Link Enable <span class="muted" style="float:right">cop 11</span></button>
+              <button class="btn btn-sm dtmf-su-only" id="dtmf-btn-cop12" style="text-align:left" onclick="dtmfFunction('cop',12)">Link Disable <span class="muted" style="float:right">cop 12</span></button>
+              <button class="btn btn-sm" style="text-align:left" onclick="dtmfFunction('cop',9)">Autopatch Enable <span class="muted" style="float:right">cop 9</span></button>
+              <button class="btn btn-sm" style="text-align:left" onclick="dtmfFunction('cop',10)">Autopatch Disable <span class="muted" style="float:right">cop 10</span></button>
+              <button class="btn btn-sm" style="text-align:left" onclick="dtmfFunction('cop',7)">Timeout Timer Enable <span class="muted" style="float:right">cop 7</span></button>
+              <button class="btn btn-sm dtmf-su-only" id="dtmf-btn-cop8" style="text-align:left" onclick="dtmfFunction('cop',8)">Timeout Timer Disable <span class="muted" style="float:right">cop 8</span></button>
+              <button class="btn btn-sm" style="text-align:left" onclick="dtmfFunction('cop',21)">Parrot Mode Enable <span class="muted" style="float:right">cop 21</span></button>
+              <button class="btn btn-sm" style="text-align:left" onclick="dtmfFunction('cop',22)">Parrot Mode Disable <span class="muted" style="float:right">cop 22</span></button>
+              <button class="btn btn-sm" style="text-align:left" onclick="dtmfFunction('cop',24)">Flush All Telemetry <span class="muted" style="float:right">cop 24</span></button>
             </div>
+            <p class="muted" style="font-size:0.72rem;margin-top:10px">
+              cop 1 ("System reset") is deliberately not a quick-action button here — it's
+              <code>killall -9 asterisk</code> in app_rpt itself, an ungraceful hard kill of the
+              whole process. Use the Dashboard's Restart Asterisk button for an intentional restart.
+              Link Disable and Timeout Timer Disable are superuser-only (node-wide linking outage;
+              removes the transmit time-limit safety mechanism) — Admin accounts won't see them.
+            </p>
             <div id="dtmf-cop-result" style="margin-top:8px;font-size:0.85rem;min-height:20px"></div>
           </div>
         </div>
@@ -1422,6 +1449,14 @@ sudo asterisk -rx "module reload manager"</pre>
             <input type="number" id="sc-settle" class="val-input" value="300" min="0" style="width:100%">
           </div>
         </div>
+        <label class="form-label" style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;margin-top:10px">
+          <input type="checkbox" id="sc-disc-first" style="width:auto">
+          Disconnect all other nodes before connecting
+        </label><br>
+        <label class="form-label" style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;margin-top:6px;margin-left:22px;font-size:0.85rem;color:var(--text2)">
+          <input type="checkbox" id="sc-disc-skip-perm" style="width:auto">
+          Preserve permanently connected nodes (only applies if disconnecting all)
+        </label>
         <div id="sc-create-result" style="margin-top:10px"></div>
         <button class="btn btn-primary" style="margin-top:12px" onclick="createConnector()">Add Connector</button>
       </div>
@@ -1512,6 +1547,10 @@ sudo asterisk -rx "module reload manager"</pre>
               <label class="toggle-label" style="display:block;margin-bottom:3px">Window end</label>
               <input type="time" id="ann-wend" class="val-input" value="19:30" style="width:100%">
             </div>
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Idle settle (seconds of quiet required before playing)</label>
+            <input type="number" id="ann-settle" class="val-input" value="30" min="0" style="width:100%">
           </div>
         </div>
         <div id="ann-upload-result" style="margin-top:10px"></div>
@@ -1834,9 +1873,14 @@ sudo asterisk -rx "module reload manager"</pre>
             <tr><td>Kiosk (connect/disconnect)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
             <tr><td>Permanent kiosk connections</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
             <tr><td>Dashboard &amp; Node Control</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>General Settings, DTMF, Node ID</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>General Settings</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>DTMF Control (safe functions&#185;)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>DTMF Control (Link Disable, Timeout Disable, all others)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Node ID (FCC station ID)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
             <tr><td>Announcements, Smart Connector</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>Backups, Alerts, Conn. History</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Backups (view/diff/download/restore)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Backups (delete)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Alerts, Conn. History</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
             <tr><td>AMI Diagnostics</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
             <tr><td>Asterisk Console</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
             <tr><td>Kiosk Settings</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
@@ -1845,6 +1889,11 @@ sudo asterisk -rx "module reload manager"</pre>
             <tr><td>Raw Editor (direct rpt.conf edit)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
           </tbody>
         </table>
+        <p class="muted" style="font-size:0.72rem;padding:8px 12px;margin:0">
+          &#185; Safe DTMF functions: Force ID, TX Enable/Disable, Link Enable, Autopatch
+          Enable/Disable, Timeout Timer Enable, Query System State, Parrot Mode Enable/Disable,
+          Flush All Telemetry.
+        </p>
       </div>
     </div>
   </section>
@@ -1941,6 +1990,13 @@ function apiFetch(url, opts) {
   opts = opts || {};
   opts.headers = Object.assign({'X-CSRFToken': _csrfToken}, opts.headers || {});
   return fetch(url, opts);
+}
+
+async function doLogout() {
+  try {
+    await apiFetch('/logout', {method: 'POST'});
+  } catch (e) { /* fall through to redirect regardless */ }
+  window.location.href = '/login';
 }
 
 /* ── API ────────────────────────────────────────────────────────────────── */
@@ -2951,7 +3007,9 @@ async function loadBackups() {
       + '<button class="btn btn-sm" onclick="backupDiff(\'' + n + '\')">Diff</button>'
       + '<button class="btn btn-sm" onclick="backupDownload(\'' + n + '\')">Download</button>'
       + '<button class="btn btn-primary btn-sm" onclick="backupRestore(\'' + n + '\')">Restore</button>'
-      + '<button class="btn btn-warn btn-sm" onclick="backupDelete(\'' + n + '\')">Delete</button>'
+      + (window._henwenRole === 'superuser'
+          ? '<button class="btn btn-warn btn-sm" onclick="backupDelete(\'' + n + '\')">Delete</button>'
+          : '')
       + '</div></td>'
       + '</tr>';
   });
@@ -3965,16 +4023,28 @@ async function ksSave() {
 }
 
 /* ── Role-based nav visibility ─────────────────────────────────────────────── */
+window._henwenRole = '';
 async function applyRoleNav() {
   var r = await apiFetch('/api/session');
   if (!r.ok) return;
   var d = await r.json();
   var role = d.role || '';
+  window._henwenRole = role;
   /* Only superuser sees Raw Editor and Asterisk Console */
   var rawBtn = document.getElementById('nav-raw-editor');
   if (rawBtn) rawBtn.style.display = (role === 'superuser') ? '' : 'none';
   var consoleBtn = document.getElementById('nav-ast-console');
   if (consoleBtn) consoleBtn.style.display = (role === 'superuser') ? '' : 'none';
+  /* Only superuser can use Node ID (FCC station ID playback) — misconfiguring
+     or disabling it is a compliance concern, not just an operational one. */
+  var nodeIdBtn = document.getElementById('nav-node-id');
+  if (nodeIdBtn) nodeIdBtn.style.display = (role === 'superuser') ? '' : 'none';
+  /* Only superuser sees the higher-risk COP quick actions (node-wide link
+     outage, disabling the transmit time-limit safety mechanism) — matching
+     the same allowlist enforced server-side in /api/dtmf/cop. */
+  document.querySelectorAll('.dtmf-su-only').forEach(function(btn) {
+    btn.style.display = (role === 'superuser') ? '' : 'none';
+  });
 }
 
 window.addEventListener('DOMContentLoaded', function() {
@@ -3994,7 +4064,24 @@ window.addEventListener('DOMContentLoaded', function() {
   refreshDashboard();
   startDiagPolling();   // Dashboard is the initial page; showPage() isn't called on first load
   checkNodeDB();
+  checkForUpdate();
 });
+
+async function checkForUpdate() {
+  if (sessionStorage.getItem('henwen_update_dismissed')) return;
+  var r = await api('/api/update-check');
+  if (!r.ok || !r.data || !r.data.update_available) return;
+  document.getElementById('update-msg').textContent =
+    'A new HenWen release is available: ' + r.data.latest +
+    ' (currently running ' + r.data.current + ').';
+  document.getElementById('update-link').href = r.data.url;
+  document.getElementById('update-bar').classList.add('show');
+}
+
+function dismissUpdateBar() {
+  document.getElementById('update-bar').classList.remove('show');
+  sessionStorage.setItem('henwen_update_dismissed', '1');
+}
 
 async function checkNodeDB() {
   var r = await api('/api/debug/nodedb');
@@ -4066,8 +4153,10 @@ function annCard(a) {
     '<div class="card-body" style="font-size:0.88rem">' +
       '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:4px 18px;margin-bottom:10px">' +
         '<div><span class="muted">Interval:</span> every ' + esc(String(a.interval_min)) + ' min</div>' +
-        '<div><span class="muted">Window:</span> ' + esc(a.window_start) + ' – ' + esc(a.window_end) + '</div>' +
+        '<div><span class="muted">Window:</span> ' + esc(a.window_start) + ' – ' + esc(a.window_end) +
+          (a.window_end < a.window_start ? ' <span class="muted">(overnight)</span>' : '') + '</div>' +
         '<div><span class="muted">Mode:</span> ' + esc(a.play_cmd) + '</div>' +
+        '<div><span class="muted">Idle settle:</span> ' + esc(String(a.idle_settle_sec)) + 's quiet required</div>' +
         '<div><span class="muted">Last played:</span> ' + esc(last) + '</div>' +
       '</div>' +
       '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
@@ -4100,6 +4189,8 @@ function annEditForm(a) {
       '<input type="time" id="ane-wstart-' + a.id + '" class="val-input" value="' + esc(a.window_start) + '" style="width:100%"></div>' +
     '<div><label class="toggle-label" style="display:block;margin-bottom:3px">Window end</label>' +
       '<input type="time" id="ane-wend-' + a.id + '" class="val-input" value="' + esc(a.window_end) + '" style="width:100%"></div>' +
+    '<div><label class="toggle-label" style="display:block;margin-bottom:3px">Idle settle (sec)</label>' +
+      '<input type="number" id="ane-settle-' + a.id + '" class="val-input" value="' + a.idle_settle_sec + '" min="0" style="width:100%"></div>' +
   '</div>' +
   '<div id="ane-result-' + a.id + '" style="margin-top:8px"></div>' +
   '<div style="margin-top:10px;display:flex;gap:8px">' +
@@ -4151,6 +4242,7 @@ async function annSaveEdit(id) {
     play_cmd:     document.getElementById('ane-cmd-'    + id).value,
     window_start: document.getElementById('ane-wstart-' + id).value,
     window_end:   document.getElementById('ane-wend-'   + id).value,
+    idle_settle_sec: parseInt(document.getElementById('ane-settle-' + id).value, 10),
   };
   try {
     var r = await apiFetch('/api/announcements/' + id, {
@@ -4256,26 +4348,40 @@ async function dtmfSend() {
   }
 }
 
-async function dtmfCop(fn) {
+async function dtmfFunction(family, fn) {
   var res  = document.getElementById('dtmf-cop-result');
   var node = document.getElementById('dtmf-node').value;
-  res.innerHTML = '<span class="muted">Sending cop ' + fn + '...</span>';
+  var label = family + ' ' + fn;
+  var body = { node: node, function: fn };
+  // cop 1 = killall -9 asterisk in app_rpt itself — require a real confirm
+  // dialog before it can fire, since a mislabeled button once sent this by
+  // accident and hard-killed the node.
+  if (family === 'cop' && String(fn) === '1') {
+    if (!confirm('cop 1 kills the ENTIRE Asterisk process (killall -9), not a status ' +
+                 'query. Everyone currently connected to this box will drop and Asterisk ' +
+                 'will restart. Use "Restart Asterisk" on the Dashboard instead unless you ' +
+                 'specifically want this. Continue anyway?')) {
+      return;
+    }
+    body.confirm = true;
+  }
+  res.innerHTML = '<span class="muted">Sending ' + label + '...</span>';
   try {
-    var r = await apiFetch('/api/dtmf/cop', {
+    var r = await apiFetch('/api/dtmf/' + family, {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ node: node, function: fn })
+      body: JSON.stringify(body)
     });
     var d = await r.json();
     if (!r.ok) {
       res.innerHTML = '<span style="color:var(--danger)">' + esc(d.error || 'Error') + '</span>';
-      dtmfAddHistory('cop ' + fn + ' → node ' + node, false, d.error || 'Error');
+      dtmfAddHistory(label + ' → node ' + node, false, d.error || 'Error');
     } else {
-      res.innerHTML = '<span style="color:var(--green)">cop ' + fn + ' sent</span>';
-      dtmfAddHistory('cop ' + fn + ' → node ' + node, true, d.raw || '');
+      res.innerHTML = '<span style="color:var(--green)">' + label + ' sent</span>';
+      dtmfAddHistory(label + ' → node ' + node, true, d.raw || '');
     }
   } catch(e) {
     res.innerHTML = '<span style="color:var(--danger)">' + esc(String(e)) + '</span>';
-    dtmfAddHistory('cop ' + fn + ' → node ' + node, false, String(e));
+    dtmfAddHistory(label + ' → node ' + node, false, String(e));
   }
 }
 
@@ -4738,6 +4844,10 @@ function connCard(c) {
         '<div><span class="muted">Schedule:</span> ' + schedule + '</div>' +
         '<div><span class="muted">Idle timeout:</span> ' + esc(String(c.idle_limit_sec)) + 's</div>' +
         '<div><span class="muted">Settle:</span> ' + esc(String(c.settle_sec)) + 's</div>' +
+        (c.disconnect_all_first
+          ? '<div><span class="muted">Before connecting:</span> <span style="color:var(--warn)">Disconnects ' +
+            (c.disconnect_skip_permanent ? 'non-permanent nodes' : 'all nodes') + '</span></div>'
+          : '') +
         details +
       '</div>' +
       '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
@@ -4777,6 +4887,14 @@ function connEditForm(c) {
     '<div><label class="toggle-label" style="display:block;margin-bottom:3px">Settle (s)</label>' +
       '<input type="number" id="sce-settle-' + c.id + '" class="val-input" value="' + c.settle_sec + '" min="0" style="width:100%"></div>' +
   '</div>' +
+  '<label class="form-label" style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;margin-top:10px">' +
+    '<input type="checkbox" id="sce-disc-first-' + c.id + '" style="width:auto"' + (c.disconnect_all_first ? ' checked' : '') + '>' +
+    'Disconnect all other nodes before connecting' +
+  '</label><br>' +
+  '<label class="form-label" style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;margin-top:6px;margin-left:22px;font-size:0.85rem;color:var(--text2)">' +
+    '<input type="checkbox" id="sce-disc-skip-perm-' + c.id + '" style="width:auto"' + (c.disconnect_skip_permanent ? ' checked' : '') + '>' +
+    'Preserve permanently connected nodes (only applies if disconnecting all)' +
+  '</label>' +
   '<div id="sce-result-' + c.id + '" style="margin-top:8px"></div>' +
   '<div style="margin-top:10px;display:flex;gap:8px">' +
     '<button class="btn btn-primary btn-sm" onclick="connSaveEdit(' + c.id + ')">Save</button>' +
@@ -4854,6 +4972,8 @@ async function connSaveEdit(id) {
     target_node:    document.getElementById('sce-target-' + id).value.trim(),
     idle_limit_sec: parseInt(document.getElementById('sce-idle-'   + id).value, 10),
     settle_sec:     parseInt(document.getElementById('sce-settle-' + id).value, 10),
+    disconnect_all_first: document.getElementById('sce-disc-first-' + id).checked,
+    disconnect_skip_permanent: document.getElementById('sce-disc-skip-perm-' + id).checked,
   }, sched);
   var r = await apiFetch('/api/connectors/' + id, {
     method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
@@ -4872,6 +4992,8 @@ async function createConnector() {
     target_node:    document.getElementById('sc-target').value.trim(),
     idle_limit_sec: parseInt(document.getElementById('sc-idle').value, 10),
     settle_sec:     parseInt(document.getElementById('sc-settle').value, 10),
+    disconnect_all_first: document.getElementById('sc-disc-first').checked,
+    disconnect_skip_permanent: document.getElementById('sc-disc-skip-perm').checked,
   }, sched);
   if (!body.name)        { res.innerHTML = '<span style="color:var(--danger)">Name is required.</span>'; return; }
   if (!body.target_node) { res.innerHTML = '<span style="color:var(--danger)">Target node is required.</span>'; return; }
@@ -4884,6 +5006,8 @@ async function createConnector() {
   res.innerHTML = '<span style="color:var(--green)">Saved: ' + esc(d.name) + '</span>';
   document.getElementById('sc-name').value = '';
   document.getElementById('sc-target').value = '';
+  document.getElementById('sc-disc-first').checked = false;
+  document.getElementById('sc-disc-skip-perm').checked = false;
   document.getElementById('sc-sched-section').innerHTML = scSchedSectionHTML('sc-', 'daily', '', '');
   loadConnectors();
 }
@@ -4897,6 +5021,7 @@ async function uploadAnnouncement() {
   var wstart   = document.getElementById('ann-wstart').value;
   var wend     = document.getElementById('ann-wend').value;
   var playCmd  = document.getElementById('ann-play-cmd').value;
+  var settle   = document.getElementById('ann-settle').value;
 
   if (!name)              { res.innerHTML = '<span style="color:var(--danger)">Name is required.</span>'; return; }
   if (!node)              { res.innerHTML = '<span style="color:var(--danger)">No node selected.</span>'; return; }
@@ -4905,13 +5030,14 @@ async function uploadAnnouncement() {
   res.innerHTML = '<span class="muted">Converting and uploading...</span>';
 
   var fd = new FormData();
-  fd.append('file',         fileEl.files[0]);
-  fd.append('name',         name);
-  fd.append('node',         node);
-  fd.append('interval_min', interval);
-  fd.append('window_start', wstart);
-  fd.append('window_end',   wend);
-  fd.append('play_cmd',     playCmd);
+  fd.append('file',            fileEl.files[0]);
+  fd.append('name',            name);
+  fd.append('node',            node);
+  fd.append('interval_min',    interval);
+  fd.append('window_start',    wstart);
+  fd.append('window_end',      wend);
+  fd.append('play_cmd',        playCmd);
+  fd.append('idle_settle_sec', settle);
 
   try {
     var r = await apiFetch('/api/announcements', { method: 'POST', body: fd });

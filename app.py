@@ -43,9 +43,10 @@ import pwd
 import grp
 import secrets
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import wraps
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for, send_file, Response, stream_with_context
+from flask.sessions import SecureCookieSessionInterface
 import difflib
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_wtf.csrf import CSRFProtect, generate_csrf
@@ -87,6 +88,28 @@ SESSION_IDLE_TIMEOUT = int(os.environ.get("SESSION_IDLE_TIMEOUT", "1800"))  # 30
 DEFAULT_SECRET_KEYS = {"", "asl3-ez-change-me", "asl3-ez-change-me-in-production",
                        "henwen-change-me", "henwen-change-me-in-production"}
 
+GITHUB_REPO = "GooseThings/HenWen"
+
+
+def _load_henwen_version():
+    """Read the top version header (## vYYYY.MM.DD) from CHANGELOG.md,
+    shipped alongside app.py — used for the kiosk footer and the Manager's
+    update check. Falls back to 'unknown' for a dev checkout without a
+    stamped release yet."""
+    try:
+        changelog_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CHANGELOG.md")
+        with open(changelog_path) as f:
+            for line in f:
+                m = re.match(r'^##\s+(v\d{4}\.\d{2}\.\d{2})\s*$', line.strip())
+                if m:
+                    return m.group(1)
+    except Exception:
+        pass
+    return "unknown"
+
+
+HENWEN_VERSION = _load_henwen_version()
+
 # Persistent AMI poller settings (tunable via service file env vars)
 # 1s poll for near-real-time keyed-status updates in the UI. This used to
 # be 3s, tuned around AMIClient.command()'s old 12s-per-call bug (waiting
@@ -120,6 +143,23 @@ SYSTEMCTL_PATH  = "/bin/systemctl"
 if not os.path.exists(SYSTEMCTL_PATH):
     SYSTEMCTL_PATH = "/usr/bin/systemctl"
 ASTERISK_PATH   = "/usr/sbin/asterisk"
+SUDO_PATH       = "/usr/bin/sudo"
+
+
+def _systemctl(*args, timeout=30):
+    """Run systemctl, elevating via a narrowly-scoped passwordless sudo rule
+    when not already root. The service normally runs unprivileged as
+    `asterisk` (ASL3-EZ.service User=asterisk); install.sh installs a
+    sudoers drop-in permitting exactly the daemon-reload/restart
+    invocations this function is used for — restarting `asterisk` or this
+    service and reloading unit files. `sudo -n` fails fast (no password
+    prompt) if that rule is missing, so callers see a clear stderr message
+    instead of hanging."""
+    if os.geteuid() == 0:
+        cmd = [SYSTEMCTL_PATH, *args]
+    else:
+        cmd = [SUDO_PATH, "-n", SYSTEMCTL_PATH, *args]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 # ASL3 astdb.txt is written by asl3-update-astdb (from asl3-update-nodelist package)
 ASTDB_PATHS = [
@@ -173,6 +213,22 @@ class _LocalProxyFix:
 
 
 app.wsgi_app = _LocalProxyFix(app.wsgi_app)
+
+
+class _SchemeAwareSessionInterface(SecureCookieSessionInterface):
+    """Mark the session cookie Secure whenever the *actual* request reached us
+    over HTTPS (including via the local Apache TLS proxy, whose scheme
+    _LocalProxyFix already restores from X-Forwarded-Proto), even though
+    SECURE_COOKIES defaults to false to keep plain-LAN HTTP access working.
+    If SECURE_COOKIES is explicitly set, that always wins (HTTPS-only
+    deployments)."""
+    def get_cookie_secure(self, app):
+        if SECURE_COOKIES:
+            return True
+        return request.is_secure
+
+
+app.session_interface = _SchemeAwareSessionInterface()
 
 # ---------------------------------------------------------------------------
 # Logging  (verbose, timestamp-prefixed, written to stdout for journald)
@@ -268,8 +324,13 @@ def get_db():
         play_cmd      TEXT    NOT NULL DEFAULT 'localplay',
         last_played   TEXT,
         source_type   TEXT    NOT NULL DEFAULT 'upload',
-        created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+        created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+        idle_settle_sec INTEGER NOT NULL DEFAULT 30
     )""")
+    _ann_cols = {r[1] for r in conn.execute("PRAGMA table_info(announcements)").fetchall()}
+    if 'idle_settle_sec' not in _ann_cols:
+        conn.execute("ALTER TABLE announcements ADD COLUMN idle_settle_sec INTEGER NOT NULL DEFAULT 30")
+    conn.commit()
     conn.execute("""CREATE TABLE IF NOT EXISTS connectors (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
         name            TEXT    NOT NULL,
@@ -286,7 +347,9 @@ def get_db():
         last_activity   TEXT,
         created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
         schedule_type   TEXT    NOT NULL DEFAULT 'daily',
-        schedule_days   TEXT    NOT NULL DEFAULT ''
+        schedule_days   TEXT    NOT NULL DEFAULT '',
+        disconnect_all_first INTEGER NOT NULL DEFAULT 0,
+        disconnect_skip_permanent INTEGER NOT NULL DEFAULT 0
     )""")
     # Migrate older rows that lack the new schedule columns
     _conn_cols = {r[1] for r in conn.execute("PRAGMA table_info(connectors)").fetchall()}
@@ -294,6 +357,10 @@ def get_db():
         conn.execute("ALTER TABLE connectors ADD COLUMN schedule_type TEXT NOT NULL DEFAULT 'daily'")
     if 'schedule_days' not in _conn_cols:
         conn.execute("ALTER TABLE connectors ADD COLUMN schedule_days TEXT NOT NULL DEFAULT ''")
+    if 'disconnect_all_first' not in _conn_cols:
+        conn.execute("ALTER TABLE connectors ADD COLUMN disconnect_all_first INTEGER NOT NULL DEFAULT 0")
+    if 'disconnect_skip_permanent' not in _conn_cols:
+        conn.execute("ALTER TABLE connectors ADD COLUMN disconnect_skip_permanent INTEGER NOT NULL DEFAULT 0")
     conn.commit()
     conn.execute("""CREATE TABLE IF NOT EXISTS id_configs (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -422,12 +489,14 @@ def check_auth():
                         'api_status_history',
                         'api_login', 'api_session', 'api_csrf_token',
                         'api_favorites', 'api_favorites_status',
-                        'api_kiosk_settings_get',
-                        'api_audio_stream', 'api_audio_check', 'api_audio_stop',
-                        'api_audio_client_log'}
-    # Any logged-in user (superuser / admin / user)
+                        'api_kiosk_settings_get'}
+    # Any logged-in user (superuser / admin / user) — live audio requires a
+    # session (previously public, letting anyone on the network listen and
+    # spawn server-side encoder/relay processes with no authentication).
     _USER_OR_ABOVE = {'api_status_connect', 'api_status_disconnect',
-                      'api_fav_add', 'api_fav_delete', 'api_fav_label'}
+                      'api_fav_add', 'api_fav_delete', 'api_fav_label',
+                      'api_audio_stream', 'api_audio_check', 'api_audio_stop',
+                      'api_audio_client_log'}
 
     endpoint  = request.endpoint
     is_public = endpoint in _PUBLIC
@@ -587,7 +656,7 @@ def login():
     return render_template("login.html", setup_mode=setup_mode, error=None)
 
 
-@app.route("/logout")
+@app.route("/logout", methods=["POST"])
 def logout():
     username = session.get("username", "unknown")
     remove_active_session(session.get("sid"))
@@ -1114,6 +1183,10 @@ def _poll_loop():
                 continue
 
             _alert_events = []  # (ev_type, local_node_str, peer_str) — processed outside lock
+            # Union of every locally-hosted node's connected peers this cycle —
+            # _link_stats is shared across ALL local nodes, so pruning it must
+            # wait until every node has been polled (see below).
+            _all_current_linked = set()
 
             with _ami_pool_lock:
                 try:
@@ -1130,12 +1203,24 @@ def _poll_loop():
                             _record_keyed(node)
                         _keyed_prev_states[own_key] = bool(status.get("keyed"))
 
+                        # Idle-settle tracking for announcements: "active" means the
+                        # node's own RX is keyed OR any linked node is keyed (same
+                        # definition as _node_active(), computed here directly from
+                        # the status we just fetched instead of re-reading the cache).
+                        if status.get("keyed") or any(
+                            l.get("keyed", False) for l in status.get("links", {}).values()
+                        ):
+                            with _node_last_active_lock:
+                                _node_last_active[node] = now_ts
+
                         current_linked = set(status.get("connected", []))
+                        _all_current_linked |= current_linked
                         with _link_stats_lock:
-                            # Remove stats for nodes that are no longer connected
-                            for gone in set(_link_stats) - current_linked:
-                                del _link_stats[gone]
-                            # Ensure entry exists for each connected node
+                            # Ensure entry exists for each connected node. Stale-entry
+                            # pruning happens once after every local node has been
+                            # polled this cycle (below) — doing it here, per node,
+                            # would delete stats for peers connected to OTHER local
+                            # nodes, since this dict is shared across all of them.
                             for cn in current_linked:
                                 if cn not in _link_stats:
                                     _link_stats[cn] = {"keyups": 0, "last_keyed": None}
@@ -1179,11 +1264,14 @@ def _poll_loop():
                                 _kiosk_temp_conns.pop((node_str, peer), None)
                         _prev_connected_map[node_str] = est_set
 
-                        # Kiosk idle-timeout: update last_active when local or peer is keyed
+                        # Kiosk idle-timeout: update last_active when local or peer is keyed.
+                        # Skip entries that are genuinely permanent (ilink 12/13) OR have had
+                        # their timeout squashed via /api/status/squash-idle — the latter stays
+                        # a normal transient link, it's just exempted from this tracking.
                         local_keyed = bool(status.get("keyed"))
                         with _kiosk_temp_lock:
                             for (ln, pn), info in list(_kiosk_temp_conns.items()):
-                                if ln != node_str or info.get('permanent'):
+                                if ln != node_str or info.get('permanent') or info.get('no_timeout'):
                                     continue
                                 peer_keyed = bool(status.get("links", {}).get(pn, {}).get("keyed"))
                                 if local_keyed or peer_keyed:
@@ -1194,7 +1282,7 @@ def _poll_loop():
                         _idle_dc = []
                         with _kiosk_temp_lock:
                             for (ln, pn), info in list(_kiosk_temp_conns.items()):
-                                if ln != node_str or info.get('permanent'):
+                                if ln != node_str or info.get('permanent') or info.get('no_timeout'):
                                     continue
                                 if now_ts - info.get('last_active', now_ts) > idle_timeout:
                                     _idle_dc.append((ln, pn))
@@ -1205,6 +1293,14 @@ def _poll_loop():
                                 log("INFO", f"[KIOSK] Idle timeout: disconnected {pn} from {ln}")
                             except Exception as _e:
                                 log("ERROR", f"[KIOSK] Idle timeout disconnect failed: {_e}")
+
+                    # Now that every locally-hosted node has been polled this cycle,
+                    # prune _link_stats entries for peers no longer connected to ANY
+                    # of them (see the per-node loop above for why this can't happen
+                    # per-node).
+                    with _link_stats_lock:
+                        for gone in set(_link_stats) - _all_current_linked:
+                            del _link_stats[gone]
 
                 except Exception as e:
                     _ami_last_error = str(e)
@@ -1375,6 +1471,14 @@ _prev_connected_map = {}  # {local_node_str: set(peer_str)}
 # val: {'permanent': bool, 'last_active': float (epoch)}
 _kiosk_temp_conns = {}
 _kiosk_temp_lock  = threading.Lock()
+
+# ── Per-node idle tracking for announcements' settle period ───────────────────
+# {node_str: float (epoch of the last poll tick where the node was keyed or
+# had a keyed link)}. Updated every poll cycle (1s) rather than only when
+# _run_due_announcements runs (30s), so "quiet for N seconds" is measured to
+# ~1s resolution instead of being coarsened by the announcer's own interval.
+_node_last_active      = {}
+_node_last_active_lock = threading.Lock()
 
 # ── Alert state ───────────────────────────────────────────────────────────────
 _alert_prev_ami    = None   # None=unknown, True=was connected, False=was disconnected
@@ -2788,6 +2892,23 @@ def get_uptime():
         return "unknown"
 
 
+@_ttl_cached(3600)   # avoid hitting GitHub's API on every Manager login
+def get_latest_release():
+    """Fetch the latest published GitHub release tag for update checking.
+    CalVer tags (vYYYY.MM.DD) sort correctly as plain strings, so no semver
+    parsing is needed — just compare against HENWEN_VERSION lexically."""
+    try:
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+        req = urlreq.Request(url, headers={"User-Agent": "HenWen/1.0",
+                                           "Accept": "application/vnd.github+json"})
+        with urlreq.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode())
+        return {"tag": data.get("tag_name", ""), "url": data.get("html_url", "")}
+    except Exception as e:
+        log("WARN", f"[UPDATE] release check failed: {e}")
+        return {"tag": "", "url": ""}
+
+
 @_ttl_cached(3600)   # package version effectively never changes at runtime
 def get_asl_version():
     try:
@@ -3049,20 +3170,22 @@ def api_save():
 def api_restart():
     log("INFO", "[API] /api/restart called")
     try:
-        r = subprocess.run(
-            [SYSTEMCTL_PATH, "restart", "asterisk"],
-            capture_output=True, text=True, timeout=30
-        )
+        r = _systemctl("restart", "asterisk", timeout=30)
         log("INFO", f"[API] systemctl restart asterisk -> rc={r.returncode} stdout={r.stdout!r} stderr={r.stderr!r}")
         if r.returncode == 0:
             return jsonify({"success": True,
                             "output": r.stdout or "Asterisk restarted successfully.",
-                            "command": f"{SYSTEMCTL_PATH} restart asterisk"})
+                            "command": "systemctl restart asterisk"})
+        stderr = r.stderr.strip()
+        hint = ("Service account lacks sudo rights for this systemctl action — "
+                "re-run install.sh to install the henwen-systemctl sudoers rule."
+                if "password" in stderr.lower() or "authoriz" in stderr.lower()
+                else "Check: systemctl status asterisk  and  journalctl -u asterisk -n 30")
         return jsonify({
-            "error":     r.stderr.strip() or f"systemctl returned code {r.returncode}",
+            "error":     stderr or f"systemctl returned code {r.returncode}",
             "stdout":    r.stdout,
             "returncode": r.returncode,
-            "hint":      "Check: systemctl status asterisk  and  journalctl -u asterisk -n 30",
+            "hint":      hint,
         }), 500
     except PermissionError as e:
         return jsonify({"error": str(e),
@@ -3194,6 +3317,8 @@ def api_backup_restore(name):
 
 @app.route("/api/backups/<name>", methods=["DELETE"])
 def api_backup_delete(name):
+    if session.get('role') != 'superuser':
+        return jsonify({"error": "Superuser access required to delete backups"}), 403
     if not re.match(r'^rpt\.conf\.\d{8}_\d{6}\.bak$', name):
         return jsonify({"error": "Invalid filename"}), 400
     path = os.path.join(BACKUP_DIR, name)
@@ -3640,6 +3765,10 @@ def api_nodestats_batch():
     results = {}
     log("INFO", f"[API] nodestats/batch for {len(nodes)} nodes")
     for node in nodes[:15]:
+        node = str(node)
+        if not node.isdigit():
+            results[node] = {"error": "Invalid node"}
+            continue
         try:
             url = ASL_STATS_URL.format(node)
             req = urlreq.Request(url, headers={"User-Agent": "HenWen/1.0"})
@@ -3834,21 +3963,33 @@ def api_status_board():
             cn_loc     = cn_info.get("location", "")
             cn_coords  = _geocode_nonblocking(cn_loc) if cn_loc else None
             ls = ls_snapshot.get(cn, {})
-            # Idle-timeout info for kiosk display
+            # Idle-timeout info for kiosk display. 'permanent' (genuinely permanent
+            # ilink 12/13, set only via the explicit Permanent checkbox at connect
+            # time) and 'no_timeout' (idle-timeout exempted via the No Timeout
+            # button, link mode untouched) are reported separately so the UI can
+            # tell them apart instead of mislabeling a squashed link "Permanent".
             with _kiosk_temp_lock:
                 tc = _kiosk_temp_conns.get((node_str_local, cn))
-            if tc and not tc.get('permanent'):
-                idle_elapsed   = max(0, int(time.time() - tc['last_active']))
-                idle_remaining = max(0, idle_timeout - idle_elapsed)
-                is_permanent   = False
-            elif tc and tc.get('permanent'):
+            if tc and tc.get('permanent'):
                 idle_elapsed   = None
                 idle_remaining = None
                 is_permanent   = True
+                no_timeout     = False
+            elif tc and tc.get('no_timeout'):
+                idle_elapsed   = None
+                idle_remaining = None
+                is_permanent   = False
+                no_timeout     = True
+            elif tc:
+                idle_elapsed   = max(0, int(time.time() - tc['last_active']))
+                idle_remaining = max(0, idle_timeout - idle_elapsed)
+                is_permanent   = False
+                no_timeout     = False
             else:
                 idle_elapsed   = None
                 idle_remaining = None
                 is_permanent   = None  # not tracked (pre-existing connection)
+                no_timeout     = None
             link_info = cached.get("links", {}).get(cn, {})
             connected_details.append({
                 "node":           cn,
@@ -3866,6 +4007,7 @@ def api_status_board():
                 "idle_elapsed":   idle_elapsed,
                 "idle_remaining": idle_remaining,
                 "permanent":      is_permanent,
+                "no_timeout":     no_timeout,
             })
         location = info.get("location", "")
         coords   = _geocode_nonblocking(location) if location else None
@@ -3891,6 +4033,7 @@ def api_status_board():
         "disk":             get_disk_usage(),
         "ami_connected":    _ami_connected,
         "active_users":     get_active_user_count(),
+        "connector_warning": _connector_upcoming_disconnect_all(),
     })
     resp.headers["Cache-Control"] = "no-store"
     return resp
@@ -3991,6 +4134,7 @@ def api_status_connect():
             _kiosk_temp_conns[(local_node, remote_node)] = {
                 'permanent':   permanent,
                 'monitor':     monitor,
+                'no_timeout':  False,
                 'last_active': time.time(),
             }
         log("INFO", f"[API] /api/status/connect {local_node} -> {remote_node} mode=ilink{ilink_mode}")
@@ -4023,7 +4167,17 @@ def api_status_disconnect():
 
 @app.route("/api/status/squash-idle", methods=["POST"])
 def api_status_squash_idle():
-    """Upgrade an existing connection to permanent (ilink 12/13) and remove it from idle-timeout tracking."""
+    """Exempt an existing connection from the kiosk idle-timeout auto-disconnect.
+
+    This must NOT change the connection's ilink mode. It previously re-issued
+    ilink 12/13 (genuinely permanent — app_rpt persists it and auto-reconnects
+    if the far end drops it), conflating "stop auto-disconnecting this" with
+    "make this a permanent link" under the same 'permanent' flag. The kiosk
+    should never promote a connection to permanent unless a user explicitly
+    requests that (the separate Permanent checkbox, admin/superuser-gated, at
+    connect time) — so this only sets a distinct 'no_timeout' flag that the
+    idle-timeout poller skips, and issues no AMI command at all.
+    """
     if session.get('role') not in ('admin', 'superuser'):
         return jsonify({"error": "Admin access required"}), 403
     data        = request.json or {}
@@ -4035,21 +4189,13 @@ def api_status_squash_idle():
         return jsonify({"error": "Invalid remote_node"}), 400
     key = (local_node, remote_node)
     with _kiosk_temp_lock:
-        is_monitor = _kiosk_temp_conns.get(key, {}).get('monitor', False)
         if key in _kiosk_temp_conns:
-            _kiosk_temp_conns[key]['permanent'] = True
+            _kiosk_temp_conns[key]['no_timeout'] = True
         else:
-            _kiosk_temp_conns[key] = {'permanent': True, 'monitor': False, 'last_active': time.time()}
-    # Re-issue as the appropriate permanent ilink mode so app_rpt will auto-reconnect if dropped
-    ilink_mode = "12" if is_monitor else "13"
-    try:
-        with _ami_pool_lock:
-            ami = _ami_ensure_connected()
-            ami.rpt_cmd(local_node, f"ilink {ilink_mode} {remote_node}")
-    except Exception as e:
-        log("ERROR", f"[API] /api/status/squash-idle ilink{ilink_mode} failed: {e}")
-        return jsonify({"error": str(e)}), 500
-    log("INFO", f"[API] /api/status/squash-idle {local_node} -> {remote_node}: upgraded to ilink{ilink_mode}")
+            _kiosk_temp_conns[key] = {'permanent': False, 'monitor': False,
+                                      'no_timeout': True, 'last_active': time.time()}
+    log("INFO", f"[API] /api/status/squash-idle {local_node} -> {remote_node}: "
+                "idle timeout disabled (link mode unchanged)")
     return jsonify({"ok": True})
 
 
@@ -4210,6 +4356,11 @@ class _AudioBroadcast:
                     f'{remaining} listener(s) remaining')
         if remaining == 0:
             self.shutdown()
+
+    def has_client(self, remote_addr):
+        with self._lock:
+            return any(meta['remote'] == remote_addr
+                       for meta in self._client_meta.values())
 
     # ── internal ─────────────────────────────────────────────────────────────
 
@@ -4515,6 +4666,7 @@ def _start_broadcast(node):
 
 
 @app.route('/api/audio/stream/<node>')
+@limiter.limit("30 per minute")
 def api_audio_stream(node):
     if not re.match(r'^\d{4,7}$', node):
         return jsonify({'error': 'invalid node'}), 400
@@ -4570,12 +4722,18 @@ def api_audio_stream(node):
 
 
 @app.route('/api/audio/stop', methods=['POST'])
+@limiter.limit("30 per minute")
 def api_audio_stop():
     node = str((request.json or {}).get('node', '')).strip()
     if not re.match(r'^\d{4,7}$', node):
         return jsonify({'error': 'invalid node'}), 400
+    remote = request.remote_addr or '?'
     with _audio_lock:
         broadcast = _audio_active.get(node)
+    if broadcast and not broadcast.has_client(remote):
+        log('WARN', f'[AUDIO] stop for node {node} rejected: {remote} is not '
+                    f'a current listener of this broadcast')
+        return jsonify({'error': 'not a listener of this broadcast'}), 403
     log('DEBUG', f'[AUDIO] explicit stop requested for node {node} '
                 f'(broadcast active={broadcast is not None})')
     if broadcast:
@@ -4641,7 +4799,7 @@ def api_audio_client_log():
 
 @app.route("/")
 def status_board():
-    return render_template("status.html")
+    return render_template("status.html", henwen_version=HENWEN_VERSION)
 
 
 @app.route("/status")
@@ -4859,6 +5017,21 @@ def api_asterisk_command():
         return jsonify({"error": str(e)}), 500
 
 
+# ── Update check ──────────────────────────────────────────────────────────
+
+@app.route("/api/update-check")
+def api_update_check():
+    latest = get_latest_release()
+    latest_tag = latest["tag"]
+    return jsonify({
+        "current":          HENWEN_VERSION,
+        "latest":           latest_tag,
+        "url":              latest["url"] or f"https://github.com/{GITHUB_REPO}/releases/latest",
+        "update_available": bool(latest_tag) and HENWEN_VERSION != "unknown"
+                            and latest_tag > HENWEN_VERSION,
+    })
+
+
 # ── App settings (SECRET_KEY) ─────────────────────────────────────────────────
 #
 # SECRET_KEY signs Flask session cookies, which is how authentication state is
@@ -4917,12 +5090,29 @@ def api_set_secret_key():
         os.rename(tmp_path, SERVICE_FILE_PATH)
         log("INFO", f"[SETTINGS] SECRET_KEY updated in {SERVICE_FILE_PATH}")
 
-        subprocess.run([SYSTEMCTL_PATH, "daemon-reload"], capture_output=True, text=True, timeout=15)
+        dr = _systemctl("daemon-reload", timeout=15)
+        if dr.returncode != 0:
+            stderr = dr.stderr.strip()
+            log("ERROR", f"[SETTINGS] daemon-reload failed after SECRET_KEY write: {stderr}")
+            hint = ("Service account lacks sudo rights for systemctl — re-run "
+                    "install.sh to install the henwen-systemctl sudoers rule."
+                    if "password" in stderr.lower() or "authoriz" in stderr.lower()
+                    else "Check: journalctl -u ASL3-EZ -n 30")
+            return jsonify({
+                "error": f"SECRET_KEY was written to {SERVICE_FILE_PATH}, but "
+                        f"'systemctl daemon-reload' failed: {stderr or dr.returncode}. "
+                        "The new key will not take effect until the service is "
+                        "manually restarted.",
+                "hint": hint,
+            }), 500
 
         def _delayed_restart():
             time.sleep(1.0)
             log("INFO", f"[SETTINGS] Restarting {SERVICE_NAME} to apply new SECRET_KEY")
-            subprocess.run([SYSTEMCTL_PATH, "restart", SERVICE_NAME], capture_output=True, text=True, timeout=30)
+            r = _systemctl("restart", SERVICE_NAME, timeout=30)
+            if r.returncode != 0:
+                log("ERROR", f"[SETTINGS] Restart of {SERVICE_NAME} failed after "
+                            f"SECRET_KEY rotation: {r.stderr.strip()}")
 
         threading.Thread(target=_delayed_restart, daemon=True).start()
 
@@ -4934,7 +5124,12 @@ def api_set_secret_key():
     except PermissionError as e:
         log("ERROR", f"[SETTINGS] Permission denied writing {SERVICE_FILE_PATH}: {e}")
         return jsonify({"error": str(e),
-                        "hint": "Editing the service file requires root access."}), 403
+                        "hint": f"The service account ({os.environ.get('USER', 'asterisk')}) "
+                                "cannot write the root-owned unit file directly. Rotate the "
+                                "key by editing SECRET_KEY in "
+                                f"{SERVICE_FILE_PATH} as root, then "
+                                "`systemctl daemon-reload && systemctl restart "
+                                f"{SERVICE_NAME}`."}), 403
     except Exception as e:
         log("ERROR", f"[SETTINGS] secret_key update failed: {e}")
         return jsonify({"error": str(e)}), 500
@@ -5251,7 +5446,16 @@ def _run_due_announcements():
 
         start_min = ws_h * 60 + ws_m
         end_min   = we_h * 60 + we_m
-        if not (start_min <= now_min <= end_min):
+        # window_end < window_start (e.g. 07:30 → 07:28) means the window
+        # spans midnight — end is on the following day, not earlier the same
+        # day. start_min <= now_min <= end_min can never be true in that case
+        # (start_min > end_min for every now_min), so the window would never
+        # fire at all; OR the two half-open ranges instead.
+        if start_min <= end_min:
+            in_window = start_min <= now_min <= end_min
+        else:
+            in_window = now_min >= start_min or now_min <= end_min
+        if not in_window:
             log("DEBUG", f"[ANNOUNCE] '{name}': outside window "
                          f"{row['window_start']}–{row['window_end']} (now={now.strftime('%H:%M')})")
             continue
@@ -5268,10 +5472,15 @@ def _run_due_announcements():
                 pass
 
         node = row["node"]
-        cached = _ami_cache.get(node, {})
-        if cached.get("keyed", False):
-            log("INFO", f"[ANNOUNCE] Node {node} busy — deferring '{row['name']}'")
-            continue
+        settle_sec = row["idle_settle_sec"] if row["idle_settle_sec"] is not None else 30
+        with _node_last_active_lock:
+            last_active_ts = _node_last_active.get(node)
+        if last_active_ts is not None:
+            quiet_sec = now.timestamp() - last_active_ts
+            if quiet_sec < settle_sec:
+                log("INFO", f"[ANNOUNCE] Node {node} not settled — deferring '{row['name']}' "
+                            f"(quiet {quiet_sec:.0f}s / {settle_sec}s needed)")
+                continue
 
         sound_arg = f"asl3ez/{row['slug']}"
         cmd = f"rpt {row['play_cmd']} {node} {sound_arg}"
@@ -5344,6 +5553,13 @@ def api_ann_create():
     except (ValueError, TypeError):
         return jsonify({"error": "interval_min must be a positive integer"}), 400
 
+    try:
+        idle_settle_sec = int(request.form.get("idle_settle_sec", 30))
+        if idle_settle_sec < 0:
+            raise ValueError
+    except (ValueError, TypeError):
+        return jsonify({"error": "idle_settle_sec must be a non-negative integer"}), 400
+
     window_start = request.form.get("window_start", "07:30").strip()
     window_end   = request.form.get("window_end",   "19:30").strip()
     play_cmd     = request.form.get("play_cmd",     "localplay").strip()
@@ -5383,9 +5599,10 @@ def api_ann_create():
     db = get_db()
     db.execute(
         """INSERT INTO announcements
-           (name, slug, node, enabled, interval_min, window_start, window_end, play_cmd)
-           VALUES (?, ?, ?, 1, ?, ?, ?, ?)""",
-        (name, slug, node, interval_min, window_start, window_end, play_cmd),
+           (name, slug, node, enabled, interval_min, window_start, window_end, play_cmd,
+            idle_settle_sec)
+           VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)""",
+        (name, slug, node, interval_min, window_start, window_end, play_cmd, idle_settle_sec),
     )
     db.commit()
     row = db.execute("SELECT * FROM announcements WHERE slug=?", (slug,)).fetchone()
@@ -5408,11 +5625,14 @@ def api_ann_update(ann_id):
     window_start = str(data.get("window_start", row["window_start"])).strip()
     window_end   = str(data.get("window_end",   row["window_end"])).strip()
     play_cmd     = str(data.get("play_cmd",     row["play_cmd"])).strip()
+    idle_settle_sec = int(data.get("idle_settle_sec", row["idle_settle_sec"]))
 
     if not re.match(r'^\d{4,7}$', node):
         return jsonify({"error": "Invalid node number"}), 400
     if interval_min < 1:
         return jsonify({"error": "interval_min must be >= 1"}), 400
+    if idle_settle_sec < 0:
+        return jsonify({"error": "idle_settle_sec must be >= 0"}), 400
     if not re.match(r'^\d{2}:\d{2}$', window_start) or not re.match(r'^\d{2}:\d{2}$', window_end):
         return jsonify({"error": "window times must be HH:MM"}), 400
     if play_cmd not in ("localplay", "playback"):
@@ -5420,9 +5640,10 @@ def api_ann_update(ann_id):
 
     db.execute(
         """UPDATE announcements
-           SET name=?, node=?, interval_min=?, window_start=?, window_end=?, play_cmd=?
+           SET name=?, node=?, interval_min=?, window_start=?, window_end=?, play_cmd=?,
+               idle_settle_sec=?
            WHERE id=?""",
-        (name, node, interval_min, window_start, window_end, play_cmd, ann_id),
+        (name, node, interval_min, window_start, window_end, play_cmd, idle_settle_sec, ann_id),
     )
     db.commit()
     updated = db.execute("SELECT * FROM announcements WHERE id=?", (ann_id,)).fetchone()
@@ -5500,8 +5721,40 @@ def _node_active(node: str) -> bool:
     return any(l.get("keyed", False) for l in cached.get("links", {}).values())
 
 
-def _connector_do_connect(local: str, target: str):
-    def _cmd(ami, ln=local, tn=target):
+def _connector_do_connect(local: str, target: str, disconnect_first: bool = False,
+                          skip_permanent: bool = False):
+    """Connect target to local. If disconnect_first, drop existing links on
+    local before connecting: either all of them (ilink 6, same pattern as the
+    manual "Connect / Disconnect" panel's disconnect_first option in
+    /api/ami/connect), or — if skip_permanent — only the ones not marked
+    permanent, disconnected individually (ilink 1 per peer) so permanent
+    links are left alone.
+
+    "Permanent" here means this app has the link recorded as such in
+    _kiosk_temp_conns (set only when a user explicitly checks Permanent at
+    connect time). app_rpt doesn't expose a queryable "is this link
+    permanent" flag via AMI, so a link established outside the app — raw
+    AMI/CLI, or a startup connection baked into rpt.conf — isn't tracked and
+    will be treated as non-permanent and disconnected like any other.
+    """
+    def _cmd(ami, ln=local, tn=target, disc=disconnect_first, skip=skip_permanent):
+        if disc:
+            if skip:
+                cached    = _ami_cache.get(ln) or {}
+                connected = list(cached.get("connected", []))
+                with _kiosk_temp_lock:
+                    perm_peers = {pn for (l, pn), info in _kiosk_temp_conns.items()
+                                 if l == ln and info.get('permanent')}
+                to_drop = [pn for pn in connected if pn not in perm_peers]
+                log("INFO", f"[CONNECTOR] Disconnecting {len(to_drop)} non-permanent "
+                            f"node(s) on {ln} before scheduled connect to {tn} "
+                            f"(preserving {len(connected) - len(to_drop)} permanent)")
+                for peer in to_drop:
+                    ami.rpt_cmd(ln, f"ilink 1 {peer}")
+            else:
+                log("INFO", f"[CONNECTOR] Disconnecting all nodes on {ln} before scheduled connect to {tn}")
+                ami.rpt_cmd(ln, "ilink 6")
+            time.sleep(0.3)
         return ami.rpt_cmd(ln, f"ilink 3 {tn}")
     return ami_send_command(_cmd)
 
@@ -5587,6 +5840,31 @@ def _connector_should_fire(row, now):
     return False
 
 
+def _connector_upcoming_disconnect_all():
+    """Warn the Status Board when a disconnect-all-first connector is about to
+    fire: either its schedule lands within the next 60s, or it's already past
+    its scheduled time and sitting in 'waiting' for the local node to go idle
+    (up to 2 minutes — see _run_connectors). Only connectors with
+    disconnect_all_first matter here, since a plain scheduled connect doesn't
+    disturb anyone already linked."""
+    try:
+        db   = get_db()
+        rows = db.execute(
+            "SELECT * FROM connectors WHERE enabled=1 AND disconnect_all_first=1"
+        ).fetchall()
+    except Exception:
+        return None
+    now = datetime.now()
+    for row in rows:
+        what = "non-permanent nodes" if row["disconnect_skip_permanent"] else "all nodes"
+        if row["state"] == "waiting":
+            return f"Scheduled connection to {row['target_node']} will disconnect {what} shortly"
+        if _connector_should_fire(row, now + timedelta(seconds=60)):
+            return (f"Scheduled connection to {row['target_node']} in the next minute "
+                    f"will disconnect {what}")
+    return None
+
+
 def _run_connectors():
     now     = datetime.now()
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -5629,7 +5907,9 @@ def _run_connectors():
             if node_idle or forced:
                 label = "forced" if forced else "node idle"
                 try:
-                    result = _connector_do_connect(local, target)
+                    result = _connector_do_connect(local, target,
+                                                   disconnect_first=bool(row["disconnect_all_first"]),
+                                                   skip_permanent=bool(row["disconnect_skip_permanent"]))
                     if not result.get("success", True):
                         raise RuntimeError(
                             f"ilink 3 rejected by Asterisk: {result.get('raw', '')[:120]}"
@@ -5761,6 +6041,8 @@ def api_conn_create():
     schedule_days = str(data.get("schedule_days", "")).strip()
     idle_limit_sec = int(data.get("idle_limit_sec", 180))
     settle_sec     = int(data.get("settle_sec",     300))
+    disconnect_all_first = 1 if data.get("disconnect_all_first") else 0
+    disconnect_skip_permanent = 1 if data.get("disconnect_skip_permanent") else 0
 
     if not name:
         return jsonify({"error": "Name is required"}), 400
@@ -5776,10 +6058,12 @@ def api_conn_create():
     db = get_db()
     db.execute(
         "INSERT INTO connectors (name, local_node, target_node, connect_time, "
-        "schedule_type, schedule_days, idle_limit_sec, settle_sec) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "schedule_type, schedule_days, idle_limit_sec, settle_sec, disconnect_all_first, "
+        "disconnect_skip_permanent) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (name, local_node, target_node, connect_time,
-         schedule_type, schedule_days, idle_limit_sec, settle_sec)
+         schedule_type, schedule_days, idle_limit_sec, settle_sec, disconnect_all_first,
+         disconnect_skip_permanent)
     )
     db.commit()
     row = db.execute("SELECT * FROM connectors WHERE rowid=last_insert_rowid()").fetchone()
@@ -5798,11 +6082,19 @@ def api_conn_update(cid):
     name          = str(data.get("name",          row["name"])).strip()
     local_node    = str(data.get("local_node",    row["local_node"])).strip()
     target_node   = str(data.get("target_node",   row["target_node"])).strip()
-    connect_time  = data.get("connect_time") or None
+    # Unlike every other field here, this must fall back to the existing value
+    # when omitted — data.get("connect_time") or None would silently clear the
+    # schedule on any partial PATCH that doesn't resend it. `or None` still
+    # normalizes an explicitly-submitted empty string to NULL.
+    connect_time  = data.get("connect_time", row["connect_time"]) or None
     schedule_type = str(data.get("schedule_type", row["schedule_type"] or "daily")).strip()
     schedule_days = str(data.get("schedule_days", row["schedule_days"] or "")).strip()
     idle_limit_sec = int(data.get("idle_limit_sec", row["idle_limit_sec"]))
     settle_sec     = int(data.get("settle_sec",     row["settle_sec"]))
+    disconnect_all_first = 1 if data.get("disconnect_all_first",
+                                         bool(row["disconnect_all_first"])) else 0
+    disconnect_skip_permanent = 1 if data.get("disconnect_skip_permanent",
+                                              bool(row["disconnect_skip_permanent"])) else 0
 
     if not re.match(r'^\d{4,7}$', local_node):
         return jsonify({"error": "Invalid local node number"}), 400
@@ -5815,9 +6107,11 @@ def api_conn_update(cid):
 
     db.execute(
         "UPDATE connectors SET name=?, local_node=?, target_node=?, connect_time=?, "
-        "schedule_type=?, schedule_days=?, idle_limit_sec=?, settle_sec=? WHERE id=?",
+        "schedule_type=?, schedule_days=?, idle_limit_sec=?, settle_sec=?, "
+        "disconnect_all_first=?, disconnect_skip_permanent=? WHERE id=?",
         (name, local_node, target_node, connect_time,
-         schedule_type, schedule_days, idle_limit_sec, settle_sec, cid)
+         schedule_type, schedule_days, idle_limit_sec, settle_sec,
+         disconnect_all_first, disconnect_skip_permanent, cid)
     )
     db.commit()
     updated = db.execute("SELECT * FROM connectors WHERE id=?", (cid,)).fetchone()
@@ -6123,6 +6417,8 @@ def start_id_monitor():
 
 @app.route("/api/id")
 def api_id_list():
+    if session.get('role') != 'superuser':
+        return jsonify({"error": "Superuser access required"}), 403
     db   = get_db()
     rows = db.execute("SELECT * FROM id_configs ORDER BY name COLLATE NOCASE").fetchall()
     now  = time.time()
@@ -6148,6 +6444,8 @@ def api_id_list():
 
 @app.route("/api/id", methods=["POST"])
 def api_id_create():
+    if session.get('role') != 'superuser':
+        return jsonify({"error": "Superuser access required"}), 403
     data = request.json or {}
     name           = str(data.get("name",           "")).strip()
     node           = str(data.get("node",           "")).strip()
@@ -6179,6 +6477,8 @@ def api_id_create():
 
 @app.route("/api/id/<int:iid>", methods=["PATCH"])
 def api_id_update(iid):
+    if session.get('role') != 'superuser':
+        return jsonify({"error": "Superuser access required"}), 403
     db  = get_db()
     row = db.execute("SELECT * FROM id_configs WHERE id=?", (iid,)).fetchone()
     if not row:
@@ -6211,6 +6511,8 @@ def api_id_update(iid):
 
 @app.route("/api/id/<int:iid>", methods=["DELETE"])
 def api_id_delete(iid):
+    if session.get('role') != 'superuser':
+        return jsonify({"error": "Superuser access required"}), 403
     db  = get_db()
     row = db.execute("SELECT * FROM id_configs WHERE id=?", (iid,)).fetchone()
     if not row:
@@ -6225,6 +6527,8 @@ def api_id_delete(iid):
 
 @app.route("/api/id/<int:iid>/toggle", methods=["POST"])
 def api_id_toggle(iid):
+    if session.get('role') != 'superuser':
+        return jsonify({"error": "Superuser access required"}), 403
     db  = get_db()
     row = db.execute("SELECT * FROM id_configs WHERE id=?", (iid,)).fetchone()
     if not row:
@@ -6241,6 +6545,8 @@ def api_id_toggle(iid):
 
 @app.route("/api/id/<int:iid>/play", methods=["POST"])
 def api_id_play(iid):
+    if session.get('role') != 'superuser':
+        return jsonify({"error": "Superuser access required"}), 403
     db  = get_db()
     row = db.execute("SELECT * FROM id_configs WHERE id=?", (iid,)).fetchone()
     if not row:
@@ -6258,6 +6564,8 @@ def api_id_play(iid):
 @app.route("/api/id/upload", methods=["POST"])
 def api_id_upload():
     """Upload and convert a sound file; returns the Asterisk-relative path for use in sound_path."""
+    if session.get('role') != 'superuser':
+        return jsonify({"error": "Superuser access required"}), 403
     if "file" not in request.files:
         return jsonify({"error": "No file"}), 400
     f   = request.files["file"]
@@ -6311,7 +6619,7 @@ def api_dtmf_send():
     if not digits or not _DTMF_VALID.match(digits):
         return jsonify({"error": "digits must contain only 0-9 A-D * #"}), 400
     def _send(ami):
-        lines = ami.command(f"rpt cmd {node} dtmf {digits}")
+        lines = ami.command(f"rpt fun {node} {digits}")
         raw   = "\n".join(lines)
         return {"ok": True, "raw": raw}
     try:
@@ -6321,8 +6629,66 @@ def api_dtmf_send():
         return jsonify({"error": str(e)}), 500
 
 
+# Function numbers Admin (not just Superuser) may invoke via /api/dtmf/cop
+# and /api/dtmf/status — verified individually against app_rpt's actual
+# source (apps/app_rpt/rpt_functions.c) after cop 1 turned out to be
+# `killall -9 asterisk`, not a status query. Everything NOT on these lists
+# defaults to superuser-only — an allowlist, rather than trying to keep
+# enumerating every dangerous number by hand (that's exactly how cop 1 got
+# mislabeled "System Status" in the first place). Two functions that ARE in
+# this UI's quick-action buttons are deliberately excluded here even though
+# they're not destructive in the cop-1 sense:
+#   cop 8  (Timeout Timer Disable) — removes the transmit time-limit safety/
+#           compliance mechanism; leaving it off risks an indefinite keyup.
+#   cop 12 (Link Disable) — disables ilink node-wide, breaking Connect/
+#           Monitor/Smart Connector for the whole node until cop 11 restores it.
+_DTMF_COP_ADMIN_SAFE    = {2, 3, 7, 9, 10, 11, 13, 21, 22, 24}
+_DTMF_STATUS_ADMIN_SAFE = {1, 11}
+
+
 @app.route("/api/dtmf/cop", methods=["POST"])
 def api_dtmf_cop():
+    """Raw app_rpt COP (control operator) passthrough — rpt cmd <node> cop <N>.
+
+    cop 1 is `system("killall -9 asterisk")` in app_rpt itself (see
+    apps/app_rpt/rpt_functions.c, function_cop() case 1) — an ungraceful hard
+    kill of the entire Asterisk process, NOT a status query. A mislabeled
+    quick-action button once sent this by accident and took the node down.
+    It now requires an explicit confirm flag; use the Dashboard's own
+    Restart Asterisk button (a clean systemctl restart) for an intentional
+    restart instead of cop 1.
+    """
+    data     = request.get_json(force=True)
+    node     = str(data.get("node", "")).strip()
+    function = str(data.get("function", "")).strip()
+    confirm  = bool(data.get("confirm", False))
+    if not node.isdigit():
+        return jsonify({"error": "node must be numeric"}), 400
+    if not function.isdigit():
+        return jsonify({"error": "function must be a positive integer"}), 400
+    if int(function) not in _DTMF_COP_ADMIN_SAFE and session.get('role') != 'superuser':
+        return jsonify({"error": f"cop {function} requires a superuser account"}), 403
+    if function == "1" and not confirm:
+        return jsonify({"error": "cop 1 kills the entire Asterisk process (killall -9 asterisk) "
+                                 "— it is not a status query. Pass confirm:true if this is really "
+                                 "what you want; otherwise use Restart Asterisk on the Dashboard."}), 400
+    def _send(ami):
+        lines = ami.command(f"rpt cmd {node} cop {function}")
+        raw   = "\n".join(lines)
+        return {"ok": True, "raw": raw}
+    try:
+        result = ami_send_command(_send)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/dtmf/status", methods=["POST"])
+def api_dtmf_status():
+    """Raw app_rpt STATUS passthrough — rpt cmd <node> status <N>. Separate
+    command family from cop; this is where "Force ID" actually lives (status
+    1 = System ID, status 11 = System ID local-only) — it is NOT a cop
+    function, despite what an earlier version of this UI implied."""
     data     = request.get_json(force=True)
     node     = str(data.get("node", "")).strip()
     function = str(data.get("function", "")).strip()
@@ -6330,8 +6696,10 @@ def api_dtmf_cop():
         return jsonify({"error": "node must be numeric"}), 400
     if not function.isdigit():
         return jsonify({"error": "function must be a positive integer"}), 400
+    if int(function) not in _DTMF_STATUS_ADMIN_SAFE and session.get('role') != 'superuser':
+        return jsonify({"error": f"status {function} requires a superuser account"}), 403
     def _send(ami):
-        lines = ami.command(f"rpt cmd {node} cop {function}")
+        lines = ami.command(f"rpt cmd {node} status {function}")
         raw   = "\n".join(lines)
         return {"ok": True, "raw": raw}
     try:

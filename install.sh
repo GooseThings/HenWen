@@ -23,29 +23,29 @@ fi
 
 # ── Python check ─────────────────────────────────────────
 if ! command -v python3 &>/dev/null; then
-    echo "[1/7] Installing Python 3..."
+    echo "[1/8] Installing Python 3..."
     apt-get install -y python3 python3-pip python3-venv python3-full
 else
-    echo "[1/7] Python 3 found: $(python3 --version)"
+    echo "[1/8] Python 3 found: $(python3 --version)"
 fi
 
 apt-get install -y python3-venv python3-full 2>/dev/null || true
 
 # ── Copy files ────────────────────────────────────────────
-echo "[2/7] Installing to $INSTALL_DIR..."
+echo "[2/8] Installing to $INSTALL_DIR..."
 mkdir -p "$INSTALL_DIR"
 cp -r . "$INSTALL_DIR/"
 chmod 755 "$INSTALL_DIR"          # standard app dir: owner rwx, group rx, others rx
 chmod +x "$INSTALL_DIR/"*.sh 2>/dev/null || true
 
 # ── Virtual environment ───────────────────────────────────
-echo "[3/7] Creating Python virtual environment..."
+echo "[3/8] Creating Python virtual environment..."
 python3 -m venv "$INSTALL_DIR/venv"
 "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
 "$INSTALL_DIR/venv/bin/pip" install --quiet flask gunicorn flask-wtf flask-limiter
 
 # ── rpt_backups directory ─────────────────────────────────
-echo "[4/7] Creating backup directory..."
+echo "[4/8] Creating backup directory..."
 mkdir -p /etc/asterisk/rpt_backups
 chown asterisk:asterisk /etc/asterisk/rpt_backups
 chmod 750 /etc/asterisk/rpt_backups
@@ -56,7 +56,7 @@ if [ -f /etc/asterisk/asl3ez.db ]; then
 fi
 
 # ── Verify rpt.conf accessible ────────────────────────────
-echo "[5/7] Checking rpt.conf..."
+echo "[5/8] Checking rpt.conf..."
 if [ -f /etc/asterisk/rpt.conf ]; then
     echo "      Found: /etc/asterisk/rpt.conf"
     ls -la /etc/asterisk/rpt.conf
@@ -66,7 +66,7 @@ else
 fi
 
 # ── Systemd service ───────────────────────────────────────
-echo "[6/7] Installing systemd service ($SERVICE_NAME)..."
+echo "[6/8] Installing systemd service ($SERVICE_NAME)..."
 
 # Remove any old service under the previous name to avoid duplicates
 if [ -f /etc/systemd/system/asl3-rpt-editor.service ]; then
@@ -102,6 +102,34 @@ else
     echo "      Journal cap already present ($JOURNALD_CAP) — leaving as-is."
 fi
 
+# ── Sudoers rule for privileged systemctl actions ─────────
+# The service runs unprivileged as User=asterisk (see ASL3-EZ.service), but
+# the Dashboard's "Restart Asterisk" button and secret-key rotation need to
+# run `systemctl restart asterisk`, `systemctl restart ASL3-EZ`, and
+# `systemctl daemon-reload`. Without this rule those actions fail with
+# "Interactive authentication required" since there's no session for
+# polkit to prompt. Scope is intentionally limited to these exact
+# commands — do not broaden with wildcards.
+echo "[7/8] Installing sudoers rule for restart/reload actions..."
+SUDOERS_FILE=/etc/sudoers.d/henwen-systemctl
+SYSTEMCTL_BIN=$(command -v systemctl || echo /bin/systemctl)
+cat > "${SUDOERS_FILE}.tmp" <<EOF
+# Installed by HenWen's install.sh. Lets the unprivileged service account
+# restart the units it manages and reload systemd unit definitions.
+asterisk ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} daemon-reload
+asterisk ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} restart asterisk
+asterisk ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} restart ${SERVICE_NAME}
+EOF
+if visudo -c -f "${SUDOERS_FILE}.tmp" &>/dev/null; then
+    chmod 440 "${SUDOERS_FILE}.tmp"
+    mv "${SUDOERS_FILE}.tmp" "$SUDOERS_FILE"
+    echo "      Installed $SUDOERS_FILE"
+else
+    echo "      WARNING: generated sudoers rule failed validation — not installed."
+    echo "      Restart/reload actions from the Manager UI will not work until"
+    echo "      this is fixed manually. See $SUDOERS_FILE.tmp for the rejected content."
+fi
+
 # ── Firewall ──────────────────────────────────────────────
 echo "      Opening firewall port $PORT..."
 if command -v firewall-cmd &>/dev/null; then
@@ -111,7 +139,7 @@ elif command -v ufw &>/dev/null; then
 fi
 
 # ── Start service ─────────────────────────────────────────
-echo "[7/7] Enabling and starting $SERVICE_NAME..."
+echo "[8/8] Enabling and starting $SERVICE_NAME..."
 systemctl enable "$SERVICE_NAME"
 systemctl restart "$SERVICE_NAME"
 sleep 2
