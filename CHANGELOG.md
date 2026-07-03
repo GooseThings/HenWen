@@ -1,5 +1,10 @@
 # Changelog
 
+## v2026.07.03.3
+
+- **Changed: NWS severe weather announcements no longer open with "Attention all stations."** Spoken text now starts directly with "The National Weather Service has issued a...".
+- **Changed: NWS-sourced announcements no longer appear on the Announcements page.** They're auto-managed and shown exclusively on the Weather Alerts page's "Currently Active" list — the Announcements page now only shows manually-created (upload/TTS) announcements. Per-row actions (edit, delete, test play) on NWS rows are unaffected; only this list view changed.
+
 ## v2026.07.03.2
 
 - **Added: Text-to-speech Announcements.** Admins and Superusers can type a message instead of uploading an audio file, choose from a curated set of offline Piper neural voices, and schedule it exactly like an uploaded announcement — same Local Play/Playback choice, repeat interval, time window, and idle-settle period. A voice downloads once (roughly 60–115MB) and is cached; a Preview button plays a message on the node before it's saved as a scheduled announcement. Editing a TTS announcement's text re-synthesizes the audio atomically in place, so a scheduler tick or manual test-play firing mid-edit can never hit a missing file.
