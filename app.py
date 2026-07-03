@@ -78,6 +78,17 @@ AMI_HOST        = os.environ.get("AMI_HOST",         "127.0.0.1")
 AMI_PORT        = int(os.environ.get("AMI_PORT",     5038))
 SERVICE_NAME    = os.environ.get("SERVICE_NAME",     "ASL3-EZ")
 SOUNDS_DIR      = os.environ.get("SOUNDS_DIR",       "/usr/share/asterisk/sounds/asl3ez")
+# Piper voice models (.onnx/.onnx.json) — NOT under SOUNDS_DIR: these are
+# Piper's own assets, not Asterisk sound files, and don't need asterisk's
+# sound-format/ownership conventions. Also NOT under /opt/ASL3-EZ: that
+# directory is root:root and the service runs as User=asterisk, so it can't
+# write there. /var/lib/asterisk is already asterisk:asterisk.
+TTS_VOICES_DIR  = os.environ.get("TTS_VOICES_DIR",   "/var/lib/asterisk/asl3ez_tts_voices")
+# Resolved via the running interpreter's own directory, not PATH lookup —
+# under systemd, venv/bin isn't on PATH the way it is in an interactive
+# shell, so a bare "piper" subprocess call would fail with FileNotFoundError.
+PIPER_BIN       = os.environ.get("PIPER_BIN",
+                                  os.path.join(os.path.dirname(sys.executable), "piper"))
 SERVICE_FILE_PATH = os.environ.get("SERVICE_FILE_PATH",
                                     f"/etc/systemd/system/{SERVICE_NAME}.service")
 SECURE_COOKIES       = os.environ.get("SECURE_COOKIES", "false").lower() == "true"
@@ -92,15 +103,15 @@ GITHUB_REPO = "GooseThings/HenWen"
 
 
 def _load_henwen_version():
-    """Read the top version header (## vYYYY.MM.DD) from CHANGELOG.md,
-    shipped alongside app.py — used for the kiosk footer and the Manager's
-    update check. Falls back to 'unknown' for a dev checkout without a
-    stamped release yet."""
+    """Read the top version header (## vYYYY.MM.DD, optionally .N for a
+    same-day second release) from CHANGELOG.md, shipped alongside app.py —
+    used for the kiosk footer and the Manager's update check. Falls back to
+    'unknown' for a dev checkout without a stamped release yet."""
     try:
         changelog_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CHANGELOG.md")
         with open(changelog_path) as f:
             for line in f:
-                m = re.match(r'^##\s+(v\d{4}\.\d{2}\.\d{2})\s*$', line.strip())
+                m = re.match(r'^##\s+(v\d{4}\.\d{2}\.\d{2}(?:\.\d+)?)\s*$', line.strip())
                 if m:
                     return m.group(1)
     except Exception:
@@ -325,11 +336,50 @@ def get_db():
         last_played   TEXT,
         source_type   TEXT    NOT NULL DEFAULT 'upload',
         created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
-        idle_settle_sec INTEGER NOT NULL DEFAULT 30
+        idle_settle_sec INTEGER NOT NULL DEFAULT 30,
+        tts_text      TEXT,
+        tts_voice     TEXT    NOT NULL DEFAULT 'en_US-lessac-medium',
+        external_id   TEXT,
+        nws_expires   TEXT,
+        max_defer_sec INTEGER
     )""")
     _ann_cols = {r[1] for r in conn.execute("PRAGMA table_info(announcements)").fetchall()}
     if 'idle_settle_sec' not in _ann_cols:
         conn.execute("ALTER TABLE announcements ADD COLUMN idle_settle_sec INTEGER NOT NULL DEFAULT 30")
+    if 'tts_text' not in _ann_cols:
+        conn.execute("ALTER TABLE announcements ADD COLUMN tts_text TEXT")
+    if 'tts_voice' not in _ann_cols:
+        # Must match DEFAULT_TTS_VOICE below.
+        conn.execute("ALTER TABLE announcements ADD COLUMN tts_voice TEXT NOT NULL DEFAULT 'en_US-lessac-medium'")
+    if 'external_id' not in _ann_cols:
+        # Dedup/lifecycle key for auto-sourced rows (e.g. NWS alerts' parsed
+        # VTEC identity). NULL for upload/tts rows.
+        conn.execute("ALTER TABLE announcements ADD COLUMN external_id TEXT")
+    if 'nws_expires' not in _ann_cols:
+        # The alert's own expiry time, used as a local/network-independent
+        # ceiling so a stale alert can't replay forever if the NWS poller
+        # can't reach the API to confirm it has ended.
+        conn.execute("ALTER TABLE announcements ADD COLUMN nws_expires TEXT")
+    if 'max_defer_sec' not in _ann_cols:
+        # NULL (default) preserves today's indefinite idle-settle defer for
+        # every existing announcement. Only NWS-sourced rows set this, to
+        # force playback after being due for this long even if the channel
+        # hasn't gone idle-settled yet — see _run_due_announcements().
+        conn.execute("ALTER TABLE announcements ADD COLUMN max_defer_sec INTEGER")
+    conn.commit()
+    # Durable record of connections made Permanent through this app, so the
+    # Status Board's Permanent badge survives a HenWen restart — app_rpt
+    # itself keeps the link genuinely permanent across a restart of this web
+    # app (Asterisk was never touched), but _kiosk_temp_conns is in-process
+    # memory only and would otherwise forget, making the badge vanish even
+    # though the underlying link is unchanged. See _rehydrate_permanent_links().
+    conn.execute("""CREATE TABLE IF NOT EXISTS permanent_links (
+        local_node TEXT    NOT NULL,
+        peer_node  TEXT    NOT NULL,
+        monitor    INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT    NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (local_node, peer_node)
+    )""")
     conn.commit()
     conn.execute("""CREATE TABLE IF NOT EXISTS connectors (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -404,6 +454,26 @@ def get_db():
     _alert_cols = {r[1] for r in conn.execute("PRAGMA table_info(alert_config)").fetchall()}
     if 'on_dns_stuck' not in _alert_cols:
         conn.execute("ALTER TABLE alert_config ADD COLUMN on_dns_stuck INTEGER NOT NULL DEFAULT 1")
+    conn.commit()
+    # Singleton config for the NWS severe weather auto-announcement poller —
+    # separate from alert_config (that's push notifications; this is
+    # auto-playing TTS on the repeater itself, a different concept).
+    conn.execute("""CREATE TABLE IF NOT EXISTS nws_alert_config (
+        id                 INTEGER PRIMARY KEY CHECK (id = 1),
+        enabled            INTEGER NOT NULL DEFAULT 0,
+        zone               TEXT    NOT NULL DEFAULT '',
+        zone_area_name     TEXT    NOT NULL DEFAULT '',
+        zone_auto_detected INTEGER NOT NULL DEFAULT 0,
+        node               TEXT    NOT NULL DEFAULT '',
+        play_cmd           TEXT    NOT NULL DEFAULT 'localplay',
+        voice              TEXT    NOT NULL DEFAULT 'en_US-lessac-medium',
+        interval_min       INTEGER NOT NULL DEFAULT 15,
+        idle_settle_sec    INTEGER NOT NULL DEFAULT 10,
+        max_defer_sec      INTEGER NOT NULL DEFAULT 120,
+        event_types        TEXT    NOT NULL DEFAULT 'Tornado Warning,Severe Thunderstorm Warning',
+        last_poll_at       TEXT,
+        last_poll_error    TEXT
+    )""")
     conn.commit()
     conn.execute("""
     CREATE TABLE IF NOT EXISTS users (
@@ -1201,6 +1271,8 @@ def _poll_loop():
                         own_key = f"own:{node}"
                         if status.get("keyed") and not _keyed_prev_states.get(own_key):
                             _record_keyed(node)
+                            with _own_keyups_lock:
+                                _own_keyups[node] = _own_keyups.get(node, 0) + 1
                         _keyed_prev_states[own_key] = bool(status.get("keyed"))
 
                         # Idle-settle tracking for announcements: "active" means the
@@ -1262,6 +1334,16 @@ def _poll_loop():
                             _alert_events.append(("disconnect", node_str, peer))
                             with _kiosk_temp_lock:
                                 _kiosk_temp_conns.pop((node_str, peer), None)
+                            try:
+                                pdb = get_db()
+                                pdb.execute(
+                                    "DELETE FROM permanent_links WHERE local_node=? AND peer_node=?",
+                                    (node_str, peer)
+                                )
+                                pdb.commit()
+                            except Exception as _e:
+                                log("WARN", f"[KIOSK] Failed to prune permanent_links for "
+                                            f"{node_str}->{peer}: {_e}")
                         _prev_connected_map[node_str] = est_set
 
                         # Kiosk idle-timeout: update last_active when local or peer is keyed.
@@ -1289,6 +1371,10 @@ def _poll_loop():
                                     del _kiosk_temp_conns[(ln, pn)]
                         for (ln, pn) in _idle_dc:
                             try:
+                                # ilink 1, not 11, is correct here (unlike the manual disconnect
+                                # endpoints): _idle_dc is built only from _kiosk_temp_conns entries
+                                # that already excluded info.get('permanent') above, so nothing
+                                # reaching this line can be a permanent link.
                                 ami.rpt_cmd(ln, f"ilink 1 {pn}")
                                 log("INFO", f"[KIOSK] Idle timeout: disconnected {pn} from {ln}")
                             except Exception as _e:
@@ -1463,6 +1549,10 @@ _keyed_prev_states  = {}   # {key: bool}  — track transitions per node/link
 _link_stats      = {}   # {node_str: {"keyups": int, "last_keyed": float|None}}
 _link_stats_lock = threading.Lock()
 
+# ── Hosted node's own keyup count (this repeater's RX, not a linked peer) ─────
+_own_keyups      = {}   # {node_str: int}
+_own_keyups_lock = threading.Lock()
+
 # ── Connection history tracking ────────────────────────────────────────────────
 _prev_connected_map = {}  # {local_node_str: set(peer_str)}
 
@@ -1617,6 +1707,39 @@ def _db_conn_startup_cleanup():
             log("INFO", f"[CONNHIST] Startup cleanup: closed {len(rows)} open record(s)")
     except Exception as e:
         log("ERROR", f"[CONNHIST] _db_conn_startup_cleanup error: {e}")
+
+
+def _rehydrate_permanent_links():
+    """Restore _kiosk_temp_conns' knowledge of Permanent connections from the
+    durable permanent_links table on startup.
+
+    _kiosk_temp_conns is in-process memory, wiped on every HenWen restart —
+    but app_rpt itself was never restarted, so a link made Permanent through
+    this app is still genuinely permanent in Asterisk regardless. Without
+    this, the Status Board's Permanent badge would incorrectly disappear
+    after any HenWen restart even though the underlying link is unchanged.
+    A row for a peer that's no longer actually connected is harmless here —
+    the Status Board only ever displays permanence for nodes currently in
+    the live AMI connected list, and the poll loop prunes the row for real
+    the next time it observes that peer's connection end while running.
+    """
+    try:
+        db   = get_db()
+        rows = db.execute("SELECT local_node, peer_node, monitor FROM permanent_links").fetchall()
+        with _kiosk_temp_lock:
+            for row in rows:
+                key = (row["local_node"], row["peer_node"])
+                if key not in _kiosk_temp_conns:
+                    _kiosk_temp_conns[key] = {
+                        'permanent':   True,
+                        'monitor':     bool(row["monitor"]),
+                        'no_timeout':  False,
+                        'last_active': time.time(),
+                    }
+        if rows:
+            log("INFO", f"[KIOSK] Rehydrated {len(rows)} permanent link(s) from the database")
+    except Exception as e:
+        log("ERROR", f"[KIOSK] _rehydrate_permanent_links error: {e}")
 
 
 # ── Alert helpers ──────────────────────────────────────────────────────────────
@@ -2895,8 +3018,11 @@ def get_uptime():
 @_ttl_cached(3600)   # avoid hitting GitHub's API on every Manager login
 def get_latest_release():
     """Fetch the latest published GitHub release tag for update checking.
-    CalVer tags (vYYYY.MM.DD) sort correctly as plain strings, so no semver
-    parsing is needed — just compare against HENWEN_VERSION lexically."""
+    CalVer tags (vYYYY.MM.DD, optionally .N for a same-day second release)
+    sort correctly as plain strings, so no semver parsing is needed — just
+    compare against HENWEN_VERSION lexically. (A same-day suffix above
+    single digits, e.g. .10 vs .9, would sort incorrectly as a string —
+    not a real concern at the release cadence this project actually has.)"""
     try:
         url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
         req = urlreq.Request(url, headers={"User-Agent": "HenWen/1.0",
@@ -3857,6 +3983,9 @@ def api_ami_connect():
 
 @app.route("/api/ami/disconnect", methods=["POST"])
 def api_ami_disconnect():
+    """Manual Disconnect Node / Disconnect All from the Dashboard's Connect /
+    Disconnect panel. Uses ilink 11, not ilink 1 — see api_status_disconnect's
+    docstring for why: ilink 1 silently no-ops on a permanent link."""
     data        = request.json or {}
     local_node  = str(data.get("local_node",  "")).strip()
     remote_node = str(data.get("remote_node", "")).strip()
@@ -3870,7 +3999,7 @@ def api_ami_disconnect():
 
     def _do(ami):
         if remote_node:
-            r = ami.rpt_cmd(local_node, f"ilink 1 {remote_node}")
+            r = ami.rpt_cmd(local_node, f"ilink 11 {remote_node}")
         else:
             r = ami.rpt_cmd(local_node, "ilink 6")
         return {"success": r["success"], "output": r["output"], "command": r["command"]}
@@ -3884,6 +4013,12 @@ def api_ami_disconnect():
 
 @app.route("/api/ami/perm_connect", methods=["POST"])
 def api_ami_perm_connect():
+    """Manual Perm Connect from the Dashboard's Connect / Disconnect panel.
+    Despite the name, `mode` isn't restricted to the two permanent ilink
+    modes (12/13) — matching this endpoint's existing behavior — but only
+    genuinely permanent modes get recorded in _kiosk_temp_conns/
+    permanent_links, so the Status Board's Permanent badge reflects what
+    app_rpt actually did, not what the button is called."""
     data        = request.json or {}
     local_node  = str(data.get("local_node",  "")).strip()
     remote_node = str(data.get("remote_node", "")).strip()
@@ -3901,7 +4036,24 @@ def api_ami_perm_connect():
         return {"success": r["success"], "output": r["output"], "command": r["command"]}
 
     try:
-        return jsonify(ami_send_command(_do))
+        result = ami_send_command(_do)
+        if result.get("success") and mode in ("12", "13"):
+            monitor = (mode == "12")
+            with _kiosk_temp_lock:
+                _kiosk_temp_conns[(local_node, remote_node)] = {
+                    'permanent':   True,
+                    'monitor':     monitor,
+                    'no_timeout':  False,
+                    'last_active': time.time(),
+                }
+            db = get_db()
+            db.execute(
+                "INSERT OR REPLACE INTO permanent_links (local_node, peer_node, monitor) "
+                "VALUES (?, ?, ?)",
+                (local_node, remote_node, 1 if monitor else 0)
+            )
+            db.commit()
+        return jsonify(result)
     except Exception as e:
         log("ERROR", f"[API] /api/ami/perm_connect error: {e}")
         return jsonify({"error": str(e)}), 500
@@ -4011,16 +4163,19 @@ def api_status_board():
             })
         location = info.get("location", "")
         coords   = _geocode_nonblocking(location) if location else None
+        with _own_keyups_lock:
+            own_keyups = _own_keyups.get(node, 0)
         node_data.append({
-            "node":      node,
-            "callsign":  info.get("callsign", ""),
-            "desc":      info.get("desc", ""),
-            "location":  location,
-            "lat":       coords["lat"] if coords else None,
-            "lon":       coords["lon"] if coords else None,
-            "keyed":     cached.get("keyed", False),
-            "connected": connected_details,
-            "stale":     cached.get("stale", True),
+            "node":       node,
+            "callsign":   info.get("callsign", ""),
+            "desc":       info.get("desc", ""),
+            "location":   location,
+            "lat":        coords["lat"] if coords else None,
+            "lon":        coords["lon"] if coords else None,
+            "keyed":      cached.get("keyed", False),
+            "own_keyups": own_keyups,
+            "connected":  connected_details,
+            "stale":      cached.get("stale", True),
         })
 
     resp = jsonify({
@@ -4137,6 +4292,14 @@ def api_status_connect():
                 'no_timeout':  False,
                 'last_active': time.time(),
             }
+        if permanent:
+            db = get_db()
+            db.execute(
+                "INSERT OR REPLACE INTO permanent_links (local_node, peer_node, monitor) "
+                "VALUES (?, ?, ?)",
+                (local_node, remote_node, 1 if monitor else 0)
+            )
+            db.commit()
         log("INFO", f"[API] /api/status/connect {local_node} -> {remote_node} mode=ilink{ilink_mode}")
         return jsonify({"ok": True, "output": result})
     except Exception as e:
@@ -4146,7 +4309,20 @@ def api_status_connect():
 
 @app.route("/api/status/disconnect", methods=["POST"])
 def api_status_disconnect():
-    """Disconnect a remote node from a local node — public endpoint for the Status Board."""
+    """Disconnect a remote node from a local node — public endpoint for the Status Board.
+
+    Uses ilink 11 ("Perm Link off"), not ilink 1 ("Link off"). Per app_rpt's
+    function_ilink() (apps/app_rpt/rpt_functions.c): cases 1 and 11 share the
+    same code path, but 1 has a guard — `if (myatoi(param) < 10 &&
+    l->max_retries > MAX_RETRIES) return DC_COMPLETE;` — that silently no-ops
+    on a permanent link (id < 10 is exactly the ilink-1 case) instead of
+    disconnecting it. ilink 11 hits the same guard's false branch and always
+    proceeds to the real disconnect, for both transient and permanent links,
+    so it's used here unconditionally rather than only when we happen to know
+    (via _kiosk_temp_conns) that a given link is permanent — a link made
+    permanent outside this app (raw AMI/CLI, rpt.conf) isn't tracked there
+    either, and would hit this same bug.
+    """
     data        = request.json or {}
     local_node  = str(data.get("local_node",  "")).strip()
     remote_node = str(data.get("remote_node", "")).strip()
@@ -4157,7 +4333,7 @@ def api_status_disconnect():
     try:
         with _ami_pool_lock:
             ami = _ami_ensure_connected()
-            result = ami.rpt_cmd(local_node, f"ilink 1 {remote_node}")
+            result = ami.rpt_cmd(local_node, f"ilink 11 {remote_node}")
         log("INFO", f"[API] /api/status/disconnect {local_node} -> {remote_node}")
         return jsonify({"ok": True, "output": result})
     except Exception as e:
@@ -5387,6 +5563,135 @@ def api_ami_raw_test():
 # Announcements — audio file upload, ULAW conversion, scheduler
 # ---------------------------------------------------------------------------
 
+# Curated Piper voice list — deliberately short and fixed, not an open picker.
+# Every voice is the 'medium' quality tier: 'low' trades away intelligibility
+# that matters for narrowband FM/repeater audio, and 'high' quality is
+# unlikely to survive ULAW + FM compression while costing more synthesis
+# time and disk. Only en_US-lessac-medium has been listen-tested through an
+# actual repeater audio chain as of this writing — treat the others as
+# reputationally good but unverified on-air until someone checks.
+# Voice IDs must never be accepted from a client and used to build a
+# download URL directly — see _ensure_voice_model_cached()'s allowlist check.
+TTS_VOICES = {
+    "en_US-lessac-medium": {
+        "label": "Lessac (US, neutral)",
+        "lang": "en", "region": "en_US", "name": "lessac", "quality": "medium",
+    },
+    "en_US-amy-medium": {
+        "label": "Amy (US, female)",
+        "lang": "en", "region": "en_US", "name": "amy", "quality": "medium",
+    },
+    "en_US-ryan-medium": {
+        "label": "Ryan (US, male)",
+        "lang": "en", "region": "en_US", "name": "ryan", "quality": "medium",
+    },
+    "en_GB-alan-medium": {
+        "label": "Alan (UK, male)",
+        "lang": "en", "region": "en_GB", "name": "alan", "quality": "medium",
+    },
+}
+DEFAULT_TTS_VOICE = "en_US-lessac-medium"   # must match the DB column default above
+TTS_TEXT_MAX_CHARS = 800
+PIPER_VOICES_BASE_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
+
+# Fixed allowlist for the NWS auto-announcement feature's event_types filter.
+# Validated server-side on save so a typo'd event name can't silently
+# produce a filter that never matches anything (unlike watch_nodes, where a
+# typo'd node number just harmlessly never matches — a wrong entry here is a
+# safety-relevant silent failure, worth the extra guard).
+NWS_ALERT_EVENT_TYPES = [
+    "Tornado Warning",
+    "Tornado Watch",
+    "Severe Thunderstorm Warning",
+    "Severe Thunderstorm Watch",
+    "Flash Flood Warning",
+    "Flash Flood Watch",
+    "Extreme Wind Warning",
+]
+NWS_ALERTS_BASE_URL = "https://api.weather.gov"
+NWS_USER_AGENT = "HenWen/1.0 (ham radio node manager; https://github.com/GooseThings/HenWen)"
+NWS_ALERT_SPOKEN_PREFIX = "Attention all stations, the National Weather Service has issued a "
+
+
+def _piper_voice_urls(voice_id: str):
+    """(onnx_url, json_url) for a curated voice id. Caller must have already
+    validated voice_id is a TTS_VOICES key — this never accepts arbitrary
+    input, since it's used to build an outbound download URL."""
+    v = TTS_VOICES[voice_id]
+    base = f"{PIPER_VOICES_BASE_URL}/{v['lang']}/{v['region']}/{v['name']}/{v['quality']}/{v['region']}-{v['name']}-{v['quality']}"
+    return f"{base}.onnx", f"{base}.onnx.json"
+
+
+def _voice_model_paths(voice_id: str):
+    onnx = os.path.join(TTS_VOICES_DIR, f"{voice_id}.onnx")
+    json_ = os.path.join(TTS_VOICES_DIR, f"{voice_id}.onnx.json")
+    return onnx, json_
+
+
+def _voice_is_cached(voice_id: str) -> bool:
+    onnx, json_ = _voice_model_paths(voice_id)
+    return os.path.exists(onnx) and os.path.exists(json_)
+
+
+def _ensure_voice_model_cached(voice_id: str):
+    """Download a curated voice's model files if not already present.
+    Raises ValueError for an unrecognized voice id (never reachable from a
+    client-supplied string without going through this check first — the
+    caller must validate against TTS_VOICES before calling). Downloads to
+    .part temp files and os.replace()s into place only on full success, so a
+    network failure never leaves a truncated file that looks cached."""
+    if voice_id not in TTS_VOICES:
+        raise ValueError(f"Unknown voice id: {voice_id!r}")
+    if _voice_is_cached(voice_id):
+        return
+    os.makedirs(TTS_VOICES_DIR, exist_ok=True)
+    onnx_url, json_url = _piper_voice_urls(voice_id)
+    onnx_path, json_path = _voice_model_paths(voice_id)
+    for url, dest in ((onnx_url, onnx_path), (json_url, json_path)):
+        tmp = dest + ".part"
+        req = urlreq.Request(url, headers={"User-Agent": "HenWen/1.0"})
+        with urlreq.urlopen(req, timeout=120) as resp, open(tmp, "wb") as f:
+            shutil.copyfileobj(resp, f)
+        os.replace(tmp, dest)
+    log("INFO", f"[TTS] Downloaded voice model '{voice_id}'")
+
+
+def _synthesize_tts(text: str, voice_id: str, dest_wav: str) -> None:
+    """Run Piper to synthesize text to a WAV file. Caller must have already
+    ensured the voice is cached (_ensure_voice_model_cached) — this does not
+    trigger a download itself, keeping synthesis latency predictable."""
+    if voice_id not in TTS_VOICES:
+        raise ValueError(f"Unknown voice id: {voice_id!r}")
+    onnx_path, _ = _voice_model_paths(voice_id)
+    if not os.path.exists(onnx_path):
+        raise RuntimeError(f"Voice '{voice_id}' is not downloaded yet")
+    os.makedirs(os.path.dirname(dest_wav), exist_ok=True)
+    result = subprocess.run(
+        [PIPER_BIN, "-m", onnx_path, "-f", dest_wav],
+        input=text.encode("utf-8"),
+        capture_output=True, timeout=90,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"piper failed: {result.stderr.decode(errors='replace')[-500:]}")
+
+
+def _tts_to_ulaw(text: str, voice_id: str, dest_ulaw: str) -> None:
+    """Synthesize text to speech and convert it straight to the 8kHz mono
+    ULAW format Asterisk needs, via the existing _convert_to_ulaw() — same
+    output format as an uploaded announcement file, so the scheduler and
+    playback path need no source-type-specific handling at all."""
+    fd, tmp_wav = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    try:
+        _synthesize_tts(text, voice_id, tmp_wav)
+        _convert_to_ulaw(tmp_wav, dest_ulaw)
+    finally:
+        try:
+            os.unlink(tmp_wav)
+        except OSError:
+            pass
+
+
 def _ann_slug(name: str) -> str:
     """Turn a user-supplied name into a filesystem/Asterisk-safe slug."""
     slug = re.sub(r'[^a-zA-Z0-9_-]', '_', name.strip().lower())
@@ -5478,9 +5783,41 @@ def _run_due_announcements():
         if last_active_ts is not None:
             quiet_sec = now.timestamp() - last_active_ts
             if quiet_sec < settle_sec:
-                log("INFO", f"[ANNOUNCE] Node {node} not settled — deferring '{row['name']}' "
-                            f"(quiet {quiet_sec:.0f}s / {settle_sec}s needed)")
-                continue
+                # max_defer_sec (NWS-sourced rows only; NULL for every other
+                # announcement, which preserves today's indefinite defer) lets
+                # a severe weather alert force playback after being due for
+                # too long, even over a still-busy channel, rather than
+                # deferring indefinitely like a routine announcement would.
+                forced = False
+                max_defer = row["max_defer_sec"]
+                if max_defer is not None:
+                    try:
+                        if row["last_played"]:
+                            due_since = (datetime.strptime(row["last_played"], "%Y-%m-%d %H:%M:%S")
+                                         + timedelta(minutes=row["interval_min"]))
+                        else:
+                            due_since = datetime.strptime(row["created_at"], "%Y-%m-%d %H:%M:%S")
+                        waited_sec = (now - due_since).total_seconds()
+                        forced = waited_sec >= max_defer
+                    except Exception:
+                        forced = False
+                if not forced:
+                    log("INFO", f"[ANNOUNCE] Node {node} not settled — deferring '{row['name']}' "
+                                f"(quiet {quiet_sec:.0f}s / {settle_sec}s needed)")
+                    continue
+                log("WARN", f"[ANNOUNCE] Node {node} not settled but '{row['name']}' forced "
+                            f"after exceeding max_defer_sec={max_defer}")
+
+        # Re-check the row still exists and is enabled right before firing.
+        # `rows` was snapshotted once at the top of this function; if an
+        # admin deletes (or disables) this announcement after that snapshot
+        # but before its turn in this loop — a real, observed race, since a
+        # busy cycle can spend real time on AMI I/O for earlier rows — the
+        # stale in-memory copy would otherwise still get played even though
+        # it no longer exists.
+        if not db.execute("SELECT 1 FROM announcements WHERE id=? AND enabled=1", (row["id"],)).fetchone():
+            log("INFO", f"[ANNOUNCE] '{name}' was deleted/disabled since this cycle started — skipping")
+            continue
 
         sound_arg = f"asl3ez/{row['slug']}"
         cmd = f"rpt {row['play_cmd']} {node} {sound_arg}"
@@ -5513,6 +5850,38 @@ def start_announcer():
 
 
 # ---------------------------------------------------------------------------
+# TTS voice management API routes
+# ---------------------------------------------------------------------------
+
+@app.route("/api/tts/voices")
+def api_tts_voices_list():
+    out = []
+    for vid, v in TTS_VOICES.items():
+        out.append({
+            "id":     vid,
+            "label":  v["label"],
+            "cached": _voice_is_cached(vid),
+        })
+    return jsonify(out)
+
+
+@app.route("/api/tts/voices/<voice_id>/download", methods=["POST"])
+def api_tts_voice_download(voice_id):
+    """Explicit, separate action from announcement create/edit — a first-time
+    model download is network-dependent and can itself take a while, and
+    stacking it inside the same request as text synthesis + ffmpeg conversion
+    risks the combined latency against gunicorn's worker timeout."""
+    if voice_id not in TTS_VOICES:
+        return jsonify({"error": f"Unknown voice id: {voice_id}"}), 400
+    try:
+        _ensure_voice_model_cached(voice_id)
+        return jsonify({"ok": True, "id": voice_id, "cached": True})
+    except Exception as e:
+        log("ERROR", f"[TTS] Voice download failed for '{voice_id}': {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
 # Announcement API routes
 # ---------------------------------------------------------------------------
 
@@ -5528,46 +5897,64 @@ def api_ann_list():
     return jsonify([dict(r) for r in rows])
 
 
+def _validate_ann_common(data):
+    """Shared scheduling-field validation for both the upload (multipart
+    form) and TTS (JSON) announcement-creation paths. `data` must support
+    .get(key, default) — works for both request.form and a plain dict from
+    request.json. Returns (validated_dict, None) on success, or
+    (None, (response, status_code)) on the first validation failure."""
+    name = str(data.get("name", "")).strip()
+    node = str(data.get("node", "")).strip()
+    if not name:
+        return None, (jsonify({"error": "Name is required"}), 400)
+    if not re.match(r'^\d{4,7}$', node):
+        return None, (jsonify({"error": "Invalid node number"}), 400)
+
+    try:
+        interval_min = int(data.get("interval_min", 60))
+        if interval_min < 1:
+            raise ValueError
+    except (ValueError, TypeError):
+        return None, (jsonify({"error": "interval_min must be a positive integer"}), 400)
+
+    try:
+        idle_settle_sec = int(data.get("idle_settle_sec", 30))
+        if idle_settle_sec < 0:
+            raise ValueError
+    except (ValueError, TypeError):
+        return None, (jsonify({"error": "idle_settle_sec must be a non-negative integer"}), 400)
+
+    window_start = str(data.get("window_start", "07:30")).strip()
+    window_end   = str(data.get("window_end",   "19:30")).strip()
+    play_cmd     = str(data.get("play_cmd",     "localplay")).strip()
+    if play_cmd not in ("localplay", "playback"):
+        play_cmd = "localplay"
+    if not re.match(r'^\d{2}:\d{2}$', window_start) or not re.match(r'^\d{2}:\d{2}$', window_end):
+        return None, (jsonify({"error": "window_start and window_end must be HH:MM"}), 400)
+
+    return {
+        "name": name, "node": node, "interval_min": interval_min,
+        "idle_settle_sec": idle_settle_sec, "window_start": window_start,
+        "window_end": window_end, "play_cmd": play_cmd,
+    }, None
+
+
 @app.route("/api/announcements", methods=["POST"])
 def api_ann_create():
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
 
-    f    = request.files["file"]
-    name = request.form.get("name", "").strip()
-    node = request.form.get("node", "").strip()
-
-    if not name:
-        return jsonify({"error": "Name is required"}), 400
-    if not re.match(r'^\d{4,7}$', node):
-        return jsonify({"error": "Invalid node number"}), 400
+    f = request.files["file"]
+    fields, err = _validate_ann_common(request.form)
+    if err:
+        return err
+    name, node = fields["name"], fields["node"]
+    interval_min, idle_settle_sec = fields["interval_min"], fields["idle_settle_sec"]
+    window_start, window_end, play_cmd = fields["window_start"], fields["window_end"], fields["play_cmd"]
 
     ext = os.path.splitext(f.filename)[1].lower()
     if ext not in ALLOWED_UPLOAD_EXTS:
         return jsonify({"error": f"Unsupported file type: {ext}"}), 400
-
-    try:
-        interval_min = int(request.form.get("interval_min", 60))
-        if interval_min < 1:
-            raise ValueError
-    except (ValueError, TypeError):
-        return jsonify({"error": "interval_min must be a positive integer"}), 400
-
-    try:
-        idle_settle_sec = int(request.form.get("idle_settle_sec", 30))
-        if idle_settle_sec < 0:
-            raise ValueError
-    except (ValueError, TypeError):
-        return jsonify({"error": "idle_settle_sec must be a non-negative integer"}), 400
-
-    window_start = request.form.get("window_start", "07:30").strip()
-    window_end   = request.form.get("window_end",   "19:30").strip()
-    play_cmd     = request.form.get("play_cmd",     "localplay").strip()
-    if play_cmd not in ("localplay", "playback"):
-        play_cmd = "localplay"
-
-    if not re.match(r'^\d{2}:\d{2}$', window_start) or not re.match(r'^\d{2}:\d{2}$', window_end):
-        return jsonify({"error": "window_start and window_end must be HH:MM"}), 400
 
     os.makedirs(SOUNDS_DIR, exist_ok=True)
 
@@ -5610,6 +5997,72 @@ def api_ann_create():
     return jsonify(dict(row)), 201
 
 
+@app.route("/api/announcements/tts", methods=["POST"])
+def api_ann_create_tts():
+    """Create a TTS-sourced announcement. Separate route from the upload
+    path (JSON body, not multipart) rather than branching api_ann_create —
+    that route's first line is a request.files presence check, and this
+    keeps the file-upload control flow completely untouched.
+
+    The chosen voice must already be downloaded (see /api/tts/voices and
+    POST /api/tts/voices/<id>/download) — synthesis does not trigger a
+    download itself, so create-time latency stays predictable and bounded
+    well under gunicorn's worker timeout.
+    """
+    data = request.json or {}
+    fields, err = _validate_ann_common(data)
+    if err:
+        return err
+    name, node = fields["name"], fields["node"]
+    interval_min, idle_settle_sec = fields["interval_min"], fields["idle_settle_sec"]
+    window_start, window_end, play_cmd = fields["window_start"], fields["window_end"], fields["play_cmd"]
+
+    text  = str(data.get("text", "")).strip()
+    voice = str(data.get("voice", DEFAULT_TTS_VOICE)).strip()
+
+    if not text:
+        return jsonify({"error": "Message text is required"}), 400
+    if len(text) > TTS_TEXT_MAX_CHARS:
+        return jsonify({"error": f"Message text must be {TTS_TEXT_MAX_CHARS} characters or fewer"}), 400
+    if voice not in TTS_VOICES:
+        return jsonify({"error": f"Unknown voice: {voice}"}), 400
+    if not _voice_is_cached(voice):
+        return jsonify({"error": f"Voice '{voice}' is not downloaded yet — "
+                                 "download it first from the voice picker."}), 400
+
+    os.makedirs(SOUNDS_DIR, exist_ok=True)
+
+    base_slug = _ann_slug(name)
+    slug      = _ann_unique_slug(base_slug)
+    dest      = _ann_sound_path(slug)
+
+    try:
+        _tts_to_ulaw(text, voice, dest)
+    except Exception as e:
+        log("ERROR", f"[ANNOUNCE] TTS synthesis failed for '{name}': {e}")
+        return jsonify({"error": f"Speech synthesis failed: {e}"}), 500
+
+    try:
+        shutil.chown(dest, user="asterisk", group="asterisk")
+        os.chmod(dest, 0o640)
+    except Exception:
+        pass
+
+    db = get_db()
+    db.execute(
+        """INSERT INTO announcements
+           (name, slug, node, enabled, interval_min, window_start, window_end, play_cmd,
+            idle_settle_sec, source_type, tts_text, tts_voice)
+           VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, 'tts', ?, ?)""",
+        (name, slug, node, interval_min, window_start, window_end, play_cmd, idle_settle_sec,
+         text, voice),
+    )
+    db.commit()
+    row = db.execute("SELECT * FROM announcements WHERE slug=?", (slug,)).fetchone()
+    log("INFO", f"[ANNOUNCE] Created TTS announcement '{name}' (slug={slug}, node={node}, voice={voice})")
+    return jsonify(dict(row)), 201
+
+
 @app.route("/api/announcements/<int:ann_id>", methods=["PATCH"])
 def api_ann_update(ann_id):
     db   = get_db()
@@ -5638,12 +6091,55 @@ def api_ann_update(ann_id):
     if play_cmd not in ("localplay", "playback"):
         play_cmd = "localplay"
 
+    tts_text  = row["tts_text"]
+    tts_voice = row["tts_voice"]
+    if row["source_type"] == "tts":
+        new_text  = str(data.get("text",  row["tts_text"]  or "")).strip()
+        new_voice = str(data.get("voice", row["tts_voice"])).strip()
+        if not new_text:
+            return jsonify({"error": "Message text is required"}), 400
+        if len(new_text) > TTS_TEXT_MAX_CHARS:
+            return jsonify({"error": f"Message text must be {TTS_TEXT_MAX_CHARS} characters or fewer"}), 400
+        if new_voice not in TTS_VOICES:
+            return jsonify({"error": f"Unknown voice: {new_voice}"}), 400
+        if new_text != (row["tts_text"] or "") or new_voice != row["tts_voice"]:
+            if not _voice_is_cached(new_voice):
+                return jsonify({"error": f"Voice '{new_voice}' is not downloaded yet — "
+                                         "download it first from the voice picker."}), 400
+            # The slug — and therefore the sound file path — never changes on
+            # edit, so this is old-content/new-content at the SAME path, not
+            # old-file/new-file. Synthesize to a temp file and atomically
+            # os.replace() over the live path: the scheduler or a manual Test
+            # Play firing mid-edit gets either the fully-old or fully-new
+            # file, never a missing one, and a failed re-synthesis leaves the
+            # previous working audio untouched.
+            dest = _ann_sound_path(row["slug"])
+            fd, tmp_ulaw = tempfile.mkstemp(suffix=".ulaw", dir=SOUNDS_DIR)
+            os.close(fd)
+            try:
+                _tts_to_ulaw(new_text, new_voice, tmp_ulaw)
+                try:
+                    shutil.chown(tmp_ulaw, user="asterisk", group="asterisk")
+                    os.chmod(tmp_ulaw, 0o640)
+                except Exception:
+                    pass
+                os.replace(tmp_ulaw, dest)
+            except Exception as e:
+                try:
+                    os.unlink(tmp_ulaw)
+                except OSError:
+                    pass
+                log("ERROR", f"[ANNOUNCE] TTS re-synthesis failed for '{row['name']}': {e}")
+                return jsonify({"error": f"Speech synthesis failed: {e}"}), 500
+            tts_text, tts_voice = new_text, new_voice
+
     db.execute(
         """UPDATE announcements
            SET name=?, node=?, interval_min=?, window_start=?, window_end=?, play_cmd=?,
-               idle_settle_sec=?
+               idle_settle_sec=?, tts_text=?, tts_voice=?
            WHERE id=?""",
-        (name, node, interval_min, window_start, window_end, play_cmd, idle_settle_sec, ann_id),
+        (name, node, interval_min, window_start, window_end, play_cmd, idle_settle_sec,
+         tts_text, tts_voice, ann_id),
     )
     db.commit()
     updated = db.execute("SELECT * FROM announcements WHERE id=?", (ann_id,)).fetchone()
@@ -5709,6 +6205,527 @@ def api_ann_play(ann_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/tts/preview", methods=["POST"])
+def api_tts_preview():
+    """Synthesize and immediately play text WITHOUT saving it as an
+    announcement — lets an admin hear a message before scheduling it. Always
+    uses a fixed scratch slug (asl3ez/_tts_preview), overwritten each call,
+    so previews never accumulate files needing cleanup."""
+    data  = request.json or {}
+    node  = str(data.get("node", "")).strip()
+    text  = str(data.get("text", "")).strip()
+    voice = str(data.get("voice", DEFAULT_TTS_VOICE)).strip()
+
+    if not re.match(r'^\d{4,7}$', node):
+        return jsonify({"error": "Invalid node number"}), 400
+    if not text:
+        return jsonify({"error": "Message text is required"}), 400
+    if len(text) > TTS_TEXT_MAX_CHARS:
+        return jsonify({"error": f"Message text must be {TTS_TEXT_MAX_CHARS} characters or fewer"}), 400
+    if voice not in TTS_VOICES:
+        return jsonify({"error": f"Unknown voice: {voice}"}), 400
+    if not _voice_is_cached(voice):
+        return jsonify({"error": f"Voice '{voice}' is not downloaded yet — "
+                                 "download it first from the voice picker."}), 400
+
+    os.makedirs(SOUNDS_DIR, exist_ok=True)
+    slug = "_tts_preview"
+    dest = _ann_sound_path(slug)
+    try:
+        _tts_to_ulaw(text, voice, dest)
+    except Exception as e:
+        log("ERROR", f"[TTS] Preview synthesis failed: {e}")
+        return jsonify({"error": f"Speech synthesis failed: {e}"}), 500
+    try:
+        shutil.chown(dest, user="asterisk", group="asterisk")
+        os.chmod(dest, 0o640)
+    except Exception:
+        pass
+
+    cmd = f"rpt localplay {node} asl3ez/{slug}"
+    log("INFO", f"[TTS] Preview play on {node}: {cmd!r}")
+    try:
+        def _play(ami, _cmd=cmd):
+            return {"output": ami.command(_cmd)}
+        result = ami_send_command(_play)
+        return jsonify({"ok": True, "output": result.get("output", [])})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# NWS severe weather auto-announcements — poll api.weather.gov, auto-create
+# TTS announcements for active Tornado/Severe Weather alerts, let the
+# existing announcement scheduler handle all actual timed playback.
+# ---------------------------------------------------------------------------
+
+def _get_nws_alert_config():
+    """Return nws_alert_config row as dict, or None if not configured."""
+    try:
+        db  = get_db()
+        row = db.execute("SELECT * FROM nws_alert_config WHERE id=1").fetchone()
+        return dict(row) if row else None
+    except Exception as e:
+        log("ERROR", f"[NWS] _get_nws_alert_config error: {e}")
+        return None
+
+
+def _nws_zone_from_latlon(lat: float, lon: float):
+    """Resolve a lat/lon to an NWS county/forecast-zone UGC code + a
+    human-readable area name, via a one-time api.weather.gov/points call.
+    Returns {"zone": "COZ085", "area_name": "Colorado Springs, CO"} or None."""
+    try:
+        url = f"{NWS_ALERTS_BASE_URL}/points/{lat},{lon}"
+        req = urlreq.Request(url, headers={"User-Agent": NWS_USER_AGENT})
+        with urlreq.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        props = data.get("properties", {})
+        # Prefer the county UGC — most Warning-tier severe weather products
+        # (Tornado Warning, Severe Thunderstorm Warning) are issued against
+        # county zones, not public forecast zones.
+        county_url = props.get("county", "") or ""
+        zone = county_url.rstrip("/").split("/")[-1] if county_url else ""
+        if not zone:
+            forecast_url = props.get("forecastZone", "") or ""
+            zone = forecast_url.rstrip("/").split("/")[-1] if forecast_url else ""
+        if not zone:
+            return None
+        rel = (props.get("relativeLocation") or {}).get("properties", {})
+        area_name = ", ".join(x for x in (rel.get("city"), rel.get("state")) if x)
+        return {"zone": zone, "area_name": area_name}
+    except Exception as e:
+        log("WARN", f"[NWS] _nws_zone_from_latlon({lat},{lon}): {e}")
+        return None
+
+
+def _nws_parse_vtec_key(alert_props: dict) -> str:
+    """Parse the stable {office}.{phenomena}.{significance}.{ETN} identity
+    out of a VTEC string, e.g. '/O.CON.KMKX.TO.W.0075.000000T0000Z-260703T1815Z/'
+    -> 'KMKX.TO.W.0075'. The VTEC string also embeds a timestamp range,
+    which is deliberately excluded from the key — it can change on a
+    time-extension update, unlike the office/phenomena/significance/ETN
+    identity, which persists for the warning's entire lifecycle across
+    NEW/CON/EXT/UPG/CAN updates. The CAP `id` field is NOT stable across
+    updates (verified against live NWS data) — using it as a dedup key
+    would delete-and-recreate the row on every routine update, resetting
+    last_played and breaking the interval-based replay cadence. Falls back
+    to the raw CAP id for alert types that don't carry a VTEC parameter
+    (some lower-tier statements) — those specific types re-announce on
+    every update instead of holding a stable interval, an accepted
+    degradation rather than a crash.
+    """
+    vtec_list = (alert_props.get("parameters") or {}).get("VTEC") or []
+    if vtec_list:
+        parts = vtec_list[0].strip("/").split(".")
+        if len(parts) >= 6:
+            _cls, _action, office, phenomena, significance, etn = parts[:6]
+            return f"{office}.{phenomena}.{significance}.{etn}"
+    return alert_props.get("id", "")
+
+
+def _nws_fetch_active_alerts(zone: str, event_types=None):
+    """Fetch currently-active NWS alerts for a UGC zone/county code, already
+    filtered to real (status=='Actual', non-Cancel) alerts, optionally
+    further filtered to a set of event names. Raises on network/HTTP
+    failure — the poller must NOT prune any tracked alert just because this
+    call failed (fail-safe, not fail-open, for a safety feature)."""
+    url = f"{NWS_ALERTS_BASE_URL}/alerts/active?zone={urlparse.quote(zone)}"
+    req = urlreq.Request(url, headers={"User-Agent": NWS_USER_AGENT,
+                                        "Accept": "application/geo+json"})
+    with urlreq.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read())
+    out = []
+    for feat in data.get("features", []):
+        p = feat.get("properties", {})
+        if p.get("status") != "Actual":
+            continue
+        if p.get("messageType") == "Cancel":
+            continue
+        if event_types is not None and p.get("event") not in event_types:
+            continue
+        out.append({
+            "id":       p.get("id", ""),
+            "vtec_key": _nws_parse_vtec_key(p),
+            "event":    p.get("event", ""),
+            "headline": p.get("headline", ""),
+            "areaDesc": p.get("areaDesc", ""),
+            "expires":  p.get("expires", ""),
+            "severity": p.get("severity", ""),
+        })
+    return out
+
+
+_STATE_ABBREV_RE = re.compile(r',\s*[A-Z]{2}\b')
+
+
+def _strip_state_names(area_desc: str) -> str:
+    """NWS areaDesc is 'County, ST' pairs joined by semicolons (e.g.
+    'Kenosha, WI; Racine, WI'). The county list alone identifies the area
+    precisely enough for on-air use — strip the trailing state code from
+    each entry rather than repeating (or mispronouncing) it after every
+    single county."""
+    return _STATE_ABBREV_RE.sub('', area_desc)
+
+
+def _join_with_and(items) -> str:
+    """Natural spoken list: 'A', 'A and B', or 'A, B, and C' — rather than a
+    flat semicolon/comma run, which reads like a list of unrelated fragments
+    instead of one place description."""
+    items = [i.strip() for i in items if i and i.strip()]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return ", ".join(items[:-1]) + ", and " + items[-1]
+
+
+def _format_clock_time(dt: datetime) -> str:
+    """'10:00 PM' reads/sounds better as '10 PM' — on-the-hour minutes add
+    nothing and Piper reads out the redundant ':00'. Anything else keeps
+    its minutes, e.g. '1:15 PM'."""
+    return dt.strftime("%-I %p") if dt.minute == 0 else dt.strftime("%-I:%M %p")
+
+
+def _nws_alert_spoken_text(alert: dict) -> str:
+    """Build the spoken announcement string — templated, not the verbatim
+    NWS headline, which includes wordy issue-time phrasing meant for text
+    display, not repeated speech."""
+    expires_str = ""
+    if alert.get("expires"):
+        try:
+            expires_str = _format_clock_time(datetime.fromisoformat(alert["expires"]))
+        except Exception:
+            expires_str = ""
+    raw_area = alert.get("areaDesc", "") or ""
+    event    = alert.get("event", "") or "Severe Weather Alert"
+    counties = _join_with_and(_strip_state_names(raw_area).split(";"))
+    area_phrase = f"the following counties: {counties}" if counties else "your area"
+    if expires_str:
+        return f"{NWS_ALERT_SPOKEN_PREFIX}{event}. In effect for {area_phrase}, until {expires_str}."
+    return f"{NWS_ALERT_SPOKEN_PREFIX}{event}. In effect for {area_phrase}."
+
+
+def _nws_sync_alert(alert: dict, cfg: dict):
+    """Create or update the announcements row tracking one active NWS
+    alert. Shared by both the poller and the test-alert route so there's
+    exactly one code path for 'turn an alert dict into an announcement
+    row' — the poller and manual test can't drift out of sync."""
+    db     = get_db()
+    spoken = _nws_alert_spoken_text(alert)
+    row    = db.execute(
+        "SELECT * FROM announcements WHERE source_type='nws_alert' AND external_id=?",
+        (alert["vtec_key"],)
+    ).fetchone()
+
+    if row is None:
+        name      = f"NWS: {alert['event']} ({alert['vtec_key']})"
+        base_slug = _ann_slug(name)
+        slug      = _ann_unique_slug(base_slug)
+        dest      = _ann_sound_path(slug)
+        os.makedirs(SOUNDS_DIR, exist_ok=True)
+        _ensure_voice_model_cached(cfg["voice"])
+        _tts_to_ulaw(spoken, cfg["voice"], dest)
+        try:
+            shutil.chown(dest, user="asterisk", group="asterisk")
+            os.chmod(dest, 0o640)
+        except Exception:
+            pass
+        db.execute(
+            """INSERT INTO announcements
+               (name, slug, node, enabled, interval_min, window_start, window_end,
+                play_cmd, idle_settle_sec, source_type, tts_text, tts_voice,
+                external_id, nws_expires, max_defer_sec)
+               VALUES (?, ?, ?, 1, ?, '00:00', '23:59', ?, ?, 'nws_alert', ?, ?, ?, ?, ?)""",
+            (name, slug, cfg["node"], cfg["interval_min"], cfg["play_cmd"],
+             cfg["idle_settle_sec"], spoken, cfg["voice"], alert["vtec_key"],
+             alert.get("expires", ""), cfg["max_defer_sec"]),
+        )
+        db.commit()
+        log("INFO", f"[NWS] New alert tracked: {alert['event']} ({alert['vtec_key']})")
+    elif row["tts_text"] != spoken or row["nws_expires"] != alert.get("expires", ""):
+        # Content changed (e.g. an Update extended the expiry) — re-synthesize
+        # atomically in place, exactly like a manual TTS edit. The slug/path
+        # never changes, so this is old-content/new-content at the same
+        # path, never a missing-file gap for a scheduler tick to hit.
+        dest = _ann_sound_path(row["slug"])
+        fd, tmp_ulaw = tempfile.mkstemp(suffix=".ulaw", dir=SOUNDS_DIR)
+        os.close(fd)
+        try:
+            _ensure_voice_model_cached(cfg["voice"])
+            _tts_to_ulaw(spoken, cfg["voice"], tmp_ulaw)
+            try:
+                shutil.chown(tmp_ulaw, user="asterisk", group="asterisk")
+                os.chmod(tmp_ulaw, 0o640)
+            except Exception:
+                pass
+            os.replace(tmp_ulaw, dest)
+        except Exception as e:
+            try:
+                os.unlink(tmp_ulaw)
+            except OSError:
+                pass
+            log("ERROR", f"[NWS] Re-synthesis failed for {alert['vtec_key']}: {e}")
+            return
+        db.execute(
+            "UPDATE announcements SET tts_text=?, nws_expires=? WHERE id=?",
+            (spoken, alert.get("expires", ""), row["id"]),
+        )
+        db.commit()
+        log("INFO", f"[NWS] Updated tracked alert: {alert['event']} ({alert['vtec_key']})")
+
+
+NWS_ALERT_CONFIG_DEFAULTS = {
+    "enabled": 0, "zone": "", "zone_area_name": "", "zone_auto_detected": 0,
+    "node": "", "play_cmd": "localplay", "voice": DEFAULT_TTS_VOICE,
+    "interval_min": 15, "idle_settle_sec": 10, "max_defer_sec": 120,
+    "event_types": "Tornado Warning,Severe Thunderstorm Warning",
+    "last_poll_at": None, "last_poll_error": None,
+}
+
+
+@app.route("/api/nws-alerts/config")
+def api_nws_alerts_get_config():
+    cfg = _get_nws_alert_config()
+    return jsonify(dict(cfg) if cfg else NWS_ALERT_CONFIG_DEFAULTS)
+
+
+@app.route("/api/nws-alerts/config", methods=["POST"])
+def api_nws_alerts_save_config():
+    data = request.json or {}
+
+    event_types = [e.strip() for e in str(data.get("event_types", "")).split(",") if e.strip()]
+    bad = [e for e in event_types if e not in NWS_ALERT_EVENT_TYPES]
+    if bad:
+        return jsonify({"error": f"Unknown event type(s): {', '.join(bad)}"}), 400
+
+    voice = str(data.get("voice", DEFAULT_TTS_VOICE))
+    if voice not in TTS_VOICES:
+        return jsonify({"error": f"Unknown voice: {voice}"}), 400
+
+    node = str(data.get("node", "")).strip()
+    if data.get("enabled") and not re.match(r'^\d{4,7}$', node):
+        return jsonify({"error": "A valid node number is required to enable NWS alerts"}), 400
+
+    play_cmd = str(data.get("play_cmd", "localplay")).strip()
+    if play_cmd not in ("localplay", "playback"):
+        play_cmd = "localplay"
+
+    # Download the voice model now, with the admin watching, rather than
+    # lazily when the first real alert fires — deferring it would mean the
+    # first real tornado warning is also the first moment a multi-minute
+    # download gets triggered.
+    if data.get("enabled"):
+        try:
+            _ensure_voice_model_cached(voice)
+        except Exception as e:
+            return jsonify({"error": f"Could not download voice '{voice}': {e}"}), 500
+
+    db = get_db()
+    db.execute(
+        """INSERT OR REPLACE INTO nws_alert_config
+           (id, enabled, zone, zone_area_name, zone_auto_detected, node, play_cmd, voice,
+            interval_min, idle_settle_sec, max_defer_sec, event_types, last_poll_at, last_poll_error)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                   (SELECT last_poll_at FROM nws_alert_config WHERE id=1),
+                   (SELECT last_poll_error FROM nws_alert_config WHERE id=1))""",
+        (
+            1 if data.get("enabled") else 0,
+            str(data.get("zone", "")).strip(),
+            str(data.get("zone_area_name", "")).strip(),
+            1 if data.get("zone_auto_detected") else 0,
+            node,
+            play_cmd,
+            voice,
+            int(data.get("interval_min", 15)),
+            int(data.get("idle_settle_sec", 10)),
+            int(data.get("max_defer_sec", 120)),
+            ",".join(event_types),
+        )
+    )
+    db.commit()
+    log("INFO", "[NWS] Alert config saved")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/nws-alerts/detect-zone", methods=["POST"])
+def api_nws_alerts_detect_zone():
+    """Suggest an NWS zone from the node's configured location — does not
+    save anything, the admin confirms/overrides before saving config."""
+    content  = read_conf_file(RPT_CONF_PATH)
+    nodes    = get_node_numbers(content) if content else []
+    location = lookup_node(nodes[0]).get("location", "") if nodes else ""
+    if not location:
+        return jsonify({"error": "No node location found in rpt.conf to geocode"}), 400
+    coords = _geocode(location)
+    if not coords:
+        return jsonify({"error": f"Could not geocode location '{location}'"}), 400
+    result = _nws_zone_from_latlon(coords["lat"], coords["lon"])
+    if not result:
+        return jsonify({"error": "Could not resolve an NWS zone for that location"}), 400
+    return jsonify({"zone": result["zone"], "area_name": result["area_name"], "location": location})
+
+
+@app.route("/api/nws-alerts/status")
+def api_nws_alerts_status():
+    cfg = _get_nws_alert_config()
+    db  = get_db()
+    tracked = db.execute(
+        """SELECT id, name, node, tts_text, play_cmd, interval_min, last_played,
+                  external_id, nws_expires
+           FROM announcements WHERE source_type='nws_alert' ORDER BY nws_expires"""
+    ).fetchall()
+    alerts = []
+    for r in tracked:
+        d = dict(r)
+        d["expires_display"] = ""
+        if d["nws_expires"]:
+            try:
+                exp = datetime.fromisoformat(d["nws_expires"])
+                d["expires_display"] = exp.strftime("%a ") + _format_clock_time(exp)
+            except Exception:
+                d["expires_display"] = d["nws_expires"]
+        alerts.append(d)
+    return jsonify({
+        "last_poll_at":    cfg.get("last_poll_at") if cfg else None,
+        "last_poll_error": cfg.get("last_poll_error") if cfg else None,
+        "active_alerts":   alerts,
+    })
+
+
+@app.route("/api/nws-alerts/test", methods=["POST"])
+def api_nws_alerts_test():
+    cfg = _get_nws_alert_config()
+    if not cfg or not cfg["node"]:
+        return jsonify({"error": "Configure and save a node before testing"}), 400
+    test_alert = {
+        "vtec_key": "TEST.WX.W.0000",
+        "event":    "Test Severe Weather Alert",
+        "headline": "This is a test of the severe weather alert system.",
+        "areaDesc": cfg.get("zone_area_name") or "your area",
+        "expires":  (datetime.now().astimezone()).isoformat(),
+        "severity": "Test",
+    }
+    try:
+        _nws_sync_alert(test_alert, cfg)
+        return jsonify({"ok": True, "message": "Test alert created — it will play on the next scheduler tick"})
+    except Exception as e:
+        log("ERROR", f"[NWS] Test alert failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+_NWS_POLL_INTERVAL   = 120.0   # base interval between fetches, single zone — well within NWS's rate expectations
+_NWS_MAX_SLEEP       = 1200.0  # cap backoff at 20 minutes between cycles
+_NWS_EXPIRE_GRACE_SEC = 30 * 60  # local safety ceiling: prune a tracked alert this long past its own expiry
+                                 # even if NWS can't be reached to confirm — see _nws_alert_poll_loop().
+_nws_backoff_level = 0
+
+
+def _nws_prune_expired_locally(db, now):
+    """Delete any tracked NWS alert whose OWN reported expiry is more than
+    _NWS_EXPIRE_GRACE_SEC in the past. Runs every cycle regardless of fetch
+    success — this is a local, network-independent ceiling so a stale
+    warning can't replay forever during a sustained NWS outage. The grace
+    period (rather than deleting right at `expires`) avoids racing a
+    legitimate time-extension Update that hasn't been seen yet."""
+    now_aware = now.astimezone() if now.tzinfo is None else now
+    rows = db.execute(
+        "SELECT id, slug, name, nws_expires FROM announcements "
+        "WHERE source_type='nws_alert' AND nws_expires IS NOT NULL AND nws_expires != ''"
+    ).fetchall()
+    for row in rows:
+        try:
+            exp = datetime.fromisoformat(row["nws_expires"])
+            if exp.tzinfo is None:
+                exp = exp.astimezone()
+            age_sec = (now_aware - exp).total_seconds()
+        except Exception:
+            continue
+        if age_sec > _NWS_EXPIRE_GRACE_SEC:
+            sound = _ann_sound_path(row["slug"])
+            try:
+                if os.path.exists(sound):
+                    os.unlink(sound)
+            except Exception as e:
+                log("WARN", f"[NWS] Could not delete sound file {sound}: {e}")
+            db.execute("DELETE FROM announcements WHERE id=?", (row["id"],))
+            db.commit()
+            log("INFO", f"[NWS] Pruned locally-expired alert '{row['name']}' "
+                        f"({age_sec/60:.0f} min past expiry)")
+
+
+def _nws_alert_poll_loop():
+    global _nws_backoff_level
+    log("INFO", f"[NWS-POLL] Background poller started (interval={_NWS_POLL_INTERVAL}s)")
+    while True:
+        success = False
+        try:
+            cfg = _get_nws_alert_config()
+            db  = get_db()
+            now = datetime.now()
+
+            # Regardless of fetch success — local safety ceiling.
+            _nws_prune_expired_locally(db, now)
+
+            if not cfg or not cfg["enabled"] or not cfg["zone"]:
+                success = True  # not an error, just nothing to do — don't back off
+            else:
+                event_types = [e.strip() for e in cfg["event_types"].split(",") if e.strip()]
+                alerts = _nws_fetch_active_alerts(cfg["zone"], event_types=event_types or None)
+                success = True
+
+                current_keys = {a["vtec_key"] for a in alerts}
+                tracked = db.execute(
+                    "SELECT id, slug, name, external_id FROM announcements WHERE source_type='nws_alert'"
+                ).fetchall()
+                for row in tracked:
+                    if row["external_id"] not in current_keys:
+                        sound = _ann_sound_path(row["slug"])
+                        try:
+                            if os.path.exists(sound):
+                                os.unlink(sound)
+                        except Exception as e:
+                            log("WARN", f"[NWS] Could not delete sound file {sound}: {e}")
+                        db.execute("DELETE FROM announcements WHERE id=?", (row["id"],))
+                        db.commit()
+                        log("INFO", f"[NWS] No longer active, pruned: '{row['name']}'")
+
+                for alert in alerts:
+                    try:
+                        _nws_sync_alert(alert, cfg)
+                    except Exception as e:
+                        log("ERROR", f"[NWS] _nws_sync_alert failed for {alert.get('vtec_key')}: {e}")
+
+            db.execute(
+                "UPDATE nws_alert_config SET last_poll_at=?, last_poll_error=? WHERE id=1",
+                (now.strftime("%Y-%m-%d %H:%M:%S"), None)
+            )
+            db.commit()
+        except Exception as e:
+            log("WARN", f"[NWS-POLL] Cycle error: {e}")
+            try:
+                db = get_db()
+                db.execute(
+                    "UPDATE nws_alert_config SET last_poll_error=? WHERE id=1",
+                    (str(e),)
+                )
+                db.commit()
+            except Exception:
+                pass
+
+        _nws_backoff_level = 0 if success else min(_nws_backoff_level + 1, 6)
+        sleep_time = min(_NWS_POLL_INTERVAL * (2 ** _nws_backoff_level), _NWS_MAX_SLEEP)
+        if _nws_backoff_level:
+            log("WARN", f"[NWS-POLL] backing off — next poll in {sleep_time:.0f}s (level {_nws_backoff_level})")
+        time.sleep(sleep_time)
+
+
+def start_nws_alert_poller():
+    t = threading.Thread(target=_nws_alert_poll_loop, name="nws-alert-poller", daemon=True)
+    t.start()
+
+
 # ---------------------------------------------------------------------------
 # Smart Connector — scheduled node connect/disconnect with idle monitoring
 # ---------------------------------------------------------------------------
@@ -5727,15 +6744,19 @@ def _connector_do_connect(local: str, target: str, disconnect_first: bool = Fals
     local before connecting: either all of them (ilink 6, same pattern as the
     manual "Connect / Disconnect" panel's disconnect_first option in
     /api/ami/connect), or — if skip_permanent — only the ones not marked
-    permanent, disconnected individually (ilink 1 per peer) so permanent
-    links are left alone.
+    permanent, disconnected individually with ilink 11 (not ilink 1 — see
+    api_status_disconnect's docstring; ilink 1 silently no-ops on a link
+    app_rpt considers permanent) so permanent links are left alone.
 
     "Permanent" here means this app has the link recorded as such in
     _kiosk_temp_conns (set only when a user explicitly checks Permanent at
     connect time). app_rpt doesn't expose a queryable "is this link
     permanent" flag via AMI, so a link established outside the app — raw
     AMI/CLI, or a startup connection baked into rpt.conf — isn't tracked and
-    will be treated as non-permanent and disconnected like any other.
+    will be treated as non-permanent and disconnected like any other. Using
+    ilink 11 (rather than 1) for that disconnect matters precisely because
+    such a link might actually be permanent in app_rpt despite being
+    untracked here — ilink 1 would silently fail to drop it.
     """
     def _cmd(ami, ln=local, tn=target, disc=disconnect_first, skip=skip_permanent):
         if disc:
@@ -5750,7 +6771,7 @@ def _connector_do_connect(local: str, target: str, disconnect_first: bool = Fals
                             f"node(s) on {ln} before scheduled connect to {tn} "
                             f"(preserving {len(connected) - len(to_drop)} permanent)")
                 for peer in to_drop:
-                    ami.rpt_cmd(ln, f"ilink 1 {peer}")
+                    ami.rpt_cmd(ln, f"ilink 11 {peer}")
             else:
                 log("INFO", f"[CONNECTOR] Disconnecting all nodes on {ln} before scheduled connect to {tn}")
                 ami.rpt_cmd(ln, "ilink 6")
@@ -5760,8 +6781,14 @@ def _connector_do_connect(local: str, target: str, disconnect_first: bool = Fals
 
 
 def _connector_do_disconnect(local: str, target: str):
+    """Used for both the idle-timeout auto-disconnect and the manual
+    Disconnect button. Uses ilink 11, not ilink 1 — see
+    api_status_disconnect's docstring for why: ilink 1 silently no-ops on a
+    permanent link. A connector-managed link is normally transient (created
+    via ilink 3), but if the same node pair was independently made permanent
+    elsewhere, ilink 1 would fail here too."""
     def _cmd(ami, ln=local, tn=target):
-        return ami.rpt_cmd(ln, f"ilink 1 {tn}")
+        return ami.rpt_cmd(ln, f"ilink 11 {tn}")
     return ami_send_command(_cmd)
 
 
@@ -5969,12 +6996,12 @@ def _run_connectors():
                 if idle_sec >= row["idle_limit_sec"]:
                     try:
                         result = _connector_do_disconnect(local, target)
-                        # ilink 1 on an already-gone node returns no-error output
+                        # ilink 11 on an already-gone node returns no-error output
                         # so treat both success and "node not connected" as done
                         raw = result.get("raw", "")
                         hard_fail = any(w in raw for w in ["permission denied", "not permitted", "unknown command"])
                         if hard_fail:
-                            raise RuntimeError(f"ilink 1 rejected: {raw[:120]}")
+                            raise RuntimeError(f"ilink 11 rejected: {raw[:120]}")
                         db.execute(
                             "UPDATE connectors SET state='idle', "
                             "state_msg='Auto-disconnected after idle timeout', "
@@ -6273,9 +7300,10 @@ def api_conn_diagnose():
 
         # ── Test 4: iLink command path ───────────────────────────────────────
         # Disconnect a node (0) that is never connected — safe no-op that
-        # exercises the exact same code path as the real disconnect command.
+        # exercises the exact same code path as the real disconnect command
+        # (ilink 11, not 1 — see api_status_disconnect's docstring).
         try:
-            lines = ami.command(f"rpt cmd {local_node} ilink 1 0")
+            lines = ami.command(f"rpt cmd {local_node} ilink 11 0")
             raw   = " ".join(lines).lower()
             blocked = any(w in raw for w in
                           ["permission denied", "not permitted", "unknown command", "no permission"])
@@ -6715,6 +7743,7 @@ def api_dtmf_status():
 # ---------------------------------------------------------------------------
 load_astdb()
 _db_conn_startup_cleanup()
+_rehydrate_permanent_links()
 start_poller()
 start_favstats_poller()
 start_global_activity_poller()
@@ -6722,6 +7751,7 @@ start_geocode_worker()
 start_announcer()
 start_connector_scheduler()
 start_id_monitor()
+start_nws_alert_poller()
 
 if __name__ == "__main__":
     log("INFO", "Starting in direct-run mode (not via gunicorn)")

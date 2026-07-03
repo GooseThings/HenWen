@@ -934,7 +934,8 @@ async function refreshBoard() {
           '</div>' +
           '<div class="keyed-label ' + (healthy ? 'healthy' : 'down') + '">' + (healthy ? 'ONLINE' : 'OFFLINE') + '</div>' +
         '</div>' +
-        '<div class="link-count">Linked: <span>' + (n.connected ? n.connected.length : 0) + '</span></div>';
+        '<div class="link-count">Linked: <span>' + (n.connected ? n.connected.length : 0) + '</span>' +
+          ' &nbsp;·&nbsp; Keyups: <span>' + (n.own_keyups || 0) + '</span></div>';
     }
 
     /* Update hosted-node star pins */

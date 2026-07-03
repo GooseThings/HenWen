@@ -41,17 +41,18 @@ There are no tests and no linter configuration.
 
 ### Single-file backend
 
-`app.py` (~5800 lines) contains everything: Flask routes, AMI client, rpt.conf parser, SQLite schema, and all background threads. There is no module split.
+`app.py` (~7800 lines) contains everything: Flask routes, AMI client, rpt.conf parser, SQLite schema, and all background threads. There is no module split.
 
 ### Background threads (started at module load, bottom of app.py)
 
-Six daemon threads launch when gunicorn imports the module:
+Daemon threads launch when gunicorn imports the module:
 - `start_poller()` — AMI poll loop (1s interval): refreshes node keyed/connected state from Asterisk into an in-process cache
 - `start_favstats_poller()` — polls AllStarLink stats API (30s interval) for favorite node status
 - `start_global_activity_poller()` — fetches global ASL activity feed for the kiosk map
-- `start_announcer()` — fires scheduled audio announcements via AMI `rpt localplay`
+- `start_announcer()` — fires scheduled audio announcements via AMI `rpt localplay`/`playback` (30s interval, `_run_due_announcements()`); covers upload, TTS, and NWS-sourced announcements identically
 - `start_connector_scheduler()` — manages Smart Connector link/unlink on schedule
 - `start_id_monitor()` — monitors node activity to trigger FCC ID audio playback
+- `start_nws_alert_poller()` — polls api.weather.gov for active severe weather alerts (~120s interval, exponential backoff) and manages the lifecycle of auto-created NWS announcement rows; never triggers playback itself, that's still `start_announcer()`'s job
 
 Because gunicorn runs `--workers 1 --threads 8`, all threads share a single process and in-process cache. Do not increase worker count without rethinking the AMI connection pool.
 
@@ -61,7 +62,9 @@ Because gunicorn runs `--workers 1 --threads 8`, all threads share a single proc
 
 ### Database
 
-SQLite at `/etc/asterisk/asl3ez.db`. Schema is defined inline in `get_db()` (called per request). Migrations happen via `ALTER TABLE` checks at startup — no migration framework. Tables: `users`, `favorites`, `settings`, `announcements`, `connectors`, `id_configs`, and a connection history log table.
+SQLite at `/etc/asterisk/asl3ez.db`. Schema is defined inline in `get_db()` (called per request). Migrations happen via `ALTER TABLE` checks at startup — no migration framework. Tables: `users`, `favorites`, `settings`, `announcements`, `connectors`, `id_configs`, `permanent_links`, `alert_config`, `nws_alert_config`, and a connection history log table.
+
+`announcements.source_type` distinguishes `'upload'` (user-uploaded audio file), `'tts'` (typed text, synthesized once at save time), and `'nws_alert'` (auto-created/retired by the NWS poller) — the scheduler (`_run_due_announcements()`) treats all three identically except for two NWS-only nullable columns: `max_defer_sec` (forces playback past a busy channel after being due too long; NULL preserves indefinite defer for every other row) and `nws_expires`/`external_id` (NWS lifecycle bookkeeping, unused by upload/tts rows).
 
 ### rpt.conf parsing
 
@@ -73,6 +76,18 @@ Asterisk `MixMonitor` writes raw PCM to a FIFO (`/tmp/asl3ez_audio_<node>.sln`).
 
 The pacing loop runs in its own OS process specifically to avoid GIL contention: gunicorn's request handlers, the AMI poller, and other background threads sharing this worker's GIL can stall a real-time 20ms deadline long enough to be audible as a click or stutter. Running the frame loop in a separate process lets the kernel schedule it independently. The MSE live-edge controller in `status.html` keeps the browser at ~0.5s behind live edge using `playbackRate` adjustment, with a startup watchdog and stall-recovery rebuffer logic.
 
+### Text-to-speech (TTS) Announcements
+
+Piper (`piper-tts` pip package, shelled out to via `PIPER_BIN` — never `import piper`, so a missing dependency fails cleanly at TTS-use time rather than crashing the whole app at startup) synthesizes typed text to a WAV, which then goes through the same `_convert_to_ulaw()` ffmpeg pipeline uploaded files use — TTS and upload rows produce byte-identical output formats and share every downstream code path. Voice models (`TTS_VOICES`, a fixed curated dict, never an open picker) live in `TTS_VOICES_DIR` (default `/var/lib/asterisk/asl3ez_tts_voices` — **not** under `/opt/ASL3-EZ`, which is `root:root` and unwritable by the `asterisk` user the service runs as), downloaded on demand from Hugging Face's `rhasspy/piper-voices` repo and cached thereafter. Editing a TTS announcement's text re-synthesizes to a temp file and `os.replace()`s it atomically over the existing slug path — the slug/filename never changes on edit, so this is old-content/new-content at the same path, never a window where the scheduler could hit a missing file.
+
+### NWS severe weather alerts
+
+`_nws_alert_poll_loop()` polls `api.weather.gov/alerts/active?zone=<UGC>` for a single configured county/zone (`nws_alert_config`, a singleton table like `alert_config`) and manages the lifecycle of `announcements` rows with `source_type='nws_alert'` — it never plays anything itself, `_run_due_announcements()` does that on its own schedule exactly as it would for any other announcement. Two independent prune paths: on a successful fetch, anything no longer in the active set gets deleted; regardless of fetch success, anything whose own `expires` is more than 30 minutes past gets deleted too (a local, network-independent ceiling so a stale alert can't replay forever during a sustained NWS outage — the fail-safe stance is "don't assume an alert ended just because NWS is unreachable," but that can't be unbounded).
+
+Dedup/lifecycle tracking (`announcements.external_id`) uses a **parsed VTEC identity** (`{office}.{phenomena}.{significance}.{ETN}`, e.g. `KMKX.TO.W.0075`), not NWS's CAP `id` field — verified against live data that the CAP `id` changes on every `messageType: Update`, so using it directly would delete-and-recreate the row (resetting `last_played`) on every routine update to a tracked storm instead of holding the intended replay interval. The VTEC string itself also embeds a timestamp range that must be excluded from the key, since a time-extension update changes it.
+
+Spoken text is templated (`_nws_alert_spoken_text()`), not NWS's raw headline — see the function for the exact phrasing rules (state names dropped, natural "A, B, and C" county joining, on-the-hour times drop `:00`).
+
 ### Templates
 
 - `templates/status.html` — kiosk/status board (`/` and `/status` routes); self-contained SPA with embedded JS (~1800 lines). Contains the live audio player, network map, weather bar, and global activity feed. Accessible without login.
@@ -83,7 +98,7 @@ The pacing loop runs in its own OS process specifically to avoid GIL contention:
 
 All config comes from environment variables set in `/etc/systemd/system/ASL3-EZ.service`. The service file is the single source of truth for AMI credentials, `SECRET_KEY`, paths, and tuning parameters. After editing the service file: `sudo systemctl daemon-reload && sudo systemctl restart ASL3-EZ`.
 
-Key env vars: `AMI_USER`, `AMI_SECRET`, `SECRET_KEY`, `DB_PATH`, `SOUNDS_DIR`, `LOG_LEVEL` (`INFO`/`DEBUG`), `RPT_CONF_PATH`.
+Key env vars: `AMI_USER`, `AMI_SECRET`, `SECRET_KEY`, `DB_PATH`, `SOUNDS_DIR`, `LOG_LEVEL` (`INFO`/`DEBUG`), `RPT_CONF_PATH`, `TTS_VOICES_DIR`, `PIPER_BIN`.
 
 ### Auth and security
 
@@ -97,6 +112,9 @@ Sessions are plain signed cookies — there is no server-side session store. To 
 - `https://stats.allstarlink.org/stats/keyed` — scraped (regex, no HTML parser dependency) for the global activity feed on the kiosk map; every node currently keyed network-wide, polled every 2 min
 - `https://allmondb.allstarlink.org/allmondb.php` — node callsign/location database
 - `astdb.txt` — local copy of ASL node DB written by `asl3-update-nodelist` package
+- `https://api.weather.gov` — NWS active alerts (`/alerts/active`) and zone lookup (`/points/{lat},{lon}`), no API key, requires a descriptive `User-Agent`
+- `https://huggingface.co/rhasspy/piper-voices` — Piper TTS voice model downloads (`.onnx`/`.onnx.json`), on demand
+- `https://nominatim.openstreetmap.org` — geocodes a node's free-text location string to lat/lon, feeding both the kiosk map and the NWS zone lookup; rate-limited to 1 req/1.1s in-process
 
 ### Service identity
 

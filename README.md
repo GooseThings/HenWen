@@ -12,7 +12,8 @@ A browser-based web interface for managing and using your AllStarLink 3 node. Al
 - **Stream live receive audio** from your node to any browser tab — WebM/Opus over HTTP, multiple simultaneous listeners
 - **Status Board** (`/status`) — full-screen kiosk display for TVs and public screens: connected nodes, global activity feed, network map with grayline, weather bar
 - **Smart Connector** — automatically link to a net node on a schedule (daily, weekly, monthly, one-time, and more), wait for the local node to go idle before connecting, then disconnect after an idle timeout
-- **Announcements** — upload audio files and schedule them to play on a node at configured times
+- **Announcements** — upload audio files, or type a message and have it read aloud via text-to-speech, and schedule either to play on a node at configured times
+- **Weather Alerts** — automatically play Tornado/Severe Thunderstorm/Flash Flood alerts from the National Weather Service on your node, repeating at an interval for as long as they stay active, no manual action needed once configured
 - **Node ID** — FCC-compliant background ID monitor: plays a sound file on key-up, on interval during continuous activity, and after the node goes idle
 - **Multi-user accounts** — Superuser, Admin, and User (Kiosk) roles; kiosk accounts can connect/disconnect nodes but cannot access settings
 - **Asterisk Console** — live log viewer, CLI command runner, and verbosity control, all from the browser
@@ -29,6 +30,7 @@ A browser-based web interface for managing and using your AllStarLink 3 node. Al
 - Python 3.8 or later
 - Root access (required to write `/etc/asterisk/rpt.conf` and restart Asterisk)
 - `ffmpeg` — required only if you use the Announcements or Node ID audio upload features (`sudo apt install ffmpeg`)
+- `piper-tts` — required only for the text-to-speech Announcements feature; installed automatically into the venv by `install.sh`/`requirements.txt`, unlike `ffmpeg` there's no separate apt step. On an existing install being upgraded in place, re-run `venv/bin/pip install -r requirements.txt` to pick it up (a HenWen restart alone won't).
 
 ---
 
@@ -234,9 +236,21 @@ Before enabling a connector, run the **Pre-flight Diagnostics** in the same sect
 
 ## Announcements
 
-Found under **Manager → Announcements**.
+Found under **Manager → Announcements**. Available to Admin and Superuser accounts.
 
-Upload an audio file (mp3, wav, ogg, flac, m4a) and schedule it to play on a node. Files are converted to 8 kHz mono ULAW automatically via `ffmpeg`. Each announcement has a time window, repeat interval, and local-only vs all-links playback mode.
+Upload an audio file (mp3, wav, ogg, flac, m4a), or type a message and have it converted to speech — either way, schedule it to play on a node. Files are converted to 8 kHz mono ULAW automatically via `ffmpeg`. Each announcement has a time window, repeat interval, idle-settle period (waits for the node to be quiet before playing), and local-only vs all-links playback mode.
+
+**Text-to-speech**: pick "Type Text" instead of "Upload File", choose a voice, and write the message (800 characters max). A voice must be downloaded once before it can be used — the picker shows which voices are already available and lets you fetch a new one (roughly 60-115MB per voice, from the [Piper voices](https://huggingface.co/rhasspy/piper-voices) project). Use the Preview button to hear a message on the node before saving it as a scheduled announcement. Editing a TTS announcement's text re-synthesizes the audio in place.
+
+---
+
+## Weather Alerts
+
+Found under **Manager → Weather Alerts**. Available to Admin and Superuser accounts.
+
+Polls the National Weather Service every couple of minutes for active Tornado Warnings, Severe Thunderstorm Warnings, and similar severe weather products for a configured county/zone, and automatically creates and schedules a TTS announcement for each one that's currently active — no manual action needed. Announcements disappear on their own once NWS shows the alert has ended, or can be removed manually from the Currently Active list (if the alert is still active in NWS's feed, it may reappear on the next check).
+
+Click **Detect Zone** to auto-fill the zone from your node's configured location, or enter an NWS UGC code manually. Pick which alert types to watch (Tornado Warning and Severe Thunderstorm Warning are on by default), a node, playback mode, voice, and how often an active alert repeats. Unlike routine Announcements, these ignore the quiet-hours window entirely and have a "max defer" setting that can force playback even if the channel hasn't gone idle, so a real warning isn't silently delayed for too long. Use **Send Test Alert** to verify the whole pipeline without waiting for real weather.
 
 ---
 
@@ -291,6 +305,10 @@ systemctl status ASL3-EZ
 - Confirm `ffmpeg` is installed: `ffmpeg -version`
 - Install if missing: `sudo apt install ffmpeg`
 
+**Text-to-speech announcements fail with "piper: command not found" or similar:**
+- An in-place upgrade needs its own pip step — a HenWen restart alone doesn't install new Python dependencies. Run `sudo -u asterisk venv/bin/pip install -r requirements.txt` from `/opt/ASL3-EZ`, then restart the service.
+- Confirm it resolved correctly: `sudo -u asterisk /opt/ASL3-EZ/venv/bin/piper --help`
+
 ---
 
 ## Environment Variables
@@ -308,6 +326,8 @@ All settings are configured in the systemd service file (`/etc/systemd/system/AS
 | `BACKUP_DIR` | `/etc/asterisk/rpt_backups` | Backup directory for rpt.conf saves |
 | `DB_PATH` | `/etc/asterisk/asl3ez.db` | SQLite database (users, favorites, connectors, etc.) |
 | `SOUNDS_DIR` | `/var/lib/asterisk/sounds/asl3ez` | Uploaded audio files for Announcements and Node ID |
+| `TTS_VOICES_DIR` | `/var/lib/asterisk/asl3ez_tts_voices` | Downloaded Piper voice models for text-to-speech Announcements |
+| `PIPER_BIN` | *(resolved from the venv automatically)* | Path to the `piper` executable, if it needs to be overridden |
 | `PORT` | `5000` | Web server port |
 | `HOST` | `0.0.0.0` | Bind address |
 | `SECRET_KEY` | `henwen-change-me` | Flask session key — rotate via the Settings page |

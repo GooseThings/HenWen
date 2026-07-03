@@ -42,13 +42,22 @@ chmod +x "$INSTALL_DIR/"*.sh 2>/dev/null || true
 echo "[3/8] Creating Python virtual environment..."
 python3 -m venv "$INSTALL_DIR/venv"
 "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
-"$INSTALL_DIR/venv/bin/pip" install --quiet flask gunicorn flask-wtf flask-limiter
+"$INSTALL_DIR/venv/bin/pip" install --quiet flask gunicorn flask-wtf flask-limiter piper-tts
 
 # ── rpt_backups directory ─────────────────────────────────
 echo "[4/8] Creating backup directory..."
 mkdir -p /etc/asterisk/rpt_backups
 chown asterisk:asterisk /etc/asterisk/rpt_backups
 chmod 750 /etc/asterisk/rpt_backups
+
+# ── TTS voice model directory ──────────────────────────────
+# Piper voice models (.onnx/.onnx.json), downloaded on first use of each
+# voice from the Manager UI. Not under $INSTALL_DIR (root:root, unwritable
+# by the asterisk user the service runs as) and not under Asterisk's own
+# sounds directory (these are Piper assets, not Asterisk sound files).
+mkdir -p /var/lib/asterisk/asl3ez_tts_voices
+chown asterisk:asterisk /var/lib/asterisk/asl3ez_tts_voices
+chmod 750 /var/lib/asterisk/asl3ez_tts_voices
 
 # Fix ownership of the database so the service can write it as the asterisk user
 if [ -f /etc/asterisk/asl3ez.db ]; then

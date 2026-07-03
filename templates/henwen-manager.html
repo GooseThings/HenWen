@@ -518,6 +518,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     <button class="nav-item" onclick="showPage('backups')">Backups</button>
     <button class="nav-item" onclick="showPage('conn-history')">Conn. History</button>
     <button class="nav-item" onclick="showPage('alerts')">Alerts</button>
+    <button class="nav-item" onclick="showPage('nws-alerts')">Weather Alerts</button>
     <button class="nav-item" onclick="showPage('ami-diag')">AMI Diagnostics</button>
     <button class="nav-item" id="nav-ast-console" onclick="showPage('ast-console')">Asterisk Console</button>
     <button class="nav-item" onclick="showPage('kiosk-settings')">Kiosk Settings</button>
@@ -987,6 +988,86 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
           <button class="btn" onclick="alTest()">Send Test</button>
         </div>
         <div id="al-status" style="margin-top:8px;font-size:0.82rem"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- NWS Weather Alerts -->
+  <section class="page" id="page-nws-alerts">
+    <div class="page-title">Weather Alerts</div>
+    <div class="page-sub">Automatically play severe weather alerts from the National Weather Service on your node while they remain active.</div>
+    <div class="card">
+      <div class="card-header"><h2>Configuration</h2></div>
+      <div class="card-body">
+        <div class="toggle-row">
+          <div class="toggle-info">
+            <div class="toggle-key">Enable</div>
+            <div class="toggle-desc">Master switch — polls api.weather.gov and auto-creates TTS announcements for matching active alerts</div>
+          </div>
+          <label class="switch"><input type="checkbox" id="nws-enabled"><span class="slider"></span></label>
+        </div>
+
+        <div style="margin-top:14px">
+          <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:3px">NWS Zone / County Code</label>
+          <div style="font-size:0.75rem;color:var(--text2);margin-bottom:6px">Which area to watch for alerts. Detect it from your node's configured location, or enter a UGC code manually.</div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <input id="nws-zone" type="text" class="val-input" placeholder="e.g. WIC059" style="width:140px">
+            <input id="nws-zone-area" type="text" class="val-input" placeholder="Area name" style="width:220px" readonly>
+            <button class="btn btn-sm" type="button" onclick="nwsDetectZone()">Detect Zone</button>
+          </div>
+          <div id="nws-zone-status" class="muted" style="font-size:0.78rem;margin-top:4px"></div>
+        </div>
+
+        <div style="margin-top:16px;font-size:0.82rem;font-weight:600;margin-bottom:8px">Alert Types</div>
+        <div id="nws-event-types" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:4px 12px;font-size:0.85rem"></div>
+
+        <div style="margin-top:16px;display:grid;grid-template-columns:1fr 1fr;gap:10px 18px">
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Node</label>
+            <select id="nws-node" class="val-input" style="width:100%"></select>
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Playback</label>
+            <select id="nws-play-cmd" class="val-input" style="width:100%">
+              <option value="localplay">Local only (localplay)</option>
+              <option value="playback">All linked nodes (playback)</option>
+            </select>
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Voice</label>
+            <select id="nws-voice" class="val-input" style="width:100%" onchange="annUpdateVoiceStatus('nws')"></select>
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Replay interval (minutes)</label>
+            <input type="number" id="nws-interval" class="val-input" value="15" min="1" style="width:100%">
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Idle settle (seconds of quiet required before playing)</label>
+            <input type="number" id="nws-settle" class="val-input" value="10" min="0" style="width:100%">
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Max defer (seconds — force playback if the channel stays busy this long)</label>
+            <input type="number" id="nws-max-defer" class="val-input" value="120" min="0" style="width:100%">
+          </div>
+        </div>
+        <div id="nws-voice-status" class="muted" style="font-size:0.78rem;margin-top:4px"></div>
+
+        <div style="margin-top:18px;display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-primary" onclick="nwsSave()">Save</button>
+          <button class="btn" onclick="nwsTest()">Send Test Alert</button>
+        </div>
+        <div id="nws-status" style="margin-top:8px;font-size:0.82rem"></div>
+        <div id="nws-poll-info" class="muted" style="margin-top:6px;font-size:0.78rem"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+        <h2>Currently Active</h2>
+        <button class="btn btn-sm" onclick="nwsLoadStatus()">Refresh</button>
+      </div>
+      <div class="card-body">
+        <div id="nws-active-list"><span class="muted">Loading...</span></div>
       </div>
     </div>
   </section>
@@ -1504,12 +1585,18 @@ sudo asterisk -rx "module reload manager"</pre>
   <!-- Announcements -->
   <section class="page" id="page-announcements">
     <div class="page-title">Announcements</div>
-    <div class="page-sub">Upload audio files and schedule them to play on your node automatically.</div>
+    <div class="page-sub">Upload audio files or type a text-to-speech message, and schedule them to play on your node automatically.</div>
 
-    <!-- Upload -->
+    <!-- Add -->
     <div class="card">
-      <div class="card-header"><h2>Upload Announcement</h2></div>
+      <div class="card-header"><h2>Add Announcement</h2></div>
       <div class="card-body">
+        <div style="margin-bottom:12px">
+          <label style="margin-right:18px;font-size:0.85rem;cursor:pointer">
+            <input type="radio" name="ann-source-mode" value="upload" checked onchange="annToggleSourceMode()" style="margin-right:4px">Upload File</label>
+          <label style="font-size:0.85rem;cursor:pointer">
+            <input type="radio" name="ann-source-mode" value="tts" onchange="annToggleSourceMode()" style="margin-right:4px">Type Text (Text-to-Speech)</label>
+        </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 18px" id="ann-upload-grid">
           <div>
             <label class="toggle-label" style="display:block;margin-bottom:3px">Name</label>
@@ -1519,13 +1606,32 @@ sudo asterisk -rx "module reload manager"</pre>
             <label class="toggle-label" style="display:block;margin-bottom:3px">Node</label>
             <select id="ann-node" class="val-input" style="width:100%"></select>
           </div>
-          <div>
-            <label class="toggle-label" style="display:block;margin-bottom:3px">Audio File <span class="muted">(mp3, wav, ogg, flac, m4a)</span></label>
-            <input type="file" id="ann-file" accept=".mp3,.wav,.ogg,.flac,.m4a" style="display:none" onchange="document.getElementById('ann-file-label').textContent=this.files[0]?this.files[0].name:'No file chosen'">
-            <div style="display:flex;align-items:center;gap:8px">
-              <button class="btn btn-sm" type="button" onclick="document.getElementById('ann-file').click()">Choose File</button>
-              <span id="ann-file-label" class="muted" style="font-size:0.88rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">No file chosen</span>
+          <div id="ann-upload-fields" style="grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr;gap:10px 18px">
+            <div>
+              <label class="toggle-label" style="display:block;margin-bottom:3px">Audio File <span class="muted">(mp3, wav, ogg, flac, m4a)</span></label>
+              <input type="file" id="ann-file" accept=".mp3,.wav,.ogg,.flac,.m4a" style="display:none" onchange="document.getElementById('ann-file-label').textContent=this.files[0]?this.files[0].name:'No file chosen'">
+              <div style="display:flex;align-items:center;gap:8px">
+                <button class="btn btn-sm" type="button" onclick="document.getElementById('ann-file').click()">Choose File</button>
+                <span id="ann-file-label" class="muted" style="font-size:0.88rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">No file chosen</span>
+              </div>
             </div>
+          </div>
+          <div id="ann-tts-fields" style="grid-column:1/-1;display:none">
+            <div style="margin-bottom:10px">
+              <label class="toggle-label" style="display:block;margin-bottom:3px">Message Text</label>
+              <textarea id="ann-tts-text" class="val-input" rows="3" maxlength="800" placeholder="e.g. This is a test of the club repeater's automated announcement system." style="width:100%;resize:vertical" oninput="document.getElementById('ann-tts-count').textContent=this.value.length"></textarea>
+              <div class="muted" style="font-size:0.75rem;margin-top:2px"><span id="ann-tts-count">0</span> / 800 characters</div>
+            </div>
+            <div style="display:flex;align-items:end;gap:8px;flex-wrap:wrap">
+              <div style="flex:1;min-width:200px">
+                <label class="toggle-label" style="display:block;margin-bottom:3px">Voice</label>
+                <select id="ann-tts-voice" class="val-input" style="width:100%" onchange="annUpdateVoiceStatus()"></select>
+              </div>
+              <button class="btn btn-sm" type="button" id="ann-tts-dl-btn" onclick="annDownloadVoice()" style="display:none">Download Voice</button>
+              <button class="btn btn-sm" type="button" onclick="annPreviewTts()">&#9834; Preview</button>
+            </div>
+            <div id="ann-tts-voice-status" class="muted" style="font-size:0.78rem;margin-top:4px"></div>
+            <div id="ann-tts-preview-result" style="font-size:0.82rem;margin-top:4px"></div>
           </div>
           <div>
             <label class="toggle-label" style="display:block;margin-bottom:3px">Playback</label>
@@ -1554,8 +1660,8 @@ sudo asterisk -rx "module reload manager"</pre>
           </div>
         </div>
         <div id="ann-upload-result" style="margin-top:10px"></div>
-        <button class="btn btn-primary" style="margin-top:12px" onclick="uploadAnnouncement()">Upload &amp; Save</button>
-        <div id="ann-convert-note" class="muted" style="margin-top:6px;font-size:0.82rem">Files are converted to 8 kHz mono ULAW for Asterisk.</div>
+        <button class="btn btn-primary" id="ann-save-btn" style="margin-top:12px" onclick="uploadAnnouncement()">Upload &amp; Save</button>
+        <div id="ann-convert-note" class="muted" style="margin-top:6px;font-size:0.82rem">Files/speech are converted to 8 kHz mono ULAW for Asterisk.</div>
       </div>
     </div>
 
@@ -2052,6 +2158,7 @@ function showPage(id) {
   else if (id === 'backups')        loadBackups();
   else if (id === 'conn-history')   chLoad(0);
   else if (id === 'alerts')           alLoad();
+  else if (id === 'nws-alerts')       nwsLoad();
   else if (id === 'kiosk-settings')   ksLoad();
   else if (id === 'ami-diag')         loadSysInfo();
   else if (id === 'ast-console')  astFetchLog();
@@ -2059,7 +2166,7 @@ function showPage(id) {
   else if (id === 'user-mgmt')      loadUsers();
   else if (id === 'dtmf')             { populateDtmfNodeSelect(); }
   else if (id === 'node-id')          { loadIdConfigs(); populateIdNodeSelect(); }
-  else if (id === 'announcements')    { loadAnnouncements(); populateAnnNodeSelect(); }
+  else if (id === 'announcements')    { loadAnnouncements(); populateAnnNodeSelect(); loadTtsVoices(); }
   else if (id === 'smart-connector') { loadConnectors(); populateConnNodeSelects(); }
   else if (id === 'general')        loadGeneralEditor();
   else {
@@ -3215,6 +3322,183 @@ async function alTest() {
   setTimeout(function() { st.textContent = ''; }, 5000);
 }
 
+/* ── NWS Weather Alerts ─────────────────────────────────────────────────── */
+
+var NWS_EVENT_TYPES = [
+  'Tornado Warning', 'Tornado Watch',
+  'Severe Thunderstorm Warning', 'Severe Thunderstorm Watch',
+  'Flash Flood Warning', 'Flash Flood Watch',
+  'Extreme Wind Warning',
+];
+var NWS_DEFAULT_EVENT_TYPES = ['Tornado Warning', 'Severe Thunderstorm Warning'];
+
+function nwsBuildEventTypeCheckboxes(selected) {
+  var el = document.getElementById('nws-event-types');
+  if (!el) return;
+  el.innerHTML = NWS_EVENT_TYPES.map(function(ev, i) {
+    var id = 'nws-evt-' + i;
+    var checked = selected.indexOf(ev) !== -1;
+    return '<label style="cursor:pointer"><input type="checkbox" id="' + id + '" value="' + esc(ev) + '"' +
+      (checked ? ' checked' : '') + ' style="margin-right:5px">' + esc(ev) + '</label>';
+  }).join('');
+}
+
+function nwsSelectedEventTypes() {
+  var checks = document.querySelectorAll('#nws-event-types input[type="checkbox"]:checked');
+  return Array.prototype.map.call(checks, function(c) { return c.value; });
+}
+
+function populateNwsNodeSelect() {
+  var sel = document.getElementById('nws-node');
+  if (!sel) return;
+  var nodes = [];
+  document.querySelectorAll('[id^="page-node-"]').forEach(function(el) {
+    var m = el.id.match(/^page-node-(\d+)$/);
+    if (m) nodes.push(m[1]);
+  });
+  sel.innerHTML = '';
+  nodes.forEach(function(n) {
+    var o = document.createElement('option'); o.value = n; o.textContent = n; sel.appendChild(o);
+  });
+  if (!nodes.length) {
+    var o = document.createElement('option'); o.value = ''; o.textContent = '(no nodes found)'; sel.appendChild(o);
+  }
+}
+
+async function nwsLoad() {
+  populateNwsNodeSelect();
+  var nodeSel = document.getElementById('nws-node');
+
+  if (!_ttsVoices.length) await loadTtsVoices();
+  var voiceSel = document.getElementById('nws-voice');
+  if (voiceSel) {
+    voiceSel.innerHTML = _ttsVoices.map(function(v) {
+      return '<option value="' + esc(v.id) + '">' + esc(v.label) + (v.cached ? '' : ' (not downloaded)') + '</option>';
+    }).join('');
+  }
+
+  var r = await api('/api/nws-alerts/config');
+  var d = r.ok ? r.data : {};
+  document.getElementById('nws-enabled').checked = !!d.enabled;
+  document.getElementById('nws-zone').value = d.zone || '';
+  document.getElementById('nws-zone-area').value = d.zone_area_name || '';
+  nwsBuildEventTypeCheckboxes(d.event_types ? d.event_types.split(',') : NWS_DEFAULT_EVENT_TYPES);
+  if (nodeSel && d.node) nodeSel.value = d.node;
+  document.getElementById('nws-play-cmd').value = d.play_cmd || 'localplay';
+  if (voiceSel && d.voice) voiceSel.value = d.voice;
+  document.getElementById('nws-interval').value = d.interval_min || 15;
+  document.getElementById('nws-settle').value = d.idle_settle_sec != null ? d.idle_settle_sec : 10;
+  document.getElementById('nws-max-defer').value = d.max_defer_sec != null ? d.max_defer_sec : 120;
+  annUpdateVoiceStatus('nws');
+
+  var pollInfo = document.getElementById('nws-poll-info');
+  if (pollInfo) {
+    pollInfo.textContent = d.last_poll_at ? ('Last checked: ' + d.last_poll_at) : 'Not polled yet.';
+    if (d.last_poll_error) pollInfo.textContent += ' — last error: ' + d.last_poll_error;
+  }
+
+  nwsLoadStatus();
+}
+
+async function nwsDetectZone() {
+  var st = document.getElementById('nws-zone-status');
+  st.textContent = 'Detecting...';
+  st.style.color = 'var(--text2)';
+  var r = await api('/api/nws-alerts/detect-zone', {method: 'POST'});
+  if (r.ok) {
+    document.getElementById('nws-zone').value = r.data.zone;
+    document.getElementById('nws-zone-area').value = r.data.area_name;
+    st.textContent = 'Detected from node location "' + r.data.location + '".';
+    st.style.color = 'var(--green)';
+  } else {
+    st.textContent = (r.data && r.data.error) || ('Error ' + r.status);
+    st.style.color = 'var(--red)';
+  }
+}
+
+async function nwsSave() {
+  var payload = {
+    enabled: document.getElementById('nws-enabled').checked ? 1 : 0,
+    zone: document.getElementById('nws-zone').value.trim(),
+    zone_area_name: document.getElementById('nws-zone-area').value.trim(),
+    zone_auto_detected: 0,
+    event_types: nwsSelectedEventTypes().join(','),
+    node: document.getElementById('nws-node').value,
+    play_cmd: document.getElementById('nws-play-cmd').value,
+    voice: document.getElementById('nws-voice').value,
+    interval_min: parseInt(document.getElementById('nws-interval').value, 10),
+    idle_settle_sec: parseInt(document.getElementById('nws-settle').value, 10),
+    max_defer_sec: parseInt(document.getElementById('nws-max-defer').value, 10),
+  };
+  var st = document.getElementById('nws-status');
+  st.textContent = payload.enabled ? 'Saving (may download a voice model)...' : 'Saving...';
+  st.style.color = 'var(--text2)';
+  var r = await api('/api/nws-alerts/config', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)
+  });
+  if (r.ok) {
+    st.textContent = 'Saved.';
+    st.style.color = 'var(--green)';
+    loadTtsVoices();
+  } else {
+    st.textContent = 'Save failed: ' + (r.data && r.data.error || r.status);
+    st.style.color = 'var(--red)';
+  }
+  setTimeout(function() { st.textContent = ''; }, 4000);
+}
+
+async function nwsTest() {
+  var st = document.getElementById('nws-status');
+  st.textContent = 'Creating test alert...';
+  st.style.color = 'var(--text2)';
+  var r = await api('/api/nws-alerts/test', {method: 'POST'});
+  if (r.ok) {
+    st.textContent = r.data.message || 'Test alert created.';
+    st.style.color = 'var(--green)';
+    nwsLoadStatus();
+  } else {
+    st.textContent = (r.data && r.data.error) || ('Error ' + r.status);
+    st.style.color = 'var(--red)';
+  }
+  setTimeout(function() { st.textContent = ''; }, 6000);
+}
+
+async function nwsLoadStatus() {
+  var el = document.getElementById('nws-active-list');
+  if (!el) return;
+  var r = await api('/api/nws-alerts/status');
+  if (!r.ok) { el.innerHTML = '<span style="color:var(--danger)">Error loading status.</span>'; return; }
+  var alerts = r.data.active_alerts || [];
+  if (!alerts.length) {
+    el.innerHTML = '<span class="muted">No active alerts currently tracked.</span>';
+    return;
+  }
+  el.innerHTML = alerts.map(function(a) {
+    return '<div class="card" style="margin-bottom:8px"><div class="card-body" style="font-size:0.88rem">' +
+      '<div style="display:flex;align-items:start;justify-content:space-between;gap:10px;margin-bottom:4px">' +
+        '<div style="font-weight:600">' + esc(a.name) + '</div>' +
+        '<button class="btn btn-sm" style="color:var(--danger);border-color:var(--danger);flex-shrink:0" ' +
+          'onclick=\'nwsDeleteAlert(' + a.id + ', ' + JSON.stringify(a.name) + ')\'>Delete</button>' +
+      '</div>' +
+      '<div class="muted" style="font-style:italic;margin-bottom:6px">&ldquo;' + esc(a.tts_text || '') + '&rdquo;</div>' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:4px 18px">' +
+        '<div><span class="muted">Node:</span> ' + esc(a.node) + '</div>' +
+        '<div><span class="muted">Interval:</span> every ' + esc(String(a.interval_min)) + ' min</div>' +
+        '<div><span class="muted">Last played:</span> ' + esc(a.last_played || 'Never') + '</div>' +
+        '<div><span class="muted">Expires:</span> ' + esc(a.expires_display || a.nws_expires || '') + '</div>' +
+      '</div>' +
+    '</div></div>';
+  }).join('');
+}
+
+async function nwsDeleteAlert(id, name) {
+  if (!confirm('Stop and remove "' + name + '"?\nIf NWS still shows this alert as active, it may be re-created on the next check (about every 2 minutes).')) return;
+  var r = await apiFetch('/api/announcements/' + id, { method: 'DELETE' });
+  if (r.ok) nwsLoadStatus();
+  else { var d = await r.json(); alert('Error: ' + (d.error || r.status)); }
+}
+
 /* ── Node Control — live status polling ──────────────────────────────────── */
 
 function startNcPolling() {
@@ -4123,6 +4407,140 @@ function populateAnnNodeSelect() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// TTS (text-to-speech) announcement support
+// ---------------------------------------------------------------------------
+
+var _ttsVoices = [];
+
+function annToggleSourceMode() {
+  var mode = document.querySelector('input[name="ann-source-mode"]:checked').value;
+  var isTts = mode === 'tts';
+  document.getElementById('ann-upload-fields').style.display = isTts ? 'none' : '';
+  document.getElementById('ann-tts-fields').style.display = isTts ? '' : 'none';
+  var btn = document.getElementById('ann-save-btn');
+  if (isTts) {
+    btn.textContent = 'Synthesize & Save';
+    btn.setAttribute('onclick', 'createTtsAnnouncement()');
+    if (!_ttsVoices.length) loadTtsVoices();
+  } else {
+    btn.textContent = 'Upload & Save';
+    btn.setAttribute('onclick', 'uploadAnnouncement()');
+  }
+}
+
+async function loadTtsVoices() {
+  try {
+    var r = await apiFetch('/api/tts/voices');
+    _ttsVoices = await r.json();
+    var sel = document.getElementById('ann-tts-voice');
+    if (sel) {
+      sel.innerHTML = _ttsVoices.map(function(v) {
+        return '<option value="' + esc(v.id) + '">' + esc(v.label) + (v.cached ? '' : ' (not downloaded)') + '</option>';
+      }).join('');
+      annUpdateVoiceStatus();
+    }
+  } catch(e) {}
+}
+
+function annUpdateVoiceStatus(prefix) {
+  prefix = prefix || 'ann-tts';
+  var sel    = document.getElementById(prefix + '-voice');
+  var status = document.getElementById(prefix + '-voice-status');
+  var dlBtn  = document.getElementById(prefix + '-dl-btn');
+  if (!sel) return;
+  var v = _ttsVoices.find(function(x) { return x.id === sel.value; });
+  if (!v) return;
+  if (v.cached) {
+    if (status) status.innerHTML = '<span style="color:var(--green)">Ready to use.</span>';
+    if (dlBtn) dlBtn.style.display = 'none';
+  } else {
+    if (status) status.innerHTML = '<span style="color:var(--warn)">Not downloaded yet — required before this voice can be used.</span>';
+    if (dlBtn) dlBtn.style.display = '';
+  }
+}
+
+async function annDownloadVoice(prefix) {
+  prefix = prefix || 'ann-tts';
+  var sel    = document.getElementById(prefix + '-voice');
+  var status = document.getElementById(prefix + '-voice-status');
+  var dlBtn  = document.getElementById(prefix + '-dl-btn');
+  if (!sel) return;
+  var id = sel.value;
+  if (dlBtn) { dlBtn.disabled = true; dlBtn.textContent = 'Downloading...'; }
+  if (status) status.innerHTML = '<span class="muted">Downloading voice model, this can take a minute...</span>';
+  try {
+    var r = await apiFetch('/api/tts/voices/' + encodeURIComponent(id) + '/download', { method: 'POST' });
+    var d = await r.json();
+    if (!r.ok) {
+      if (status) status.innerHTML = '<span style="color:var(--danger)">' + esc(d.error || 'Download failed') + '</span>';
+    } else {
+      await loadTtsVoices();
+      if (prefix !== 'ann-tts') annUpdateVoiceStatus(prefix);
+    }
+  } catch(e) {
+    if (status) status.innerHTML = '<span style="color:var(--danger)">' + esc(String(e)) + '</span>';
+  } finally {
+    if (dlBtn) { dlBtn.disabled = false; dlBtn.textContent = 'Download Voice'; }
+  }
+}
+
+async function annPreviewTts() {
+  var res  = document.getElementById('ann-tts-preview-result');
+  var node = document.getElementById('ann-node').value;
+  var text = document.getElementById('ann-tts-text').value.trim();
+  var voice = document.getElementById('ann-tts-voice').value;
+  if (!text) { res.innerHTML = '<span style="color:var(--warn)">Type a message first.</span>'; return; }
+  res.innerHTML = '<span class="muted">Synthesizing...</span>';
+  try {
+    var r = await apiFetch('/api/tts/preview', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ node: node, text: text, voice: voice })
+    });
+    var d = await r.json();
+    if (!r.ok) res.innerHTML = '<span style="color:var(--danger)">' + esc(d.error || 'Error') + '</span>';
+    else res.innerHTML = '<span style="color:var(--green)">Playing on node ' + esc(node) + '...</span>';
+  } catch(e) {
+    res.innerHTML = '<span style="color:var(--danger)">' + esc(String(e)) + '</span>';
+  }
+}
+
+async function createTtsAnnouncement() {
+  var res = document.getElementById('ann-upload-result');
+  var body = {
+    name:  document.getElementById('ann-name').value.trim(),
+    node:  document.getElementById('ann-node').value,
+    text:  document.getElementById('ann-tts-text').value.trim(),
+    voice: document.getElementById('ann-tts-voice').value,
+    play_cmd:     document.getElementById('ann-play-cmd').value,
+    interval_min: parseInt(document.getElementById('ann-interval').value, 10),
+    window_start: document.getElementById('ann-wstart').value,
+    window_end:   document.getElementById('ann-wend').value,
+    idle_settle_sec: parseInt(document.getElementById('ann-settle').value, 10),
+  };
+  if (!body.name) { res.innerHTML = '<span style="color:var(--warn)">Name is required.</span>'; return; }
+  if (!body.text) { res.innerHTML = '<span style="color:var(--warn)">Message text is required.</span>'; return; }
+  res.innerHTML = '<span class="muted">Synthesizing speech...</span>';
+  try {
+    var r = await apiFetch('/api/announcements/tts', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    var d = await r.json();
+    if (!r.ok) {
+      res.innerHTML = '<span style="color:var(--danger)">' + esc(d.error || 'Error') + '</span>';
+      return;
+    }
+    res.innerHTML = '<span style="color:var(--green)">Saved.</span>';
+    document.getElementById('ann-name').value = '';
+    document.getElementById('ann-tts-text').value = '';
+    document.getElementById('ann-tts-count').textContent = '0';
+    loadAnnouncements();
+  } catch(e) {
+    res.innerHTML = '<span style="color:var(--danger)">' + esc(String(e)) + '</span>';
+  }
+}
+
 async function loadAnnouncements() {
   var el = document.getElementById('ann-list');
   if (!el) return;
@@ -4130,7 +4548,7 @@ async function loadAnnouncements() {
     var r = await apiFetch('/api/announcements');
     var list = await r.json();
     if (!list.length) {
-      el.innerHTML = '<span class="muted">No announcements yet. Upload one above.</span>';
+      el.innerHTML = '<span class="muted">No announcements yet. Add one above.</span>';
       return;
     }
     el.innerHTML = list.map(function(a) { return annCard(a); }).join('');
@@ -4144,13 +4562,16 @@ function annCard(a) {
   var statusLabel = a.enabled ? 'Enabled' : 'Disabled';
   var last = a.last_played ? a.last_played : 'Never';
   var editId = 'ann-edit-' + a.id;
+  var isTts = a.source_type === 'tts';
   return '<div class="card" style="margin-bottom:10px" id="ann-card-' + a.id + '">' +
     '<div class="card-header" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">' +
       '<span style="font-weight:600;flex:1">' + esc(a.name) + '</span>' +
+      (isTts ? '<span class="muted" style="font-size:0.78rem;border:1px solid var(--border);border-radius:3px;padding:1px 6px">TTS</span>' : '') +
       '<span class="muted" style="font-size:0.82rem">Node ' + esc(a.node) + '</span>' +
       '<span style="font-size:0.82rem;color:' + statusColor + '">' + statusLabel + '</span>' +
     '</div>' +
     '<div class="card-body" style="font-size:0.88rem">' +
+      (isTts ? '<div class="muted" style="margin-bottom:8px;font-style:italic">&ldquo;' + esc(a.tts_text || '') + '&rdquo;</div>' : '') +
       '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:4px 18px;margin-bottom:10px">' +
         '<div><span class="muted">Interval:</span> every ' + esc(String(a.interval_min)) + ' min</div>' +
         '<div><span class="muted">Window:</span> ' + esc(a.window_start) + ' – ' + esc(a.window_end) +
@@ -4158,11 +4579,12 @@ function annCard(a) {
         '<div><span class="muted">Mode:</span> ' + esc(a.play_cmd) + '</div>' +
         '<div><span class="muted">Idle settle:</span> ' + esc(String(a.idle_settle_sec)) + 's quiet required</div>' +
         '<div><span class="muted">Last played:</span> ' + esc(last) + '</div>' +
+        (isTts ? '<div><span class="muted">Voice:</span> ' + esc(a.tts_voice) + '</div>' : '') +
       '</div>' +
       '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
         '<button class="btn btn-sm" onclick="annToggle(' + a.id + ')">' + (a.enabled ? 'Disable' : 'Enable') + '</button>' +
         '<button class="btn btn-sm" onclick="annTestPlay(' + a.id + ')">Test Play</button>' +
-        '<button class="btn btn-sm" onclick="annEditShow(' + a.id + ')">Edit</button>' +
+        '<button class="btn btn-sm" onclick="annEditShow(' + a.id + ', ' + isTts + ')">Edit</button>' +
         '<button class="btn btn-sm" style="color:var(--danger);border-color:var(--danger)" onclick=\'annDelete(' + a.id + ', ' + JSON.stringify(a.name) + ')\'>Delete</button>' +
       '</div>' +
       '<div id="' + editId + '" style="display:none;margin-top:14px;border-top:1px solid var(--border);padding-top:12px">' +
@@ -4173,7 +4595,30 @@ function annCard(a) {
 }
 
 function annEditForm(a) {
-  return '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 18px">' +
+  var isTts = a.source_type === 'tts';
+  var ttsFields = '';
+  if (isTts) {
+    var prefix = 'ane-tts-' + a.id;
+    var voiceOpts = _ttsVoices.map(function(v) {
+      return '<option value="' + esc(v.id) + '"' + (v.id === a.tts_voice ? ' selected' : '') + '>' +
+        esc(v.label) + (v.cached ? '' : ' (not downloaded)') + '</option>';
+    }).join('');
+    ttsFields =
+      '<div style="margin-bottom:10px">' +
+        '<label class="toggle-label" style="display:block;margin-bottom:3px">Message Text</label>' +
+        '<textarea id="' + prefix + '-text" class="val-input" rows="3" maxlength="800" style="width:100%;resize:vertical">' + esc(a.tts_text || '') + '</textarea>' +
+      '</div>' +
+      '<div style="display:flex;align-items:end;gap:8px;flex-wrap:wrap;margin-bottom:10px">' +
+        '<div style="flex:1;min-width:200px">' +
+          '<label class="toggle-label" style="display:block;margin-bottom:3px">Voice</label>' +
+          '<select id="' + prefix + '-voice" class="val-input" style="width:100%" onchange="annUpdateVoiceStatus(\'' + prefix + '\')">' + voiceOpts + '</select>' +
+        '</div>' +
+        '<button class="btn btn-sm" type="button" id="' + prefix + '-dl-btn" onclick="annDownloadVoice(\'' + prefix + '\')" style="display:none">Download Voice</button>' +
+      '</div>' +
+      '<div id="' + prefix + '-voice-status" class="muted" style="font-size:0.78rem;margin-bottom:10px"></div>';
+  }
+  return ttsFields +
+  '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 18px">' +
     '<div><label class="toggle-label" style="display:block;margin-bottom:3px">Name</label>' +
       '<input type="text" id="ane-name-' + a.id + '" class="val-input" value="' + esc(a.name) + '" style="width:100%"></div>' +
     '<div><label class="toggle-label" style="display:block;margin-bottom:3px">Node</label>' +
@@ -4194,14 +4639,15 @@ function annEditForm(a) {
   '</div>' +
   '<div id="ane-result-' + a.id + '" style="margin-top:8px"></div>' +
   '<div style="margin-top:10px;display:flex;gap:8px">' +
-    '<button class="btn btn-primary btn-sm" onclick="annSaveEdit(' + a.id + ')">Save</button>' +
+    '<button class="btn btn-primary btn-sm" onclick="annSaveEdit(' + a.id + ', ' + isTts + ')">Save</button>' +
     '<button class="btn btn-sm" onclick="annEditHide(' + a.id + ')">Cancel</button>' +
   '</div>';
 }
 
-function annEditShow(id) {
+function annEditShow(id, isTts) {
   var el = document.getElementById('ann-edit-' + id);
   if (el) el.style.display = 'block';
+  if (isTts) annUpdateVoiceStatus('ane-tts-' + id);
 }
 function annEditHide(id) {
   var el = document.getElementById('ann-edit-' + id);
@@ -4233,7 +4679,7 @@ async function annDelete(id, name) {
   } catch(e) { alert('Error: ' + e); }
 }
 
-async function annSaveEdit(id) {
+async function annSaveEdit(id, isTts) {
   var res = document.getElementById('ane-result-' + id);
   var body = {
     name:         document.getElementById('ane-name-'   + id).value.trim(),
@@ -4244,6 +4690,16 @@ async function annSaveEdit(id) {
     window_end:   document.getElementById('ane-wend-'   + id).value,
     idle_settle_sec: parseInt(document.getElementById('ane-settle-' + id).value, 10),
   };
+  if (isTts) {
+    var prefix = 'ane-tts-' + id;
+    body.text  = document.getElementById(prefix + '-text').value.trim();
+    body.voice = document.getElementById(prefix + '-voice').value;
+    if (!body.text) {
+      res.innerHTML = '<span style="color:var(--danger)">Message text is required.</span>';
+      return;
+    }
+    res.innerHTML = '<span class="muted">Synthesizing speech...</span>';
+  }
   try {
     var r = await apiFetch('/api/announcements/' + id, {
       method: 'PATCH',
