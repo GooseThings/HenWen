@@ -5610,7 +5610,7 @@ NWS_ALERT_EVENT_TYPES = [
 ]
 NWS_ALERTS_BASE_URL = "https://api.weather.gov"
 NWS_USER_AGENT = "HenWen/1.0 (ham radio node manager; https://github.com/GooseThings/HenWen)"
-NWS_ALERT_SPOKEN_PREFIX = "Attention all stations, the National Weather Service has issued a "
+NWS_ALERT_SPOKEN_PREFIX = "The National Weather Service has issued a "
 
 
 def _piper_voice_urls(voice_id: str):
@@ -5890,9 +5890,14 @@ ALLOWED_UPLOAD_EXTS = {".mp3", ".wav", ".ogg", ".flac", ".m4a"}
 
 @app.route("/api/announcements")
 def api_ann_list():
+    # NWS-sourced rows are auto-managed and shown on their own Weather Alerts
+    # page (GET /api/nws-alerts/status) — excluded here so they don't also
+    # show up mixed in with manually-created announcements. Per-row actions
+    # (PATCH/DELETE/toggle/play) still work on them unchanged; only this
+    # list view filters them out.
     db = get_db()
     rows = db.execute(
-        "SELECT * FROM announcements ORDER BY name COLLATE NOCASE"
+        "SELECT * FROM announcements WHERE source_type != 'nws_alert' ORDER BY name COLLATE NOCASE"
     ).fetchall()
     return jsonify([dict(r) for r in rows])
 
