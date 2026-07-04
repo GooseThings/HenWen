@@ -1144,7 +1144,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
       <div class="card-body">
         <div class="alert alert-warn" style="margin-bottom:14px">
           <strong>Quick fix:</strong> Run the AMI setup script on your node:<br>
-          <span class="mono" style="font-size:0.9rem">sudo bash /opt/ASL3-EZ/ami-setup.sh</span><br>
+          <span class="mono" style="font-size:0.9rem">sudo bash /opt/HenWen/ami-setup.sh</span><br>
           This reads manager.conf, tests the connection, and updates the service file automatically.
         </div>
         <p style="margin-bottom:10px">Step 1 &mdash; <span class="mono">/etc/asterisk/manager.conf</span> must have a user stanza:</p>
@@ -1159,13 +1159,13 @@ read = system,call,log,verbose,command,agent,user,config,dtmf,reporting,cdr,dial
 write = system,call,log,verbose,command,agent,user,config,dtmf,reporting,cdr,dialplan
 permit = 127.0.0.1/255.255.255.0</pre>
         <p style="margin-bottom:10px">Step 2 &mdash; Set credentials in the service file:</p>
-        <pre class="codeblock">sudo nano /etc/systemd/system/ASL3-EZ.service
+        <pre class="codeblock">sudo nano /etc/systemd/system/HenWen.service
 # Set these two Environment lines:
 Environment="AMI_USER=admin"
 Environment="AMI_SECRET=your_secret_here"</pre>
         <p style="margin-bottom:10px">Step 3 &mdash; Apply changes:</p>
         <pre class="codeblock">sudo systemctl daemon-reload
-sudo systemctl restart ASL3-EZ
+sudo systemctl restart HenWen
 sudo asterisk -rx "module reload manager"</pre>
       </div>
     </div>
@@ -1454,9 +1454,9 @@ sudo asterisk -rx "module reload manager"</pre>
             <select id="nid-node" class="val-input" style="width:100%"></select>
           </div>
           <div style="grid-column:1/-1">
-            <label class="toggle-label" style="display:block;margin-bottom:3px">Sound File Path <span class="muted">(Asterisk path, no extension — e.g. <code>asl3ez/my-id</code> or <code>en/morse/n8gmz</code>)</span></label>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Sound File Path <span class="muted">(Asterisk path, no extension — e.g. <code>henwen/my-id</code> or <code>en/morse/n8gmz</code>)</span></label>
             <div style="display:flex;gap:8px;align-items:center">
-              <input type="text" id="nid-path" class="val-input" placeholder="asl3ez/my-id" style="flex:1">
+              <input type="text" id="nid-path" class="val-input" placeholder="henwen/my-id" style="flex:1">
               <span class="muted" style="font-size:0.82rem;white-space:nowrap">or upload:</span>
               <input type="file" id="nid-file" accept=".mp3,.wav,.ogg,.flac,.m4a" style="display:none" onchange="idUploadFile()">
               <button class="btn btn-sm" type="button" onclick="document.getElementById('nid-file').click()">Upload File</button>
@@ -3474,12 +3474,24 @@ async function nwsLoadStatus() {
     el.innerHTML = '<span class="muted">No active alerts currently tracked.</span>';
     return;
   }
-  el.innerHTML = alerts.map(function(a) {
-    return '<div class="card" style="margin-bottom:8px"><div class="card-body" style="font-size:0.88rem">' +
+  el.innerHTML = alerts.map(function(a) { return nwsAlertCard(a); }).join('');
+}
+
+function nwsAlertCard(a) {
+  var silenced = !a.enabled;
+  var editId = 'nws-edit-' + a.id;
+  return '<div class="card" style="margin-bottom:8px" id="nws-card-' + a.id + '">' +
+    '<div class="card-body" style="font-size:0.88rem">' +
       '<div style="display:flex;align-items:start;justify-content:space-between;gap:10px;margin-bottom:4px">' +
-        '<div style="font-weight:600">' + esc(a.name) + '</div>' +
-        '<button class="btn btn-sm" style="color:var(--danger);border-color:var(--danger);flex-shrink:0" ' +
-          'onclick=\'nwsDeleteAlert(' + a.id + ', ' + JSON.stringify(a.name) + ')\'>Delete</button>' +
+        '<div style="font-weight:600">' + esc(a.name) +
+          (silenced ? ' <span class="muted" style="font-size:0.78rem;border:1px solid var(--border);border-radius:3px;padding:1px 6px">Silenced</span>' : '') +
+        '</div>' +
+        '<div style="display:flex;gap:6px;flex-shrink:0">' +
+          '<button class="btn btn-sm" onclick="nwsToggleAlert(' + a.id + ')">' + (silenced ? 'Unsilence' : 'Silence') + '</button>' +
+          '<button class="btn btn-sm" onclick="nwsEditShow(' + a.id + ')">Edit</button>' +
+          '<button class="btn btn-sm" style="color:var(--danger);border-color:var(--danger)" ' +
+            'onclick=\'nwsDeleteAlert(' + a.id + ', ' + JSON.stringify(a.name) + ')\'>Delete</button>' +
+        '</div>' +
       '</div>' +
       '<div class="muted" style="font-style:italic;margin-bottom:6px">&ldquo;' + esc(a.tts_text || '') + '&rdquo;</div>' +
       '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:4px 18px">' +
@@ -3488,8 +3500,75 @@ async function nwsLoadStatus() {
         '<div><span class="muted">Last played:</span> ' + esc(a.last_played || 'Never') + '</div>' +
         '<div><span class="muted">Expires:</span> ' + esc(a.expires_display || a.nws_expires || '') + '</div>' +
       '</div>' +
+      '<div id="' + editId + '" style="display:none;margin-top:12px;border-top:1px solid var(--border);padding-top:10px">' +
+        nwsEditForm(a) +
+      '</div>' +
     '</div></div>';
+}
+
+function nwsEditForm(a) {
+  var prefix = 'nwse-' + a.id;
+  var voiceOpts = _ttsVoices.map(function(v) {
+    return '<option value="' + esc(v.id) + '"' + (v.id === a.tts_voice ? ' selected' : '') + '>' +
+      esc(v.label) + (v.cached ? '' : ' (not downloaded)') + '</option>';
   }).join('');
+  return '<div style="margin-bottom:10px">' +
+      '<label class="toggle-label" style="display:block;margin-bottom:3px">Message Text</label>' +
+      '<textarea id="' + prefix + '-text" class="val-input" rows="3" maxlength="800" style="width:100%;resize:vertical">' + esc(a.tts_text || '') + '</textarea>' +
+      '<div class="muted" style="font-size:0.75rem;margin-top:2px">Editing sticks until NWS itself updates this alert (a real change in expiration time), at which point it regenerates automatically.</div>' +
+    '</div>' +
+    '<div style="display:flex;align-items:end;gap:8px;flex-wrap:wrap;margin-bottom:10px">' +
+      '<div style="flex:1;min-width:200px">' +
+        '<label class="toggle-label" style="display:block;margin-bottom:3px">Voice</label>' +
+        '<select id="' + prefix + '-voice" class="val-input" style="width:100%" onchange="annUpdateVoiceStatus(\'' + prefix + '\')">' + voiceOpts + '</select>' +
+      '</div>' +
+      '<button class="btn btn-sm" type="button" id="' + prefix + '-dl-btn" onclick="annDownloadVoice(\'' + prefix + '\')" style="display:none">Download Voice</button>' +
+    '</div>' +
+    '<div id="' + prefix + '-voice-status" class="muted" style="font-size:0.78rem;margin-bottom:10px"></div>' +
+    '<div id="' + prefix + '-result" style="margin-bottom:8px"></div>' +
+    '<div style="display:flex;gap:8px">' +
+      '<button class="btn btn-primary btn-sm" onclick="nwsSaveEdit(' + a.id + ')">Save</button>' +
+      '<button class="btn btn-sm" onclick="nwsEditHide(' + a.id + ')">Cancel</button>' +
+    '</div>';
+}
+
+function nwsEditShow(id) {
+  var el = document.getElementById('nws-edit-' + id);
+  if (el) el.style.display = 'block';
+  annUpdateVoiceStatus('nwse-' + id);
+}
+function nwsEditHide(id) {
+  var el = document.getElementById('nws-edit-' + id);
+  if (el) el.style.display = 'none';
+}
+
+async function nwsToggleAlert(id) {
+  var r = await apiFetch('/api/announcements/' + id + '/toggle', { method: 'POST' });
+  if (r.ok) nwsLoadStatus();
+  else { var d = await r.json(); alert('Error: ' + (d.error || r.status)); }
+}
+
+async function nwsSaveEdit(id) {
+  var prefix = 'nwse-' + id;
+  var res = document.getElementById(prefix + '-result');
+  var text = document.getElementById(prefix + '-text').value.trim();
+  var voice = document.getElementById(prefix + '-voice').value;
+  if (!text) { res.innerHTML = '<span style="color:var(--danger)">Message text is required.</span>'; return; }
+  res.innerHTML = '<span class="muted">Synthesizing speech...</span>';
+  try {
+    var r = await apiFetch('/api/announcements/' + id, {
+      method: 'PATCH', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ text: text, voice: voice })
+    });
+    var d = await r.json();
+    if (!r.ok) {
+      res.innerHTML = '<span style="color:var(--danger)">' + esc(d.error || 'Error') + '</span>';
+      return;
+    }
+    nwsLoadStatus();
+  } catch(e) {
+    res.innerHTML = '<span style="color:var(--danger)">' + esc(String(e)) + '</span>';
+  }
 }
 
 async function nwsDeleteAlert(id, name) {

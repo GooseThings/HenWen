@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-HenWen is a browser-based AllStarLink 3 node manager and kiosk display. It runs as a systemd service (`ASL3-EZ`) on the same Debian machine as Asterisk, installed to `/opt/ASL3-EZ`.
+HenWen is a browser-based AllStarLink 3 node manager and kiosk display. It runs as a systemd service (`HenWen`) on the same Debian machine as Asterisk, installed to `/opt/HenWen`.
 
 - **Author callsign:** N8GMZ
 - **Club callsign:** WE8CHZ (do not use for author attribution)
@@ -15,24 +15,24 @@ There is no build step. The app runs directly via gunicorn.
 
 **Deploy changes to the live service:**
 ```bash
-sudo cp -r app.py audio_relay.py templates static /opt/ASL3-EZ/
-sudo systemctl restart ASL3-EZ
+sudo cp -r app.py audio_relay.py templates static /opt/HenWen/
+sudo systemctl restart HenWen
 ```
 
 **View live logs:**
 ```bash
-journalctl -u ASL3-EZ -f
+journalctl -u HenWen -f
 ```
 
 **Run directly (dev/debug, not via gunicorn):**
 ```bash
-cd /opt/ASL3-EZ
+cd /opt/HenWen
 ./venv/bin/python3 app.py
 ```
 
 **Install/reinstall:**
 ```bash
-sudo bash install.sh   # copies files to /opt/ASL3-EZ, installs venv, enables service
+sudo bash install.sh   # copies files to /opt/HenWen, installs venv, enables service
 ```
 
 There are no tests and no linter configuration.
@@ -62,7 +62,7 @@ Because gunicorn runs `--workers 1 --threads 8`, all threads share a single proc
 
 ### Database
 
-SQLite at `/etc/asterisk/asl3ez.db`. Schema is defined inline in `get_db()` (called per request). Migrations happen via `ALTER TABLE` checks at startup — no migration framework. Tables: `users`, `favorites`, `settings`, `announcements`, `connectors`, `id_configs`, `permanent_links`, `alert_config`, `nws_alert_config`, and a connection history log table.
+SQLite at `/etc/asterisk/henwen.db`. Schema is defined inline in `get_db()` (called per request). Migrations happen via `ALTER TABLE` checks at startup — no migration framework. Tables: `users`, `favorites`, `settings`, `announcements`, `connectors`, `id_configs`, `permanent_links`, `alert_config`, `nws_alert_config`, and a connection history log table.
 
 `announcements.source_type` distinguishes `'upload'` (user-uploaded audio file), `'tts'` (typed text, synthesized once at save time), and `'nws_alert'` (auto-created/retired by the NWS poller) — the scheduler (`_run_due_announcements()`) treats all three identically except for two NWS-only nullable columns: `max_defer_sec` (forces playback past a busy channel after being due too long; NULL preserves indefinite defer for every other row) and `nws_expires`/`external_id` (NWS lifecycle bookkeeping, unused by upload/tts rows).
 
@@ -72,13 +72,13 @@ Custom parser (not `configparser`) — `_collect_stanzas()`, `parse_stanza_setti
 
 ### Audio streaming
 
-Asterisk `MixMonitor` writes raw PCM to a FIFO (`/tmp/asl3ez_audio_<node>.sln`). `audio_relay.py` — a standalone process spawned by `_start_broadcast()` (~line 3902 in `app.py`), not a thread inside gunicorn — paces that PCM into strict 20ms frames (injecting silence when the node is quiet) and writes them to a second FIFO (`..._paced.sln`). ffmpeg reads that second FIFO directly and encodes WebM/Opus to its stdout. `_AudioBroadcast._read_loop` fans ffmpeg's stdout out to each client's `Queue`, and `/api/audio/stream/<node>` streams from that queue to the browser.
+Asterisk `MixMonitor` writes raw PCM to a FIFO (`/tmp/henwen_audio_<node>.sln`). `audio_relay.py` — a standalone process spawned by `_start_broadcast()` (~line 3902 in `app.py`), not a thread inside gunicorn — paces that PCM into strict 20ms frames (injecting silence when the node is quiet) and writes them to a second FIFO (`..._paced.sln`). ffmpeg reads that second FIFO directly and encodes WebM/Opus to its stdout. `_AudioBroadcast._read_loop` fans ffmpeg's stdout out to each client's `Queue`, and `/api/audio/stream/<node>` streams from that queue to the browser.
 
 The pacing loop runs in its own OS process specifically to avoid GIL contention: gunicorn's request handlers, the AMI poller, and other background threads sharing this worker's GIL can stall a real-time 20ms deadline long enough to be audible as a click or stutter. Running the frame loop in a separate process lets the kernel schedule it independently. The MSE live-edge controller in `status.html` keeps the browser at ~0.5s behind live edge using `playbackRate` adjustment, with a startup watchdog and stall-recovery rebuffer logic.
 
 ### Text-to-speech (TTS) Announcements
 
-Piper (`piper-tts` pip package, shelled out to via `PIPER_BIN` — never `import piper`, so a missing dependency fails cleanly at TTS-use time rather than crashing the whole app at startup) synthesizes typed text to a WAV, which then goes through the same `_convert_to_ulaw()` ffmpeg pipeline uploaded files use — TTS and upload rows produce byte-identical output formats and share every downstream code path. Voice models (`TTS_VOICES`, a fixed curated dict, never an open picker) live in `TTS_VOICES_DIR` (default `/var/lib/asterisk/asl3ez_tts_voices` — **not** under `/opt/ASL3-EZ`, which is `root:root` and unwritable by the `asterisk` user the service runs as), downloaded on demand from Hugging Face's `rhasspy/piper-voices` repo and cached thereafter. Editing a TTS announcement's text re-synthesizes to a temp file and `os.replace()`s it atomically over the existing slug path — the slug/filename never changes on edit, so this is old-content/new-content at the same path, never a window where the scheduler could hit a missing file.
+Piper (`piper-tts` pip package, shelled out to via `PIPER_BIN` — never `import piper`, so a missing dependency fails cleanly at TTS-use time rather than crashing the whole app at startup) synthesizes typed text to a WAV, which then goes through the same `_convert_to_ulaw()` ffmpeg pipeline uploaded files use — TTS and upload rows produce byte-identical output formats and share every downstream code path. Voice models (`TTS_VOICES`, a fixed curated dict, never an open picker) live in `TTS_VOICES_DIR` (default `/var/lib/asterisk/henwen_tts_voices` — **not** under `/opt/HenWen`, which is `root:root` and unwritable by the `asterisk` user the service runs as), downloaded on demand from Hugging Face's `rhasspy/piper-voices` repo and cached thereafter. Editing a TTS announcement's text re-synthesizes to a temp file and `os.replace()`s it atomically over the existing slug path — the slug/filename never changes on edit, so this is old-content/new-content at the same path, never a window where the scheduler could hit a missing file.
 
 ### NWS severe weather alerts
 
@@ -96,7 +96,7 @@ Spoken text is templated (`_nws_alert_spoken_text()`), not NWS's raw headline �
 
 ### Configuration
 
-All config comes from environment variables set in `/etc/systemd/system/ASL3-EZ.service`. The service file is the single source of truth for AMI credentials, `SECRET_KEY`, paths, and tuning parameters. After editing the service file: `sudo systemctl daemon-reload && sudo systemctl restart ASL3-EZ`.
+All config comes from environment variables set in `/etc/systemd/system/HenWen.service`. The service file is the single source of truth for AMI credentials, `SECRET_KEY`, paths, and tuning parameters. After editing the service file: `sudo systemctl daemon-reload && sudo systemctl restart HenWen`.
 
 Key env vars: `AMI_USER`, `AMI_SECRET`, `SECRET_KEY`, `DB_PATH`, `SOUNDS_DIR`, `LOG_LEVEL` (`INFO`/`DEBUG`), `RPT_CONF_PATH`, `TTS_VOICES_DIR`, `PIPER_BIN`.
 
@@ -118,4 +118,4 @@ Sessions are plain signed cookies — there is no server-side session store. To 
 
 ### Service identity
 
-The systemd unit is named `ASL3-EZ` (not `HenWen`) — a legacy name from when the project was called ASL3-EZ. The install path `/opt/ASL3-EZ` and service unit name are unchanged on existing installs. Do not rename them.
+The systemd unit is `HenWen`, installed at `/opt/HenWen`. This was renamed from the project's original `ASL3-EZ` name (2026-07-03) — there was no install base yet at the time, so the rename covered the systemd unit, install path, sudoers rule, database path, sounds directory, TTS voice cache directory, and the `henwen/<slug>` AMI command prefix in one pass rather than leaving internal `asl3ez`-branded paths in place. If this project ever gets a real install base, do not repeat a path/unit-name rename casually — it requires a real migration script, not just an in-place edit, since existing installs would need `systemctl stop`, a data move, a new unit file, and an updated sudoers rule to not break.

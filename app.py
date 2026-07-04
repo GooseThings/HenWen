@@ -73,17 +73,22 @@ BACKUP_DIR      = os.environ.get("BACKUP_DIR",      "/etc/asterisk/rpt_backups")
 SECRET_KEY      = os.environ.get("SECRET_KEY",      "henwen-change-me")
 PORT            = int(os.environ.get("PORT",         5000))
 HOST            = os.environ.get("HOST",             "0.0.0.0")
-DB_PATH         = os.environ.get("DB_PATH",          "/etc/asterisk/asl3ez.db")
+DB_PATH         = os.environ.get("DB_PATH",          "/etc/asterisk/henwen.db")
 AMI_HOST        = os.environ.get("AMI_HOST",         "127.0.0.1")
 AMI_PORT        = int(os.environ.get("AMI_PORT",     5038))
-SERVICE_NAME    = os.environ.get("SERVICE_NAME",     "ASL3-EZ")
-SOUNDS_DIR      = os.environ.get("SOUNDS_DIR",       "/usr/share/asterisk/sounds/asl3ez")
+SERVICE_NAME    = os.environ.get("SERVICE_NAME",     "HenWen")
+# Subdirectory name under Asterisk's sounds dir — single source of truth,
+# used both for SOUNDS_DIR's default and for the "henwen/<slug>" prefix
+# baked into every rpt localplay/playback AMI command elsewhere in this
+# file, so the two can never silently drift out of sync with each other.
+SOUNDS_SUBDIR   = "henwen"
+SOUNDS_DIR      = os.environ.get("SOUNDS_DIR",       f"/usr/share/asterisk/sounds/{SOUNDS_SUBDIR}")
 # Piper voice models (.onnx/.onnx.json) — NOT under SOUNDS_DIR: these are
 # Piper's own assets, not Asterisk sound files, and don't need asterisk's
-# sound-format/ownership conventions. Also NOT under /opt/ASL3-EZ: that
+# sound-format/ownership conventions. Also NOT under /opt/HenWen: that
 # directory is root:root and the service runs as User=asterisk, so it can't
 # write there. /var/lib/asterisk is already asterisk:asterisk.
-TTS_VOICES_DIR  = os.environ.get("TTS_VOICES_DIR",   "/var/lib/asterisk/asl3ez_tts_voices")
+TTS_VOICES_DIR  = os.environ.get("TTS_VOICES_DIR",   "/var/lib/asterisk/henwen_tts_voices")
 # Resolved via the running interpreter's own directory, not PATH lookup —
 # under systemd, venv/bin isn't on PATH the way it is in an interactive
 # shell, so a bare "piper" subprocess call would fail with FileNotFoundError.
@@ -160,7 +165,7 @@ SUDO_PATH       = "/usr/bin/sudo"
 def _systemctl(*args, timeout=30):
     """Run systemctl, elevating via a narrowly-scoped passwordless sudo rule
     when not already root. The service normally runs unprivileged as
-    `asterisk` (ASL3-EZ.service User=asterisk); install.sh installs a
+    `asterisk` (HenWen.service User=asterisk); install.sh installs a
     sudoers drop-in permitting exactly the daemon-reload/restart
     invocations this function is used for — restarting `asterisk` or this
     service and reloading unit files. `sudo -n` fails fast (no password
@@ -417,7 +422,7 @@ def get_db():
         name            TEXT    NOT NULL,
         node            TEXT    NOT NULL,
         enabled         INTEGER NOT NULL DEFAULT 1,
-        sound_path      TEXT    NOT NULL DEFAULT 'asl3ez/my-id',
+        sound_path      TEXT    NOT NULL DEFAULT 'henwen/my-id',
         interval_sec    INTEGER NOT NULL DEFAULT 600,
         idle_delay_sec  INTEGER NOT NULL DEFAULT 120,
         initial_id      INTEGER NOT NULL DEFAULT 1,
@@ -889,8 +894,8 @@ def parse_manager_conf():
     log("ERROR",
         "[AMI-CREDS] No usable AMI user found in manager.conf. "
         "Add a user stanza with 'secret = ...' OR set AMI_USER and AMI_SECRET "
-        "in /etc/systemd/system/ASL3-EZ.service then: "
-        "systemctl daemon-reload && systemctl restart ASL3-EZ")
+        "in /etc/systemd/system/HenWen.service then: "
+        "systemctl daemon-reload && systemctl restart HenWen")
     return result
 
 
@@ -1022,9 +1027,9 @@ class AMIClient:
                 f"AMI authentication failed: {msg}\n"
                 f"  User:   '{self.user}'\n"
                 f"  Host:   {self.host}:{self.port}\n"
-                f"  Fix:    Set AMI_USER and AMI_SECRET in ASL3-EZ.service to match\n"
+                f"  Fix:    Set AMI_USER and AMI_SECRET in HenWen.service to match\n"
                 f"          the [username] and secret= in /etc/asterisk/manager.conf\n"
-                f"  Then:   systemctl daemon-reload && systemctl restart ASL3-EZ"
+                f"  Then:   systemctl daemon-reload && systemctl restart HenWen"
             )
 
     def close(self):
@@ -3646,7 +3651,7 @@ def api_alerts_test():
         if not cfg["enabled"]:
             return jsonify({"error": "Alerts are disabled — enable them first"}), 400
         _send_alert("HenWen: Test Alert",
-                    "This is a test notification from ASL3-EZ", "default")
+                    "This is a test notification from HenWen", "default")
         return jsonify({"ok": True, "message": "Test alert sent"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -4719,8 +4724,8 @@ def _start_broadcast(node):
     log('INFO', f'[AUDIO] found channel {channel!r} for node {node} '
                 f'({time.monotonic() - _t0:.3f}s)')
 
-    fifo_in_path  = f'/tmp/asl3ez_audio_{node}.sln'
-    fifo_out_path = f'/tmp/asl3ez_audio_{node}_paced.sln'
+    fifo_in_path  = f'/tmp/henwen_audio_{node}.sln'
+    fifo_out_path = f'/tmp/henwen_audio_{node}_paced.sln'
     for p in (fifo_in_path, fifo_out_path):
         if os.path.exists(p):
             os.unlink(p)
@@ -5258,7 +5263,7 @@ def api_set_secret_key():
         else:
             content = re.sub(r'(\[Service\]\s*\n)', r'\1' + new_line + "\n", content, count=1)
 
-        fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(SERVICE_FILE_PATH), prefix=".asl3ez_svc_")
+        fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(SERVICE_FILE_PATH), prefix=".henwen_svc_")
         with os.fdopen(fd, "w") as f:
             f.write(content)
             f.flush()
@@ -5273,7 +5278,7 @@ def api_set_secret_key():
             hint = ("Service account lacks sudo rights for systemctl — re-run "
                     "install.sh to install the henwen-systemctl sudoers rule."
                     if "password" in stderr.lower() or "authoriz" in stderr.lower()
-                    else "Check: journalctl -u ASL3-EZ -n 30")
+                    else "Check: journalctl -u HenWen -n 30")
             return jsonify({
                 "error": f"SECRET_KEY was written to {SERVICE_FILE_PATH}, but "
                         f"'systemctl daemon-reload' failed: {stderr or dr.returncode}. "
@@ -5388,7 +5393,7 @@ def api_ami_test():
     if not result["creds_found"]:
         result["error"] = (
             "AMI credentials not found in manager.conf. "
-            "Run: sudo bash /opt/ASL3-EZ/ami-setup.sh"
+            "Run: sudo bash /opt/HenWen/ami-setup.sh"
         )
         return jsonify(result), 500
 
@@ -5421,7 +5426,7 @@ def api_ami_test():
     except Exception as e:
         result["error"] = str(e)
         result["hint"]  = (
-            "Run: sudo bash /opt/ASL3-EZ/ami-setup.sh\n"
+            "Run: sudo bash /opt/HenWen/ami-setup.sh\n"
             "This script reads manager.conf directly, tests the connection, "
             "and updates the service file automatically."
         )
@@ -5445,7 +5450,7 @@ def api_ami_raw_test():
         return jsonify({
             "error":      "Credentials not configured",
             "transcript": transcript,
-            "fix":        "Set AMI_USER and AMI_SECRET in /etc/systemd/system/ASL3-EZ.service"
+            "fix":        "Set AMI_USER and AMI_SECRET in /etc/systemd/system/HenWen.service"
         }), 500
 
     host, port   = creds["host"], creds["port"]
@@ -5819,7 +5824,7 @@ def _run_due_announcements():
             log("INFO", f"[ANNOUNCE] '{name}' was deleted/disabled since this cycle started — skipping")
             continue
 
-        sound_arg = f"asl3ez/{row['slug']}"
+        sound_arg = f"{SOUNDS_SUBDIR}/{row['slug']}"
         cmd = f"rpt {row['play_cmd']} {node} {sound_arg}"
         log("INFO", f"[ANNOUNCE] Firing '{row['name']}' on {node}: {cmd!r}")
         try:
@@ -6098,7 +6103,7 @@ def api_ann_update(ann_id):
 
     tts_text  = row["tts_text"]
     tts_voice = row["tts_voice"]
-    if row["source_type"] == "tts":
+    if row["source_type"] in ("tts", "nws_alert"):
         new_text  = str(data.get("text",  row["tts_text"]  or "")).strip()
         new_voice = str(data.get("voice", row["tts_voice"])).strip()
         if not new_text:
@@ -6148,6 +6153,12 @@ def api_ann_update(ann_id):
     )
     db.commit()
     updated = db.execute("SELECT * FROM announcements WHERE id=?", (ann_id,)).fetchone()
+    if not updated:
+        # Narrow race: for an NWS-sourced row, the poller could have decided
+        # (in a concurrent cycle) that this alert is no longer active and
+        # deleted it while this edit was in flight — most likely during a
+        # slow TTS re-synthesis above. Report clearly rather than crashing.
+        return jsonify({"error": "This announcement was deleted while being edited"}), 404
     return jsonify(dict(updated))
 
 
@@ -6194,7 +6205,7 @@ def api_ann_play(ann_id):
     if not os.path.exists(sound):
         return jsonify({"error": "Sound file not found on disk"}), 404
 
-    sound_arg = f"asl3ez/{row['slug']}"
+    sound_arg = f"{SOUNDS_SUBDIR}/{row['slug']}"
     cmd       = f"rpt {row['play_cmd']} {row['node']} {sound_arg}"
     log("INFO", f"[ANNOUNCE] Test play '{row['name']}': {cmd!r}")
 
@@ -6214,7 +6225,7 @@ def api_ann_play(ann_id):
 def api_tts_preview():
     """Synthesize and immediately play text WITHOUT saving it as an
     announcement — lets an admin hear a message before scheduling it. Always
-    uses a fixed scratch slug (asl3ez/_tts_preview), overwritten each call,
+    uses a fixed scratch slug (henwen/_tts_preview), overwritten each call,
     so previews never accumulate files needing cleanup."""
     data  = request.json or {}
     node  = str(data.get("node", "")).strip()
@@ -6247,7 +6258,7 @@ def api_tts_preview():
     except Exception:
         pass
 
-    cmd = f"rpt localplay {node} asl3ez/{slug}"
+    cmd = f"rpt localplay {node} {SOUNDS_SUBDIR}/{slug}"
     log("INFO", f"[TTS] Preview play on {node}: {cmd!r}")
     try:
         def _play(ami, _cmd=cmd):
@@ -6449,11 +6460,18 @@ def _nws_sync_alert(alert: dict, cfg: dict):
         )
         db.commit()
         log("INFO", f"[NWS] New alert tracked: {alert['event']} ({alert['vtec_key']})")
-    elif row["tts_text"] != spoken or row["nws_expires"] != alert.get("expires", ""):
-        # Content changed (e.g. an Update extended the expiry) — re-synthesize
-        # atomically in place, exactly like a manual TTS edit. The slug/path
-        # never changes, so this is old-content/new-content at the same
-        # path, never a missing-file gap for a scheduler tick to hit.
+    elif row["nws_expires"] != alert.get("expires", ""):
+        # Only re-synthesize when NWS's own data changed (an Update extended
+        # or altered the expiry) — deliberately NOT triggered by tts_text
+        # merely differing from a freshly-templated string, since an admin
+        # can now manually edit an NWS alert's text/voice. Diffing on
+        # nws_expires means a manual edit persists across poll cycles until
+        # NWS itself provides a genuine update, at which point regenerating
+        # fresh content is the right call (an edit about an old expiry time
+        # would otherwise go stale silently). Re-synthesize atomically in
+        # place, exactly like a manual TTS edit — the slug/path never
+        # changes, so this is old-content/new-content at the same path,
+        # never a missing-file gap for a scheduler tick to hit.
         dest = _ann_sound_path(row["slug"])
         fd, tmp_ulaw = tempfile.mkstemp(suffix=".ulaw", dir=SOUNDS_DIR)
         os.close(fd)
@@ -6577,8 +6595,8 @@ def api_nws_alerts_status():
     cfg = _get_nws_alert_config()
     db  = get_db()
     tracked = db.execute(
-        """SELECT id, name, node, tts_text, play_cmd, interval_min, last_played,
-                  external_id, nws_expires
+        """SELECT id, name, node, tts_text, tts_voice, play_cmd, interval_min, last_played,
+                  external_id, nws_expires, enabled
            FROM announcements WHERE source_type='nws_alert' ORDER BY nws_expires"""
     ).fetchall()
     alerts = []
@@ -7633,7 +7651,7 @@ def api_id_upload():
         pass
 
     log("INFO", f"[ID] Uploaded ID sound '{name}' → {dest}")
-    return jsonify({"path": f"asl3ez/{slug}", "slug": slug})
+    return jsonify({"path": f"{SOUNDS_SUBDIR}/{slug}", "slug": slug})
 
 
 # ---------------------------------------------------------------------------

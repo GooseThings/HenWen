@@ -13,7 +13,7 @@
 set -e
 
 MANAGER_CONF="/etc/asterisk/manager.conf"
-SERVICE_FILE="/etc/systemd/system/ASL3-EZ.service"
+SERVICE_FILE="/etc/systemd/system/HenWen.service"
 AMI_PORT=5038
 AMI_HOST="127.0.0.1"
 
@@ -301,16 +301,16 @@ else
 
     systemctl daemon-reload
 
-    if systemctl is-active --quiet ASL3-EZ 2>/dev/null; then
-        systemctl restart ASL3-EZ
+    if systemctl is-active --quiet HenWen 2>/dev/null; then
+        systemctl restart HenWen
         sleep 1
-        if systemctl is-active --quiet ASL3-EZ; then
+        if systemctl is-active --quiet HenWen; then
             echo -e "  ${GREEN}HenWen service updated and restarted successfully.${NC}"
         else
-            echo -e "  ${YELLOW}Service restart may have failed. Check: journalctl -u ASL3-EZ -n 20${NC}"
+            echo -e "  ${YELLOW}Service restart may have failed. Check: journalctl -u HenWen -n 20${NC}"
         fi
     else
-        echo "  HenWen service not currently running. Start with: sudo systemctl start ASL3-EZ"
+        echo "  HenWen service not currently running. Start with: sudo systemctl start HenWen"
     fi
 fi
 
@@ -337,5 +337,5 @@ echo "    http://$(hostname -I | awk '{print $1}'):5000"
 echo "    -> AMI Diagnostics -> Run Test"
 echo ""
 echo "  To check logs:"
-echo "    journalctl -u ASL3-EZ -f   # service unit name is still ASL3-EZ"
+echo "    journalctl -u HenWen -f"
 echo "============================================"

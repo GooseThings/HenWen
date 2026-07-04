@@ -7,8 +7,8 @@ __pycache__/
 .DS_Store
 
 # Local SQLite DB written when the app is run with a relative DB_PATH
-# (the real DB lives at /etc/asterisk/asl3ez.db)
-asl3ez.db
+# (the real DB lives at /etc/asterisk/henwen.db)
+henwen.db
 *.db
 
 # Editor/agent working dir

@@ -14,9 +14,9 @@ echo "============================================"
 echo ""
 
 echo "Stopping and disabling HenWen service..."
-systemctl stop    ASL3-EZ 2>/dev/null || true
-systemctl disable ASL3-EZ 2>/dev/null || true
-rm -f /etc/systemd/system/ASL3-EZ.service
+systemctl stop    HenWen 2>/dev/null || true
+systemctl disable HenWen 2>/dev/null || true
+rm -f /etc/systemd/system/HenWen.service
 
 # Also clean up old service name if present
 systemctl stop    asl3-rpt-editor 2>/dev/null || true
@@ -25,8 +25,8 @@ rm -f /etc/systemd/system/asl3-rpt-editor.service
 
 systemctl daemon-reload
 
-echo "Removing installation directory /opt/ASL3-EZ (HenWen)..."
-rm -rf /opt/ASL3-EZ
+echo "Removing installation directory /opt/HenWen..."
+rm -rf /opt/HenWen
 
 echo ""
 echo "Uninstall complete."

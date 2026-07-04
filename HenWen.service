@@ -12,8 +12,8 @@ Wants=asterisk.service
 Type=simple
 User=asterisk
 Group=asterisk
-WorkingDirectory=/opt/ASL3-EZ
-ExecStart=/opt/ASL3-EZ/venv/bin/gunicorn --workers 1 --worker-class gthread --threads 8 --bind 0.0.0.0:5000 --timeout 120 --log-level info app:app
+WorkingDirectory=/opt/HenWen
+ExecStart=/opt/HenWen/venv/bin/gunicorn --workers 1 --worker-class gthread --threads 8 --bind 0.0.0.0:5000 --timeout 120 --log-level info app:app
 Restart=on-failure
 RestartSec=5
 
@@ -27,10 +27,10 @@ Environment="AMI_SECRET=yourpassword"
 Environment=RPT_CONF_PATH=/etc/asterisk/rpt.conf
 Environment=MANAGER_CONF=/etc/asterisk/manager.conf
 Environment=BACKUP_DIR=/etc/asterisk/rpt_backups
-Environment=DB_PATH=/etc/asterisk/asl3ez.db
+Environment=DB_PATH=/etc/asterisk/henwen.db
 # Announcement/ID sound files — must be under Asterisk's astdatadir/sounds/
-# so that "rpt localplay <node> asl3ez/<slug>" resolves correctly.
-Environment=SOUNDS_DIR=/usr/share/asterisk/sounds/asl3ez
+# so that "rpt localplay <node> henwen/<slug>" resolves correctly.
+Environment=SOUNDS_DIR=/usr/share/asterisk/sounds/henwen
 
 # ── Network ──────────────────────────────────────────────────────────────
 Environment=PORT=5000

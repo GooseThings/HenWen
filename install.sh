@@ -4,8 +4,8 @@
 # Run as root: sudo bash install.sh
 set -e
 
-INSTALL_DIR="/opt/ASL3-EZ"
-SERVICE_NAME="ASL3-EZ"
+INSTALL_DIR="/opt/HenWen"
+SERVICE_NAME="HenWen"
 PORT="${PORT:-5000}"
 
 echo ""
@@ -55,13 +55,13 @@ chmod 750 /etc/asterisk/rpt_backups
 # voice from the Manager UI. Not under $INSTALL_DIR (root:root, unwritable
 # by the asterisk user the service runs as) and not under Asterisk's own
 # sounds directory (these are Piper assets, not Asterisk sound files).
-mkdir -p /var/lib/asterisk/asl3ez_tts_voices
-chown asterisk:asterisk /var/lib/asterisk/asl3ez_tts_voices
-chmod 750 /var/lib/asterisk/asl3ez_tts_voices
+mkdir -p /var/lib/asterisk/henwen_tts_voices
+chown asterisk:asterisk /var/lib/asterisk/henwen_tts_voices
+chmod 750 /var/lib/asterisk/henwen_tts_voices
 
 # Fix ownership of the database so the service can write it as the asterisk user
-if [ -f /etc/asterisk/asl3ez.db ]; then
-    chown asterisk:asterisk /etc/asterisk/asl3ez.db
+if [ -f /etc/asterisk/henwen.db ]; then
+    chown asterisk:asterisk /etc/asterisk/henwen.db
 fi
 
 # ── Verify rpt.conf accessible ────────────────────────────
@@ -85,7 +85,7 @@ if [ -f /etc/systemd/system/asl3-rpt-editor.service ]; then
     rm -f /etc/systemd/system/asl3-rpt-editor.service
 fi
 
-cp "$INSTALL_DIR/ASL3-EZ.service" /etc/systemd/system/
+cp "$INSTALL_DIR/HenWen.service" /etc/systemd/system/
 systemctl daemon-reload
 
 # ── Cap systemd journal size ──────────────────────────────
@@ -112,9 +112,9 @@ else
 fi
 
 # ── Sudoers rule for privileged systemctl actions ─────────
-# The service runs unprivileged as User=asterisk (see ASL3-EZ.service), but
+# The service runs unprivileged as User=asterisk (see HenWen.service), but
 # the Dashboard's "Restart Asterisk" button and secret-key rotation need to
-# run `systemctl restart asterisk`, `systemctl restart ASL3-EZ`, and
+# run `systemctl restart asterisk`, `systemctl restart HenWen`, and
 # `systemctl daemon-reload`. Without this rule those actions fail with
 # "Interactive authentication required" since there's no session for
 # polkit to prompt. Scope is intentionally limited to these exact

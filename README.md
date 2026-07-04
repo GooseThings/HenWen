@@ -46,13 +46,13 @@ sudo bash install.sh
 
 The installer:
 - Installs Python dependencies into a virtual environment
-- Creates and enables the `ASL3-EZ` systemd service (runs on port 5000)  <!-- service unit name stays ASL3-EZ on existing installs -->
+- Creates and enables the `HenWen` systemd service (runs on port 5000)
 - Starts the service immediately
 
 Verify it is running:
 
 ```bash
-systemctl status ASL3-EZ
+systemctl status HenWen
 ```
 
 ---
@@ -87,14 +87,14 @@ enabled = yes
 port = 5038
 bindaddr = 127.0.0.1
 
-[asl3ez]
+[henwen]
 secret = your_secret_here
 read  = system,call,log,verbose,command,agent,user,config,dtmf,reporting,cdr,dialplan
 write = system,call,log,verbose,command,agent,user,config,dtmf,reporting,cdr,dialplan
 permit = 127.0.0.1/255.255.255.0
 ```
 
-> The stanza name (`asl3ez` above) becomes your `AMI_USER`. Choose any name and secret you like.
+> The stanza name (`henwen` above) becomes your `AMI_USER`. Choose any name and secret you like.
 
 Reload Asterisk to apply:
 
@@ -105,13 +105,13 @@ sudo asterisk -rx "module reload manager"
 ### 3b — Add credentials to the service file
 
 ```bash
-sudo nano /etc/systemd/system/ASL3-EZ.service
+sudo nano /etc/systemd/system/HenWen.service
 ```
 
 Set these two lines to match what you put in `manager.conf`:
 
 ```
-Environment="AMI_USER=asl3ez"
+Environment="AMI_USER=henwen"
 Environment="AMI_SECRET=your_secret_here"
 ```
 
@@ -119,7 +119,7 @@ Apply and restart:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl restart ASL3-EZ
+sudo systemctl restart HenWen
 ```
 
 ### 3c — Verify
@@ -147,10 +147,10 @@ Go to **Manager** in the web UI. Your node stanzas from `/etc/asterisk/rpt.conf`
 
 ## Updating HenWen
 
-HenWen's code installs to `/opt/ASL3-EZ`, while your configuration and data live elsewhere and are **not** touched by a code update:
+HenWen's code installs to `/opt/HenWen`, while your configuration and data live elsewhere and are **not** touched by a code update:
 
-- AMI credentials and `SECRET_KEY` — `/etc/systemd/system/ASL3-EZ.service`
-- Users, favorites, connectors, announcements — `/etc/asterisk/asl3ez.db`
+- AMI credentials and `SECRET_KEY` — `/etc/systemd/system/HenWen.service`
+- Users, favorites, connectors, announcements — `/etc/asterisk/henwen.db`
 - rpt.conf backups — `/etc/asterisk/rpt_backups/`
 
 The SQLite schema migrates automatically on startup, so new features need no manual database steps.
@@ -162,34 +162,34 @@ Pulls the latest code and restarts the service. Your service file, database, and
 ```bash
 cd ~/HenWen          # the directory you originally cloned into
 git pull
-sudo cp -r app.py templates static /opt/ASL3-EZ/
-sudo systemctl restart ASL3-EZ
+sudo cp -r app.py templates static /opt/HenWen/
+sudo systemctl restart HenWen
 ```
 
 If a release adds new Python dependencies (check `requirements.txt`), also refresh the virtual environment:
 
 ```bash
-sudo /opt/ASL3-EZ/venv/bin/pip install -r /opt/ASL3-EZ/requirements.txt
-sudo systemctl restart ASL3-EZ
+sudo /opt/HenWen/venv/bin/pip install -r /opt/HenWen/requirements.txt
+sudo systemctl restart HenWen
 ```
 
 ### Full reinstall
 
-Re-running the installer also refreshes Python dependencies and the systemd unit. **It overwrites the service file** (`/etc/systemd/system/ASL3-EZ.service`) with the default template and re-runs AMI setup — so back up your service file first and restore it afterward, or you will lose your AMI credentials and `SECRET_KEY`:
+Re-running the installer also refreshes Python dependencies and the systemd unit. **It overwrites the service file** (`/etc/systemd/system/HenWen.service`) with the default template and re-runs AMI setup — so back up your service file first and restore it afterward, or you will lose your AMI credentials and `SECRET_KEY`:
 
 ```bash
 cd ~/HenWen
 git pull
-sudo cp /etc/systemd/system/ASL3-EZ.service ~/ASL3-EZ.service.bak   # save your credentials
+sudo cp /etc/systemd/system/HenWen.service ~/HenWen.service.bak   # save your credentials
 sudo bash install.sh
-sudo cp ~/ASL3-EZ.service.bak /etc/systemd/system/ASL3-EZ.service   # restore them
-sudo systemctl daemon-reload && sudo systemctl restart ASL3-EZ
+sudo cp ~/HenWen.service.bak /etc/systemd/system/HenWen.service   # restore them
+sudo systemctl daemon-reload && sudo systemctl restart HenWen
 ```
 
 ### Verify
 
 ```bash
-systemctl status ASL3-EZ
+systemctl status HenWen
 ```
 
 Then open the web UI and run **Dashboard → AMI Diagnostics → Run Test**. Hard-refresh the browser (Ctrl-Shift-R) to pick up any updated UI.
@@ -268,17 +268,17 @@ Plays a configurable sound file for FCC-required station identification. Trigger
 
 **Service won't start:**
 ```bash
-journalctl -u ASL3-EZ -n 50
-systemctl status ASL3-EZ
+journalctl -u HenWen -n 50
+systemctl status HenWen
 ```
 
 **Can't reach the web UI:**
-- Confirm the service is running: `systemctl status ASL3-EZ`
+- Confirm the service is running: `systemctl status HenWen`
 - Check that port 5000 is not blocked by a firewall: `ss -tlnp | grep 5000`
 - Try `http://127.0.0.1:5000` directly on the node
 
 **Permission denied saving rpt.conf:**
-- The service must run as root. Check: `grep User= /etc/systemd/system/ASL3-EZ.service` — should say `User=root`.
+- The service runs as the `asterisk` user, which must be able to write `rpt.conf`. Check: `grep User= /etc/systemd/system/HenWen.service` — should say `User=asterisk`, and confirm that user has write access to `/etc/asterisk/rpt.conf`.
 
 **rpt.conf changes don't take effect:**
 - Click **Reload rpt.conf** on the Dashboard after saving. If that doesn't help, use **Restart Asterisk**.
@@ -308,14 +308,14 @@ systemctl status ASL3-EZ
 - Install if missing: `sudo apt install ffmpeg`
 
 **Text-to-speech announcements fail with "piper: command not found" or similar:**
-- An in-place upgrade needs its own pip step — a HenWen restart alone doesn't install new Python dependencies. Run `sudo -u asterisk venv/bin/pip install -r requirements.txt` from `/opt/ASL3-EZ`, then restart the service.
-- Confirm it resolved correctly: `sudo -u asterisk /opt/ASL3-EZ/venv/bin/piper --help`
+- An in-place upgrade needs its own pip step — a HenWen restart alone doesn't install new Python dependencies. Run `sudo -u asterisk venv/bin/pip install -r requirements.txt` from `/opt/HenWen`, then restart the service.
+- Confirm it resolved correctly: `sudo -u asterisk /opt/HenWen/venv/bin/piper --help`
 
 ---
 
 ## Environment Variables
 
-All settings are configured in the systemd service file (`/etc/systemd/system/ASL3-EZ.service`). After editing, run `sudo systemctl daemon-reload && sudo systemctl restart ASL3-EZ`. (The service unit file retains the `ASL3-EZ` name on existing installs.)
+All settings are configured in the systemd service file (`/etc/systemd/system/HenWen.service`). After editing, run `sudo systemctl daemon-reload && sudo systemctl restart HenWen`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -326,14 +326,14 @@ All settings are configured in the systemd service file (`/etc/systemd/system/AS
 | `RPT_CONF_PATH` | `/etc/asterisk/rpt.conf` | Path to rpt.conf |
 | `MANAGER_CONF` | `/etc/asterisk/manager.conf` | Path to manager.conf |
 | `BACKUP_DIR` | `/etc/asterisk/rpt_backups` | Backup directory for rpt.conf saves |
-| `DB_PATH` | `/etc/asterisk/asl3ez.db` | SQLite database (users, favorites, connectors, etc.) |
-| `SOUNDS_DIR` | `/var/lib/asterisk/sounds/asl3ez` | Uploaded audio files for Announcements and Node ID |
-| `TTS_VOICES_DIR` | `/var/lib/asterisk/asl3ez_tts_voices` | Downloaded Piper voice models for text-to-speech Announcements |
+| `DB_PATH` | `/etc/asterisk/henwen.db` | SQLite database (users, favorites, connectors, etc.) |
+| `SOUNDS_DIR` | `/usr/share/asterisk/sounds/henwen` | Uploaded audio files for Announcements and Node ID |
+| `TTS_VOICES_DIR` | `/var/lib/asterisk/henwen_tts_voices` | Downloaded Piper voice models for text-to-speech Announcements |
 | `PIPER_BIN` | *(resolved from the venv automatically)* | Path to the `piper` executable, if it needs to be overridden |
 | `PORT` | `5000` | Web server port |
 | `HOST` | `0.0.0.0` | Bind address |
 | `SECRET_KEY` | `henwen-change-me` | Flask session key — rotate via the Settings page |
-| `SERVICE_NAME` | `ASL3-EZ` | systemd unit name (used when applying a new SECRET_KEY) |
+| `SERVICE_NAME` | `HenWen` | systemd unit name (used when applying a new SECRET_KEY) |
 | `SERVICE_FILE_PATH` | `/etc/systemd/system/<SERVICE_NAME>.service` | Path to the unit file the Settings page edits |
 | `LOG_LEVEL` | `INFO` | HenWen log verbosity: `INFO` or `DEBUG` (full trace in journald) |
 | `ASTERISK_LOG_PATH` | `/var/log/asterisk/messages.log` | Asterisk log shown in the Asterisk Console page |
@@ -351,7 +351,7 @@ HenWen/
 │   ├── login.html              # Login / first-run account creation
 │   └── status.html             # Status Board / kiosk display (/status)
 ├── requirements.txt            # Python dependencies (flask, gunicorn, werkzeug)
-├── ASL3-EZ.service             # systemd unit file template
+├── HenWen.service             # systemd unit file template
 ├── install.sh                  # Installer
 ├── uninstall.sh                # Uninstaller
 ├── README.md

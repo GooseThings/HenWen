@@ -92,8 +92,9 @@ Scope reviewed: `app.py` (all ~6,100 lines), `templates/status.html`, `templates
 
 ## Housekeeping
 
-- [ ] **[H1] Stray 0-byte `asl3ez.db` committed to / sitting in the repo root (Low).**
+- [x] **FIXED 2026-07-03 — [H1] Stray 0-byte `asl3ez.db` committed to / sitting in the repo root (Low).**
   `/opt/ASL3-EZ/asl3ez.db` (0 bytes) exists untracked in the working tree. The real DB is `/etc/asterisk/asl3ez.db`. This root-level file is created if the app is ever run with a relative `DB_PATH`. Add `asl3ez.db` (or `*.db`) to `.gitignore` and delete the stray file so it can't be committed by accident.
+  **Fix applied:** deleted the stray file (during the ASL3-EZ→HenWen rename, which also moved the real DB to `/etc/asterisk/henwen.db`). `.gitignore` already had `*.db`; updated its specific entry and comment from `asl3ez.db` to `henwen.db` to match.
 
 - [ ] **[H2] `.claude/` directory untracked in repo root (Low).**
   Decide whether to commit shared agent config or add `.claude/` to `.gitignore`.

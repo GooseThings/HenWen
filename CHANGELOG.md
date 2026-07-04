@@ -1,5 +1,12 @@
 # Changelog
 
+## v2026.07.03.4
+
+- **Changed: renamed the project's internals from ASL3-EZ to HenWen throughout** — the systemd unit (`ASL3-EZ.service` → `HenWen.service`), install path (`/opt/ASL3-EZ` → `/opt/HenWen`), database path, the Asterisk sounds directory, the TTS voice cache directory, the sudoers restart rule, and the `henwen/<slug>` prefix embedded in every announcement/Node-ID AMI playback command (now driven by a single constant instead of four independently-hardcoded copies of the same string). The display name has been HenWen for a while; the underlying paths and unit name were still the legacy ASL3-EZ branding. Deploy commands and `journalctl`/`systemctl` references throughout the docs are updated to match — see the README and CLAUDE.md for the current paths.
+- **Added: Silence, unsilence, and edit for NWS Weather Alerts.** Each tracked severe weather alert on the Weather Alerts page now has Silence/Unsilence (reuses the same enable/disable toggle every other announcement has — the poller keeps managing lifecycle normally while silenced) and Edit (change the spoken text or voice in place, same atomic re-synthesis TTS announcements already use). A manual edit now sticks across poll cycles instead of being silently overwritten — the poller only regenerates an alert's audio when NWS itself provides a genuine update (a real change to the expiration time), not merely because the stored text differs from what the template would currently produce.
+- **Fixed: editing an announcement that a concurrent process deletes out from under it (e.g. the NWS poller deciding an alert is no longer active mid-edit) crashed with an unhandled exception.** Now returns a clear error instead.
+- **Fixed: a documentation bug** where the README listed the wrong default path for `SOUNDS_DIR`, and a troubleshooting tip that incorrectly said the service must run as root (it runs as `asterisk`).
+
 ## v2026.07.03.3
 
 - **Changed: NWS severe weather announcements no longer open with "Attention all stations."** Spoken text now starts directly with "The National Weather Service has issued a...".
