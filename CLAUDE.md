@@ -58,7 +58,7 @@ Because gunicorn runs `--workers 1 --threads 8`, all threads share a single proc
 
 ### AMI connection
 
-`AMIClient` (class in app.py ~line 664) is a raw TCP socket client to Asterisk Manager Interface on port 5038. It is a persistent connection managed by `_poll_loop`. Routes read from the AMI cache (`get_cached_status()`) rather than issuing live AMI commands — this makes most status reads sub-millisecond. Commands that must be sent live (connect/disconnect, restart, etc.) use `ami_send_command()`.
+`AMIClient` (class in app.py ~line 915) is a raw TCP socket client to Asterisk Manager Interface on port 5038. It is a persistent connection managed by `_poll_loop`. Routes read from the AMI cache (`get_cached_status()`) rather than issuing live AMI commands — this makes most status reads sub-millisecond. Commands that must be sent live (connect/disconnect, restart, etc.) use `ami_send_command()`.
 
 ### Database
 
@@ -72,7 +72,7 @@ Custom parser (not `configparser`) — `_collect_stanzas()`, `parse_stanza_setti
 
 ### Audio streaming
 
-Asterisk `MixMonitor` writes raw PCM to a FIFO (`/tmp/henwen_audio_<node>.sln`). `audio_relay.py` — a standalone process spawned by `_start_broadcast()` (~line 3902 in `app.py`), not a thread inside gunicorn — paces that PCM into strict 20ms frames (injecting silence when the node is quiet) and writes them to a second FIFO (`..._paced.sln`). ffmpeg reads that second FIFO directly and encodes WebM/Opus to its stdout. `_AudioBroadcast._read_loop` fans ffmpeg's stdout out to each client's `Queue`, and `/api/audio/stream/<node>` streams from that queue to the browser.
+Asterisk `MixMonitor` writes raw PCM to a FIFO (`/tmp/henwen_audio_<node>.sln`). `audio_relay.py` — a standalone process spawned by `_start_broadcast()` (~line 4710 in `app.py`), not a thread inside gunicorn — paces that PCM into strict 20ms frames (injecting silence when the node is quiet) and writes them to a second FIFO (`..._paced.sln`). ffmpeg reads that second FIFO directly and encodes WebM/Opus to its stdout. `_AudioBroadcast._read_loop` fans ffmpeg's stdout out to each client's `Queue`, and `/api/audio/stream/<node>` streams from that queue to the browser.
 
 The pacing loop runs in its own OS process specifically to avoid GIL contention: gunicorn's request handlers, the AMI poller, and other background threads sharing this worker's GIL can stall a real-time 20ms deadline long enough to be audible as a click or stutter. Running the frame loop in a separate process lets the kernel schedule it independently. The MSE live-edge controller in `status.html` keeps the browser at ~0.5s behind live edge using `playbackRate` adjustment, with a startup watchdog and stall-recovery rebuffer logic.
 

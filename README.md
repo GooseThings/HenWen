@@ -344,18 +344,28 @@ All settings are configured in the systemd service file (`/etc/systemd/system/He
 
 ```
 HenWen/
-├── app.py                      # Flask backend — all routes, AMI, scheduler threads
+├── app.py                    # Flask backend — all routes, AMI, scheduler threads
+├── audio_relay.py            # Standalone process that paces live audio into 20ms frames for streaming
 ├── templates/
-│   ├── index.html              # Manager shell (nav + page loader)
-│   ├── henwen-manager.html     # All manager pages (settings, connectors, users, etc.)
-│   ├── login.html              # Login / first-run account creation
-│   └── status.html             # Status Board / kiosk display (/status)
-├── requirements.txt            # Python dependencies (flask, gunicorn, werkzeug)
-├── HenWen.service             # systemd unit file template
-├── install.sh                  # Installer
-├── uninstall.sh                # Uninstaller
+│   ├── henwen-manager.html   # Manager shell + all manager pages (settings, connectors, users, etc.)
+│   ├── login.html            # Login / first-run account creation
+│   └── status.html           # Status Board / kiosk display (/status)
+├── static/
+│   ├── favicon.ico
+│   └── logo-512.png
+├── requirements.txt          # Python dependencies (flask, gunicorn, flask-wtf, flask-limiter, piper-tts)
+├── HenWen.service            # systemd unit file template
+├── install.sh                # Installer
+├── uninstall.sh              # Uninstaller
+├── ami-setup.sh              # Verifies/fixes the Asterisk AMI (manager.conf) configuration
 ├── README.md
-└── CHANGELOG.md
+├── CHANGELOG.md
+├── CLAUDE.md                 # Guidance for Claude Code when working in this repo
+├── open-issues.md            # Running log of code/security review findings
+├── LICENSE                   # GPL-3.0
+├── kiosk-example.jpg         # Older Status Board screenshot (unreferenced — superseded by kiosk-example.png below)
+├── kiosk-example.png         # Status Board screenshot embedded in this README
+└── manager-example.png       # Manager UI screenshot embedded in this README
 ```
 
 ---

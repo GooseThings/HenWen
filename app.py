@@ -2572,7 +2572,7 @@ def update_setting_in_content(content, section, key, value, enable=True):
 # ---------------------------------------------------------------------------
 # rpt.conf setting validation
 #
-# Mirrors the GENERAL_META / NODE_SECS metadata in templates/index.html
+# Mirrors the GENERAL_META / NODE_SECS metadata in templates/henwen-manager.html
 # (sourced from https://allstarlink.github.io/config/rpt_conf/). The web UI
 # already restricts these fields to dropdowns/number inputs, but a request
 # can bypass the UI entirely, so the same constraints are enforced here
