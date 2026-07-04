@@ -615,7 +615,7 @@ def check_auth():
             if not sid:
                 sid = secrets.token_hex(16)
                 session['sid'] = sid
-            touch_active_session(sid, session.get('username', ''))
+            touch_active_session(sid, session.get('username', ''), session.get('role', ''))
 
     if is_public:
         return None
@@ -1605,9 +1605,9 @@ _active_sessions_lock = threading.Lock()
 ACTIVE_SESSION_WINDOW = 90  # seconds of inactivity before a session drops out of the count
 
 
-def touch_active_session(sid, username):
+def touch_active_session(sid, username, role=''):
     with _active_sessions_lock:
-        _active_sessions[sid] = {'username': username, 'last_active': time.time()}
+        _active_sessions[sid] = {'username': username, 'role': role, 'last_active': time.time()}
 
 
 def remove_active_session(sid):
@@ -1617,13 +1617,39 @@ def remove_active_session(sid):
         _active_sessions.pop(sid, None)
 
 
-def get_active_user_count():
+def _active_sessions_snapshot():
+    """Prune sessions idle longer than ACTIVE_SESSION_WINDOW and return what's left."""
     cutoff = time.time() - ACTIVE_SESSION_WINDOW
     with _active_sessions_lock:
         stale = [sid for sid, info in _active_sessions.items() if info['last_active'] < cutoff]
         for sid in stale:
             del _active_sessions[sid]
-        return len(_active_sessions)
+        return list(_active_sessions.values())
+
+
+def get_active_user_count():
+    return len(_active_sessions_snapshot())
+
+
+def get_active_sessions_detail():
+    """Per-username detail (role, concurrent session count, seconds idle) behind
+    the superuser-only "who's logged in" panel — everyone else just sees the
+    count from get_active_user_count(). Multiple sessions under the same
+    account (e.g. several kiosk displays sharing one login) collapse into a
+    single row with a session count rather than duplicate entries."""
+    now = time.time()
+    by_user = {}
+    for info in _active_sessions_snapshot():
+        uname = info.get('username') or '(unknown)'
+        entry = by_user.setdefault(uname, {
+            'username': uname, 'role': info.get('role', ''),
+            'sessions': 0, 'idle_sec': None,
+        })
+        entry['sessions'] += 1
+        idle = now - info['last_active']
+        if entry['idle_sec'] is None or idle < entry['idle_sec']:
+            entry['idle_sec'] = idle
+    return sorted(by_user.values(), key=lambda u: u['username'].lower())
 
 
 def _record_keyed(node: str):
@@ -4195,6 +4221,18 @@ def api_status_board():
         "active_users":     get_active_user_count(),
         "connector_warning": _connector_upcoming_disconnect_all(),
     })
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/api/status/active_users")
+def api_status_active_users():
+    """Superuser-only detail behind the footer's 'Logged in: N' count — who's
+    actually logged in, their role, and how long each has been idle. Everyone
+    else (including admins) only ever sees the plain count from api_status_board."""
+    if session.get('role') != 'superuser':
+        return jsonify({"error": "Superuser access required"}), 403
+    resp = jsonify({"users": get_active_sessions_detail()})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 

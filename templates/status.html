@@ -562,7 +562,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
   <!-- Footer -->
   <footer class="footer">
-    <span>Logged in: <strong id="f-active-users">—</strong></span>
+    <span id="f-active-users-wrap" style="position:relative">
+      <span id="f-active-users-toggle">Logged in: <strong id="f-active-users">—</strong></span>
+      <div id="f-active-users-panel" style="display:none;position:absolute;bottom:100%;left:0;margin-bottom:6px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;min-width:170px;max-width:260px;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:50;font-size:0.78rem;line-height:1.6"></div>
+    </span>
     <span><a href="https://github.com/GooseThings/HenWen" target="_blank" rel="noopener"
              style="color:var(--text2);text-decoration:none" title="HenWen on GitHub">HenWen{% if henwen_version and henwen_version != 'unknown' %} {{ henwen_version }}{% endif %}</a></span>
   </footer>
@@ -1026,6 +1029,7 @@ async function refreshBoard() {
     /* Footer */
     var elActiveUsers = document.getElementById('f-active-users');
     if (elActiveUsers) elActiveUsers.textContent = (data.active_users != null) ? data.active_users : '—';
+    if (_activeUsersPanelOpen) refreshActiveUsersPanel();
 
     /* Re-render map whenever board data changes */
     updateMap();
@@ -1042,6 +1046,67 @@ function _histDuration(sec) {
   if (h) return h + 'h ' + m + 'm';
   if (m) return m + 'm';
   return s + 's';
+}
+
+/* ── "Who's logged in" panel (superuser-only) ──────────────────────────────
+   The footer's "Logged in: N" count is shown to every visitor, same as
+   before. Superusers can click it to see the actual usernames/roles behind
+   that number, via a superuser-gated API the Status Board itself (public,
+   no login) never calls. */
+var _activeUsersPanelOpen = false;
+
+function _activeUsersOutsideClick(e) {
+  var wrap = document.getElementById('f-active-users-wrap');
+  if (wrap && !wrap.contains(e.target)) hideActiveUsersPanel();
+}
+
+function hideActiveUsersPanel() {
+  var panel = document.getElementById('f-active-users-panel');
+  if (panel) panel.style.display = 'none';
+  _activeUsersPanelOpen = false;
+  document.removeEventListener('click', _activeUsersOutsideClick);
+}
+
+function renderActiveUsersPanel(users) {
+  var panel = document.getElementById('f-active-users-panel');
+  if (!panel) return;
+  if (!users || !users.length) {
+    panel.innerHTML = '<div style="opacity:.7">No active sessions</div>';
+    return;
+  }
+  panel.innerHTML = users.map(function(u) {
+    var idle  = (u.idle_sec < 5) ? 'active now' : ('idle ' + _histDuration(u.idle_sec));
+    var extra = (u.sessions > 1) ? ' · ' + u.sessions + ' sessions' : '';
+    return '<div style="display:flex;justify-content:space-between;gap:14px">' +
+             '<span>' + esc(u.username) + ' <span style="opacity:.65">(' + esc(u.role) + ')</span></span>' +
+             '<span style="opacity:.7;white-space:nowrap">' + esc(idle + extra) + '</span>' +
+           '</div>';
+  }).join('');
+}
+
+async function refreshActiveUsersPanel() {
+  var panel = document.getElementById('f-active-users-panel');
+  if (!panel) return;
+  try {
+    var r = await apiFetch('/api/status/active_users', {cache: 'no-store'});
+    if (!r.ok) { panel.innerHTML = '<div style="opacity:.7">Unavailable</div>'; return; }
+    var d = await r.json();
+    renderActiveUsersPanel(d.users || []);
+  } catch (e) {
+    panel.innerHTML = '<div style="opacity:.7">Unavailable</div>';
+  }
+}
+
+function toggleActiveUsersPanel(e) {
+  if (e) e.stopPropagation();
+  if (_activeUsersPanelOpen) { hideActiveUsersPanel(); return; }
+  var panel = document.getElementById('f-active-users-panel');
+  if (!panel) return;
+  panel.style.display = 'block';
+  panel.innerHTML = '<div style="opacity:.7">Loading…</div>';
+  _activeUsersPanelOpen = true;
+  document.addEventListener('click', _activeUsersOutsideClick);
+  refreshActiveUsersPanel();
 }
 
 async function refreshHistory() {
@@ -1436,6 +1501,22 @@ async function checkKioskSession() {
   /* Show Permanent checkbox only for admin/superuser */
   var pl = document.getElementById('perm-label');
   if (pl) pl.style.display = (window._kioskRole === 'admin' || window._kioskRole === 'superuser') ? '' : 'none';
+
+  /* "Logged in: N" is only clickable for superusers — everyone else (including
+     admins) just sees the plain count, same as today. */
+  var auToggle = document.getElementById('f-active-users-toggle');
+  if (auToggle) {
+    if (window._kioskRole === 'superuser') {
+      auToggle.style.cursor = 'pointer';
+      auToggle.title = "Click to see who's logged in";
+      auToggle.onclick = toggleActiveUsersPanel;
+    } else {
+      auToggle.style.cursor = '';
+      auToggle.title = '';
+      auToggle.onclick = null;
+      hideActiveUsersPanel();
+    }
+  }
 }
 
 /* ── Favorites sidebar ── */
