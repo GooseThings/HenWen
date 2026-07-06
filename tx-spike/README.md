@@ -1,7 +1,7 @@
 # Browser-transmitter spike (phase 1)
 
 Proves the chosen architecture for browser-mic TX before any product code:
-**browser WebRTC (JsSIP over WSS) → Asterisk PJSIP → `Rpt(643930,P)`** —
+**browser WebRTC (JsSIP over WSS) → Asterisk PJSIP → `Rpt(<node>,P)`** —
 phone-control mode, PTT = DTMF `*99`, unkey = `#`. Audio is G.711 µ-law
 end-to-end (WebRTC-mandatory codec, app_rpt native — no transcoding, no
 Opus module needed). No audio touches the HenWen/Flask process.
@@ -16,13 +16,20 @@ Opus module needed). No audio touches the HenWen/Flask process.
   `#tryinclude "custom/extensions.conf"` hook ASL3 already ships
 - `apply.sh` — backs everything up, applies the above, live-loads the
   modules (no Asterisk restart), adds the Apache `/asterisk-ws` WSS proxy
-  (configtest-gated), generates the SIP secret, prints test credentials
+  (configtest-gated), generates the SIP secret, prints test credentials.
+  Derives the local node number from `rpt.conf` (same rule as `app.py`'s
+  `get_node_numbers()`: first top-level `[NNNN]` stanza) and substitutes it
+  into `pjsip.snippet`/`extensions-custom.snippet` — pass it explicitly as
+  `sudo bash apply.sh <node>` to override
 - `rollback.sh` — restores the backups
 - `check-ports.sh` — verifies every network requirement (local listeners,
   WSS handshake, STUN/NAT probe from the RTP range) and reports PASS/FAIL
 - `tx-test.html` — standalone debug page, deliberately NOT web-served
   (it was removed from `static/` once the kiosk integration landed); to
-  use it, temporarily copy it into `static/` and remove it afterward
+  use it, temporarily copy it into `static/` and remove it afterward. Once
+  served through HenWen (and logged in as admin/superuser in that browser),
+  it self-populates username/password/dial from `/api/tx/config` — no
+  editing needed regardless of which node it's running on
 
 ## Network requirements (router port forwards)
 

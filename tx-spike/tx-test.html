@@ -26,9 +26,9 @@
 <div id="linkok">No nodes linked — OK to key for a brief test.</div>
 
 <label>WSS URL</label><input id="wss" value="">
-<label>SIP username</label><input id="user" value="henwen-tx">
+<label>SIP username</label><input id="user" value="">
 <label>SIP password</label><input id="pass" type="password" value="">
-<label>Dial (2 + node = phone-control mode)</label><input id="dest" value="2643930">
+<label>Dial (2 + node = phone-control mode)</label><input id="dest" value="">
 
 <div>
   <button id="btn-reg">1. Connect &amp; Register</button>
@@ -55,6 +55,19 @@ function setStatus(s) { document.getElementById('status').textContent = s; }
 
 /* Default the WSS URL to this page's own host */
 document.getElementById('wss').value = 'wss://' + location.host + '/asterisk-ws';
+
+/* Pull username/dial (and password, since this test page is itself
+   admin-gated by HenWen's session) from the live /api/tx/config instead of
+   a hardcoded node number — keeps this page correct on any node HenWen is
+   installed on without editing the file. Requires an active HenWen admin
+   session in this browser; falls back to blank/manual entry otherwise. */
+fetch('/api/tx/config').then(function(r){ return r.json(); }).then(function(d){
+  if (!d.enabled) { log('TX not configured server-side (no secret file)'); return; }
+  document.getElementById('user').value = d.username || '';
+  document.getElementById('pass').value = d.password || '';
+  document.getElementById('dest').value = d.dial || '';
+  log('Loaded config for node ' + d.node);
+}).catch(function(e){ log('Could not load /api/tx/config: ' + e.message); });
 
 /* Live linked-node guard: poll the board API; keying with other nodes
    connected is forbidden during the spike. */

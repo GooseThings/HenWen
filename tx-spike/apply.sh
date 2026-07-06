@@ -2,10 +2,10 @@
 # HenWen browser-transmitter spike — apply script.
 #
 # Enables the PJSIP/WebRTC stack in the local ASL3 Asterisk and wires the
-# Apache WSS proxy, so a browser can register and call into node 643930 in
-# phone-control mode (PTT = *99, unkey = #). Everything is additive and
-# marker-guarded (safe to re-run); backups of every touched file are taken
-# first. Companion: rollback.sh restores them.
+# Apache WSS proxy, so a browser can register and call into this machine's
+# own node in phone-control mode (PTT = *99, unkey = #). Everything is
+# additive and marker-guarded (safe to re-run); backups of every touched
+# file are taken first. Companion: rollback.sh restores them.
 #
 # Touches:  /etc/asterisk/modules.conf   (append module loads)
 #           /etc/asterisk/http.conf      (enabled=yes on loopback bind)
@@ -21,8 +21,22 @@ MARKER="HenWen browser transmitter"
 STAMP=$(date +%Y%m%d-%H%M%S)
 BACKUP_DIR="/root/henwen-browsertx-backup-$STAMP"
 APACHE_CONF="/etc/apache2/sites-enabled/henwen-ssl.conf"
+RPT_CONF_PATH="${RPT_CONF_PATH:-/etc/asterisk/rpt.conf}"
 
 [ "$(id -u)" = 0 ] || { echo "Run as root (sudo)"; exit 1; }
+
+# Local node number: same convention app.py's get_node_numbers() uses
+# (first top-level [NNNN] stanza in rpt.conf, 4-7 digits) so the TX feature
+# always keys the same node HenWen itself treats as primary. Pass it
+# explicitly as $1 to override (e.g. multiple node stanzas and you want a
+# specific one, or rpt.conf isn't in the default place).
+NODENUM="${1:-}"
+if [ -z "$NODENUM" ]; then
+  [ -f "$RPT_CONF_PATH" ] || { echo "rpt.conf not found at $RPT_CONF_PATH — pass the node number explicitly: $0 <node>"; exit 1; }
+  NODENUM=$(grep -oE '^\[[0-9]{4,7}\]' "$RPT_CONF_PATH" | head -1 | tr -d '[]')
+fi
+[[ "$NODENUM" =~ ^[0-9]{4,7}$ ]] || { echo "Could not determine a valid node number from $RPT_CONF_PATH — pass it explicitly: $0 <node>"; exit 1; }
+echo "== Using node $NODENUM"
 
 echo "== Backing up to $BACKUP_DIR"
 mkdir -p "$BACKUP_DIR"
@@ -50,7 +64,7 @@ if grep -q "$MARKER" /etc/asterisk/pjsip.conf; then
   echo "   already patched, skipping (existing secret kept)"
 else
   TXSECRET=$(openssl rand -hex 16)
-  sed "s/__TXSECRET__/$TXSECRET/" "$SPIKE_DIR/pjsip.snippet" >> /etc/asterisk/pjsip.conf
+  sed -e "s/__TXSECRET__/$TXSECRET/" -e "s/__NODENUM__/$NODENUM/g" "$SPIKE_DIR/pjsip.snippet" >> /etc/asterisk/pjsip.conf
   printf '%s\n' "$TXSECRET" > /etc/asterisk/henwen-tx.secret
   chown asterisk:asterisk /etc/asterisk/henwen-tx.secret
   chmod 600 /etc/asterisk/henwen-tx.secret
@@ -61,7 +75,7 @@ mkdir -p /etc/asterisk/custom
 if [ -f /etc/asterisk/custom/extensions.conf ] && grep -q "$MARKER" /etc/asterisk/custom/extensions.conf; then
   echo "   already patched, skipping"
 else
-  cat "$SPIKE_DIR/extensions-custom.snippet" >> /etc/asterisk/custom/extensions.conf
+  sed "s/__NODENUM__/$NODENUM/g" "$SPIKE_DIR/extensions-custom.snippet" >> /etc/asterisk/custom/extensions.conf
   chown asterisk:asterisk /etc/asterisk/custom/extensions.conf
 fi
 
@@ -118,7 +132,7 @@ echo "Done. SIP credentials for the test page:"
 echo "  WSS URL:  wss://goosethings.ddns.net/asterisk-ws"
 echo "  Username: henwen-tx"
 echo "  Password: $(cat /etc/asterisk/henwen-tx.secret)"
-echo "  Dial:     2643930   (node 643930, phone-control mode: *99 = PTT, # = unkey)"
+echo "  Dial:     2$NODENUM   (node $NODENUM, phone-control mode: *99 = PTT, # = unkey)"
 echo "Port check: sudo bash $SPIKE_DIR/check-ports.sh   (verifies forwards/NAT/WSS)"
 echo "Required router forwards: TCP 443, UDP 10000-10100 -> this machine"
 echo "Rollback:  sudo bash $SPIKE_DIR/rollback.sh"
