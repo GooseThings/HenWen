@@ -346,6 +346,24 @@ input:checked + .slider::before  { transform: translateX(16px); background: var(
   padding: 10px; height: 220px; overflow-y: auto; color: #90a0b0;
 }
 
+/* Dashboard's Diagnostics feed grows to fill the rest of the browser window
+   instead of sitting in a fixed 220px box — everything above it (stat grid,
+   Quick Actions) keeps its natural height; only this card's log stretches.
+   Other .log-panel uses (Node Control, Asterisk Console, etc.) are untouched.
+   This must be a definite `height`, not `min-height`: a flex container only
+   shrinks its children to resolve overflow against a definite size. With
+   min-height, wrapped content (the stat grid dropping to 3 columns, the
+   header's filter controls wrapping to a second line on a narrower window)
+   simply grew the container past the viewport instead of shrinking the log
+   — confirmed by rendering this page headless at a range of window sizes.
+   overflow-y:auto is a last-resort safety net for the rare case where even
+   the fully-collapsed card can't fit — it scrolls internally instead of
+   pushing the browser's own page scrollbar. */
+#page-dashboard.active { display: flex; flex-direction: column; height: calc(100vh - 40px); overflow-y: auto; }
+.diag-card { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.diag-card > .card-header, .diag-card > #diag-note { flex-shrink: 0; }
+#main-log { flex: 1; height: auto; min-height: 0; }
+
 .theme-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 10px; }
 .theme-swatch {
   border: 2px solid var(--border); border-radius: var(--radius);
@@ -456,6 +474,15 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
   .sidebar-nav { display: none; border-top: 1px solid var(--border); max-height: 60vh; overflow-y: auto; }
   .sidebar-nav.open { display: block; }
   .main { padding: 12px; }
+  /* The viewport-fill trick above only holds up in the desktop flex-row
+     layout, where .sidebar's height is a known 100vh. Here .layout stacks
+     into a column, so the sidebar sits above .main with its own height
+     that varies with nav-open state — there's no reliable viewport-relative
+     figure to subtract, so fall back to a normal fixed-height log instead,
+     same as every other .log-panel. */
+  #page-dashboard.active { display: block; height: auto; overflow-y: visible; }
+  .diag-card { flex: none; }
+  #main-log { flex: none; height: 300px; min-height: 0; }
   .form-row { grid-template-columns: 1fr; }
   .stat-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; }
   .toggle-row { flex-wrap: wrap; }
@@ -586,7 +613,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
       </div>
     </div>
 
-    <div class="card">
+    <div class="card diag-card">
       <div class="card-header">
         <h2>Diagnostics <span class="muted" style="font-size:.8rem;font-weight:400">HenWen + Asterisk</span></h2>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">

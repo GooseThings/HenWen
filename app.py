@@ -480,6 +480,27 @@ def get_db():
         last_poll_error    TEXT
     )""")
     conn.commit()
+    # Kiosk-editable scheduled-net reminders — shared across all visitors (not
+    # per-user like favorites), since a net schedule is repeater-wide info.
+    # A row is either 'weekly' (repeats every week on `weekday`, 0=Monday..
+    # 6=Sunday) or 'once' (a single date in `net_date`). `time` is always
+    # kiosk-local HH:MM: the frontend already knows the kiosk's configured
+    # timezone (same Intl-based logic the clock itself uses), so "is this
+    # scheduled for today / how many minutes away" is computed client-side
+    # rather than duplicating timezone math here.
+    conn.execute("""CREATE TABLE IF NOT EXISTS net_schedules (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        name       TEXT    NOT NULL,
+        node       TEXT    NOT NULL DEFAULT '',
+        recurrence TEXT    NOT NULL DEFAULT 'weekly',
+        weekday    INTEGER,
+        net_date   TEXT,
+        time       TEXT    NOT NULL,
+        notes      TEXT    NOT NULL DEFAULT '',
+        created_by TEXT    NOT NULL DEFAULT '',
+        created_at TEXT    DEFAULT (datetime('now'))
+    )""")
+    conn.commit()
     conn.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -564,14 +585,16 @@ def check_auth():
                         'api_status_history',
                         'api_login', 'api_session', 'api_csrf_token',
                         'api_favorites', 'api_favorites_status',
-                        'api_kiosk_settings_get'}
+                        'api_kiosk_settings_get',
+                        'api_nets_list'}
     # Any logged-in user (superuser / admin / user) — live audio requires a
     # session (previously public, letting anyone on the network listen and
     # spawn server-side encoder/relay processes with no authentication).
     _USER_OR_ABOVE = {'api_status_connect', 'api_status_disconnect',
                       'api_fav_add', 'api_fav_delete', 'api_fav_label',
                       'api_audio_stream', 'api_audio_check', 'api_audio_stop',
-                      'api_audio_client_log'}
+                      'api_audio_client_log',
+                      'api_nets_create', 'api_nets_update', 'api_nets_delete'}
 
     endpoint  = request.endpoint
     is_public = endpoint in _PUBLIC
@@ -1129,7 +1152,7 @@ class AMIClient:
         per connected node containing the remote node number.
         """
         status = {"keyed": False, "connected": [], "links": {}, "raw": [], "lstats": [],
-                  "link_connect_time": {}, "link_direction": {}, "link_connect_state": {}}
+                  "link_connect_seconds": {}, "link_direction": {}, "link_connect_state": {}}
 
         # Primary: rpt show variables — RPT_RXKEYED for local keyed state,
         # RPT_ALINKS for per-link keyed state of already-connected nodes.
@@ -1166,9 +1189,18 @@ class AMIClient:
                     status["connected"].append(cn)
                 # DIRECTION is the 4th column (index 3), "IN" or "OUT"
                 status["link_direction"][cn] = parts[3]
-                # CONNECT_TIME is the 5th column (index 4), format HH:MM:SS
-                if re.match(r'^\d+:\d{2}:\d{2}$', parts[4]):
-                    status["link_connect_time"][cn] = parts[4]
+                # CONNECT_TIME is the 5th column (index 4). Confirmed against
+                # app_rpt's rpt_do_lstats (rpt_cli.c): snprintf(conntime, 20,
+                # "%02d:%02d:%02d:%02d", hours, minutes, seconds, <sub-second>)
+                # — four colon-separated fields, not three. Asterisk itself
+                # tracks this counter from the moment the link came up, so
+                # re-reading it fresh on every poll makes elapsed connect time
+                # immune to both a HenWen restart and a kiosk browser refresh —
+                # there's no HenWen-side or client-side state to lose.
+                m_ct = re.match(r'^(\d+):(\d{2}):(\d{2}):\d+$', parts[4])
+                if m_ct:
+                    h, mnt, s = int(m_ct.group(1)), int(m_ct.group(2)), int(m_ct.group(3))
+                    status["link_connect_seconds"][cn] = h * 3600 + mnt * 60 + s
                 # CONNECT_STATE is the 6th column (index 5)
                 if len(parts) >= 6:
                     status["link_connect_state"][cn] = parts[5].upper()
@@ -3897,6 +3929,138 @@ def api_fav_label():
         return jsonify({"error": str(e)}), 500
 
 
+# ── Scheduled-net calendar reminders ──────────────────────────────────────────
+# Shared, kiosk-editable list of recurring/one-time net reminders. Reading the
+# list is public (it drives the weather-bar's "net today" display for every
+# visitor, logged in or not); adding/editing/deleting requires a login, same
+# permission level as Favorites, to keep an open kiosk touchscreen from being
+# vandalized by an anonymous visitor.
+_NET_TIME_RE = re.compile(r'^([01]\d|2[0-3]):[0-5]\d$')
+
+
+def _validate_net_fields(data, existing=None):
+    """Validate incoming fields for create (existing=None) or update
+    (existing=the current DB row, for a PATCH). Returns (fields_dict, error).
+
+    For an update, only keys actually present in `data` are validated/written
+    — except recurrence/weekday/net_date, which are validated as a group
+    whenever the caller touches any one of them, falling back to the
+    existing row's values for the ones they didn't send. That keeps a PATCH
+    that only changes, say, weekday from leaving the row with a stale
+    net_date from a previous 'once' schedule, or vice versa."""
+    fields  = {}
+    partial = existing is not None
+
+    if "name" in data or not partial:
+        name = str(data.get("name", "")).strip()
+        if not name:
+            return None, "Name is required"
+        if len(name) > 100:
+            return None, "Name must be 100 characters or fewer"
+        fields["name"] = name
+
+    if "node" in data or not partial:
+        node = str(data.get("node", "")).strip()
+        if len(node) > 50:
+            return None, "Node must be 50 characters or fewer"
+        fields["node"] = node
+
+    if "notes" in data or not partial:
+        notes = str(data.get("notes", "")).strip()
+        if len(notes) > 500:
+            return None, "Notes must be 500 characters or fewer"
+        fields["notes"] = notes
+
+    if "time" in data or not partial:
+        net_time = str(data.get("time", "")).strip()
+        if not _NET_TIME_RE.match(net_time):
+            return None, "Time must be in 24-hour HH:MM format"
+        fields["time"] = net_time
+
+    touches_recurrence_group = bool({"recurrence", "weekday", "net_date"} & set(data))
+    if touches_recurrence_group or not partial:
+        recurrence = str(data.get("recurrence", existing["recurrence"] if partial else "")).strip()
+        if recurrence not in ("weekly", "once"):
+            return None, "recurrence must be 'weekly' or 'once'"
+        fields["recurrence"] = recurrence
+        if recurrence == "weekly":
+            weekday_raw = data.get("weekday", existing["weekday"] if partial else None)
+            try:
+                weekday = int(weekday_raw)
+            except (TypeError, ValueError):
+                weekday = -1
+            if not (0 <= weekday <= 6):
+                return None, "weekday must be 0 (Monday) through 6 (Sunday)"
+            fields["weekday"]  = weekday
+            fields["net_date"] = None
+        else:
+            net_date = str(data.get("net_date", existing["net_date"] if partial else "")).strip()
+            try:
+                datetime.strptime(net_date, "%Y-%m-%d")
+            except ValueError:
+                return None, "net_date must be a valid YYYY-MM-DD date"
+            fields["net_date"] = net_date
+            fields["weekday"]  = None
+
+    return fields, None
+
+
+@app.route("/api/nets")
+def api_nets_list():
+    db   = get_db()
+    rows = db.execute("SELECT * FROM net_schedules ORDER BY name COLLATE NOCASE").fetchall()
+    resp = jsonify([dict(r) for r in rows])
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/api/nets", methods=["POST"])
+def api_nets_create():
+    data = request.json or {}
+    fields, err = _validate_net_fields(data)
+    if err:
+        return jsonify({"error": err}), 400
+    fields["created_by"] = session.get("username", "")
+    db = get_db()
+    db.execute(
+        "INSERT INTO net_schedules (name, node, recurrence, weekday, net_date, time, notes, created_by) "
+        "VALUES (:name, :node, :recurrence, :weekday, :net_date, :time, :notes, :created_by)",
+        fields
+    )
+    db.commit()
+    row = db.execute("SELECT * FROM net_schedules WHERE rowid=last_insert_rowid()").fetchone()
+    log("INFO", f"[NETS] Created '{fields['name']}' by {fields['created_by'] or 'unknown'}")
+    return jsonify(dict(row)), 201
+
+
+@app.route("/api/nets/<int:net_id>", methods=["PATCH"])
+def api_nets_update(net_id):
+    db  = get_db()
+    row = db.execute("SELECT * FROM net_schedules WHERE id=?", (net_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+    data = request.json or {}
+    fields, err = _validate_net_fields(data, existing=row)
+    if err:
+        return jsonify({"error": err}), 400
+    if not fields:
+        return jsonify(dict(row))
+    set_clause = ", ".join(f"{k}=:{k}" for k in fields)
+    fields["id"] = net_id
+    db.execute(f"UPDATE net_schedules SET {set_clause} WHERE id=:id", fields)
+    db.commit()
+    row = db.execute("SELECT * FROM net_schedules WHERE id=?", (net_id,)).fetchone()
+    return jsonify(dict(row))
+
+
+@app.route("/api/nets/<int:net_id>", methods=["DELETE"])
+def api_nets_delete(net_id):
+    db = get_db()
+    db.execute("DELETE FROM net_schedules WHERE id=?", (net_id,))
+    db.commit()
+    return jsonify({"success": True})
+
+
 # ── AllStarLink stats proxy ───────────────────────────────────────────────────
 
 @app.route("/api/nodestats/<node>")
@@ -4136,7 +4300,7 @@ def api_status_board():
         info     = lookup_node(node)
         cached   = get_cached_status(node)
         connected_details = []
-        lct = cached.get("link_connect_time", {})
+        lcs = cached.get("link_connect_seconds", {})
         with _link_stats_lock:
             ls_snapshot = dict(_link_stats)
         node_str_local = str(node)
@@ -4181,7 +4345,7 @@ def api_status_board():
                 "location":       cn_loc,
                 "keyed":          link_info.get("keyed", False),
                 "mode":           link_info.get("mode", ""),  # 'T' = transmit/transceive, 'R' = monitor/receive-only
-                "connect_time":   lct.get(cn, ""),
+                "connect_elapsed_sec": lcs.get(cn),
                 "keyups":         ls.get("keyups", 0),
                 "last_keyed":     ls.get("last_keyed"),
                 "lat":            cn_coords["lat"] if cn_coords else None,

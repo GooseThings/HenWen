@@ -115,6 +115,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   background: var(--bg2); border: 1px solid var(--border); border-radius: 7px;
   padding: 5px 14px; display: flex; align-items: center; gap: 14px; flex-shrink: 0;
   font-size: 0.85rem; overflow: hidden; min-height: 32px;
+  transition: background-color .3s, border-color .3s;
 }
 .weather-location { color: var(--accent); font-weight: 600; white-space: nowrap; flex-shrink: 0; }
 .weather-sep { color: var(--border); flex-shrink: 0; }
@@ -122,6 +123,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .weather-item { color: var(--text2); white-space: nowrap; }
 .weather-item strong { color: var(--text); }
 .weather-loading { color: var(--text2); font-style: italic; }
+/* A net scheduled today within an hour of its start (either side) highlights
+   the whole bar in the same orange as the Favorites ("★ Fav") button, so the
+   "something needs attention" color language stays consistent across the kiosk. */
+.weather-bar-alert { background: rgba(232,113,10,.10); border-color: rgba(232,113,10,.5); }
 
 /* ── Content area: Node info | Connected/Map | Favorites | Global Activity (outer 2 + node full height) ── */
 .content-area { display: grid; grid-template-columns: 210px 1fr 280px 280px; grid-template-rows: 55fr 45fr; gap: 10px; flex: 1; min-height: 0; }
@@ -381,11 +386,13 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   .header-logo { height: 44px; width: 44px; }
   .header-brand { font-size: 0.8rem; }
   .header-brand strong { font-size: 0.92rem; }
-  .header-clock { font-size: 1.7rem; order: 3; flex-basis: 100%; text-align: center; }
+  .header-clock { font-size: 1.7rem; }
+  .header-clock-wrap { order: 3; flex-basis: 100%; justify-content: center; }
   .header-actions { gap: 6px; }
 
-  .weather-bar { min-height: 0; overflow: visible; }
+  .weather-bar { min-height: 0; overflow: visible; flex-wrap: wrap; }
   .weather-items { overflow: visible; }
+  #weather-net-today { flex-basis: 100%; }
 
   /* Single scrolling column. Order follows what a kiosk visitor checks
      first on a phone: their own node, who's connected to it, then the
@@ -450,7 +457,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       <img class="header-logo" src="/static/logo-512.png" alt="HenWen">
       <strong>HenWen</strong> <span>KIOSK</span>
     </div>
-    <div class="header-clock" id="clock">--:--:--</div>
+    <div class="header-clock-wrap" style="display:flex;align-items:center;gap:10px">
+      <div class="header-clock" id="clock">--:--:--</div>
+      <button class="btn-icon" id="net-cal-btn" onclick="openNetModal()" title="Net Schedule — scheduled net reminders">&#128197;</button>
+    </div>
     <div class="header-actions">
       <div id="kiosk-user-bar" style="display:none;align-items:center;gap:8px;font-size:0.75rem">
         <span id="kiosk-username" style="color:var(--text2)"></span>
@@ -467,7 +477,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
   <!-- Weather bar -->
   <div class="weather-bar" id="weather-bar">
-    <span class="weather-loading">Loading weather&hellip;</span>
+    <div id="weather-content" style="display:flex;align-items:center;gap:14px;flex:1;min-width:0;overflow:hidden">
+      <span class="weather-loading">Loading weather&hellip;</span>
+    </div>
+    <div id="weather-net-today" style="display:none;flex-shrink:0"></div>
   </div>
 
   <!-- Content -->
@@ -588,6 +601,58 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     </div>
   </div>
 
+  <!-- Net Schedule modal -->
+  <div id="net-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;align-items:center;justify-content:center">
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:22px 26px;width:520px;max-width:92vw;max-height:86vh;overflow-y:auto">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+        <div style="font-size:0.95rem;font-weight:700">&#128197; Net Schedule</div>
+        <button onclick="closeNetModal()" style="background:none;border:none;color:var(--text2);font-size:1.1rem;cursor:pointer;line-height:1;padding:2px 6px">&#10005;</button>
+      </div>
+
+      <div id="net-form-box" style="background:var(--bg3);border:1px solid var(--border);border-radius:7px;padding:12px 14px;margin-bottom:14px">
+        <input type="hidden" id="net-edit-id" value="">
+        <div style="font-size:0.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--text2);margin-bottom:8px" id="net-form-title">Add a Net Reminder</div>
+        <input id="net-f-name" type="text" placeholder="Net name (e.g. Monday Night Traffic Net)" maxlength="100"
+               style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:6px 9px;border:1px solid var(--border);border-radius:5px;background:var(--bg2);color:var(--text);font-size:0.85rem">
+        <input id="net-f-node" type="text" placeholder="Node (optional)" maxlength="50"
+               style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:6px 9px;border:1px solid var(--border);border-radius:5px;background:var(--bg2);color:var(--text);font-size:0.85rem">
+        <div style="display:flex;gap:14px;margin-bottom:6px;font-size:0.82rem;color:var(--text2)">
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer">
+            <input type="radio" name="net-f-recur" value="weekly" checked onchange="netFormRecurrenceChanged()"> Weekly
+          </label>
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer">
+            <input type="radio" name="net-f-recur" value="once" onchange="netFormRecurrenceChanged()"> One-time date
+          </label>
+        </div>
+        <select id="net-f-weekday"
+                style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:6px 9px;border:1px solid var(--border);border-radius:5px;background:var(--bg2);color:var(--text);font-size:0.85rem">
+          <option value="0">Monday</option>
+          <option value="1">Tuesday</option>
+          <option value="2">Wednesday</option>
+          <option value="3">Thursday</option>
+          <option value="4">Friday</option>
+          <option value="5">Saturday</option>
+          <option value="6">Sunday</option>
+        </select>
+        <input id="net-f-date" type="date"
+               style="display:none;width:100%;box-sizing:border-box;margin-bottom:6px;padding:6px 9px;border:1px solid var(--border);border-radius:5px;background:var(--bg2);color:var(--text);font-size:0.85rem">
+        <input id="net-f-time" type="time"
+               style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:6px 9px;border:1px solid var(--border);border-radius:5px;background:var(--bg2);color:var(--text);font-size:0.85rem">
+        <textarea id="net-f-notes" placeholder="Notes (optional)" maxlength="500" rows="2"
+               style="width:100%;box-sizing:border-box;margin-bottom:8px;padding:6px 9px;border:1px solid var(--border);border-radius:5px;background:var(--bg2);color:var(--text);font-size:0.85rem;resize:vertical"></textarea>
+        <div style="display:flex;gap:8px">
+          <button onclick="saveNet()" style="flex:1;padding:7px;background:var(--accent);border:none;border-radius:5px;color:var(--bg);font-weight:600;cursor:pointer;font-size:0.85rem" id="net-f-save-btn">Save</button>
+          <button onclick="resetNetForm()" style="padding:7px 14px;background:var(--bg2);border:1px solid var(--border);border-radius:5px;color:var(--text2);cursor:pointer;font-size:0.85rem">Clear</button>
+        </div>
+        <div id="net-f-error" style="margin-top:6px;font-size:0.78rem;color:var(--red);min-height:1em"></div>
+      </div>
+
+      <div id="net-list" style="display:flex;flex-direction:column;gap:6px">
+        <div class="empty-msg" style="font-size:0.8rem">Loading&hellip;</div>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <div id="sb-toast"></div>
@@ -644,6 +709,12 @@ function relTime(ts) {
 }
 var _clockFormat = '24';
 var _clockTZ     = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+// Declared here (not down with the rest of the net-schedule code below) because
+// tickClock() calls updateWeatherNetBadge() on its very first, synchronous
+// invocation — before script execution would otherwise reach that later var
+// statement — and a var's assignment (unlike its hoisted declaration) only
+// takes effect when execution actually reaches that line.
+var _nets = [];
 
 function nowStr() {
   try {
@@ -671,6 +742,9 @@ function nowStr() {
 /* ── Clock ── */
 function tickClock() {
   document.getElementById('clock').textContent = nowStr();
+  updateWeatherNetBadge();
+  var netModal = document.getElementById('net-modal-overlay');
+  if (netModal && netModal.style.display !== 'none') renderNetList();
 }
 setInterval(tickClock, 1000); tickClock();
 
@@ -698,6 +772,8 @@ var _connectedNodes     = [];  /* [{node,callsign,location,lat,lon,host_lat,host
 var _lastActivityPoints = [];  /* combined activity list */
 var _globalWindowMin    = 15;  /* global-activity display window, from the server */
 var _mapFitted          = false;
+var _popupOpen          = false;  /* a pin popup is open — hold off re-rendering */
+var _mapDirty           = false;  /* data changed while a popup was open */
 
 /* Tile layer definitions: darkFilter=true means keep OSM invert CSS */
 var _tileDefs = {
@@ -737,6 +813,20 @@ function initMap() {
   changeTiles(saved);
 
   _map.on('zoomend', function() { updateMap(); });
+
+  /* While a pin popup is open, updateMap() defers instead of rendering —
+     re-rendering removes every marker, which would close the popup a second
+     or two after the user opened it. Catch up once the popup closes. The
+     setTimeout matters: clicking pin B while pin A's popup is open fires
+     popupclose(A) then popupopen(B), and rendering synchronously in between
+     would remove pin B just as its popup opens. */
+  _map.on('popupopen', function() { _popupOpen = true; });
+  _map.on('popupclose', function() {
+    _popupOpen = false;
+    setTimeout(function() {
+      if (!_popupOpen && _mapDirty) updateMap();
+    }, 0);
+  });
 }
 
 function pinSize() {
@@ -794,6 +884,8 @@ function makeStarIcon(color) {
 /* ── Master map renderer ── */
 function updateMap() {
   if (!_map) return;
+  if (_popupOpen) { _mapDirty = true; return; }
+  _mapDirty = false;
 
   var localNode = (window._lastBoardNodes && window._lastBoardNodes[0])
                   ? window._lastBoardNodes[0].node : '';
@@ -885,7 +977,7 @@ async function refreshWeather() {
     var r = await apiFetch('/api/status/weather');
     if (!r.ok) return;
     var w = await r.json();
-    var bar = document.getElementById('weather-bar');
+    var bar = document.getElementById('weather-content');
     if (w.error && !w.temp_f && !w.temp_c) {
       bar.innerHTML = '<span class="weather-loading">Weather unavailable</span>';
       return;
@@ -906,6 +998,272 @@ async function refreshWeather() {
     html += '</div>';
     bar.innerHTML = html;
   } catch(e) {}
+}
+
+/* ── Scheduled nets (calendar reminders) ──────────────────────────────────
+   Schedules are stored as kiosk-local wall-clock time (weekday+HH:MM, or a
+   plain date+HH:MM for a one-off) — no timezone is stored server-side. All
+   "is this today / how many minutes away" math happens here, against the
+   same kiosk-configured timezone (_clockTZ) the clock itself already uses,
+   so a net always lines up with whatever time the kiosk is displaying.
+   (_nets itself is declared up near _clockFormat/_clockTZ — see the comment
+   there for why.) ── */
+var _WEEKDAY_NAMES = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+
+function _kioskNowParts(refDate) {
+  var parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: _clockTZ, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(refDate || new Date());
+  var o = {};
+  parts.forEach(function(p) { if (p.type !== 'literal') o[p.type] = parseInt(p.value, 10); });
+  if (o.hour === 24) o.hour = 0; // some engines report midnight as "24" under h23
+  return o;
+}
+
+// 0=Monday..6=Sunday for "today" in the kiosk timezone (matches the <select>
+// in the Add form). Date.UTC(y,m,d) with no time-of-day is only used here as
+// a calendar helper to recover the day-of-week — never compared against a
+// real instant, so it doesn't need to account for the kiosk's UTC offset.
+function _kioskWeekdayToday(refDate) {
+  var p = _kioskNowParts(refDate);
+  var jsDay = new Date(Date.UTC(p.year, p.month - 1, p.day)).getUTCDay(); // 0=Sun..6=Sat
+  return (jsDay + 6) % 7;
+}
+
+function _formatNetTime(hhmm) {
+  var t = (hhmm || '0:0').split(':');
+  var h = parseInt(t[0], 10) || 0, m = parseInt(t[1], 10) || 0;
+  if (_clockFormat === '12') {
+    var ap  = h >= 12 ? 'PM' : 'AM';
+    var h12 = h % 12; if (h12 === 0) h12 = 12;
+    return h12 + ':' + (m < 10 ? '0' : '') + m + ' ' + ap;
+  }
+  return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
+}
+
+function _netScheduleLabel(net) {
+  if (net.recurrence === 'once') return net.net_date + ' at ' + _formatNetTime(net.time);
+  return 'Weekly · ' + (_WEEKDAY_NAMES[net.weekday] || '?') + ' at ' + _formatNetTime(net.time);
+}
+
+function _netCountdownLabel(min) {
+  if (min == null) return '';
+  if (min < 0) {
+    var ago = Math.round(-min);
+    return ago < 60 ? (ago + 'm ago') : (Math.floor(ago / 60) + 'h ' + (ago % 60) + 'm ago');
+  }
+  if (min === 0) return 'starting now';
+  return min < 60 ? ('in ' + min + 'm') : ('in ' + Math.floor(min / 60) + 'h ' + (min % 60) + 'm');
+}
+
+// Minutes from now (kiosk-local) until this net's *next* occurrence — used
+// to sort the calendar list soonest-first. Weekly nets roll to next week
+// once today's slot has passed; one-time nets with no valid date sort last.
+function netMinutesUntil(net, refDate) {
+  var now   = _kioskNowParts(refDate);
+  var nowMs = Date.UTC(now.year, now.month - 1, now.day, now.hour, now.minute);
+  var t  = (net.time || '0:0').split(':');
+  var th = parseInt(t[0], 10) || 0, tm = parseInt(t[1], 10) || 0;
+
+  if (net.recurrence === 'once') {
+    var d = (net.net_date || '').split('-').map(function(x) { return parseInt(x, 10); });
+    if (d.length !== 3 || !d[0]) return null;
+    var targetMs = Date.UTC(d[0], d[1] - 1, d[2], th, tm);
+    return Math.round((targetMs - nowMs) / 60000);
+  }
+
+  if (typeof net.weekday !== 'number') return null;
+  var todayWd    = _kioskWeekdayToday(refDate);
+  var daysAhead  = (net.weekday - todayWd + 7) % 7;
+  var targetMs   = Date.UTC(now.year, now.month - 1, now.day + daysAhead, th, tm);
+  var diffMin    = Math.round((targetMs - nowMs) / 60000);
+  if (diffMin < 0) diffMin += 7 * 24 * 60; // today's slot already passed — next week
+  return diffMin;
+}
+
+// Is this net scheduled for *today* (kiosk-local)? Returns minutes until it
+// starts (negative once it's started), or null if it's not today at all.
+function netTodayMinutes(net, refDate) {
+  var now = _kioskNowParts(refDate);
+  var isToday;
+  if (net.recurrence === 'once') {
+    var d = (net.net_date || '').split('-').map(function(x) { return parseInt(x, 10); });
+    isToday = d.length === 3 && d[0] === now.year && d[1] === now.month && d[2] === now.day;
+  } else {
+    isToday = net.weekday === _kioskWeekdayToday(refDate);
+  }
+  if (!isToday) return null;
+  var t  = (net.time || '0:0').split(':');
+  var th = parseInt(t[0], 10) || 0, tm = parseInt(t[1], 10) || 0;
+  var nowMs    = Date.UTC(now.year, now.month - 1, now.day, now.hour, now.minute);
+  var targetMs = Date.UTC(now.year, now.month - 1, now.day, th, tm);
+  return Math.round((targetMs - nowMs) / 60000);
+}
+
+// Right side of the weather bar: any net(s) scheduled today, soonest first.
+// The frame itself gets the Favorites-orange highlight once the soonest one
+// is within an hour either side of its start time (so it doesn't wink out
+// the instant the net begins — it stays flagged for the first hour too).
+function updateWeatherNetBadge() {
+  var el  = document.getElementById('weather-net-today');
+  var bar = document.getElementById('weather-bar');
+  if (!el || !bar) return;
+  var todays = _nets
+    .map(function(n) { return {net: n, mins: netTodayMinutes(n)}; })
+    .filter(function(x) { return x.mins != null; })
+    .sort(function(a, b) { return a.mins - b.mins; });
+
+  if (!todays.length) {
+    el.style.display = 'none';
+    bar.classList.remove('weather-bar-alert');
+    return;
+  }
+  el.style.display = '';
+  el.innerHTML = todays.map(function(x) {
+    return '<span class="weather-item" style="white-space:nowrap">&#128225; ' + esc(x.net.name) +
+      ' <strong>' + esc(_formatNetTime(x.net.time)) + '</strong></span>';
+  }).join('');
+  var withinAnHour = todays[0].mins <= 60 && todays[0].mins >= -60;
+  bar.classList.toggle('weather-bar-alert', withinAnHour);
+}
+
+async function fetchNets() {
+  try {
+    var r = await apiFetch('/api/nets', {cache: 'no-store'});
+    if (!r.ok) return;
+    _nets = await r.json();
+  } catch (e) { return; }
+  renderNetList();
+  updateWeatherNetBadge();
+}
+
+function renderNetList() {
+  var box = document.getElementById('net-list');
+  if (!box) return;
+  if (!_nets.length) {
+    box.innerHTML = '<div class="empty-msg" style="font-size:0.8rem">No net reminders yet</div>';
+    return;
+  }
+  var sorted = _nets.slice().sort(function(a, b) {
+    var ma = netMinutesUntil(a), mb = netMinutesUntil(b);
+    if (ma == null) ma = Infinity;
+    if (mb == null) mb = Infinity;
+    return ma - mb;
+  });
+  var canEdit = !!window._kioskRole;
+  box.innerHTML = sorted.map(function(n) {
+    var mins  = netMinutesUntil(n);
+    var today = netTodayMinutes(n) != null;
+    var badge = today ? '<span style="background:rgba(232,113,10,.15);color:#e8710a;border:1px solid rgba(232,113,10,.35);border-radius:4px;padding:1px 6px;font-size:0.68rem;margin-left:6px">Today</span>' : '';
+    var actions = canEdit ? (
+      '<button onclick="editNet(' + n.id + ')" style="background:none;border:none;color:var(--text2);cursor:pointer;font-size:0.78rem;margin-left:6px">Edit</button>' +
+      '<button onclick="deleteNet(' + n.id + ')" style="background:none;border:none;color:var(--text2);cursor:pointer;font-size:0.78rem;margin-left:2px">Delete</button>'
+    ) : '';
+    return '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:6px">' +
+      '<div style="min-width:0;overflow:hidden">' +
+        '<div style="font-size:0.85rem;font-weight:600">' + esc(n.name) + badge +
+          (n.node ? ' <span style="color:var(--text2);font-weight:400;font-size:0.78rem">(' + esc(n.node) + ')</span>' : '') +
+        '</div>' +
+        '<div style="font-size:0.76rem;color:var(--text2)">' + esc(_netScheduleLabel(n)) +
+          (mins != null ? ' — ' + esc(_netCountdownLabel(mins)) : '') + '</div>' +
+        (n.notes ? '<div style="font-size:0.74rem;color:var(--text2);margin-top:2px;white-space:pre-wrap">' + esc(n.notes) + '</div>' : '') +
+      '</div>' +
+      '<div style="flex-shrink:0;white-space:nowrap">' + actions + '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function openNetModal() {
+  document.getElementById('net-modal-overlay').style.display = 'flex';
+  fetchNets();
+}
+
+function closeNetModal() {
+  document.getElementById('net-modal-overlay').style.display = 'none';
+  resetNetForm();
+}
+
+function netFormRecurrenceChanged() {
+  var weekly = document.querySelector('input[name="net-f-recur"]:checked').value === 'weekly';
+  document.getElementById('net-f-weekday').style.display = weekly ? '' : 'none';
+  document.getElementById('net-f-date').style.display    = weekly ? 'none' : '';
+}
+
+function resetNetForm() {
+  document.getElementById('net-edit-id').value   = '';
+  document.getElementById('net-f-name').value    = '';
+  document.getElementById('net-f-node').value    = '';
+  document.getElementById('net-f-time').value    = '';
+  document.getElementById('net-f-notes').value   = '';
+  document.getElementById('net-f-date').value    = '';
+  document.getElementById('net-f-weekday').value = '0';
+  document.querySelector('input[name="net-f-recur"][value="weekly"]').checked = true;
+  netFormRecurrenceChanged();
+  document.getElementById('net-f-error').textContent    = '';
+  document.getElementById('net-form-title').textContent = 'Add a Net Reminder';
+  document.getElementById('net-f-save-btn').textContent = 'Save';
+}
+
+function editNet(id) {
+  var n = _nets.find(function(x) { return x.id === id; });
+  if (!n) return;
+  document.getElementById('net-edit-id').value = n.id;
+  document.getElementById('net-f-name').value  = n.name  || '';
+  document.getElementById('net-f-node').value  = n.node  || '';
+  document.getElementById('net-f-time').value  = n.time  || '';
+  document.getElementById('net-f-notes').value = n.notes || '';
+  var recur = n.recurrence === 'once' ? 'once' : 'weekly';
+  document.querySelector('input[name="net-f-recur"][value="' + recur + '"]').checked = true;
+  if (recur === 'once') {
+    document.getElementById('net-f-date').value = n.net_date || '';
+  } else {
+    document.getElementById('net-f-weekday').value = (n.weekday != null ? n.weekday : 0);
+  }
+  netFormRecurrenceChanged();
+  document.getElementById('net-f-error').textContent    = '';
+  document.getElementById('net-form-title').textContent = 'Edit Net Reminder';
+  document.getElementById('net-f-save-btn').textContent = 'Update';
+}
+
+async function saveNet() {
+  var errEl = document.getElementById('net-f-error');
+  errEl.textContent = '';
+  var id      = document.getElementById('net-edit-id').value;
+  var name    = document.getElementById('net-f-name').value.trim();
+  var node    = document.getElementById('net-f-node').value.trim();
+  var recur   = document.querySelector('input[name="net-f-recur"]:checked').value;
+  var netTime = document.getElementById('net-f-time').value;
+  var notes   = document.getElementById('net-f-notes').value.trim();
+  var weekday = parseInt(document.getElementById('net-f-weekday').value, 10);
+  var netDate = document.getElementById('net-f-date').value;
+
+  if (!name)    { errEl.textContent = 'Name is required'; return; }
+  if (!netTime) { errEl.textContent = 'Time is required'; return; }
+  if (recur === 'once' && !netDate) { errEl.textContent = 'Pick a date for a one-time net'; return; }
+
+  var payload = {name: name, node: node, recurrence: recur, time: netTime, notes: notes};
+  if (recur === 'weekly') payload.weekday = weekday; else payload.net_date = netDate;
+
+  var url    = id ? ('/api/nets/' + id) : '/api/nets';
+  var method = id ? 'PATCH' : 'POST';
+  var r = await apiFetch(url, {
+    method:  method,
+    headers: {'Content-Type': 'application/json'},
+    body:    JSON.stringify(payload)
+  });
+  if (r.status === 401) { openKioskLogin(saveNet, []); return; }
+  var d = await r.json();
+  if (!r.ok) { errEl.textContent = d.error || ('Save failed (HTTP ' + r.status + ')'); return; }
+  resetNetForm();
+  fetchNets();
+}
+
+async function deleteNet(id) {
+  if (!confirm('Delete this net reminder?')) return;
+  var r = await apiFetch('/api/nets/' + id, {method: 'DELETE'});
+  if (r.status === 401) { openKioskLogin(deleteNet, [id]); return; }
+  fetchNets();
 }
 
 /* ── Board data ── */
@@ -985,7 +1343,7 @@ async function refreshBoard() {
       nl.innerHTML = allLinked.map(function(c) {
         var meta = [];
         var isConn = (c.connect_state || 'ESTABLISHED') === 'ESTABLISHED';
-        if (c.connect_time) meta.push('Conn: <strong>' + esc(c.connect_time) + '</strong>');
+        if (typeof c.connect_elapsed_sec === 'number') meta.push('Connected: <strong>' + _histDuration(c.connect_elapsed_sec) + '</strong>');
         meta.push('Keyups: <strong>' + (c.keyups || 0) + '</strong>');
         var modeBadge = '';
         if (c.mode === 'T') modeBadge = '<span class="mode-badge tx">TX</span>';
@@ -2251,6 +2609,7 @@ refreshActivity();
 refreshHistory();
 loadFavorites();
 checkKioskSession();
+fetchNets();
 
 setInterval(refreshBoard,    2000);    /* node status every 2s — board endpoint is
                                           cheap (system-info calls are TTL-cached,
@@ -2259,6 +2618,10 @@ setInterval(refreshBoard,    2000);    /* node status every 2s — board endpoin
 setInterval(refreshActivity, 15000);   /* activity every 15s */
 setInterval(refreshHistory,  30000);   /* connection history every 30s */
 setInterval(refreshWeather,  600000);  /* weather every 10min */
+setInterval(fetchNets,       60000);   /* net schedule list every 60s — the weather-bar
+                                          badge/highlight itself re-derives every second
+                                          from tickClock(), this just catches edits made
+                                          from another browser/tab */
 </script>
 </body>
 </html>
