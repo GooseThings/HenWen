@@ -203,11 +203,14 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .empty-msg { display: flex; align-items: center; justify-content: center; height: 100%;
   color: var(--text2); font-size: 0.95rem; min-height: 48px; }
 
-/* Everything about a connected node stays on a single line at any width —
-   fixed-size pieces (dot, number, callsign) shrink/truncate before wrapping,
-   and the meta strip (keyed count, last-heard, mode/idle badges) scrolls
-   horizontally in place rather than wrapping, so its buttons (idle reset/
-   squash) stay reachable instead of getting clipped off. */
+/* A connected node is two deliberate lines: identity (dot, number, callsign,
+   location) then the stats strip (connect time, keyups, mode/idle badges and
+   their admin buttons), with the disconnect X centered on the right spanning
+   both. Nothing truncates — either line wraps further if it still doesn't
+   fit. Always two lines rather than wrap-only-when-needed on purpose: the
+   idle timer and keyup counts re-render every couple of seconds with varying
+   widths, and fit-dependent wrapping would make rows jitter between one and
+   two lines as those tick over. */
 .node-row { display: flex; align-items: center; gap: 10px; min-width: 0;
   padding: 8px 18px;
   border-bottom: 1px solid var(--border); transition: background .15s; }
@@ -218,18 +221,16 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   box-shadow: 0 0 5px rgba(224,68,68,.7); }
 .nr-dot.connecting { background: #d9a520; border-color: #d9a520;
   box-shadow: 0 0 5px rgba(217,165,32,.6); }
-.nr-num  { flex: 0 1 auto; min-width: 2.6em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+.nr-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.nr-line { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.nr-num  { flex: 0 0 auto;
   font-size: 1.05rem; font-weight: 700; font-family: var(--mono); color: var(--accent); text-decoration: none; }
-.nr-call { flex: 0 1 auto; min-width: 2.5em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+.nr-call { flex: 0 0 auto;
   font-size: 0.95rem; font-weight: 600; color: var(--text); letter-spacing: .03em; }
-.nr-right { flex: 1 1 40px; min-width: 0; display: flex; align-items: baseline; gap: 10px; overflow: hidden; }
-.nr-loc  { flex: 0 1 auto; min-width: 0; font-size: 0.82rem; color: var(--text2); white-space: nowrap; overflow: hidden;
-  text-overflow: ellipsis; }
-.nr-meta { flex: 1 1 auto; min-width: 0; font-size: 0.72rem; color: var(--text2);
-  display: flex; align-items: center; gap: 10px; white-space: nowrap;
-  overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
-.nr-meta::-webkit-scrollbar { display: none; }
-.nr-meta span { white-space: nowrap; flex-shrink: 0; }
+.nr-loc  { flex: 0 1 auto; min-width: 0; font-size: 0.82rem; color: var(--text2); }
+.nr-meta { min-width: 0; font-size: 0.72rem; color: var(--text2);
+  display: flex; align-items: center; gap: 10px; row-gap: 3px; flex-wrap: wrap; }
+.nr-meta span { white-space: nowrap; }
 .nr-meta strong { color: var(--text); }
 .node-row > .sb-btn.disconnect { flex: 0 0 auto; }
 
@@ -345,13 +346,14 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .idle-badge { font-size: 0.68rem; padding: 1px 6px; border-radius: 3px; font-weight: 600;
   background: rgba(88,166,255,.1); color: var(--accent); white-space: nowrap; }
 .idle-badge.warn { background: rgba(255,179,0,.15); color: var(--warn); }
-.idle-squash-btn { font-size: 0.68rem; padding: 1px 6px; border-radius: 3px; font-weight: 600;
+/* ✕ inside the idle badge — dismisses the timeout itself (No Timeout) */
+.idle-squash-btn { background: none; border: none; color: inherit; cursor: pointer;
+  font-size: 0.75rem; padding: 0 0 0 5px; line-height: 1; opacity: 0.6; }
+.idle-squash-btn:hover { opacity: 1; }
+.idle-reset-btn { font-size: 0.68rem; padding: 1px 6px; border-radius: 3px; font-weight: 600;
   background: rgba(63,185,80,.08); border: 1px solid rgba(63,185,80,.3); color: var(--green);
   cursor: pointer; white-space: nowrap; }
-.idle-squash-btn:hover { background: rgba(63,185,80,.22); }
-.idle-reset-btn { background: none; border: none; color: var(--text2); cursor: pointer;
-  font-size: 0.8rem; padding: 0 2px; line-height: 1; opacity: 0.6; }
-.idle-reset-btn:hover { color: var(--warn); opacity: 1; }
+.idle-reset-btn:hover { background: rgba(63,185,80,.22); }
 
 /* Transmit / Monitor mode badge in node rows */
 .mode-badge { font-size: 0.65rem; padding: 1px 6px; border-radius: 3px; font-weight: 600; white-space: nowrap; }
@@ -425,13 +427,12 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   .keyed-dot { width: 46px; height: 46px; }
   .keyed-label { font-size: 0.88rem; }
 
-  /* .node-row is already a single shrink-to-fit flex line at any width (see
-     base styles) — just tighten sizes/gaps so more of it fits before the
-     ellipsis/scroll fallbacks kick in. */
+  /* .node-row already wraps instead of truncating (see base styles) — just
+     tighten sizes/gaps so more fits per line before wrapping kicks in. */
   .node-row { gap: 6px; padding: 8px 12px; }
-  .nr-num   { min-width: 2em; font-size: 0.95rem; }
-  .nr-call  { min-width: 1.5em; font-size: 0.85rem; }
-  .nr-right { gap: 6px; }
+  .nr-num   { font-size: 0.95rem; }
+  .nr-call  { font-size: 0.85rem; }
+  .nr-line  { gap: 6px; }
   .node-row > .sb-btn.disconnect { padding-left: 6px; padding-right: 6px; }
 
   /* Activity rows: let the optional Fav/Monitor button pair drop to their
@@ -1354,14 +1355,19 @@ async function refreshBoard() {
           var secs = c.idle_elapsed % 60;
           var ts   = mins + ':' + (secs < 10 ? '0' : '') + secs;
           var warn = (typeof c.idle_remaining === 'number') && c.idle_remaining < 120;
-          idleBadge = '<span class="idle-badge' + (warn ? ' warn' : '') + '">Idle: ' + ts + '</span>';
-          if (window._kioskRole === 'admin' || window._kioskRole === 'superuser') {
+          var isAdmin = window._kioskRole === 'admin' || window._kioskRole === 'superuser';
+          /* The ✕ inside the badge dismisses the idle timeout itself (No
+             Timeout); Reset just puts the countdown back to zero. */
+          var squashX = isAdmin
+            ? '<button class="idle-squash-btn" onclick="sbSquashIdle(\'' +
+                esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)" ' +
+                'title="Disable auto-disconnect for this connection — stays a normal, non-permanent link; won\'t auto-reconnect if the far end drops it">&#10005;</button>'
+            : '';
+          idleBadge = '<span class="idle-badge' + (warn ? ' warn' : '') + '">Idle: ' + ts + squashX + '</span>';
+          if (isAdmin) {
             idleBadge += '<button class="idle-reset-btn" onclick="sbResetIdle(\'' +
               esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)" ' +
-              'title="Reset idle timer to zero — stays a temporary connection">&#10005;</button>';
-            idleBadge += '<button class="idle-squash-btn" onclick="sbSquashIdle(\'' +
-              esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)" ' +
-              'title="Disable auto-disconnect for this connection — stays a normal, non-permanent link; won\'t auto-reconnect if the far end drops it">No Timeout</button>';
+              'title="Reset idle timer to zero — stays a temporary connection">Reset</button>';
           }
         } else if (c.permanent === true) {
           idleBadge = '<span class="idle-badge">Permanent</span>';
@@ -1372,10 +1378,12 @@ async function refreshBoard() {
           esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)">X</button>';
         return '<div class="node-row">' +
           '<div class="nr-dot' + dotClass + '"></div>' +
-          nodeLink(c.node, 'nr-num') +
-          '<div class="nr-call">' + esc(c.callsign||'—') + '</div>' +
-          '<div class="nr-right">' +
-            '<div class="nr-loc">' + esc(c.location||c.desc||'') + '</div>' +
+          '<div class="nr-main">' +
+            '<div class="nr-line">' +
+              nodeLink(c.node, 'nr-num') +
+              '<div class="nr-call">' + esc(c.callsign||'—') + '</div>' +
+              '<div class="nr-loc">' + esc(c.location||c.desc||'') + '</div>' +
+            '</div>' +
             (meta.length ? '<div class="nr-meta"><span>' + meta.join('</span><span>') + '</span>' + badges + '</div>' : (badges ? '<div class="nr-meta">' + badges + '</div>' : '')) +
             (!isConn ? '<div class="nr-meta" style="color:var(--warn)">Connecting…</div>' : '') +
           '</div>' +

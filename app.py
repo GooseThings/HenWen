@@ -386,6 +386,20 @@ def get_db():
         PRIMARY KEY (local_node, peer_node)
     )""")
     conn.commit()
+    # Same story for temporary (non-permanent) kiosk connections: their
+    # idle-timeout state (last_active, plus the No Timeout exemption) lived
+    # only in _kiosk_temp_conns, so a HenWen restart both hid the Idle badge
+    # and silently exempted the link from ever timing out. See
+    # _rehydrate_kiosk_temp_conns().
+    conn.execute("""CREATE TABLE IF NOT EXISTS kiosk_temp_conns (
+        local_node  TEXT    NOT NULL,
+        peer_node   TEXT    NOT NULL,
+        monitor     INTEGER NOT NULL DEFAULT 0,
+        no_timeout  INTEGER NOT NULL DEFAULT 0,
+        last_active REAL    NOT NULL,
+        PRIMARY KEY (local_node, peer_node)
+    )""")
+    conn.commit()
     conn.execute("""CREATE TABLE IF NOT EXISTS connectors (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
         name            TEXT    NOT NULL,
@@ -1377,9 +1391,13 @@ def _poll_loop():
                                     "DELETE FROM permanent_links WHERE local_node=? AND peer_node=?",
                                     (node_str, peer)
                                 )
+                                pdb.execute(
+                                    "DELETE FROM kiosk_temp_conns WHERE local_node=? AND peer_node=?",
+                                    (node_str, peer)
+                                )
                                 pdb.commit()
                             except Exception as _e:
-                                log("WARN", f"[KIOSK] Failed to prune permanent_links for "
+                                log("WARN", f"[KIOSK] Failed to prune link tracking for "
                                             f"{node_str}->{peer}: {_e}")
                         _prev_connected_map[node_str] = est_set
 
@@ -1388,6 +1406,7 @@ def _poll_loop():
                         # their timeout squashed via /api/status/squash-idle — the latter stays
                         # a normal transient link, it's just exempted from this tracking.
                         local_keyed = bool(status.get("keyed"))
+                        _idle_touches = []
                         with _kiosk_temp_lock:
                             for (ln, pn), info in list(_kiosk_temp_conns.items()):
                                 if ln != node_str or info.get('permanent') or info.get('no_timeout'):
@@ -1395,17 +1414,35 @@ def _poll_loop():
                                 peer_keyed = bool(status.get("links", {}).get(pn, {}).get("keyed"))
                                 if local_keyed or peer_keyed:
                                     info['last_active'] = now_ts
+                                    info['_unsaved']    = True
+                                elif info.pop('_unsaved', False):
+                                    # Persist last_active once per exchange, when the
+                                    # link goes quiet (the only value that matters for
+                                    # the idle clock), not on every 1s tick while keyed.
+                                    _idle_touches.append((ln, pn, info.get('monitor', False),
+                                                          info['last_active']))
+                        for (ln, pn, _mon, _la) in _idle_touches:
+                            _db_temp_conn_save(ln, pn, _mon, False, _la)
 
                         # Fire idle disconnects (outside _kiosk_temp_lock to avoid deadlock)
                         idle_timeout = int(get_setting('kiosk_idle_timeout_sec', '600') or 600)
-                        _idle_dc = []
+                        _idle_dc    = []
+                        _idle_stale = []
                         with _kiosk_temp_lock:
                             for (ln, pn), info in list(_kiosk_temp_conns.items()):
                                 if ln != node_str or info.get('permanent') or info.get('no_timeout'):
                                     continue
                                 if now_ts - info.get('last_active', now_ts) > idle_timeout:
-                                    _idle_dc.append((ln, pn))
+                                    # An overdue entry whose peer isn't connected anymore
+                                    # is a rehydrated leftover from a connection that
+                                    # ended while HenWen was down — nothing to
+                                    # disconnect, just drop the tracking. (Checked only
+                                    # for overdue entries so a just-made connection the
+                                    # AMI cache hasn't caught up to yet is never purged.)
+                                    (_idle_dc if pn in all_set else _idle_stale).append((ln, pn))
                                     del _kiosk_temp_conns[(ln, pn)]
+                        for (ln, pn) in _idle_dc + _idle_stale:
+                            _db_temp_conn_delete(ln, pn)
                         for (ln, pn) in _idle_dc:
                             try:
                                 # ilink 1, not 11, is correct here (unlike the manual disconnect
@@ -1803,6 +1840,67 @@ def _rehydrate_permanent_links():
             log("INFO", f"[KIOSK] Rehydrated {len(rows)} permanent link(s) from the database")
     except Exception as e:
         log("ERROR", f"[KIOSK] _rehydrate_permanent_links error: {e}")
+
+
+def _db_temp_conn_save(local_node, peer_node, monitor, no_timeout, last_active):
+    """Persist one temporary connection's idle-tracking state. Best-effort:
+    a failed write only degrades restart persistence, never live tracking."""
+    try:
+        db = get_db()
+        db.execute(
+            "INSERT OR REPLACE INTO kiosk_temp_conns "
+            "(local_node, peer_node, monitor, no_timeout, last_active) VALUES (?, ?, ?, ?, ?)",
+            (local_node, peer_node, 1 if monitor else 0, 1 if no_timeout else 0, last_active)
+        )
+        db.commit()
+    except Exception as e:
+        log("WARN", f"[KIOSK] Failed to persist idle state for {local_node}->{peer_node}: {e}")
+
+
+def _db_temp_conn_delete(local_node, peer_node):
+    try:
+        db = get_db()
+        db.execute("DELETE FROM kiosk_temp_conns WHERE local_node=? AND peer_node=?",
+                   (local_node, peer_node))
+        db.commit()
+    except Exception as e:
+        log("WARN", f"[KIOSK] Failed to prune kiosk_temp_conns for {local_node}->{peer_node}: {e}")
+
+
+def _rehydrate_kiosk_temp_conns():
+    """Restore idle-timeout tracking for temporary kiosk connections from the
+    durable kiosk_temp_conns table on startup, the same way
+    _rehydrate_permanent_links() does for Permanent ones.
+
+    last_active is restored exactly as stored, so time spent with HenWen down
+    counts as idle time — a temporary connection is supposed to time out, and
+    the fail-safe direction is to keep that promise rather than restart the
+    clock (or worse, forget the link entirely and never disconnect it, which
+    is what happened before this table existed). An entry whose connection
+    actually ended while HenWen was down is dropped by the poll loop's idle
+    pass once it's overdue, without issuing any disconnect command.
+
+    Runs after _rehydrate_permanent_links(); a key already present from that
+    pass is genuinely permanent and wins."""
+    try:
+        db   = get_db()
+        rows = db.execute(
+            "SELECT local_node, peer_node, monitor, no_timeout, last_active FROM kiosk_temp_conns"
+        ).fetchall()
+        with _kiosk_temp_lock:
+            for row in rows:
+                key = (row["local_node"], row["peer_node"])
+                if key not in _kiosk_temp_conns:
+                    _kiosk_temp_conns[key] = {
+                        'permanent':   False,
+                        'monitor':     bool(row["monitor"]),
+                        'no_timeout':  bool(row["no_timeout"]),
+                        'last_active': float(row["last_active"]),
+                    }
+        if rows:
+            log("INFO", f"[KIOSK] Rehydrated {len(rows)} temporary connection(s) from the database")
+    except Exception as e:
+        log("ERROR", f"[KIOSK] _rehydrate_kiosk_temp_conns error: {e}")
 
 
 # ── Alert helpers ──────────────────────────────────────────────────────────────
@@ -4248,6 +4346,7 @@ def api_ami_perm_connect():
                 (local_node, remote_node, 1 if monitor else 0)
             )
             db.commit()
+            _db_temp_conn_delete(local_node, remote_node)
         return jsonify(result)
     except Exception as e:
         log("ERROR", f"[API] /api/ami/perm_connect error: {e}")
@@ -4492,12 +4591,13 @@ def api_status_connect():
         with _ami_pool_lock:
             ami = _ami_ensure_connected()
             result = ami.rpt_cmd(local_node, f"ilink {ilink_mode} {remote_node}")
+        now = time.time()
         with _kiosk_temp_lock:
             _kiosk_temp_conns[(local_node, remote_node)] = {
                 'permanent':   permanent,
                 'monitor':     monitor,
                 'no_timeout':  False,
-                'last_active': time.time(),
+                'last_active': now,
             }
         if permanent:
             db = get_db()
@@ -4507,6 +4607,9 @@ def api_status_connect():
                 (local_node, remote_node, 1 if monitor else 0)
             )
             db.commit()
+            _db_temp_conn_delete(local_node, remote_node)
+        else:
+            _db_temp_conn_save(local_node, remote_node, monitor, False, now)
         log("INFO", f"[API] /api/status/connect {local_node} -> {remote_node} mode=ilink{ilink_mode}")
         return jsonify({"ok": True, "output": result})
     except Exception as e:
@@ -4577,6 +4680,10 @@ def api_status_squash_idle():
         else:
             _kiosk_temp_conns[key] = {'permanent': False, 'monitor': False,
                                       'no_timeout': True, 'last_active': time.time()}
+        info = dict(_kiosk_temp_conns[key])
+    if not info.get('permanent'):
+        _db_temp_conn_save(local_node, remote_node, info.get('monitor', False),
+                           True, info['last_active'])
     log("INFO", f"[API] /api/status/squash-idle {local_node} -> {remote_node}: "
                 "idle timeout disabled (link mode unchanged)")
     return jsonify({"ok": True})
@@ -4601,6 +4708,9 @@ def api_status_reset_idle():
         if key not in _kiosk_temp_conns or _kiosk_temp_conns[key].get('permanent'):
             return jsonify({"error": "Not a tracked temporary connection"}), 404
         _kiosk_temp_conns[key]['last_active'] = time.time()
+        info = dict(_kiosk_temp_conns[key])
+    _db_temp_conn_save(local_node, remote_node, info.get('monitor', False),
+                       info.get('no_timeout', False), info['last_active'])
     log("INFO", f"[API] /api/status/reset-idle {local_node} -> {remote_node}: idle timer reset")
     return jsonify({"ok": True})
 
@@ -7969,6 +8079,7 @@ def api_dtmf_status():
 load_astdb()
 _db_conn_startup_cleanup()
 _rehydrate_permanent_links()
+_rehydrate_kiosk_temp_conns()
 start_poller()
 start_favstats_poller()
 start_global_activity_poller()
