@@ -355,6 +355,23 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   cursor: pointer; white-space: nowrap; }
 .idle-reset-btn:hover { background: rgba(63,185,80,.22); }
 
+/* Browser-transmit PTT bar (inline in the Connected Nodes card while armed) */
+#tx-bar { padding: 8px 18px; border-bottom: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 5px; }
+#tx-ptt { width: 100%; padding: 14px; font-size: 1rem; font-weight: 700;
+  background: rgba(63,185,80,.08); border: 2px solid rgba(63,185,80,.4);
+  border-radius: 8px; color: var(--green); cursor: pointer;
+  user-select: none; -webkit-user-select: none; touch-action: none; }
+#tx-ptt:disabled { opacity: .35; cursor: default; }
+#tx-ptt.tx { background: rgba(248,81,73,.15); border-color: var(--red); color: var(--red); }
+#tx-audio-row { display: flex; align-items: center; gap: 8px; }
+#tx-meter { flex: 1; height: 10px; background: var(--bg3); border: 1px solid var(--border);
+  border-radius: 4px; overflow: hidden; }
+#tx-meter-fill { height: 100%; width: 0%; background: var(--green); transition: width .06s linear; }
+#tx-meter-fill.hot  { background: var(--warn); }
+#tx-meter-fill.clip { background: var(--red); }
+#tx-gain { width: 110px; accent-color: var(--accent); flex-shrink: 0; }
+
 /* Transmit / Monitor mode badge in node rows */
 .mode-badge { font-size: 0.65rem; padding: 1px 6px; border-radius: 3px; font-weight: 600; white-space: nowrap; }
 .mode-badge.tx  { background: rgba(63,185,80,.1);  color: var(--green); }
@@ -508,8 +525,19 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <span class="card-count" id="conn-count"></span>
         <span style="margin-left:auto;display:flex;align-items:center;gap:6px">
           <span id="listen-delay-note" style="font-size:0.65rem;color:var(--text2);font-style:italic;display:none">~1s delay</span>
+          <button class="btn-icon" id="tx-btn" onclick="openTx()" style="display:none" title="Transmit from your microphone through this node">&#127908; TX</button>
           <button class="btn-icon" id="listen-btn" onclick="toggleListen()" title="Stream live audio from this node — expect ~1 second delay">&#9834; Listen</button>
         </span>
+      </div>
+      <div id="tx-bar" style="display:none">
+        <button id="tx-ptt" disabled>&#127908; PTT &mdash; hold to transmit&ensp;<span style="font-size:0.7rem;font-weight:400">(or hold Space &middot; keys in ~&frac12;s)</span></button>
+        <div id="tx-audio-row">
+          <span style="font-size:0.7rem;color:var(--text2);flex-shrink:0">Mic</span>
+          <div id="tx-meter"><div id="tx-meter-fill"></div></div>
+          <input type="range" id="tx-gain" min="0" max="200" value="100" title="Microphone gain">
+          <span id="tx-gain-val" style="font-size:0.7rem;color:var(--text2);width:3em;flex-shrink:0">100%</span>
+        </div>
+        <div id="tx-status" style="font-size:0.75rem;color:var(--accent);min-height:1em">Arming&hellip;</div>
       </div>
       <div class="connector-warn-bar" id="connector-warn-bar" style="display:none">
         &#9888; <span id="connector-warn-text"></span>
@@ -653,6 +681,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       </div>
     </div>
   </div>
+
 
 </div>
 
@@ -1815,6 +1844,7 @@ async function kioskLogin() {
     updateKioskUserBar(d.username, d.role);
     var pl = document.getElementById('perm-label');
     if (pl) pl.style.display = (d.role === 'admin' || d.role === 'superuser') ? '' : 'none';
+    _txUpdateBtn();
     loadFavorites();
     if (_pendingAction) {
       _pendingAction.fn.apply(null, _pendingAction.args);
@@ -1837,6 +1867,8 @@ async function kioskLogout() {
   } catch(e) { /* non-fatal — a page reload would also fix it */ }
   window._kioskRole = '';
   updateKioskUserBar(null, null);
+  if (_tx.armed) disarmTx();
+  _txUpdateBtn();
   loadFavorites();
   sbToast('Logged out', true);
 }
@@ -1867,6 +1899,9 @@ async function checkKioskSession() {
   /* Show Permanent checkbox only for admin/superuser */
   var pl = document.getElementById('perm-label');
   if (pl) pl.style.display = (window._kioskRole === 'admin' || window._kioskRole === 'superuser') ? '' : 'none';
+
+  /* TX button: admin/superuser + HTTPS + feature configured server-side */
+  _txUpdateBtn();
 
   /* "Logged in: N" is only clickable for superusers — everyone else (including
      admins) just sees the plain count, same as today. */
@@ -2037,6 +2072,381 @@ async function removeFavorite(node) {
   }
 }
 
+/* ── Browser transmit (PTT) ──────────────────────────────────────────────
+   WebRTC straight from this page to Asterisk's PJSIP stack (JsSIP is
+   fetched on first use — ordinary kiosk viewers never load it). The 🎤 TX
+   header button is an arm/disarm toggle: arming places a background call
+   to the phone-portal extension (Rpt phone-control mode) and shows the
+   inline PTT bar; DTMF *99 keys the transmitter, # unkeys. No audio
+   touches the HenWen server process.
+
+   Monitoring stays Listen's job: the call's incoming audio is discarded
+   (playing it alongside Listen would double the node audio ~1s apart),
+   Listen is auto-started when arming if it's off, and is muted only while
+   actually keyed — like a radio muting RX during TX, and so you don't hear
+   your own voice a second late. It unmutes on release, so your repeater
+   tail comes back as confirmation.
+
+   Credentials come from /api/tx/config (admin/superuser only); the button
+   is hidden unless that endpoint says the feature is configured AND the
+   page is a secure context (mic capture requires HTTPS). */
+var _tx = { ua: null, session: null, keyed: false, armed: false, idleTimer: null,
+            node: '', statsTimer: null,
+            audioCtx: null, gainNode: null, analyser: null, rawStream: null, meterTimer: null };
+var _TX_IDLE_HANGUP_MS = 5 * 60 * 1000;  // auto-disarm after 5 min without keying
+
+/* Mic gain: the browser's autoGainControl drove a headset mic to hard
+   clipping (media-source audioLevel pinned at 1.000, "much too loud" on a
+   parrot test), so AGC is off and level is set manually with this slider —
+   the mic runs through a WebAudio gain stage before it enters the call,
+   with a post-gain analyser feeding the level meter (what the meter shows
+   is what transmits). Persisted per browser. */
+function _txSavedGain() {
+  var v = parseInt(localStorage.getItem('henwen-tx-gain') || '100', 10);
+  return (v >= 0 && v <= 200) ? v : 100;
+}
+
+function _txBuildMicChain() {
+  return navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false },
+    video: false,
+  }).then(function(raw) {
+    _tx.rawStream = raw;
+    _tx.audioCtx  = new (window.AudioContext || window.webkitAudioContext)();
+    var src  = _tx.audioCtx.createMediaStreamSource(raw);
+    _tx.gainNode = _tx.audioCtx.createGain();
+    _tx.gainNode.gain.value = _txSavedGain() / 100;
+    _tx.analyser = _tx.audioCtx.createAnalyser();
+    _tx.analyser.fftSize = 1024;
+    var dest = _tx.audioCtx.createMediaStreamDestination();
+    src.connect(_tx.gainNode);
+    _tx.gainNode.connect(_tx.analyser);
+    _tx.gainNode.connect(dest);
+    _txStartMeter();
+    return dest.stream;
+  });
+}
+
+function _txStartMeter() {
+  var fill = document.getElementById('tx-meter-fill');
+  var buf  = new Float32Array(_tx.analyser.fftSize);
+  var shown = 0;
+  clearInterval(_tx.meterTimer);
+  _tx.meterTimer = setInterval(function() {
+    if (!_tx.analyser) return;
+    _tx.analyser.getFloatTimeDomainData(buf);
+    var peak = 0;
+    for (var i = 0; i < buf.length; i++) {
+      var a = Math.abs(buf[i]);
+      if (a > peak) peak = a;
+    }
+    /* fast attack, slow decay so short syllables stay visible */
+    shown = Math.max(peak, shown * 0.85);
+    var pct = Math.min(100, Math.round(shown * 100));
+    fill.style.width = pct + '%';
+    fill.className = pct >= 95 ? 'clip' : (pct >= 75 ? 'hot' : '');
+  }, 80);
+}
+
+/* TX diagnostics land in journalctl via the same [AUDIO-CLIENT] endpoint the
+   Listen player uses — lets "no audio" reports be diagnosed from the server
+   log (was DTMF actually sent? was the mic track live? was the outbound RTP
+   audio level non-zero?) without browser devtools open. */
+function _txDiag(type, detail) {
+  if (!_tx.node) return;
+  try {
+    apiFetch('/api/audio/client-log', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({node: _tx.node, type: 'tx-' + type, detail: String(detail).slice(0, 200)}),
+      keepalive: true,
+    });
+  } catch (e) {}
+}
+
+/* While keyed, sample the peer connection: outbound packet count and the
+   mic's live audio level. audioLevel ≈ 0 while the operator is speaking
+   means the capture path is broken (wrong device, OS mute); healthy level
+   with packets flowing means the problem is downstream of the browser. */
+function _txStatsSample(tag) {
+  if (!_tx.session || !_tx.session.connection) return;
+  try {
+    _tx.session.connection.getStats().then(function(stats) {
+      var out = [];
+      stats.forEach(function(s) {
+        if (s.type === 'media-source' && s.kind === 'audio') {
+          out.push('micLevel=' + (s.audioLevel != null ? s.audioLevel.toFixed(3) : '?'));
+        }
+        if (s.type === 'outbound-rtp' && s.kind === 'audio') {
+          out.push('pktsSent=' + s.packetsSent + ' bytesSent=' + s.bytesSent);
+        }
+      });
+      var track = null;
+      try { track = _tx.session.connection.getSenders()[0].track; } catch (e) {}
+      if (track) out.push('track[' + track.label.slice(0, 40) + '] muted=' + track.muted +
+                          ' enabled=' + track.enabled + ' state=' + track.readyState);
+      if (_tx.gainNode) out.push('gain=' + Math.round(_tx.gainNode.gain.value * 100) + '%');
+      _txDiag('stats-' + tag, out.join(' '));
+    });
+  } catch (e) { _txDiag('stats-err', e.message); }
+}
+
+function _txStatus(s, color) {
+  var el = document.getElementById('tx-status');
+  if (el) { el.textContent = s; el.style.color = color || 'var(--accent)'; }
+}
+
+function _txSetBtn(html, color) {
+  var btn = document.getElementById('tx-btn');
+  if (btn) { btn.innerHTML = html; btn.style.color = color || ''; }
+}
+
+async function _txUpdateBtn() {
+  var btn = document.getElementById('tx-btn');
+  if (!btn) return;
+  var eligible = (window._kioskRole === 'admin' || window._kioskRole === 'superuser')
+                 && window.isSecureContext && navigator.mediaDevices && window.WebSocket;
+  if (!eligible) { btn.style.display = 'none'; return; }
+  try {
+    var r = await apiFetch('/api/tx/config?probe=1');
+    btn.style.display = r.ok ? '' : 'none';
+  } catch (e) { btn.style.display = 'none'; }
+}
+
+var _jssipPromise = null;
+function _loadJsSIP() {
+  if (window.JsSIP) return Promise.resolve();
+  if (_jssipPromise) return _jssipPromise;
+  _jssipPromise = new Promise(function(resolve, reject) {
+    var s = document.createElement('script');
+    s.src = '/static/vendor/jssip-3.13.8.min.js';
+    s.onload  = resolve;
+    s.onerror = function() { _jssipPromise = null; reject(new Error('failed to load JsSIP')); };
+    document.head.appendChild(s);
+  });
+  return _jssipPromise;
+}
+
+function openTx() {  /* header 🎤 TX button: arm/disarm toggle */
+  if (_tx.armed) { disarmTx(); return; }
+  armTx();
+}
+
+async function armTx() {
+  if (!window._kioskRole) { openKioskLogin(armTx, []); return; }
+  _tx.armed = true;
+  document.getElementById('tx-bar').style.display = '';
+  _txSetBtn('&#127908; TX arming&hellip;', 'var(--text2)');
+  _txStatus('Arming…');
+  try {
+    var r = await apiFetch('/api/tx/config');
+    if (r.status === 401) { disarmTx(); openKioskLogin(armTx, []); return; }
+    var cfg = await r.json();
+    if (!r.ok || !cfg.enabled) {
+      _txStatus(cfg.error || 'Browser transmit is not configured on this server', 'var(--red)');
+      _txSetBtn('&#127908; TX', '');
+      _tx.armed = false;
+      return;
+    }
+    await _loadJsSIP();
+    if (!_tx.armed) return;  // disarmed while loading
+    _tx.node = cfg.node;
+
+    var domain = location.hostname;
+    var socket = new JsSIP.WebSocketInterface('wss://' + location.host + cfg.ws_path);
+    _tx.ua = new JsSIP.UA({ sockets: [socket], uri: 'sip:' + cfg.username + '@' + domain,
+                            password: cfg.password, register: true, session_timers: false });
+    _tx.ua.on('registrationFailed', function(e) {
+      _txStatus('Registration failed: ' + (e.cause || ''), 'var(--red)');
+    });
+    _tx.ua.on('disconnected', function() {
+      if (_tx.armed && !_tx.session) _txStatus('Connection lost', 'var(--red)');
+    });
+    _tx.ua.on('registered', async function() {
+      if (!_tx.armed || _tx.session) return;
+      var micStream;
+      try {
+        micStream = await _txBuildMicChain();
+      } catch (e) {
+        _txStatus('Microphone unavailable: ' + e.message, 'var(--red)');
+        _txDiag('mic-err', e.name + ' ' + e.message);
+        return;
+      }
+      if (!_tx.armed) { _txReleaseMic(); return; }  // disarmed while prompting
+      var s = _tx.ua.call('sip:' + cfg.dial + '@' + domain, {
+        mediaStream: micStream,  // pre-gained mic (see _txBuildMicChain)
+        /* STUN is required for remote (non-LAN) operators: SIP signaling rides
+           the Apache WSS proxy over TCP 443, but the media is direct UDP — the
+           browser must discover its public candidate or ICE never completes
+           and zero RTP flows (verified: mic live, pktsSent=0). Asterisk needs
+           its own stunaddr in rtp.conf for the same reason (tx-spike). */
+        pcConfig: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] },
+      });
+      _tx.session = s;
+      /* The call is full-duplex: Asterisk streams the node's audio (which,
+         while keyed, is your own voice ~a beat behind) back down it. Listen
+         is the one monitor path, so hard-disable every inbound track — not
+         attaching them isn't enough, the browser can still route a live
+         WebRTC audio track to the default output. */
+      var muteInbound = function() {
+        try {
+          s.connection.getReceivers().forEach(function(r) {
+            if (r.track) r.track.enabled = false;
+          });
+        } catch (e) {}
+      };
+      s.connection.addEventListener('track', muteInbound);
+      s.on('confirmed', function() {
+        muteInbound();
+        _txStatus('Armed — hold PTT to transmit');
+        _txSetBtn('&#127908; TX armed', 'var(--green)');
+        document.getElementById('tx-ptt').disabled = false;
+        /* Listen is the monitor path — make sure it's running */
+        if (!_listenActive) _startListen();
+        _txTouchIdle();
+        _txDiag('armed', 'call confirmed');
+        _txStatsSample('armed');
+      });
+      s.on('newDTMF', function(e) {
+        if (e.originator === 'local') _txDiag('dtmf', 'sent ' + e.dtmf.tone);
+      });
+      s.on('failed', function(e) {
+        _txStatus('Call failed: ' + (e.cause || ''), 'var(--red)');
+        _txTeardown();
+      });
+      s.on('ended', function() {
+        if (_tx.armed) _txStatus('Call ended', 'var(--text2)');
+        _txTeardown();
+      });
+      /* Incoming call audio is deliberately not attached anywhere: Listen
+         already carries the node audio; playing both doubles it ~1s apart. */
+    });
+    _tx.ua.start();
+  } catch (e) {
+    _txStatus('Error: ' + e.message, 'var(--red)');
+  }
+}
+
+/* Release the WebAudio mic chain: stop the meter, close the context, and —
+   critically — stop the raw getUserMedia tracks. JsSIP only stops the
+   processed stream we handed it, so without this the browser's mic-in-use
+   indicator would stay lit after disarming. */
+function _txReleaseMic() {
+  clearInterval(_tx.meterTimer);
+  _tx.meterTimer = null;
+  var fill = document.getElementById('tx-meter-fill');
+  if (fill) { fill.style.width = '0%'; fill.className = ''; }
+  if (_tx.rawStream) {
+    try { _tx.rawStream.getTracks().forEach(function(t) { t.stop(); }); } catch (e) {}
+    _tx.rawStream = null;
+  }
+  if (_tx.audioCtx) { try { _tx.audioCtx.close(); } catch (e) {} _tx.audioCtx = null; }
+  _tx.gainNode = null;
+  _tx.analyser = null;
+}
+
+/* Drop the call/UA and disable the PTT, leaving the bar's last status
+   readable. Listen is left exactly as the user has it (just unmuted). */
+function _txTeardown() {
+  _txUnkey();
+  clearTimeout(_tx.idleTimer);
+  clearTimeout(_tx.statsTimer);
+  var pttEl = document.getElementById('tx-ptt');
+  if (pttEl) pttEl.disabled = true;
+  if (_tx.session) { try { _tx.session.terminate(); } catch (e) {} _tx.session = null; }
+  if (_tx.ua)      { try { _tx.ua.stop(); }           catch (e) {} _tx.ua = null; }
+  _txReleaseMic();
+  _txSetBtn('&#127908; TX', '');
+}
+
+function disarmTx() {
+  _tx.armed = false;
+  _txTeardown();
+  document.getElementById('tx-bar').style.display = 'none';
+}
+
+function _txTouchIdle() {
+  clearTimeout(_tx.idleTimer);
+  _tx.idleTimer = setTimeout(function() {
+    if (_tx.session) {
+      sbToast('TX disarmed after 5 minutes idle', false);
+      disarmTx();
+    }
+  }, _TX_IDLE_HANGUP_MS);
+}
+
+/* Mute Listen only while keyed — the radio-style RX mute. Restored on
+   unkey so the operator hears their own repeater tail as confirmation. */
+function _txMuteListen(muted) {
+  var a = document.getElementById('node-audio');
+  if (a) a.muted = muted;
+}
+
+function _txKey() {
+  if (!_tx.session || _tx.keyed || !_tx.session.isEstablished()) return;
+  _tx.keyed = true;
+  var b = document.getElementById('tx-ptt');
+  b.classList.add('tx');
+  _txStatus('TRANSMITTING', 'var(--red)');
+  _txMuteListen(true);
+  _txTouchIdle();
+  try { _tx.session.sendDTMF('*99', { duration: 100, interToneGap: 70 }); }
+  catch (e) {
+    _tx.keyed = false; b.classList.remove('tx'); _txMuteListen(false);
+    _txDiag('dtmf-err', e.message);
+  }
+  /* Sample outbound audio 2s into the keydown — long enough for *99 to
+     land and the operator to be speaking. */
+  clearTimeout(_tx.statsTimer);
+  _tx.statsTimer = setTimeout(function() { if (_tx.keyed) _txStatsSample('keyed'); }, 2000);
+}
+
+function _txUnkey() {
+  if (!_tx.keyed) return;
+  _tx.keyed = false;
+  var b = document.getElementById('tx-ptt');
+  if (b) b.classList.remove('tx');
+  _txMuteListen(false);
+  if (_tx.session && _tx.session.isEstablished()) {
+    _txStatus('Armed — hold PTT to transmit');
+    _txTouchIdle();
+    try { _tx.session.sendDTMF('#', { duration: 100, interToneGap: 70 }); } catch (e) {}
+  }
+}
+
+(function() {
+  var gain = document.getElementById('tx-gain');
+  var gval = document.getElementById('tx-gain-val');
+  gain.value = _txSavedGain();
+  gval.textContent = gain.value + '%';
+  gain.addEventListener('input', function() {
+    gval.textContent = gain.value + '%';
+    localStorage.setItem('henwen-tx-gain', gain.value);
+    if (_tx.gainNode) _tx.gainNode.gain.value = gain.value / 100;
+  });
+
+  var ptt = document.getElementById('tx-ptt');
+  ptt.addEventListener('pointerdown',   function(e) { e.preventDefault(); _txKey(); });
+  ptt.addEventListener('pointerup',     function(e) { e.preventDefault(); _txUnkey(); });
+  ptt.addEventListener('pointerleave',  function()  { _txUnkey(); });
+  ptt.addEventListener('pointercancel', function()  { _txUnkey(); });
+  document.addEventListener('keydown', function(e) {
+    if (e.code === 'Space' && !e.repeat && _tx.armed && _tx.session &&
+        !/^(INPUT|TEXTAREA|SELECT)$/.test((document.activeElement || {}).tagName || '')) {
+      e.preventDefault(); _txKey();
+    }
+  });
+  document.addEventListener('keyup', function(e) {
+    if (e.code === 'Space' && _tx.keyed) { e.preventDefault(); _txUnkey(); }
+  });
+  /* Fail-safes: anything that takes focus/page away unkeys; leaving the page
+     tears the whole call down (hangup is a guaranteed unkey server-side). */
+  window.addEventListener('blur', _txUnkey);
+  document.addEventListener('visibilitychange', function() { if (document.hidden) _txUnkey(); });
+  window.addEventListener('beforeunload', function() {
+    if (_tx.session) { try { _tx.session.terminate(); } catch (e) {} }
+  });
+})();
+
 /* ── Audio listen ── */
 var _listenActive    = false;
 var _listenNode      = '';
@@ -2126,6 +2536,9 @@ function _startListen() {
   if (!node) { sbToast('No local node found', false); return; }
 
   var audio = document.getElementById('node-audio');
+  /* Honor the TX-keyed mute even across a Listen (re)start — an auto-
+     reconnect mid-transmission must not bring the delayed self-audio back. */
+  audio.muted = !!(window._tx && _tx.keyed);
   _listenSetBtn('... Connecting', 'var(--text2)', true);
   audio.onloadstart = null;
   audio.onerror     = null;

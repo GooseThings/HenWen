@@ -15,6 +15,7 @@ cp "$BACKUP_DIR/modules.conf" /etc/asterisk/modules.conf
 cp "$BACKUP_DIR/http.conf"    /etc/asterisk/http.conf
 cp "$BACKUP_DIR/pjsip.conf"   /etc/asterisk/pjsip.conf
 cp "$BACKUP_DIR/henwen-ssl.conf" /etc/apache2/sites-enabled/henwen-ssl.conf
+[ -f "$BACKUP_DIR/rtp.conf" ] && cp "$BACKUP_DIR/rtp.conf" /etc/asterisk/rtp.conf
 if [ -f "$BACKUP_DIR/custom-extensions.conf" ]; then
   cp "$BACKUP_DIR/custom-extensions.conf" /etc/asterisk/custom/extensions.conf
 else

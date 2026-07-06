@@ -18,9 +18,33 @@ Opus module needed). No audio touches the HenWen/Flask process.
   modules (no Asterisk restart), adds the Apache `/asterisk-ws` WSS proxy
   (configtest-gated), generates the SIP secret, prints test credentials
 - `rollback.sh` — restores the backups
-- `../static/tx-test.html` — standalone test page (JsSIP self-hosted in
-  `static/vendor/`); shows a live linked-node count and warns against
-  keying while any node is connected
+- `check-ports.sh` — verifies every network requirement (local listeners,
+  WSS handshake, STUN/NAT probe from the RTP range) and reports PASS/FAIL
+- `tx-test.html` — standalone debug page, deliberately NOT web-served
+  (it was removed from `static/` once the kiosk integration landed); to
+  use it, temporarily copy it into `static/` and remove it afterward
+
+## Network requirements (router port forwards)
+
+The feature does not work without these — **be explicit about them at
+install time**:
+
+| Port | Proto | Direction | Purpose |
+|------|-------|-----------|---------|
+| 443 | TCP | inbound → this box | HTTPS kiosk + SIP-over-WSS signaling (Apache) |
+| 10000–10100 | UDP | inbound → this box | WebRTC RTP media (Asterisk; range set by apply.sh) |
+| — | UDP | outbound | STUN to stun.l.google.com (both sides' ICE candidates) |
+
+Asterisk's builtin HTTP server (8088) stays loopback-only and must **not**
+be forwarded. LAN-only operators need none of the inbound forwards — ICE
+host candidates connect directly.
+
+Run `sudo bash tx-spike/check-ports.sh` to verify all of the above from
+the box itself (it also STUN-probes from inside the RTP range and reports
+whether the NAT/forward preserves ports). Exposure profile of the RTP
+forward: Asterisk binds ports only for active calls (kernel drops the
+rest), active TX calls are DTLS-SRTP, and `strictrtp` (default on) locks
+each session to its learned peer.
 
 ## Test procedure
 

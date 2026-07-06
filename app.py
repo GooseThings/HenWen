@@ -4715,6 +4715,56 @@ def api_status_reset_idle():
     return jsonify({"ok": True})
 
 
+# ── Browser transmit (WebRTC → PJSIP → Rpt phone-control mode) ────────────────
+# The kiosk's TX feature never routes audio through this process: the browser
+# registers directly to Asterisk's PJSIP stack over WSS (Apache-proxied to the
+# loopback-only builtin HTTP server) and calls the phone-portal extension
+# 2<node> (PTT = DTMF *99, unkey = #). HenWen's only job is handing the SIP
+# credentials to a sufficiently-privileged logged-in session. The Asterisk side
+# is set up by tx-spike/apply.sh; if its secret file is missing the feature is
+# simply not configured and the kiosk hides the TX button.
+TX_SECRET_PATH = os.environ.get("TX_SECRET_PATH", "/etc/asterisk/henwen-tx.secret")
+TX_SIP_USER    = os.environ.get("TX_SIP_USER", "henwen-tx")
+TX_WS_PATH     = os.environ.get("TX_WS_PATH", "/asterisk-ws")
+
+
+@app.route("/api/tx/config")
+def api_tx_config():
+    """SIP credentials for the browser transmitter. Admin/superuser only —
+    this keys an RF transmitter under the club callsign, so it's gated at
+    least as tightly as the other RF-consequential features. ?probe=1 answers
+    availability only (no secret, no log line) for deciding button visibility."""
+    if session.get('role') not in ('admin', 'superuser'):
+        return jsonify({"error": "Admin access required"}), 403
+    try:
+        with open(TX_SECRET_PATH) as f:
+            secret = f.read().strip()
+    except OSError:
+        secret = ""
+    if not secret:
+        return jsonify({"enabled": False}), 404
+    if request.args.get("probe"):
+        return jsonify({"enabled": True})
+    content = read_conf_file(RPT_CONF_PATH)
+    nodes   = get_node_numbers(content) if content else []
+    if not nodes:
+        return jsonify({"error": "No local node configured"}), 500
+    node = str(nodes[0])
+    log("INFO", f"[TX] Browser-TX credentials issued to {session.get('username', '?')} "
+                f"for node {node}")
+    resp = jsonify({
+        "enabled":  True,
+        "username": TX_SIP_USER,
+        "password": secret,
+        "ws_path":  TX_WS_PATH,
+        "dial":     "2" + node,
+        "node":     node,
+    })
+    # Live SIP credential in the body — keep it out of shared-kiosk disk caches.
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 # ---------------------------------------------------------------------------
 # Audio monitoring — one ffmpeg per node, broadcast to N simultaneous clients
 #

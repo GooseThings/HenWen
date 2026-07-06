@@ -65,6 +65,27 @@ else
   chown asterisk:asterisk /etc/asterisk/custom/extensions.conf
 fi
 
+echo "== rtp.conf (STUN for remote WebRTC operators)"
+cp /etc/asterisk/rtp.conf "$BACKUP_DIR/" 2>/dev/null || true
+if grep -qE "^stunaddr" /etc/asterisk/rtp.conf; then
+  echo "   stunaddr already set, skipping"
+else
+  sed -i "s|^\[general\]$|[general]\n; $MARKER: learn our public (server-reflexive) ICE candidate so\n; remote WebRTC operators can reach us — without it, media from any\n; non-LAN browser never flows (SIP signaling rides TCP 443 via Apache,\n; but RTP is direct UDP).\nstunaddr=stun.l.google.com:3478|" /etc/asterisk/rtp.conf
+  grep -qE "^stunaddr" /etc/asterisk/rtp.conf || { echo "   FAILED to set stunaddr"; exit 1; }
+fi
+
+echo "== rtp.conf (narrow RTP port range)"
+# 100 ports = 50 concurrent RTP sessions; browser TX needs ~2. Forwarding
+# 10000-20000/udp from the internet is 100x more surface than required —
+# narrow Asterisk's range so the router forward can be equally narrow.
+# (Nothing else in ASL3 uses RTP: IAX2 media rides its own port 4569.)
+if grep -qE "^rtpend=10100" /etc/asterisk/rtp.conf; then
+  echo "   already narrowed, skipping"
+else
+  sed -i "s|^rtpend=20000$|rtpend=10100 ; $MARKER: narrowed from 20000 — forward only 10000-10100/udp|" /etc/asterisk/rtp.conf
+  grep -qE "^rtpend=10100" /etc/asterisk/rtp.conf || echo "   NOTE: rtpend was not 20000; narrow it manually if desired"
+fi
+
 echo "== Loading Asterisk modules (live, no restart)"
 grep -E "^load = " "$SPIKE_DIR/modules.snippet" | awk '{print $3}' | while read -r m; do
   out=$(asterisk -rx "module load $m" 2>&1) || true
@@ -98,5 +119,6 @@ echo "  WSS URL:  wss://goosethings.ddns.net/asterisk-ws"
 echo "  Username: henwen-tx"
 echo "  Password: $(cat /etc/asterisk/henwen-tx.secret)"
 echo "  Dial:     2643930   (node 643930, phone-control mode: *99 = PTT, # = unkey)"
-echo "Test page: https://goosethings.ddns.net/static/tx-test.html"
+echo "Port check: sudo bash $SPIKE_DIR/check-ports.sh   (verifies forwards/NAT/WSS)"
+echo "Required router forwards: TCP 443, UDP 10000-10100 -> this machine"
 echo "Rollback:  sudo bash $SPIKE_DIR/rollback.sh"

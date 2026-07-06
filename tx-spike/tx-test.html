@@ -95,7 +95,7 @@ document.getElementById('btn-call').onclick = function() {
   var domain = new URL(document.getElementById('wss').value.replace('wss:','https:')).hostname;
   session = ua.call('sip:' + dest + '@' + domain, {
     mediaConstraints: { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false },
-    pcConfig: { iceServers: [] },
+    pcConfig: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] },
   });
   session.on('connecting', function(){ log('call connecting (mic granted)'); });
   session.on('accepted',   function(){ log('call accepted'); });
