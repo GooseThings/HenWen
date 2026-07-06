@@ -1,0 +1,38 @@
+
+; ── HenWen browser transmitter (spike, 2026-07-05) ────────────────────────
+; One WebRTC endpoint for the kiosk's browser-mic TX. Signaling arrives as
+; SIP over WebSocket on the loopback-only builtin HTTP server (Apache
+; terminates WSS with the existing cert and proxies /asterisk-ws to it).
+; webrtc=yes turns on DTLS-SRTP, ICE, AVPF, and rtcp-mux in one switch.
+; ulaw only: WebRTC browsers must support G.711, app_rpt is native ulaw —
+; zero transcoding. The endpoint's context exposes exactly one extension
+; (our node in phone-control mode), so a leaked credential can't dial
+; anywhere else.
+
+[henwen-ws]
+type=transport
+protocol=ws
+bind=0.0.0.0
+
+[henwen-tx]
+type=endpoint
+context=henwen-browser-tx
+disallow=all
+allow=ulaw
+webrtc=yes
+dtls_auto_generate_cert=yes
+auth=henwen-tx-auth
+aors=henwen-tx
+callerid="HenWen Web" <643930>
+
+[henwen-tx-auth]
+type=auth
+auth_type=userpass
+username=henwen-tx
+password=__TXSECRET__
+
+[henwen-tx]
+type=aor
+max_contacts=3
+remove_existing=yes
+; ── end HenWen browser transmitter ────────────────────────────────────────

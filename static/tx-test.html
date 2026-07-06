@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HenWen TX Spike</title>
+<style>
+  body { background:#0d1117; color:#e6edf3; font-family:system-ui,sans-serif; max-width:640px; margin:24px auto; padding:0 16px; }
+  h1 { font-size:1.1rem; } h1 span { color:#8b949e; font-weight:400; font-size:.85rem; }
+  label { display:block; font-size:.75rem; color:#8b949e; margin:10px 0 2px; text-transform:uppercase; letter-spacing:.05em; }
+  input { width:100%; box-sizing:border-box; padding:7px 10px; background:#161b22; color:#e6edf3; border:1px solid #30363d; border-radius:6px; font-size:.9rem; }
+  button { padding:9px 16px; border-radius:6px; border:1px solid #30363d; background:#21262d; color:#e6edf3; cursor:pointer; font-size:.9rem; margin:12px 8px 0 0; }
+  button:disabled { opacity:.4; cursor:default; }
+  #ptt { width:100%; padding:26px; font-size:1.2rem; font-weight:700; background:#1a2f1a; border-color:#2ea043; color:#3fb950; user-select:none; touch-action:none; }
+  #ptt.tx { background:#5a1e1e; border-color:#f85149; color:#f85149; }
+  #linkwarn { border:1px solid #f85149; background:rgba(248,81,73,.1); color:#f85149; border-radius:6px; padding:8px 12px; margin:12px 0; font-size:.85rem; display:none; }
+  #linkok { border:1px solid #2ea043; background:rgba(63,185,80,.08); color:#3fb950; border-radius:6px; padding:8px 12px; margin:12px 0; font-size:.85rem; display:none; }
+  #status { font-size:.85rem; margin-top:10px; color:#58a6ff; min-height:1.2em; }
+  pre { background:#161b22; border:1px solid #30363d; border-radius:6px; padding:10px; font-size:.72rem; height:220px; overflow-y:auto; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<h1>HenWen browser-TX spike <span>— WebRTC → PJSIP → Rpt(P)</span></h1>
+
+<div id="linkwarn">⚠ <b><span id="linkcount">?</span> node(s) linked</b> — do NOT key (PTT) while other nodes are connected.</div>
+<div id="linkok">No nodes linked — OK to key for a brief test.</div>
+
+<label>WSS URL</label><input id="wss" value="">
+<label>SIP username</label><input id="user" value="henwen-tx">
+<label>SIP password</label><input id="pass" type="password" value="">
+<label>Dial (2 + node = phone-control mode)</label><input id="dest" value="2643930">
+
+<div>
+  <button id="btn-reg">1. Connect &amp; Register</button>
+  <button id="btn-call" disabled>2. Call node</button>
+  <button id="btn-hang" disabled>Hang up</button>
+</div>
+
+<button id="ptt" disabled>PTT — hold to transmit (or hold Space)</button>
+<div id="status">idle</div>
+<audio id="rx" autoplay></audio>
+<pre id="log"></pre>
+
+<script src="/static/vendor/jssip-3.13.8.min.js"></script>
+<script>
+'use strict';
+var ua = null, session = null, keyed = false;
+
+function log(m) {
+  var el = document.getElementById('log');
+  el.textContent += new Date().toISOString().slice(11,19) + '  ' + m + '\n';
+  el.scrollTop = el.scrollHeight;
+}
+function setStatus(s) { document.getElementById('status').textContent = s; }
+
+/* Default the WSS URL to this page's own host */
+document.getElementById('wss').value = 'wss://' + location.host + '/asterisk-ws';
+
+/* Live linked-node guard: poll the board API; keying with other nodes
+   connected is forbidden during the spike. */
+async function pollLinks() {
+  try {
+    var r = await fetch('/api/status/board');
+    var d = await r.json();
+    var n = 0;
+    (d.nodes || []).forEach(function(x){ n += (x.connected || []).length; });
+    document.getElementById('linkcount').textContent = n;
+    document.getElementById('linkwarn').style.display = n > 0 ? 'block' : 'none';
+    document.getElementById('linkok').style.display   = n > 0 ? 'none'  : 'block';
+  } catch(e) {}
+}
+setInterval(pollLinks, 5000); pollLinks();
+
+document.getElementById('btn-reg').onclick = function() {
+  var wss  = document.getElementById('wss').value.trim();
+  var user = document.getElementById('user').value.trim();
+  var pass = document.getElementById('pass').value;
+  var domain = new URL(wss.replace('wss:', 'https:')).hostname;
+  try {
+    var socket = new JsSIP.WebSocketInterface(wss);
+    ua = new JsSIP.UA({ sockets: [socket], uri: 'sip:' + user + '@' + domain,
+                        password: pass, register: true, session_timers: false });
+    ua.on('connected',    function(){ log('WebSocket connected'); });
+    ua.on('disconnected', function(e){ log('WebSocket disconnected'); setStatus('disconnected'); });
+    ua.on('registered',   function(){ log('REGISTERED'); setStatus('registered');
+                                      document.getElementById('btn-call').disabled = false; });
+    ua.on('registrationFailed', function(e){ log('REGISTRATION FAILED: ' + (e.cause || '')); });
+    ua.start();
+    setStatus('connecting…');
+  } catch(e) { log('ERROR: ' + e.message); }
+};
+
+document.getElementById('btn-call').onclick = function() {
+  var dest   = document.getElementById('dest').value.trim();
+  var domain = new URL(document.getElementById('wss').value.replace('wss:','https:')).hostname;
+  session = ua.call('sip:' + dest + '@' + domain, {
+    mediaConstraints: { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false },
+    pcConfig: { iceServers: [] },
+  });
+  session.on('connecting', function(){ log('call connecting (mic granted)'); });
+  session.on('accepted',   function(){ log('call accepted'); });
+  session.on('confirmed',  function(){
+    log('CALL CONFIRMED — in phone-control mode; PTT enabled');
+    setStatus('in call — unkeyed');
+    document.getElementById('ptt').disabled  = false;
+    document.getElementById('btn-hang').disabled = false;
+  });
+  session.on('failed', function(e){ log('CALL FAILED: ' + (e.cause || '')); resetCall(); });
+  session.on('ended',  function(){ log('call ended'); resetCall(); });
+  session.on('newDTMF', function(e){ if (e.originator === 'local') log('DTMF sent: ' + e.dtmf.tone); });
+  session.connection.addEventListener('track', function(ev) {
+    document.getElementById('rx').srcObject = ev.streams[0];
+    log('remote audio track attached');
+  });
+};
+
+function resetCall() {
+  unkey();
+  session = null;
+  setStatus(ua && ua.isRegistered() ? 'registered' : 'idle');
+  document.getElementById('ptt').disabled = true;
+  document.getElementById('btn-hang').disabled = true;
+}
+
+document.getElementById('btn-hang').onclick = function() { if (session) session.terminate(); };
+
+function key() {
+  if (!session || keyed) return;
+  keyed = true;
+  document.getElementById('ptt').classList.add('tx');
+  setStatus('in call — KEYED (TX)');
+  session.sendDTMF('*99', { duration: 100, interToneGap: 70 });
+}
+function unkey() {
+  if (!session || !keyed) return;
+  keyed = false;
+  document.getElementById('ptt').classList.remove('tx');
+  setStatus('in call — unkeyed');
+  session.sendDTMF('#', { duration: 100, interToneGap: 70 });
+}
+
+var ptt = document.getElementById('ptt');
+ptt.addEventListener('pointerdown',   function(e){ e.preventDefault(); key(); });
+ptt.addEventListener('pointerup',     function(e){ e.preventDefault(); unkey(); });
+ptt.addEventListener('pointerleave',  function(){ unkey(); });
+ptt.addEventListener('pointercancel', function(){ unkey(); });
+document.addEventListener('keydown', function(e){ if (e.code === 'Space' && !e.repeat) { e.preventDefault(); key(); } });
+document.addEventListener('keyup',   function(e){ if (e.code === 'Space') { e.preventDefault(); unkey(); } });
+window.addEventListener('blur', unkey);
+/* Fail-safe: leaving the page tears the call down (hangup = guaranteed unkey) */
+window.addEventListener('beforeunload', function(){ if (session) try { session.terminate(); } catch(e){} });
+</script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+
+; ── HenWen browser transmitter (spike, 2026-07-05) ────────────────────────
+; The only thing the henwen-tx WebRTC endpoint can dial: our own node in
+; phone-control mode. PTT = DTMF *99, unkey = #. Loaded via the
+; #tryinclude "custom/extensions.conf" already present in extensions.conf.
+[henwen-browser-tx]
+exten => 2643930,1,Answer()
+ same => n,Rpt(643930,P,${CALLERID(name)}-P)
+ same => n,Hangup()
+; ── end HenWen browser transmitter ────────────────────────────────────────
