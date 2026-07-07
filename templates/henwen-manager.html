@@ -576,6 +576,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     <span id="update-msg"></span>
     <div class="btn-row">
       <a id="update-link" class="btn btn-sm" href="#" target="_blank" rel="noopener">View Release</a>
+      <button class="btn btn-sm btn-warn" onclick="launchUpdater()">Launch Updater</button>
       <button class="btn btn-sm" onclick="dismissUpdateBar()">Dismiss</button>
     </div>
   </div>
@@ -4474,6 +4475,25 @@ async function checkForUpdate() {
 function dismissUpdateBar() {
   document.getElementById('update-bar').classList.remove('show');
   sessionStorage.setItem('henwen_update_dismissed', '1');
+}
+
+async function launchUpdater() {
+  if (!confirm('Launch the updater now?\n\nHenWen will pull the latest release and restart '
+             + 'itself automatically. This briefly disconnects everyone (kiosk playback, '
+             + 'active calls, and this page).')) return;
+  var msgEl = document.getElementById('update-msg');
+  var prevMsg = msgEl.textContent;
+  msgEl.textContent = 'Launching updater...';
+  var r = await api('/api/update/launch', {method: 'POST'});
+  if (r.ok) {
+    msgEl.textContent = r.data.message;
+    log('Updater launched: ' + r.data.message, 'OK');
+  } else {
+    msgEl.textContent = prevMsg;
+    var err = (r.data && (r.data.error || r.data.hint)) || 'Failed to launch updater.';
+    alert(err);
+    log('Updater launch failed: ' + err, 'ERROR');
+  }
 }
 
 async function checkNodeDB() {

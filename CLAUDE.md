@@ -57,6 +57,10 @@ Daemon threads launch when gunicorn imports the module:
 
 Because gunicorn runs `--workers 1 --threads 8`, all threads share a single process and in-process cache. Do not increase worker count without rethinking the AMI connection pool.
 
+### Self-update
+
+The update bar's "Launch Updater" button (`/api/update/launch`, superuser only) runs `update.sh` — but not as a direct child process. It's launched via `sudo systemd-run --unit=henwen-updater --collect update.sh` specifically so the script runs as its own transient systemd unit, outside HenWen.service's cgroup: the script ends by running `systemctl restart HenWen`, which would kill a plain subprocess child of the very process it's restarting. `update.sh` fetches `main` over plain HTTPS from the public repo (not the SSH `origin` remote — root may have no SSH key/agent under systemd-run), hard-resets to it, reinstalls `requirements.txt`, byte-compiles `app.py` as a sanity check before touching the running service (rolling back and aborting the restart if that fails), then restarts. This only works when `/opt/HenWen` is itself a git checkout of the repo — true of this specific deployment, but not of installs that used `install.sh`'s plain `cp -r` (which doesn't set up git at all). The required sudoers line is installed by `install.sh` alongside the existing restart/reload rules.
+
 ### AMI connection
 
 `AMIClient` (class in app.py ~line 915) is a raw TCP socket client to Asterisk Manager Interface on port 5038. It is a persistent connection managed by `_poll_loop`. Routes read from the AMI cache (`get_cached_status()`) rather than issuing live AMI commands — this makes most status reads sub-millisecond. Commands that must be sent live (connect/disconnect, restart, etc.) use `ami_send_command()`.

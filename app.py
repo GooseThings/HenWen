@@ -160,6 +160,10 @@ if not os.path.exists(SYSTEMCTL_PATH):
     SYSTEMCTL_PATH = "/usr/bin/systemctl"
 ASTERISK_PATH   = "/usr/sbin/asterisk"
 SUDO_PATH       = "/usr/bin/sudo"
+SYSTEMD_RUN_PATH = "/usr/bin/systemd-run"
+if not os.path.exists(SYSTEMD_RUN_PATH):
+    SYSTEMD_RUN_PATH = "/bin/systemd-run"
+UPDATE_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "update.sh")
 
 
 def _systemctl(*args, timeout=30):
@@ -5755,6 +5759,46 @@ def api_update_check():
         "url":              latest["url"] or f"https://github.com/{GITHUB_REPO}/releases/latest",
         "update_available": bool(latest_tag) and HENWEN_VERSION != "unknown"
                             and latest_tag > HENWEN_VERSION,
+    })
+
+
+@app.route("/api/update/launch", methods=["POST"])
+def api_update_launch():
+    """Kick off update.sh as its own transient systemd unit (superuser only
+    — it ends in a full service restart). Launched via `systemd-run` rather
+    than a plain subprocess so the script survives outside HenWen.service's
+    cgroup: `systemctl restart HenWen` at the end of the script would
+    otherwise kill the very process running it."""
+    if session.get('role') != 'superuser':
+        return jsonify({"error": "Superuser access required"}), 403
+
+    if not os.path.exists(UPDATE_SCRIPT_PATH):
+        return jsonify({"error": f"Updater script not found: {UPDATE_SCRIPT_PATH}"}), 404
+
+    cmd = [SUDO_PATH, "-n", SYSTEMD_RUN_PATH,
+           "--unit=henwen-updater", "--collect", UPDATE_SCRIPT_PATH]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except Exception as e:
+        log("ERROR", f"[API] /api/update/launch exception: {e}")
+        return jsonify({"error": str(e)}), 500
+
+    if r.returncode != 0:
+        stderr = r.stderr.strip()
+        hint = ("Service account lacks sudo rights for the updater — "
+                "re-run install.sh to install the henwen-systemctl sudoers rule."
+                if "password" in stderr.lower() or "authoriz" in stderr.lower()
+                else "Check: journalctl -u henwen-updater -n 50")
+        log("ERROR", f"[API] update launch failed: {stderr}")
+        return jsonify({"error": stderr or f"systemd-run returned code {r.returncode}",
+                        "hint": hint}), 500
+
+    log("INFO", f"[API] Update launched by '{session.get('username')}' (unit: henwen-updater)")
+    return jsonify({
+        "success": True,
+        "message": "Update started. If one is available, HenWen will restart "
+                   "automatically in a moment — this page will disconnect, then "
+                   "reload it. Follow progress with: journalctl -u henwen-updater -f",
     })
 
 

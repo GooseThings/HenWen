@@ -113,21 +113,27 @@ fi
 
 # ── Sudoers rule for privileged systemctl actions ─────────
 # The service runs unprivileged as User=asterisk (see HenWen.service), but
-# the Dashboard's "Restart Asterisk" button and secret-key rotation need to
-# run `systemctl restart asterisk`, `systemctl restart HenWen`, and
-# `systemctl daemon-reload`. Without this rule those actions fail with
-# "Interactive authentication required" since there's no session for
-# polkit to prompt. Scope is intentionally limited to these exact
-# commands — do not broaden with wildcards.
-echo "[7/8] Installing sudoers rule for restart/reload actions..."
+# the Dashboard's "Restart Asterisk" button, secret-key rotation, and the
+# "Launch Updater" button need to run `systemctl restart asterisk`,
+# `systemctl restart HenWen`, `systemctl daemon-reload`, and (via
+# systemd-run, so it survives outside HenWen.service's own cgroup)
+# update.sh. Without this rule those actions fail with "Interactive
+# authentication required" since there's no session for polkit to prompt.
+# Scope is intentionally limited to these exact commands — do not broaden
+# with wildcards. The updater rule only works if $INSTALL_DIR is itself a
+# git checkout of the HenWen repo — update.sh no-ops with an error otherwise.
+echo "[7/8] Installing sudoers rule for restart/reload/update actions..."
 SUDOERS_FILE=/etc/sudoers.d/henwen-systemctl
 SYSTEMCTL_BIN=$(command -v systemctl || echo /bin/systemctl)
+SYSTEMD_RUN_BIN=$(command -v systemd-run || echo /usr/bin/systemd-run)
 cat > "${SUDOERS_FILE}.tmp" <<EOF
 # Installed by HenWen's install.sh. Lets the unprivileged service account
-# restart the units it manages and reload systemd unit definitions.
+# restart the units it manages, reload systemd unit definitions, and
+# launch the self-updater as its own transient unit.
 asterisk ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} daemon-reload
 asterisk ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} restart asterisk
 asterisk ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} restart ${SERVICE_NAME}
+asterisk ALL=(root) NOPASSWD: ${SYSTEMD_RUN_BIN} --unit=henwen-updater --collect ${INSTALL_DIR}/update.sh
 EOF
 if visudo -c -f "${SUDOERS_FILE}.tmp" &>/dev/null; then
     chmod 440 "${SUDOERS_FILE}.tmp"
