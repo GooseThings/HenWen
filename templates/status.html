@@ -110,22 +110,34 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   transition: color .15s, border-color .15s; }
 .btn-icon:hover { color: var(--text); border-color: var(--text2); }
 
-/* ── Weather ticker ── */
+/* ── Weather ticker + net-schedule reminder bars ── */
+.bars-row { display: flex; gap: 10px; flex-shrink: 0; }
 .weather-bar {
   background: var(--bg2); border: 1px solid var(--border); border-radius: 7px;
   padding: 5px 14px; display: flex; align-items: center; gap: 14px; flex-shrink: 0;
   font-size: 0.85rem; overflow: hidden; min-height: 32px;
   transition: background-color .3s, border-color .3s;
 }
+#weather-bar { flex: 1; min-width: 0; }
 .weather-location { color: var(--accent); font-weight: 600; white-space: nowrap; flex-shrink: 0; }
 .weather-sep { color: var(--border); flex-shrink: 0; }
 .weather-items { display: flex; gap: 20px; flex-wrap: wrap; overflow: hidden; }
 .weather-item { color: var(--text2); white-space: nowrap; }
 .weather-item strong { color: var(--text); }
 .weather-loading { color: var(--text2); font-style: italic; }
+/* A net-bar item for a net that has a node number renders as this instead
+   of a plain span, so clicking it connects to that node (see sbConnect in
+   updateWeatherNetBadge). Reset to look identical to .weather-item at rest;
+   only the hover/focus state hints it's clickable. */
+.net-item-link { background: none; border: none; padding: 0; margin: 0;
+  font: inherit; cursor: pointer; }
+.net-item-link:hover, .net-item-link:focus-visible { color: var(--accent); }
+.net-item-link:hover strong, .net-item-link:focus-visible strong { color: var(--accent); }
 /* A net scheduled today within an hour of its start (either side) highlights
-   the whole bar in the same orange as the Favorites ("★ Fav") button, so the
-   "something needs attention" color language stays consistent across the kiosk. */
+   just the net-reminder box (#net-bar) in the same orange as the Favorites
+   ("★ Fav") button — kept as its own frame so it doesn't tint the weather
+   ticker next to it — so the "something needs attention" color language
+   stays consistent across the kiosk. */
 .weather-bar-alert { background: rgba(232,113,10,.10); border-color: rgba(232,113,10,.5); }
 
 /* ── Content area: Node info | Connected/Map | Favorites | Global Activity (outer 2 + node full height) ── */
@@ -409,9 +421,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   .header-clock-wrap { order: 3; flex-basis: 100%; justify-content: center; }
   .header-actions { gap: 6px; }
 
+  .bars-row { flex-wrap: wrap; }
   .weather-bar { min-height: 0; overflow: visible; flex-wrap: wrap; }
   .weather-items { overflow: visible; }
-  #weather-net-today { flex-basis: 100%; }
+  #net-bar { flex-basis: 100%; }
 
   /* Single scrolling column. Order follows what a kiosk visitor checks
      first on a phone: their own node, who's connected to it, then the
@@ -478,6 +491,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <div class="header-clock-wrap" style="display:flex;align-items:center;gap:10px">
       <div class="header-clock" id="clock">--:--:--</div>
       <button class="btn-icon" id="net-cal-btn" onclick="openNetModal()" title="Net Schedule — scheduled net reminders">&#128197;</button>
+      <button class="btn-icon" id="echolink-search-btn" onclick="openEchoLinkModal()" title="EchoLink — search currently-online stations to connect to" style="display:none">&#128225;EL</button>
     </div>
     <div class="header-actions">
       <div id="kiosk-user-bar" style="display:none;align-items:center;gap:8px;font-size:0.75rem">
@@ -493,12 +507,17 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     </div>
   </header>
 
-  <!-- Weather bar -->
-  <div class="weather-bar" id="weather-bar">
-    <div id="weather-content" style="display:flex;align-items:center;gap:14px;flex:1;min-width:0;overflow:hidden">
-      <span class="weather-loading">Loading weather&hellip;</span>
+  <!-- Weather bar + net-schedule reminder bar: two separate frames so a
+       due/soon net only colors its own box, not the weather ticker too. -->
+  <div class="bars-row">
+    <div class="weather-bar" id="weather-bar">
+      <div id="weather-content" style="display:flex;align-items:center;gap:14px;flex:1;min-width:0;overflow:hidden">
+        <span class="weather-loading">Loading weather&hellip;</span>
+      </div>
     </div>
-    <div id="weather-net-today" style="display:none;flex-shrink:0"></div>
+    <div class="weather-bar" id="net-bar" style="display:none">
+      <div id="weather-net-today" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap"></div>
+    </div>
   </div>
 
   <!-- Content -->
@@ -665,8 +684,13 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         </select>
         <input id="net-f-date" type="date"
                style="display:none;width:100%;box-sizing:border-box;margin-bottom:6px;padding:6px 9px;border:1px solid var(--border);border-radius:5px;background:var(--bg2);color:var(--text);font-size:0.85rem">
-        <input id="net-f-time" type="time"
-               style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:6px 9px;border:1px solid var(--border);border-radius:5px;background:var(--bg2);color:var(--text);font-size:0.85rem">
+        <div style="display:flex;gap:6px;margin-bottom:6px">
+          <input id="net-f-time" type="time" title="Start time"
+                 style="flex:1;min-width:0;box-sizing:border-box;padding:6px 9px;border:1px solid var(--border);border-radius:5px;background:var(--bg2);color:var(--text);font-size:0.85rem">
+          <input id="net-f-end" type="time" title="End time (optional) — the reminder stops showing as active/today once this passes"
+                 style="flex:1;min-width:0;box-sizing:border-box;padding:6px 9px;border:1px solid var(--border);border-radius:5px;background:var(--bg2);color:var(--text);font-size:0.85rem">
+        </div>
+        <div style="font-size:0.68rem;color:var(--text2);margin:-4px 0 6px">Start · End (optional — leave blank to keep flagging it as today's net all day)</div>
         <textarea id="net-f-notes" placeholder="Notes (optional)" maxlength="500" rows="2"
                style="width:100%;box-sizing:border-box;margin-bottom:8px;padding:6px 9px;border:1px solid var(--border);border-radius:5px;background:var(--bg2);color:var(--text);font-size:0.85rem;resize:vertical"></textarea>
         <div style="display:flex;gap:8px">
@@ -678,6 +702,24 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
       <div id="net-list" style="display:flex;flex-direction:column;gap:6px">
         <div class="empty-msg" style="font-size:0.8rem">Loading&hellip;</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- EchoLink search modal — gated to logged-in users and up; the trigger
+       button itself (#echolink-search-btn) stays hidden until login, unlike
+       the always-visible net-schedule button, since this bridges RF. -->
+  <div id="echolink-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;align-items:center;justify-content:center">
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:22px 26px;width:520px;max-width:92vw;max-height:86vh;overflow-y:auto">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+        <div style="font-size:0.95rem;font-weight:700">&#128225; EchoLink</div>
+        <button onclick="closeEchoLinkModal()" style="background:none;border:none;color:var(--text2);font-size:1.1rem;cursor:pointer;line-height:1;padding:2px 6px">&#10005;</button>
+      </div>
+      <input id="echolink-f-query" type="text" placeholder="Search callsign or node number&hellip;" maxlength="50"
+             oninput="searchEchoLinkDebounced()" autocomplete="off"
+             style="width:100%;box-sizing:border-box;margin-bottom:10px;padding:6px 9px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-size:0.85rem">
+      <div id="echolink-results" style="display:flex;flex-direction:column;gap:6px">
+        <div class="empty-msg" style="font-size:0.8rem">Currently-online repeaters, links, and conferences — type at least 2 characters to search.</div>
       </div>
     </div>
   </div>
@@ -1073,8 +1115,9 @@ function _formatNetTime(hhmm) {
 }
 
 function _netScheduleLabel(net) {
-  if (net.recurrence === 'once') return net.net_date + ' at ' + _formatNetTime(net.time);
-  return 'Weekly · ' + (_WEEKDAY_NAMES[net.weekday] || '?') + ' at ' + _formatNetTime(net.time);
+  var span = _formatNetTime(net.time) + (net.end_time ? '–' + _formatNetTime(net.end_time) : '');
+  if (net.recurrence === 'once') return net.net_date + ' at ' + span;
+  return 'Weekly · ' + (_WEEKDAY_NAMES[net.weekday] || '?') + ' at ' + span;
 }
 
 function _netCountdownLabel(min) {
@@ -1113,7 +1156,10 @@ function netMinutesUntil(net, refDate) {
 }
 
 // Is this net scheduled for *today* (kiosk-local)? Returns minutes until it
-// starts (negative once it's started), or null if it's not today at all.
+// starts (negative once it's started), or null if it's not today at all —
+// including once it's past its own end_time, if one is set. Without an
+// end_time, a started net stays "today" (negative minutes) for the rest of
+// the day; that's the pre-end_time behavior, kept for nets that don't set one.
 function netTodayMinutes(net, refDate) {
   var now = _kioskNowParts(refDate);
   var isToday;
@@ -1128,16 +1174,23 @@ function netTodayMinutes(net, refDate) {
   var th = parseInt(t[0], 10) || 0, tm = parseInt(t[1], 10) || 0;
   var nowMs    = Date.UTC(now.year, now.month - 1, now.day, now.hour, now.minute);
   var targetMs = Date.UTC(now.year, now.month - 1, now.day, th, tm);
+  if (net.end_time) {
+    var et = net.end_time.split(':');
+    var endMs = Date.UTC(now.year, now.month - 1, now.day, parseInt(et[0], 10) || 0, parseInt(et[1], 10) || 0);
+    if (nowMs >= endMs) return null;
+  }
   return Math.round((targetMs - nowMs) / 60000);
 }
 
-// Right side of the weather bar: any net(s) scheduled today, soonest first.
-// The frame itself gets the Favorites-orange highlight once the soonest one
-// is within an hour either side of its start time (so it doesn't wink out
-// the instant the net begins — it stays flagged for the first hour too).
+// Its own frame next to the weather bar: any net(s) scheduled today, soonest
+// first. The frame itself gets the Favorites-orange highlight once the
+// soonest one is within an hour either side of its start time (so it
+// doesn't wink out the instant the net begins — it stays flagged for the
+// first hour too), separate from the weather ticker so an active net
+// doesn't tint weather info that has nothing to do with it.
 function updateWeatherNetBadge() {
   var el  = document.getElementById('weather-net-today');
-  var bar = document.getElementById('weather-bar');
+  var bar = document.getElementById('net-bar');
   if (!el || !bar) return;
   var todays = _nets
     .map(function(n) { return {net: n, mins: netTodayMinutes(n)}; })
@@ -1145,17 +1198,29 @@ function updateWeatherNetBadge() {
     .sort(function(a, b) { return a.mins - b.mins; });
 
   if (!todays.length) {
-    el.style.display = 'none';
+    bar.style.display = 'none';
     bar.classList.remove('weather-bar-alert');
     return;
   }
-  el.style.display = '';
+  bar.style.display = '';
+  var localNode = (window._lastBoardNodes && window._lastBoardNodes[0])
+                  ? window._lastBoardNodes[0].node : '';
   el.innerHTML = todays.map(function(x) {
-    return '<span class="weather-item" style="white-space:nowrap">&#128225; ' + esc(x.net.name) +
-      ' <strong>' + esc(_formatNetTime(x.net.time)) + '</strong></span>';
+    var label = '&#128225; ' + esc(x.net.name) + ' <strong>' + esc(_formatNetTime(x.net.time)) + '</strong>';
+    if (x.net.node && localNode) {
+      return '<button type="button" class="weather-item net-item-link" title="Connect to node ' +
+        esc(x.net.node) + '" onclick="sbConnect(\'' + esc(localNode) + '\',\'' + esc(x.net.node) +
+        '\',this,false,false)">' + label + '</button>';
+    }
+    return '<span class="weather-item" style="white-space:nowrap">' + label + '</span>';
   }).join('');
-  var withinAnHour = todays[0].mins <= 60 && todays[0].mins >= -60;
-  bar.classList.toggle('weather-bar-alert', withinAnHour);
+  // With an end_time, netTodayMinutes already returns null past it, so any
+  // mins<=60 here (including deeply negative, still-running) counts as
+  // active. Without one, fall back to the old fixed ±1hr window since
+  // there's no known duration to bound the highlight by.
+  var lead   = todays[0];
+  var active = lead.net.end_time ? (lead.mins <= 60) : (lead.mins <= 60 && lead.mins >= -60);
+  bar.classList.toggle('weather-bar-alert', active);
 }
 
 async function fetchNets() {
@@ -1225,6 +1290,7 @@ function resetNetForm() {
   document.getElementById('net-f-name').value    = '';
   document.getElementById('net-f-node').value    = '';
   document.getElementById('net-f-time').value    = '';
+  document.getElementById('net-f-end').value     = '';
   document.getElementById('net-f-notes').value   = '';
   document.getElementById('net-f-date').value    = '';
   document.getElementById('net-f-weekday').value = '0';
@@ -1242,6 +1308,7 @@ function editNet(id) {
   document.getElementById('net-f-name').value  = n.name  || '';
   document.getElementById('net-f-node').value  = n.node  || '';
   document.getElementById('net-f-time').value  = n.time  || '';
+  document.getElementById('net-f-end').value   = n.end_time || '';
   document.getElementById('net-f-notes').value = n.notes || '';
   var recur = n.recurrence === 'once' ? 'once' : 'weekly';
   document.querySelector('input[name="net-f-recur"][value="' + recur + '"]').checked = true;
@@ -1264,6 +1331,7 @@ async function saveNet() {
   var node    = document.getElementById('net-f-node').value.trim();
   var recur   = document.querySelector('input[name="net-f-recur"]:checked').value;
   var netTime = document.getElementById('net-f-time').value;
+  var endTime = document.getElementById('net-f-end').value;
   var notes   = document.getElementById('net-f-notes').value.trim();
   var weekday = parseInt(document.getElementById('net-f-weekday').value, 10);
   var netDate = document.getElementById('net-f-date').value;
@@ -1271,8 +1339,9 @@ async function saveNet() {
   if (!name)    { errEl.textContent = 'Name is required'; return; }
   if (!netTime) { errEl.textContent = 'Time is required'; return; }
   if (recur === 'once' && !netDate) { errEl.textContent = 'Pick a date for a one-time net'; return; }
+  if (endTime && endTime <= netTime) { errEl.textContent = 'End time must be after the start time'; return; }
 
-  var payload = {name: name, node: node, recurrence: recur, time: netTime, notes: notes};
+  var payload = {name: name, node: node, recurrence: recur, time: netTime, end_time: endTime || null, notes: notes};
   if (recur === 'weekly') payload.weekday = weekday; else payload.net_date = netDate;
 
   var url    = id ? ('/api/nets/' + id) : '/api/nets';
@@ -1294,6 +1363,72 @@ async function deleteNet(id) {
   var r = await apiFetch('/api/nets/' + id, {method: 'DELETE'});
   if (r.status === 401) { openKioskLogin(deleteNet, [id]); return; }
   fetchNets();
+}
+
+/* ── EchoLink search ──
+   Directory is a server-side cache (see _echolink_poll_loop in app.py) of
+   currently-online repeaters/links/conferences scraped from echolink.org —
+   there's no live per-keystroke round trip to EchoLink itself. */
+var _ekLabel = {repeater: 'Repeater', link: 'Link', conference: 'Conference'};
+
+function openEchoLinkModal() {
+  document.getElementById('echolink-modal-overlay').style.display = 'flex';
+  document.getElementById('echolink-f-query').focus();
+}
+
+function closeEchoLinkModal() {
+  document.getElementById('echolink-modal-overlay').style.display = 'none';
+}
+
+var _ekSearchTimer = null;
+function searchEchoLinkDebounced() {
+  clearTimeout(_ekSearchTimer);
+  _ekSearchTimer = setTimeout(searchEchoLink, 300);
+}
+
+async function searchEchoLink() {
+  var box = document.getElementById('echolink-results');
+  var q   = document.getElementById('echolink-f-query').value.trim();
+  if (q.length < 2) {
+    box.innerHTML = '<div class="empty-msg" style="font-size:0.8rem">Currently-online repeaters, links, and conferences — type at least 2 characters to search.</div>';
+    return;
+  }
+  var r;
+  try {
+    r = await apiFetch('/api/echolink/search?q=' + encodeURIComponent(q), {cache: 'no-store'});
+  } catch (e) { return; }
+  if (r.status === 401) { openKioskLogin(searchEchoLink, []); return; }
+  if (!r.ok) return;
+  var d = await r.json();
+  renderEchoLinkResults(d.results || []);
+}
+
+function renderEchoLinkResults(results) {
+  var box = document.getElementById('echolink-results');
+  if (!results.length) {
+    box.innerHTML = '<div class="empty-msg" style="font-size:0.8rem">No matching stations currently online</div>';
+    return;
+  }
+  var localNode = (window._lastBoardNodes && window._lastBoardNodes[0])
+                  ? window._lastBoardNodes[0].node : '';
+  box.innerHTML = results.map(function(x) {
+    var encoded = '3' + String(x.node).padStart(6, '0');
+    var connBtn = localNode
+      ? '<button class="sb-btn connect" onclick="sbConnect(\'' + esc(localNode) + '\',\'' + esc(encoded) +
+        '\',this,false,false)">Connect</button>'
+      : '';
+    return '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:6px">' +
+      '<div style="min-width:0;overflow:hidden">' +
+        '<div style="font-size:0.85rem;font-weight:600">' + esc(x.call) +
+          ' <span style="font-size:0.68rem;font-weight:400;color:var(--text2)">' + esc(_ekLabel[x.kind] || x.kind) + '</span>' +
+        '</div>' +
+        '<div style="font-size:0.76rem;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
+          esc(x.location) + (x.status ? ' &middot; ' + esc(x.status) : '') + ' &middot; node ' + esc(x.node) +
+        '</div>' +
+      '</div>' +
+      '<div style="flex-shrink:0">' + connBtn + '</div>' +
+    '</div>';
+  }).join('');
 }
 
 /* ── Board data ── */
@@ -1845,6 +1980,7 @@ async function kioskLogin() {
     var pl = document.getElementById('perm-label');
     if (pl) pl.style.display = (d.role === 'admin' || d.role === 'superuser') ? '' : 'none';
     _txUpdateBtn();
+    _echolinkUpdateBtn();
     loadFavorites();
     if (_pendingAction) {
       _pendingAction.fn.apply(null, _pendingAction.args);
@@ -1869,6 +2005,7 @@ async function kioskLogout() {
   updateKioskUserBar(null, null);
   if (_tx.armed) disarmTx();
   _txUpdateBtn();
+  _echolinkUpdateBtn();
   loadFavorites();
   sbToast('Logged out', true);
 }
@@ -1902,6 +2039,7 @@ async function checkKioskSession() {
 
   /* TX button: admin/superuser + HTTPS + feature configured server-side */
   _txUpdateBtn();
+  _echolinkUpdateBtn();
 
   /* "Logged in: N" is only clickable for superusers — everyone else (including
      admins) just sees the plain count, same as today. */
@@ -2210,6 +2348,14 @@ async function _txUpdateBtn() {
     var r = await apiFetch('/api/tx/config?probe=1');
     btn.style.display = r.ok ? '' : 'none';
   } catch (e) { btn.style.display = 'none'; }
+}
+
+/* EchoLink search: gated to any logged-in role, no server-side "configured"
+   probe needed (unlike TX) — the search endpoint itself 401s appropriately. */
+function _echolinkUpdateBtn() {
+  var btn = document.getElementById('echolink-search-btn');
+  if (!btn) return;
+  btn.style.display = window._kioskRole ? '' : 'none';
 }
 
 var _jssipPromise = null;

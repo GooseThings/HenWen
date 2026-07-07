@@ -510,10 +510,14 @@ def get_db():
         weekday    INTEGER,
         net_date   TEXT,
         time       TEXT    NOT NULL,
+        end_time   TEXT,
         notes      TEXT    NOT NULL DEFAULT '',
         created_by TEXT    NOT NULL DEFAULT '',
         created_at TEXT    DEFAULT (datetime('now'))
     )""")
+    _net_cols = {r[1] for r in conn.execute("PRAGMA table_info(net_schedules)").fetchall()}
+    if 'end_time' not in _net_cols:
+        conn.execute("ALTER TABLE net_schedules ADD COLUMN end_time TEXT")
     conn.commit()
     conn.execute("""
     CREATE TABLE IF NOT EXISTS users (
@@ -608,7 +612,8 @@ def check_auth():
                       'api_fav_add', 'api_fav_delete', 'api_fav_label',
                       'api_audio_stream', 'api_audio_check', 'api_audio_stop',
                       'api_audio_client_log',
-                      'api_nets_create', 'api_nets_update', 'api_nets_delete'}
+                      'api_nets_create', 'api_nets_update', 'api_nets_delete',
+                      'api_echolink_search'}
 
     endpoint  = request.endpoint
     is_public = endpoint in _PUBLIC
@@ -2231,6 +2236,92 @@ def start_global_activity_poller():
     t = threading.Thread(target=_global_activity_poll_loop, name="global-activity", daemon=True)
     t.start()
     log("INFO", "[GLOBAL-ACTIVITY] Poller thread launched")
+
+
+# ── EchoLink directory cache ─────────────────────────────────────────────────
+# echolink.org/logins.jsp is a public, unauthenticated snapshot of every
+# currently-logged-in EchoLink station (repeaters, links, conferences, and
+# individual softphone users) — the only source available since EchoLink has
+# no public API. It's a presence list, not a historical registry: a node not
+# currently online won't appear. The page itself only regenerates server-side
+# every 2 minutes (its own <meta http-equiv="Refresh" content="120;">), so we
+# poll every 5 to be a good citizen; it's also ~800KB, much bigger than the
+# AllStar keyed-nodes page, hence the longer timeout below.
+ECHOLINK_LOGINS_URL    = "https://www.echolink.org/logins.jsp"
+ECHOLINK_POLL_INTERVAL = 300.0   # 5 minutes
+
+_echolink_cache      = []   # [{call, location, status, node, kind}] full-replace each successful poll
+_echolink_cache_ts   = 0.0
+_echolink_cache_lock = threading.Lock()
+
+# Individual softphone "Users" aren't stations a repeater would bridge to, so
+# that section is intentionally not scraped here.
+_ECHOLINK_SECTION_KINDS = {"rpt": "repeater", "link": "link", "conf": "conference"}
+_ECHOLINK_ANCHOR_RE = re.compile(r'<a name="(rpt|link|user|conf)">', re.I)
+_ECHOLINK_ROW_RE    = re.compile(r'<tr>(.*?)</tr>', re.S)
+_ECHOLINK_TD_RE     = re.compile(r'<td[^>]*>(.*?)</td>', re.S)
+
+
+def _fetch_echolink_directory():
+    """Scrape echolink.org/logins.jsp for currently-online repeaters, links,
+    and conferences. Returns [] on any failure (fail-soft — the poll loop
+    leaves the existing cache in place rather than blanking it on a
+    transient outage)."""
+    rows_out = []
+    try:
+        req = urlreq.Request(ECHOLINK_LOGINS_URL, headers={"User-Agent": "HenWen/1.0 (echolink directory)"})
+        with urlreq.urlopen(req, timeout=20) as resp:
+            page = resp.read().decode("utf-8", "replace")
+    except Exception as e:
+        log("WARN", f"[ECHOLINK] Directory fetch failed: {e}")
+        return rows_out
+
+    anchors = list(_ECHOLINK_ANCHOR_RE.finditer(page))
+    for i, m in enumerate(anchors):
+        kind = _ECHOLINK_SECTION_KINDS.get(m.group(1).lower())
+        if not kind:
+            continue
+        section_html = page[m.end():(anchors[i + 1].start() if i + 1 < len(anchors) else len(page))]
+        for row in _ECHOLINK_ROW_RE.findall(section_html):
+            tds = _ECHOLINK_TD_RE.findall(row)
+            if len(tds) < 5:
+                continue
+            call     = html.unescape(re.sub(r'<[^>]+>', '', tds[0])).strip()
+            location = html.unescape(re.sub(r'<[^>]+>', '', tds[1])).strip()
+            status   = html.unescape(re.sub(r'<[^>]+>', '', tds[2])).strip()
+            node     = html.unescape(re.sub(r'<[^>]+>', '', tds[4])).strip()
+            if not call or not re.match(r'^\d{1,7}$', node):
+                continue
+            rows_out.append({"call": call, "location": location, "status": status, "node": node, "kind": kind})
+    return rows_out
+
+
+def _echolink_poll_loop():
+    global _echolink_cache_ts
+    log("INFO", "[ECHOLINK] Directory poller started — first fetch in 30s")
+    time.sleep(30)
+    backoff = 0
+    while True:
+        try:
+            rows = _fetch_echolink_directory()
+            if rows:
+                with _echolink_cache_lock:
+                    _echolink_cache[:] = rows
+                    _echolink_cache_ts = time.time()
+                log("INFO", f"[ECHOLINK] Directory refreshed: {len(rows)} stations")
+                backoff = 0
+            time.sleep(ECHOLINK_POLL_INTERVAL)
+        except Exception as e:
+            backoff = min(backoff + 1, 5)
+            sleep_s = ECHOLINK_POLL_INTERVAL * (2 ** (backoff - 1))
+            log("WARN", f"[ECHOLINK] Loop error ({e}) — retry in {sleep_s:.0f}s")
+            time.sleep(sleep_s)
+
+
+def start_echolink_directory_poller():
+    t = threading.Thread(target=_echolink_poll_loop, name="echolink-directory", daemon=True)
+    t.start()
+    log("INFO", "[ECHOLINK] Directory poller thread launched")
 
 
 # ── Weather cache (wttr.in) ───────────────────────────────────────────────────
@@ -4075,6 +4166,22 @@ def _validate_net_fields(data, existing=None):
             return None, "Time must be in 24-hour HH:MM format"
         fields["time"] = net_time
 
+    if "end_time" in data or not partial:
+        end_time = str(data.get("end_time", "") or "").strip()
+        if end_time and not _NET_TIME_RE.match(end_time):
+            return None, "End time must be in 24-hour HH:MM format"
+        fields["end_time"] = end_time or None
+
+    # Re-check start/end ordering whenever either side changed — editing just
+    # "time" on a row that already has an end_time must not be allowed to
+    # push the start past it (validating only inside the end_time block above
+    # would miss that direction).
+    if "time" in fields or "end_time" in fields:
+        eff_start = fields.get("time", existing["time"] if partial else "")
+        eff_end   = fields["end_time"] if "end_time" in fields else (existing["end_time"] if partial else None)
+        if eff_start and eff_end and eff_end <= eff_start:
+            return None, "End time must be after the start time"
+
     touches_recurrence_group = bool({"recurrence", "weekday", "net_date"} & set(data))
     if touches_recurrence_group or not partial:
         recurrence = str(data.get("recurrence", existing["recurrence"] if partial else "")).strip()
@@ -4121,8 +4228,8 @@ def api_nets_create():
     fields["created_by"] = session.get("username", "")
     db = get_db()
     db.execute(
-        "INSERT INTO net_schedules (name, node, recurrence, weekday, net_date, time, notes, created_by) "
-        "VALUES (:name, :node, :recurrence, :weekday, :net_date, :time, :notes, :created_by)",
+        "INSERT INTO net_schedules (name, node, recurrence, weekday, net_date, time, end_time, notes, created_by) "
+        "VALUES (:name, :node, :recurrence, :weekday, :net_date, :time, :end_time, :notes, :created_by)",
         fields
     )
     db.commit()
@@ -4157,6 +4264,24 @@ def api_nets_delete(net_id):
     db.execute("DELETE FROM net_schedules WHERE id=?", (net_id,))
     db.commit()
     return jsonify({"success": True})
+
+
+@app.route("/api/echolink/search")
+def api_echolink_search():
+    """Search the cached EchoLink directory (see _echolink_poll_loop) by
+    callsign substring or node number. Gated to logged-in users and up
+    (see _USER_OR_ABOVE in check_auth) — this bridges RF under the club
+    callsign same as any other connect action, so it isn't public."""
+    q = request.args.get("q", "").strip()
+    if len(q) < 2:
+        return jsonify({"results": [], "updated": _echolink_cache_ts})
+    q_lower = q.lower()
+    with _echolink_cache_lock:
+        snapshot, ts = list(_echolink_cache), _echolink_cache_ts
+    matches = [r for r in snapshot if q_lower in r["call"].lower() or q in r["node"]][:50]
+    resp = jsonify({"results": matches, "updated": ts})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 # ── AllStarLink stats proxy ───────────────────────────────────────────────────
@@ -8133,6 +8258,7 @@ _rehydrate_kiosk_temp_conns()
 start_poller()
 start_favstats_poller()
 start_global_activity_poller()
+start_echolink_directory_poller()
 start_geocode_worker()
 start_announcer()
 start_connector_scheduler()
