@@ -2251,8 +2251,22 @@ ECHOLINK_LOGINS_URL    = "https://www.echolink.org/logins.jsp"
 ECHOLINK_POLL_INTERVAL = 300.0   # 5 minutes
 
 _echolink_cache      = []   # [{call, location, status, node, kind}] full-replace each successful poll
+_echolink_by_node    = {}   # {echolink_id: row} — same rows, indexed for O(1) lookup by lookup_node()
 _echolink_cache_ts   = 0.0
 _echolink_cache_lock = threading.Lock()
+
+# AllStarLink reserves 3000000-3999999 as pseudo-node numbers for EchoLink
+# peers, encoded as '3' + the EchoLink station's own ID zero-padded to 6
+# digits (see the browser-side connect encoding in status.html) — never a
+# real repeater/hub node, so this range is a safe, unambiguous test.
+_ECHOLINK_PSEUDO_NODE_RE = re.compile(r'^3(\d{6})$')
+
+
+def _echolink_station_id(node: str):
+    """Extract the raw EchoLink station ID from an AllStarLink pseudo-node
+    number (e.g. '3151197' -> '151197'), or None if node isn't one."""
+    m = _ECHOLINK_PSEUDO_NODE_RE.match(node)
+    return str(int(m.group(1))) if m else None
 
 # Individual softphone "Users" aren't stations a repeater would bridge to, so
 # that section is intentionally not scraped here.
@@ -2307,6 +2321,8 @@ def _echolink_poll_loop():
             if rows:
                 with _echolink_cache_lock:
                     _echolink_cache[:] = rows
+                    _echolink_by_node.clear()
+                    _echolink_by_node.update({r["node"]: r for r in rows})
                     _echolink_cache_ts = time.time()
                 log("INFO", f"[ECHOLINK] Directory refreshed: {len(rows)} stations")
                 backoff = 0
@@ -3176,6 +3192,17 @@ def fetch_allmondb_node(node: str) -> dict:
 
 def lookup_node(node: str) -> dict:
     node = str(node)
+
+    el_id = _echolink_station_id(node)
+    if el_id is not None:
+        # EchoLink pseudo-nodes aren't in allmondb/astdb at all — the only
+        # source of truth is the directory poller's presence snapshot, and a
+        # station currently offline just won't have a name to show.
+        with _echolink_cache_lock:
+            row = _echolink_by_node.get(el_id)
+        if row:
+            return {"callsign": row["call"], "desc": row["kind"], "location": row["location"]}
+        return dict(_ALLMONDB_EMPTY)
 
     with _allmondb_lock:
         if node in _allmondb_cache:

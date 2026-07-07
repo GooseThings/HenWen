@@ -171,6 +171,9 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .hist-meta { display: flex; justify-content: space-between; gap: 6px; font-size: 0.68rem; color: var(--text2); margin-top: 1px; }
 .node-label { font-size: 0.68rem; letter-spacing: 0.12em; color: var(--text2); text-transform: uppercase; }
 .node-number { font-size: 2.4rem; font-weight: 700; line-height: 1; color: var(--accent); text-decoration: none; }
+.el-badge { display: inline-block; font-size: 0.6rem; font-weight: 700; letter-spacing: .02em;
+  padding: 1px 4px; border-radius: 3px; background: rgba(88,166,255,.15); color: var(--accent);
+  vertical-align: middle; margin-left: 3px; }
 .node-callsign { font-size: 1.25rem; font-weight: 600; color: var(--text); letter-spacing: 0.04em; text-decoration: none; }
 .node-callsign:hover { text-decoration: underline; }
 .node-location { font-size: 0.78rem; color: var(--text2); text-align: center; }
@@ -322,7 +325,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   background: var(--green); box-shadow: 0 0 4px rgba(63,185,80,.7);
 }
 .fav-num  { font-size: 0.9rem; font-weight: 700; font-family: var(--mono); color: var(--accent); text-decoration: none; }
-.fav-call { font-size: 0.75rem; font-weight: 600; color: var(--text); }
+.fav-call { font-size: 0.75rem; font-weight: 600; color: var(--text); text-decoration: none; }
+.fav-call:hover { text-decoration: underline; }
 .fav-loc  { font-size: 0.67rem; color: var(--text2); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
 .fav-actions { display: flex; flex-direction: column; gap: 3px; align-items: stretch; width: fit-content; }
@@ -741,17 +745,33 @@ function esc(s) {
     .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
-/* Node number rendered as a link to its AllStarLink stats page */
+/* AllStarLink reserves 3000000-3999999 as pseudo-node numbers for EchoLink
+   peers (see the '3' + 6-digit-EchoLink-ID encoding used to connect out to
+   one, above) — never a real repeater/hub node, so it's a safe test. */
+var _ECHOLINK_NODE_RE = /^3\d{6}$/;
+
+/* Node number rendered as a link to its AllStarLink stats page. EchoLink
+   pseudo-nodes have no such page, so they render as plain text with a small
+   EL badge instead of linking out. */
 function nodeLink(node, cssClass) {
+  if (_ECHOLINK_NODE_RE.test(String(node))) {
+    return '<span class="' + cssClass + '">' + esc(node) + '</span><span class="el-badge" title="EchoLink node">EL</span>';
+  }
   return '<a class="' + cssClass + '" href="https://stats.allstarlink.org/stats/' +
     encodeURIComponent(node) + '" target="_blank" rel="noopener">' + esc(node) + '</a>';
 }
 
-/* Callsign rendered as a link to its QRZ.com profile; empty callsign renders nothing */
-function callsignLink(callsign, cssClass) {
+/* Callsign rendered as a link to its QRZ.com profile; empty callsign renders
+   nothing. displayText lets a custom label stand in for the link text while
+   the link itself still targets the real callsign (favorites list). EchoLink
+   appends a "-R"/"-L"/"-C" station-type suffix to the callsign (e.g.
+   "K8DAA-R") that QRZ doesn't recognize, so it's stripped for the link
+   target only — the displayed text keeps the full callsign as shown. */
+function callsignLink(callsign, cssClass, displayText) {
   if (!callsign) return '';
+  var qrzCall = String(callsign).replace(/-[A-Za-z0-9]+$/, '');
   return '<a class="' + cssClass + '" href="https://www.qrz.com/db/' +
-    encodeURIComponent(callsign) + '" target="_blank" rel="noopener">' + esc(callsign) + '</a>';
+    encodeURIComponent(qrzCall) + '" target="_blank" rel="noopener">' + esc(displayText || callsign) + '</a>';
 }
 
 var _csrfToken = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
@@ -2142,7 +2162,7 @@ function renderFavorites() {
       '<div class="fav-body">' +
         '<div class="fav-top">' + dot +
           nodeLink(f.node, 'fav-num') +
-          (name ? '<span class="fav-call">' + esc(name) + '</span>' : '') +
+          (f.callsign ? callsignLink(f.callsign, 'fav-call', name) : (name ? '<span class="fav-call">' + esc(name) + '</span>' : '')) +
           '<button class="fav-del-btn" onclick="removeFavorite(\'' + esc(f.node) + '\')" title="Remove from Favorites">✕</button>' +
         '</div>' +
         (loc ? '<div class="fav-loc">' + esc(loc) + '</div>' : '') +
