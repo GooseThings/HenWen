@@ -4437,9 +4437,9 @@ async function applyRoleNav() {
   });
 }
 
-window.addEventListener('DOMContentLoaded', function() {
+window.addEventListener('DOMContentLoaded', async function() {
   log('HenWen loaded.', 'INFO');
-  applyRoleNav();
+  await applyRoleNav();   // awaited so checkForUpdate() below can see window._henwenRole
   // Initialize Add Connector schedule section
   var scSec = document.getElementById('sc-sched-section');
   if (scSec) scSec.innerHTML = scSchedSectionHTML('sc-', 'daily', '', '');
@@ -4458,6 +4458,9 @@ window.addEventListener('DOMContentLoaded', function() {
 });
 
 async function checkForUpdate() {
+  // Only superusers are in a position to act on an update (shell/deploy
+  // access), so admins don't get this notice.
+  if (window._henwenRole !== 'superuser') return;
   if (sessionStorage.getItem('henwen_update_dismissed')) return;
   var r = await api('/api/update-check');
   if (!r.ok || !r.data || !r.data.update_available) return;

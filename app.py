@@ -3294,14 +3294,20 @@ def get_uptime():
         return "unknown"
 
 
-@_ttl_cached(3600)   # avoid hitting GitHub's API on every Manager login
-def get_latest_release():
-    """Fetch the latest published GitHub release tag for update checking.
-    CalVer tags (vYYYY.MM.DD, optionally .N for a same-day second release)
-    sort correctly as plain strings, so no semver parsing is needed — just
-    compare against HENWEN_VERSION lexically. (A same-day suffix above
-    single digits, e.g. .10 vs .9, would sort incorrectly as a string —
-    not a real concern at the release cadence this project actually has.)"""
+RELEASE_POLL_INTERVAL = 86400.0   # 24 hours
+
+_latest_release_cache = {"tag": "", "url": ""}
+_latest_release_lock  = threading.Lock()
+
+
+def _fetch_latest_release():
+    """Hit GitHub for the latest published release tag. CalVer tags
+    (vYYYY.MM.DD, optionally .N for a same-day second release) sort
+    correctly as plain strings, so no semver parsing is needed — just
+    compare against HENWEN_VERSION lexically elsewhere. (A same-day suffix
+    above single digits, e.g. .10 vs .9, would sort incorrectly as a
+    string — not a real concern at the release cadence this project
+    actually has.)"""
     try:
         url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
         req = urlreq.Request(url, headers={"User-Agent": "HenWen/1.0",
@@ -3310,8 +3316,33 @@ def get_latest_release():
             data = json.loads(resp.read().decode())
         return {"tag": data.get("tag_name", ""), "url": data.get("html_url", "")}
     except Exception as e:
-        log("WARN", f"[UPDATE] release check failed: {e}")
-        return {"tag": "", "url": ""}
+        log("WARN", f"[UPDATE-POLL] release check failed: {e}")
+        return None
+
+
+def _release_poll_loop():
+    log("INFO", "[UPDATE-POLL] Release poller started — first check in 30s")
+    time.sleep(30)
+    while True:
+        result = _fetch_latest_release()
+        if result:
+            with _latest_release_lock:
+                _latest_release_cache.update(result)
+            log("INFO", f"[UPDATE-POLL] Latest published release: {result['tag'] or 'none'}")
+        time.sleep(RELEASE_POLL_INTERVAL)
+
+
+def start_release_poller():
+    t = threading.Thread(target=_release_poll_loop, name="release-poller", daemon=True)
+    t.start()
+    log("INFO", "[UPDATE-POLL] Release poller thread launched")
+
+
+def get_latest_release():
+    """Cheap in-process cache read — the actual GitHub hit happens once a
+    day in _release_poll_loop, not on every Manager login."""
+    with _latest_release_lock:
+        return dict(_latest_release_cache)
 
 
 @_ttl_cached(3600)   # package version effectively never changes at runtime
@@ -8291,6 +8322,7 @@ start_announcer()
 start_connector_scheduler()
 start_id_monitor()
 start_nws_alert_poller()
+start_release_poller()
 
 if __name__ == "__main__":
     log("INFO", "Starting in direct-run mode (not via gunicorn)")

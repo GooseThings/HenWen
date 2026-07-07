@@ -53,6 +53,7 @@ Daemon threads launch when gunicorn imports the module:
 - `start_connector_scheduler()` — manages Smart Connector link/unlink on schedule
 - `start_id_monitor()` — monitors node activity to trigger FCC ID audio playback
 - `start_nws_alert_poller()` — polls api.weather.gov for active severe weather alerts (~120s interval, exponential backoff) and manages the lifecycle of auto-created NWS announcement rows; never triggers playback itself, that's still `start_announcer()`'s job
+- `start_release_poller()` — checks GitHub for the latest published HenWen release once a day into an in-process cache (`get_latest_release()`); `/api/update-check` reads that cache instead of hitting GitHub live, and the Manager dashboard surfaces it as a dismissible bar to superusers only (checked once per login/page-load, via `checkForUpdate()` in `henwen-manager.html`)
 
 Because gunicorn runs `--workers 1 --threads 8`, all threads share a single process and in-process cache. Do not increase worker count without rethinking the AMI connection pool.
 
