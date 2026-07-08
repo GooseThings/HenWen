@@ -8,6 +8,15 @@ Opus module needed). No audio touches the HenWen/Flask process.
 
 ## Files
 
+- `setup-https.sh` — provisions Apache + a Let's Encrypt certificate for a
+  public hostname you point at this box (`certbot --apache`). Optional and
+  separate from `apply.sh`: only needed because the TX button requires a
+  secure browser context, which plain HTTP doesn't provide off localhost.
+  `install.sh` offers to run this at install time; run it manually
+  otherwise: `sudo bash setup-https.sh <hostname> <email>`. Produces
+  `/etc/apache2/sites-enabled/henwen-ssl.conf` — the exact path `apply.sh`
+  and `check-ports.sh` expect — even though certbot's own naming
+  convention would otherwise call it `henwen-le-ssl.conf`.
 - `modules.snippet` — PJSIP/WebRTC module loads appended to `modules.conf`
   (ASL3 SIP-phone guide's set + websocket transport + SRTP)
 - `pjsip.snippet` — WS transport + one `henwen-tx` endpoint (`webrtc=yes`,
@@ -55,6 +64,7 @@ each session to its learned peer.
 
 ## Test procedure
 
+0. If this box doesn't already have HTTPS: `sudo bash tx-spike/setup-https.sh <hostname> <email>`
 1. `sudo bash tx-spike/apply.sh`
 2. Open `https://<host>/static/tx-test.html`, paste the printed password.
 3. Connect & Register → expect REGISTERED.

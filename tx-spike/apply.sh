@@ -128,8 +128,14 @@ echo "== Verification"
 asterisk -rx "http show status" | head -6
 asterisk -rx "pjsip show endpoints" | head -12
 echo
+
+# Read back whatever hostname setup-https.sh (or the operator) put in the
+# SSL vhost, rather than assuming any particular domain.
+WSHOST=$(grep -h "ServerName" "$APACHE_CONF" 2>/dev/null | awk '{print $2}' | head -1)
+WSHOST="${WSHOST:-$(hostname -f 2>/dev/null || hostname)}"
+
 echo "Done. SIP credentials for the test page:"
-echo "  WSS URL:  wss://goosethings.ddns.net/asterisk-ws"
+echo "  WSS URL:  wss://${WSHOST}/asterisk-ws"
 echo "  Username: henwen-tx"
 echo "  Password: $(cat /etc/asterisk/henwen-tx.secret)"
 echo "  Dial:     2$NODENUM   (node $NODENUM, phone-control mode: *99 = PTT, # = unkey)"

@@ -162,7 +162,7 @@ Pulls the latest code and restarts the service. Your service file, database, and
 ```bash
 cd ~/HenWen          # the directory you originally cloned into
 git pull
-sudo cp -r app.py templates static /opt/HenWen/
+sudo cp -r app.py audio_relay.py templates static tx-spike /opt/HenWen/
 sudo systemctl restart HenWen
 ```
 
@@ -172,6 +172,8 @@ If a release adds new Python dependencies (check `requirements.txt`), also refre
 sudo /opt/HenWen/venv/bin/pip install -r /opt/HenWen/requirements.txt
 sudo systemctl restart HenWen
 ```
+
+Installer-driven system changes (Apache/HTTPS for the TX button, the MixMonitor module check, sudoers rules, the journald cap) only run from `install.sh` itself — neither this quick-update path nor the in-app "Launch Updater" self-update button touches system config, by design, since an unattended updater must never silently open ports or request a public certificate. If you're upgrading an existing install and want the browser TX button's HTTPS set up, run it directly: `sudo bash /opt/HenWen/tx-spike/setup-https.sh <hostname> <email>`.
 
 ### Full reinstall
 
@@ -302,6 +304,7 @@ systemctl status HenWen
 **Audio streaming (Listen) produces no sound:**
 - Requires an active Asterisk channel on the node. The node must be keyed or have an active link.
 - Check that `app_mixmonitor.so` is loaded: `asterisk -rx "module show like mixmonitor"`
+- `install.sh` checks for this at install time (unloads any `noload =>` blacklist entry in `modules.conf` and loads the module live if Asterisk is already running) — re-run `sudo bash install.sh` if you're not sure it ran, or if the module truly isn't installed, reinstall/repair your Asterisk modules package.
 
 **Announcements or Node ID audio won't upload:**
 - Confirm `ffmpeg` is installed: `ffmpeg -version`

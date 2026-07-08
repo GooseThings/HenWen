@@ -23,29 +23,29 @@ fi
 
 # ── Python check ─────────────────────────────────────────
 if ! command -v python3 &>/dev/null; then
-    echo "[1/8] Installing Python 3..."
+    echo "[1/9] Installing Python 3..."
     apt-get install -y python3 python3-pip python3-venv python3-full
 else
-    echo "[1/8] Python 3 found: $(python3 --version)"
+    echo "[1/9] Python 3 found: $(python3 --version)"
 fi
 
 apt-get install -y python3-venv python3-full 2>/dev/null || true
 
 # ── Copy files ────────────────────────────────────────────
-echo "[2/8] Installing to $INSTALL_DIR..."
+echo "[2/9] Installing to $INSTALL_DIR..."
 mkdir -p "$INSTALL_DIR"
 cp -r . "$INSTALL_DIR/"
 chmod 755 "$INSTALL_DIR"          # standard app dir: owner rwx, group rx, others rx
 chmod +x "$INSTALL_DIR/"*.sh 2>/dev/null || true
 
 # ── Virtual environment ───────────────────────────────────
-echo "[3/8] Creating Python virtual environment..."
+echo "[3/9] Creating Python virtual environment..."
 python3 -m venv "$INSTALL_DIR/venv"
 "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
 "$INSTALL_DIR/venv/bin/pip" install --quiet flask gunicorn flask-wtf flask-limiter piper-tts
 
 # ── rpt_backups directory ─────────────────────────────────
-echo "[4/8] Creating backup directory..."
+echo "[4/9] Creating backup directory..."
 mkdir -p /etc/asterisk/rpt_backups
 chown asterisk:asterisk /etc/asterisk/rpt_backups
 chmod 750 /etc/asterisk/rpt_backups
@@ -65,7 +65,7 @@ if [ -f /etc/asterisk/henwen.db ]; then
 fi
 
 # ── Verify rpt.conf accessible ────────────────────────────
-echo "[5/8] Checking rpt.conf..."
+echo "[5/9] Checking rpt.conf..."
 if [ -f /etc/asterisk/rpt.conf ]; then
     echo "      Found: /etc/asterisk/rpt.conf"
     ls -la /etc/asterisk/rpt.conf
@@ -74,8 +74,43 @@ else
     echo "      The editor will still start but rpt.conf must exist to edit."
 fi
 
+# ── Ensure app_mixmonitor is loaded ───────────────────────
+# HenWen's Listen/broadcast feature (audio_relay.py pipeline) depends on
+# Asterisk's MixMonitor app. Some ASL3 installs carry a stale
+# 'noload => app_mixmonitor.so' in modules.conf, or the module simply
+# hasn't been loaded yet on a freshly installed system. Fix what we can
+# here rather than making the user discover it later via a silent Listen
+# button.
+echo "[6/9] Verifying Asterisk MixMonitor module..."
+MODULES_CONF="/etc/asterisk/modules.conf"
+if [ -f "$MODULES_CONF" ] && grep -qE '^\s*noload\s*=>\s*app_mixmonitor\.so' "$MODULES_CONF"; then
+    echo "      Found 'noload => app_mixmonitor.so' in modules.conf — disabling that line."
+    sed -i -E 's/^(\s*)noload(\s*=>\s*app_mixmonitor\.so)/\1;noload\2/' "$MODULES_CONF"
+fi
+
+if command -v asterisk &>/dev/null && systemctl is-active --quiet asterisk 2>/dev/null; then
+    if asterisk -rx "module show like mixmonitor" 2>/dev/null | grep -qi "app_mixmonitor.so"; then
+        echo "      app_mixmonitor.so already loaded."
+    else
+        LOAD_OUT=$(asterisk -rx "module load app_mixmonitor.so" 2>&1)
+        if echo "$LOAD_OUT" | grep -qi "not found\|failed\|error"; then
+            echo "      WARNING: app_mixmonitor.so could not be loaded ($LOAD_OUT)."
+            echo "      It may not be installed on this system. Audio streaming (Listen)"
+            echo "      in HenWen will not work until this is fixed. Check:"
+            echo "        find / -xdev -name app_mixmonitor.so"
+            echo "      and reinstall/repair the Asterisk modules package if it's missing."
+        else
+            echo "      app_mixmonitor.so loaded."
+        fi
+    fi
+else
+    echo "      Asterisk not running — skipping live load. It will autoload on next"
+    echo "      Asterisk start unless the module is missing entirely (checked above"
+    echo "      only covers the modules.conf blacklist, not a missing .so file)."
+fi
+
 # ── Systemd service ───────────────────────────────────────
-echo "[6/8] Installing systemd service ($SERVICE_NAME)..."
+echo "[7/9] Installing systemd service ($SERVICE_NAME)..."
 
 # Remove any old service under the previous name to avoid duplicates
 if [ -f /etc/systemd/system/asl3-rpt-editor.service ]; then
@@ -122,7 +157,7 @@ fi
 # Scope is intentionally limited to these exact commands — do not broaden
 # with wildcards. The updater rule only works if $INSTALL_DIR is itself a
 # git checkout of the HenWen repo — update.sh no-ops with an error otherwise.
-echo "[7/8] Installing sudoers rule for restart/reload/update actions..."
+echo "[8/9] Installing sudoers rule for restart/reload/update actions..."
 SUDOERS_FILE=/etc/sudoers.d/henwen-systemctl
 SYSTEMCTL_BIN=$(command -v systemctl || echo /bin/systemctl)
 SYSTEMD_RUN_BIN=$(command -v systemd-run || echo /usr/bin/systemd-run)
@@ -154,7 +189,7 @@ elif command -v ufw &>/dev/null; then
 fi
 
 # ── Start service ─────────────────────────────────────────
-echo "[8/8] Enabling and starting $SERVICE_NAME..."
+echo "[9/9] Enabling and starting $SERVICE_NAME..."
 systemctl enable "$SERVICE_NAME"
 systemctl restart "$SERVICE_NAME"
 sleep 2
@@ -175,6 +210,21 @@ if systemctl is-active --quiet "$SERVICE_NAME"; then
     echo ""
     echo "  Running AMI setup now..."
     bash "$INSTALL_DIR/ami-setup.sh" || true
+
+    # ── Optional: HTTPS for the browser TX button ─────────
+    # Only relevant to the browser-transmit feature (getUserMedia/WebRTC
+    # need a secure context) — the kiosk and everything else work fine
+    # over plain HTTP. Requires a public hostname pointed at this box, so
+    # it's opt-in and skipped entirely on a non-interactive install.
+    if [ -t 0 ]; then
+        echo ""
+        read -p "  Set up HTTPS now for the browser TX button? Requires a public hostname pointed at this box. [y/N]: " SETUP_HTTPS
+        if [[ "$SETUP_HTTPS" =~ ^[Yy] ]]; then
+            bash "$INSTALL_DIR/tx-spike/setup-https.sh" || echo "  HTTPS setup failed — you can re-run it later: sudo bash $INSTALL_DIR/tx-spike/setup-https.sh"
+        else
+            echo "  Skipped. Run 'sudo bash $INSTALL_DIR/tx-spike/setup-https.sh' later if you want browser TX."
+        fi
+    fi
 else
     echo ""
     echo "WARNING: Service may not have started. Check:"
