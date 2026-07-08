@@ -12,6 +12,7 @@ A browser-based web interface for managing and using your AllStarLink 3 node. Al
 - Edit `rpt.conf` field-by-field (validated dropdowns and range-checked inputs sourced from the official ASL3 docs) or switch to a raw text editor
 - Connect, disconnect, and **Monitor** (listen-only, `ilink 2`) remote nodes from the browser
 - **Stream live receive audio** from your node to any browser tab — WebM/Opus over HTTP, multiple simultaneous listeners
+- **Transmit from the browser** — Admin/Superuser accounts can key up and talk through the node with no radio, straight from the Kiosk (requires one-time HTTPS + Asterisk setup, see [Browser TX](#browser-tx-transmit) below)
 - **Status Board** (`/status`) — full-screen kiosk display for TVs and public screens: connected nodes, global activity feed, network map with grayline, weather bar
 - **Smart Connector** — automatically link to a net node on a schedule (daily, weekly, monthly, one-time, and more), wait for the local node to go idle before connecting, then disconnect after an idle timeout
 - **Announcements** — upload audio files, or type a message and have it read aloud via text-to-speech, and schedule either to play on a node at configured times
@@ -46,8 +47,9 @@ sudo bash install.sh
 
 The installer:
 - Installs Python dependencies into a virtual environment
-- Creates and enables the `HenWen` systemd service (runs on port 5000)
-- Starts the service immediately
+- Checks that Asterisk's `app_mixmonitor.so` module is loaded (needed for the Listen feature)
+- Creates and enables the `HenWen` systemd service (runs on port 5000), plus the sudoers rule and journald log cap the Manager UI's restart/update buttons need
+- Starts the service, then runs AMI setup (see Step 3) and offers to set up HTTPS for the Browser TX button (see [Browser TX](#browser-tx-transmit)) interactively
 
 Verify it is running:
 
@@ -76,6 +78,8 @@ After creating the account you will be logged in and taken to the Dashboard.
 ## Step 3 — Commission: AMI Setup
 
 Most features (node connect/disconnect, monitor, status board, smart connector, audio streaming, node ID) require a working AMI connection. This is set up once.
+
+> `install.sh` already ran `ami-setup.sh` for you interactively at the end of Step 1 — if that succeeded, you can skip straight to **3c — Verify** below. Use the steps below if you skipped it, it failed, or you need to redo it manually.
 
 ### 3a — Configure manager.conf
 
@@ -154,6 +158,10 @@ HenWen's code installs to `/opt/HenWen`, while your configuration and data live 
 - rpt.conf backups — `/etc/asterisk/rpt_backups/`
 
 The SQLite schema migrates automatically on startup, so new features need no manual database steps.
+
+### In-app update (easiest)
+
+Superusers see a dismissible bar at the top of the Manager when a new release is available (checked once a day against GitHub). Click **Launch Updater** to pull `main`, reinstall Python dependencies, and restart — no SSH needed. It runs as its own systemd unit so its own restart step can't kill itself mid-update, and it verifies the new code actually compiles before touching the running service, rolling back automatically if it doesn't. Only works if `/opt/HenWen` is a git checkout (true for anything installed via `install.sh`'s documented `git clone` step); it does not touch system config (Apache/HTTPS, sudoers, journald), same as Quick update below.
 
 ### Quick update (recommended)
 
@@ -266,6 +274,19 @@ Plays a configurable sound file for FCC-required station identification. Trigger
 
 ---
 
+## Browser TX (Transmit)
+
+Lets Admin and Superuser accounts key up and talk through the node straight from the Kiosk — a **TX** button in the header opens a hold-to-talk bar (mic gain slider with live level meter, radio-style RX mute while keyed, and fail-safes that unkey on release/blur/tab-hide/page-close or after 5 minutes idle). No radio required. Audio goes browser → Asterisk directly over WebRTC; it never touches the HenWen/Flask process.
+
+This is opt-in and needs two things set up once, in order, from the box's own shell (not the web UI):
+
+1. **HTTPS.** Browsers block microphone access outside a secure context, so the Kiosk needs to be served over `https://` (plain `http://<lan-ip>:5000`, the installer's default, doesn't qualify). If you don't already have this, `install.sh` offers to set it up interactively, or run it any time: `sudo bash /opt/HenWen/tx-spike/setup-https.sh <hostname> <email>` — requires a public hostname already pointed at this box and ports 80/443 forwarded.
+2. **Asterisk PJSIP/WebRTC config:** `sudo bash /opt/HenWen/tx-spike/apply.sh` — enables the needed Asterisk modules, adds a locked-down SIP endpoint, and wires the WSS signaling proxy through Apache.
+
+Once both have run, the TX button appears automatically for Admin/Superuser sessions. Use **Manager → TX Diagnostics** any time to check readiness end to end (HTTPS, PJSIP endpoint, Apache, RTP/STUN, NAT) without leaving the browser. Full network requirements (router forwards, LAN-only notes) and rollback are in [`tx-spike/README.md`](tx-spike/README.md).
+
+---
+
 ## Troubleshooting
 
 **Service won't start:**
@@ -306,6 +327,10 @@ systemctl status HenWen
 - Check that `app_mixmonitor.so` is loaded: `asterisk -rx "module show like mixmonitor"`
 - `install.sh` checks for this at install time (unloads any `noload =>` blacklist entry in `modules.conf` and loads the module live if Asterisk is already running) — re-run `sudo bash install.sh` if you're not sure it ran, or if the module truly isn't installed, reinstall/repair your Asterisk modules package.
 
+**TX button doesn't appear on the Kiosk:**
+- Only shows for Admin/Superuser sessions, and only when the browser considers the page a secure context (`https://`, not plain `http://<lan-ip>:5000`) and the server confirms TX is configured.
+- Go to **Manager → TX Diagnostics** and click **Run Diagnostics** for a full end-to-end check (HTTPS, PJSIP endpoint, Apache, RTP/STUN, NAT) — see [Browser TX](#browser-tx-transmit) above if it hasn't been set up yet.
+
 **Announcements or Node ID audio won't upload:**
 - Confirm `ffmpeg` is installed: `ffmpeg -version`
 - Install if missing: `sudo apt install ffmpeg`
@@ -326,6 +351,8 @@ All settings are configured in the systemd service file (`/etc/systemd/system/He
 | `AMI_SECRET` | *(none)* | AMI password — must match `manager.conf` secret |
 | `AMI_HOST` | `127.0.0.1` | Asterisk host |
 | `AMI_PORT` | `5038` | AMI TCP port |
+| `AMI_POLL_INTERVAL` | `1.0` | Seconds between AMI status polls |
+| `AMI_CACHE_TTL` | `10.0` | Seconds before the AMI status cache is considered stale |
 | `RPT_CONF_PATH` | `/etc/asterisk/rpt.conf` | Path to rpt.conf |
 | `MANAGER_CONF` | `/etc/asterisk/manager.conf` | Path to manager.conf |
 | `BACKUP_DIR` | `/etc/asterisk/rpt_backups` | Backup directory for rpt.conf saves |
@@ -333,13 +360,20 @@ All settings are configured in the systemd service file (`/etc/systemd/system/He
 | `SOUNDS_DIR` | `/usr/share/asterisk/sounds/henwen` | Uploaded audio files for Announcements and Node ID |
 | `TTS_VOICES_DIR` | `/var/lib/asterisk/henwen_tts_voices` | Downloaded Piper voice models for text-to-speech Announcements |
 | `PIPER_BIN` | *(resolved from the venv automatically)* | Path to the `piper` executable, if it needs to be overridden |
+| `TX_SECRET_PATH` | `/etc/asterisk/henwen-tx.secret` | SIP secret for the browser TX button, generated by `tx-spike/apply.sh` |
+| `TX_SIP_USER` | `henwen-tx` | SIP username the browser TX button registers as |
+| `TX_WS_PATH` | `/asterisk-ws` | Path Apache proxies to Asterisk's WSS signaling endpoint |
 | `PORT` | `5000` | Web server port |
 | `HOST` | `0.0.0.0` | Bind address |
 | `SECRET_KEY` | `henwen-change-me` | Flask session key — rotate via the Settings page |
+| `SECURE_COOKIES` | `false` | Session cookies are already marked `Secure` automatically on any request that actually arrives over HTTPS (including via the Apache TLS proxy `setup-https.sh` sets up) — set this `true` only to force `Secure`-only cookies even on plain-HTTP requests |
+| `SESSION_IDLE_TIMEOUT` | `1800` (30 min) | Seconds of inactivity before a session is logged out; `0` disables |
 | `SERVICE_NAME` | `HenWen` | systemd unit name (used when applying a new SECRET_KEY) |
 | `SERVICE_FILE_PATH` | `/etc/systemd/system/<SERVICE_NAME>.service` | Path to the unit file the Settings page edits |
 | `LOG_LEVEL` | `INFO` | HenWen log verbosity: `INFO` or `DEBUG` (full trace in journald) |
 | `ASTERISK_LOG_PATH` | `/var/log/asterisk/messages.log` | Asterisk log shown in the Asterisk Console page |
+| `FAVORITES_POLL_INTERVAL` | `30.0` | Seconds between polls of the AllStarLink stats API for favorite node status |
+| `AUDIO_RELAY_DEBUG` | *(unset)* | Set to `1` to verbose-log `audio_relay.py`'s frame-pacing loop |
 
 ---
 
@@ -360,7 +394,14 @@ HenWen/
 ├── HenWen.service            # systemd unit file template
 ├── install.sh                # Installer
 ├── uninstall.sh              # Uninstaller
+├── update.sh                 # Self-updater (git pull + restart), launched from the Manager's "Launch Updater" button
 ├── ami-setup.sh              # Verifies/fixes the Asterisk AMI (manager.conf) configuration
+├── tx-spike/                   # Browser TX (transmit) setup — see the Browser TX section above
+│   ├── setup-https.sh          # Provisions Apache + a Let's Encrypt cert
+│   ├── apply.sh                # Enables Asterisk PJSIP/WebRTC + wires the WSS proxy
+│   ├── check-ports.sh          # Read-only network/NAT diagnostic (also powers Manager → TX Diagnostics)
+│   ├── rollback.sh             # Restores everything apply.sh touched
+│   └── README.md               # Full setup details, network requirements, router forwards
 ├── README.md
 ├── CHANGELOG.md
 ├── CLAUDE.md                 # Guidance for Claude Code when working in this repo
