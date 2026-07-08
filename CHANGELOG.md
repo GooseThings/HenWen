@@ -1,5 +1,13 @@
 # Changelog
 
+## v2026.07.08
+
+- **Added: TX Diagnostics page in the Manager.** One-click readiness check for the browser TX button — verifies the SIP secret is configured, the local node resolves from rpt.conf, the Manager page itself is being served over HTTPS, and the PJSIP endpoint is registered in Asterisk (a live AMI query, not just a config-file check), then covers the whole network/NAT path (Apache on 443, Asterisk's websocket, RTP range, STUN) by re-running `tx-spike/check-ports.sh` rather than reimplementing it, so the CLI script and the UI page can't drift apart. Runs fine unprivileged as the `asterisk` user HenWen already runs as — no sudo needed.
+- **Added: automated HTTPS setup for the browser TX button.** New `tx-spike/setup-https.sh` provisions Apache and a Let's Encrypt certificate for an operator-supplied public hostname — everything TX's secure-context requirement needs — and `install.sh` now offers to run it interactively right after a fresh install. `apply.sh` no longer hardcodes the author's personal hostname in its printed WSS URL; it reads back whatever hostname was actually provisioned.
+- **Fixed: `install.sh` now checks that `app_mixmonitor.so` is loaded**, clearing a stale `noload` blacklist entry in `modules.conf` and loading the module live if Asterisk is already running. Some ASL3 installs were shipping without it, silently breaking the Listen/broadcast feature with no indication why.
+- **Added: non-admin roles can no longer disconnect a Smart Connector-managed link.** Enforced server-side against live connector state (not client-supplied data), and reflected in the UI as a disabled lock icon in place of the Disconnect button on both the Connected Nodes list and Favorites.
+- **Fixed: the documented "Quick update" copy command was missing `audio_relay.py` and `tx-spike/`**, so a manual `git pull` upgrade never actually deployed those files to `/opt/HenWen`.
+
 ## v2026.07.07.2
 
 - **Added: Launch Updater button.** Superusers can now trigger a self-update straight from the update bar instead of SSHing in — it pulls the latest `main` over HTTPS, reinstalls dependencies, sanity-checks that the new code actually compiles before touching anything live, and restarts the service. Runs as its own systemd unit (outside HenWen's own process group) so its own restart step doesn't kill itself mid-update.
