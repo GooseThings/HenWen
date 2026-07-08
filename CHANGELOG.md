@@ -1,5 +1,14 @@
 # Changelog
 
+## v2026.07.08.2
+
+- **Added: a "Network Ports" card in Settings (superuser only)** to change the web UI's own port and the AMI port without hand-editing the service file. Changing the AMI port also updates `manager.conf`'s `port =` to match automatically and reloads Asterisk's manager module before restarting HenWen. Fixes a real latent bug found while building this: gunicorn's `--bind 0.0.0.0:5000` in the service file's `ExecStart` was hardcoded independent of the `PORT` environment line, so editing `PORT` alone silently did nothing under normal (gunicorn) operation — the new Settings control always keeps both in sync.
+- **Added: a "Force Update" button in Settings (superuser only).** The existing update bar only appears when a new *tagged* GitHub release is published, so there was no way to pull a fix already on `main` but not yet released. This button calls the same update endpoint without that gate.
+- **Added: `tx-spike/setup-https.sh` gains `--port N`** (serve HTTPS on a non-standard port, for ISPs that block forwarding low ports) **and `--dns-manual`** (a manual DNS-01 certificate challenge for ISPs that block port 80 entirely; trade-off is no auto-renewal).
+- **Fixed: `tx-spike/apply.sh` failed with a bare, confusing `cp: cannot stat` error if `setup-https.sh` hadn't been run yet.** Now checks for the expected Apache vhost up front and fails with a clear pointer to `setup-https.sh` instead.
+- **Fixed: `tx-spike/apply.sh` could fail outright if Apache happened to be stopped** (`systemctl reload` requires an already-active service). Now falls back to starting it, and prints the actual `journalctl` output on failure instead of systemd's bare "not active, cannot reload".
+- **Fixed: `tx-spike/apply.sh`'s per-module load-status check didn't recognize Asterisk's actual "already loaded and running" wording**, so it printed what looked like a failure on every re-run for two of the modules Browser TX depends on, even when everything was fine.
+
 ## v2026.07.08
 
 - **Added: TX Diagnostics page in the Manager.** One-click readiness check for the browser TX button — verifies the SIP secret is configured, the local node resolves from rpt.conf, the Manager page itself is being served over HTTPS, and the PJSIP endpoint is registered in Asterisk (a live AMI query, not just a config-file check), then covers the whole network/NAT path (Apache on 443, Asterisk's websocket, RTP range, STUN) by re-running `tx-spike/check-ports.sh` rather than reimplementing it, so the CLI script and the UI page can't drift apart. Runs fine unprivileged as the `asterisk` user HenWen already runs as — no sudo needed.
