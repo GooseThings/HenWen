@@ -1571,8 +1571,13 @@ async function refreshBoard() {
         }
         var badges = modeBadge + idleBadge;
         var dotClass = !isConn ? ' connecting' : (c.keyed ? ' keyed' : '');
-        var dcBtn = '<button class="sb-btn disconnect" title="Disconnect" data-label="X" onclick="sbDisconnect(\'' +
-          esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)">X</button>';
+        var isAdminRole = window._kioskRole === 'admin' || window._kioskRole === 'superuser';
+        var dcBtn = (c.connector_managed && !isAdminRole)
+          ? '<button class="sb-btn disconnect" data-label="X" disabled ' +
+              'style="opacity:.4;cursor:not-allowed" ' +
+              'title="Managed by Smart Connector — only an admin or superuser can disconnect this">&#128274;</button>'
+          : '<button class="sb-btn disconnect" title="Disconnect" data-label="X" onclick="sbDisconnect(\'' +
+              esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)">X</button>';
         return '<div class="node-row">' +
           '<div class="nr-dot' + dotClass + '"></div>' +
           '<div class="nr-main">' +
@@ -2119,10 +2124,15 @@ function renderFavorites() {
     return;
   }
 
-  /* Build set of currently connected node numbers */
+  /* Build set of currently connected node numbers, and which are locked to
+     admin/superuser because Smart Connector is managing them */
   var connSet = {};
+  var connectorManagedSet = {};
   (window._lastBoardNodes || []).forEach(function(n) {
-    (n.connected || []).forEach(function(c) { connSet[c.node] = true; });
+    (n.connected || []).forEach(function(c) {
+      connSet[c.node] = true;
+      if (c.connector_managed) connectorManagedSet[c.node] = true;
+    });
   });
   var anyConn   = Object.keys(connSet).length > 0;
   var localNode = (window._lastBoardNodes && window._lastBoardNodes[0])
@@ -2140,7 +2150,11 @@ function renderFavorites() {
     var loc     = f.location || '';
 
     var actions;
-    if (isConn) {
+    if (isConn && connectorManagedSet[f.node] && !isAdmin) {
+      actions = '<button class="sb-btn disconnect" disabled ' +
+        'style="opacity:.4;cursor:not-allowed" ' +
+        'title="Managed by Smart Connector — only an admin or superuser can disconnect this">Disconnect</button>';
+    } else if (isConn) {
       actions = '<button class="sb-btn disconnect" onclick="favDisconnect(\'' +
         esc(localNode) + '\',\'' + esc(f.node) + '\',this)">Disconnect</button>';
     } else if (anyConn && !isAdmin) {

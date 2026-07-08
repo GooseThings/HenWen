@@ -4581,6 +4581,14 @@ def api_status_board():
     nodes      = get_node_numbers(content) if content else []
     ast_status = get_asterisk_status()
 
+    db = get_db()
+    connector_managed_pairs = {
+        (r["local_node"], r["target_node"])
+        for r in db.execute(
+            "SELECT local_node, target_node FROM connectors WHERE enabled=1 AND state='connected'"
+        ).fetchall()
+    }
+
     node_data = []
     for node in nodes:
         info     = lookup_node(node)
@@ -4641,6 +4649,7 @@ def api_status_board():
                 "idle_remaining": idle_remaining,
                 "permanent":      is_permanent,
                 "no_timeout":     no_timeout,
+                "connector_managed": (node_str_local, cn) in connector_managed_pairs,
             })
         location = info.get("location", "")
         coords   = _geocode_nonblocking(location) if location else None
@@ -4827,6 +4836,21 @@ def api_status_disconnect():
         return jsonify({"error": "Invalid local_node"}), 400
     if not re.match(r'^\d{4,7}$', remote_node):
         return jsonify({"error": "Invalid remote_node"}), 400
+    # User/kiosk accounts may not tear down a link that Smart Connector is
+    # actively managing on a schedule — only admin/superuser can. Checked
+    # against live connector state (not client-supplied data) so a user-role
+    # session can't just omit the info to bypass this.
+    caller_role = session.get('role', '')
+    if caller_role not in ('admin', 'superuser'):
+        db = get_db()
+        managed = db.execute(
+            "SELECT 1 FROM connectors WHERE enabled=1 AND state='connected' "
+            "AND local_node=? AND target_node=?",
+            (local_node, remote_node)
+        ).fetchone()
+        if managed:
+            return jsonify({"error": "This connection is managed by Smart Connector. "
+                                      "Only an admin or superuser can disconnect it."}), 403
     try:
         with _ami_pool_lock:
             ami = _ami_ensure_connected()
