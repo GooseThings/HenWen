@@ -6,8 +6,13 @@
 # localhost) and gives Asterisk's SIP-over-WebSocket signaling somewhere
 # to terminate TLS. Optional: the kiosk and every other HenWen feature
 # work fine over plain HTTP — only run this if you want browser TX and
-# have a public hostname pointed at this box. LAN-only or behind full
-# NAT with no port forwarding at all? See setup-tailscale.sh instead.
+# have a public hostname pointed at this box. If you're behind CGNAT or
+# can't forward a port at all, a third-party reverse-proxy/VPN service
+# that can front HTTPS for you (e.g. Tailscale Serve/Funnel, Cloudflare
+# Tunnel) is an option — HenWen doesn't script or manage that setup
+# itself, but any of them work as long as they proxy plain HTTP to this
+# box's Flask port and a WebSocket-capable proxy to Asterisk's :8088 for
+# /asterisk-ws (see the README's Browser TX section).
 #
 # Usage: sudo bash setup-https.sh [--port N] [--dns-manual] [hostname] [email]
 #

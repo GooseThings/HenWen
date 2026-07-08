@@ -6,21 +6,26 @@ phone-control mode, PTT = DTMF `*99`, unkey = `#`. Audio is G.711 µ-law
 end-to-end (WebRTC-mandatory codec, app_rpt native — no transcoding, no
 Opus module needed). No audio touches the HenWen/Flask process.
 
-## Which HTTPS setup script?
+## HTTPS is required first
 
 The TX button needs a secure browser context, which plain HTTP doesn't
-provide off localhost — pick one:
+provide off localhost. `setup-https.sh` provisions this via Apache + a
+Let's Encrypt certificate for a public hostname pointed at this box — see
+[Files](#files) below for its options (`--port`, `--dns-manual`).
 
-| Situation | Script |
-|---|---|
-| Public hostname, ports 80 and 443 (or another port) forwardable | `setup-https.sh` |
-| Public hostname, but your ISP blocks port 80 (so no HTTP-01 challenge) | `setup-https.sh --dns-manual` |
-| No port forwarding at all — blocked entirely, CGNAT, or you'd just rather not expose this to the public internet | `setup-tailscale.sh` |
-
-`install.sh` offers to run `setup-https.sh` interactively at install time;
-run either script manually otherwise. Both write
-`/etc/asterisk/henwen-https-{port,mode,hostname}`, which `apply.sh` and
-`check-ports.sh` read to adapt automatically — neither hardcodes port 443.
+If you don't have a public hostname or usable port forwarding at all
+(CGNAT, a blocked ISP, a cloud box you don't want publicly exposed), that's
+outside what these scripts automate — HenWen deliberately doesn't install
+or manage a VPN/tunnel client on your box for you. Any third-party service
+that can front HTTPS for a local port works instead (Tailscale Serve or
+Funnel, Cloudflare Tunnel, a reverse proxy on another box you control,
+etc.); set it up yourself, then run `apply.sh` as usual — it only cares
+that `/etc/apache2/sites-enabled/henwen-ssl.conf` exists with a working
+`ProxyPass / http://127.0.0.1:5000/`. Whatever you use needs to proxy two
+things to this box: plain HTTP to Flask's port (default 5000), and a
+WebSocket-capable proxy to Asterisk's `:8088` for `/asterisk-ws` (see
+`apply.sh`'s "Apache WSS proxy" step for the exact line it inserts, if
+you're wiring that path up by hand instead of via Apache).
 
 ## Files
 
@@ -37,16 +42,6 @@ run either script manually otherwise. Both write
   `/etc/apache2/sites-enabled/henwen-ssl.conf` — the exact path `apply.sh`
   and `check-ports.sh` expect — even though certbot's own naming
   convention would otherwise call it `henwen-le-ssl.conf`.
-- `setup-tailscale.sh` — the alternative when no inbound port works at all.
-  Uses Tailscale's own `tailscale cert` to get a real, publicly-trusted
-  certificate for a private `*.ts.net` hostname with zero port forwarding
-  — Tailscale devices reach each other over its own mesh network, not the
-  public internet. Apache is bound only to this box's Tailscale IP, not
-  all interfaces, since the whole point is staying off the public
-  internet. Only devices joined to your tailnet can reach the Kiosk or use
-  TX. Installs a daily systemd timer (`renew-tailscale-cert.sh`) since
-  `tailscale cert` doesn't auto-renew on its own.
-  `sudo bash setup-tailscale.sh [--port N]`.
 - `modules.snippet` — PJSIP/WebRTC module loads appended to `modules.conf`
   (ASL3 SIP-phone guide's set + websocket transport + SRTP)
 - `pjsip.snippet` — WS transport + one `henwen-tx` endpoint (`webrtc=yes`,
@@ -62,9 +57,7 @@ run either script manually otherwise. Both write
   `sudo bash apply.sh <node>` to override
 - `rollback.sh` — restores the backups
 - `check-ports.sh` — verifies every network requirement (local listeners,
-  WSS handshake, STUN/NAT probe from the RTP range in public mode, or that
-  `ice_host_candidates` actually maps to the current Tailscale IP in
-  Tailscale mode) and reports PASS/FAIL
+  WSS handshake, STUN/NAT probe from the RTP range) and reports PASS/FAIL
 - `tx-test.html` — standalone debug page, deliberately NOT web-served
   (it was removed from `static/` once the kiosk integration landed); to
   use it, temporarily copy it into `static/` and remove it afterward. Once
@@ -74,8 +67,8 @@ run either script manually otherwise. Both write
 
 ## Network requirements (router port forwards)
 
-**Public/certbot mode** (`setup-https.sh`) — the feature does not work
-without these; **be explicit about them at install time**:
+The feature does not work without these — **be explicit about them at
+install time**:
 
 | Port | Proto | Direction | Purpose |
 |------|-------|-----------|---------|
@@ -84,36 +77,20 @@ without these; **be explicit about them at install time**:
 | 10000–10100 | UDP | inbound → this box | WebRTC RTP media (Asterisk; range set by apply.sh) |
 | — | UDP | outbound | STUN to stun.l.google.com (both sides' ICE candidates) |
 
-**Tailscale mode** (`setup-tailscale.sh`) — none of the above need
-forwarding. Everything, including RTP media, rides the tailnet directly
-between this box and any tailnet-joined browser. Since there's no
-port-forwarded public IP for `stunaddr` to discover in this mode,
-`apply.sh` skips it and instead writes a `[ice_host_candidates]` mapping
-in `rtp.conf` (this box's LAN address(es) → its Tailscale IP,
-`include_local_address` so on-LAN clients still connect directly too) —
-without it, Asterisk would advertise its private LAN address in ICE
-candidates, which a remote tailnet browser can't reach even though
-signaling connects fine. `apply.sh` is safe to re-run after switching
-modes: it always regenerates this section to match whichever mode
-`henwen-https-mode` currently says.
-
 Asterisk's builtin HTTP server (8088) stays loopback-only and must **not**
-be forwarded, in either mode. LAN-only operators (no HTTPS at all, TX
-disabled) need none of the inbound forwards either — ICE host candidates
-connect directly.
+be forwarded. LAN-only operators need none of the inbound forwards — ICE
+host candidates connect directly.
 
 Run `sudo bash tx-spike/check-ports.sh` to verify all of the above from
-the box itself — it reads whichever HTTPS mode/port was actually
-configured (falling back to public/443 if neither setup script has been
-run yet) and adjusts its checks accordingly, including skipping the
-public-NAT STUN probe entirely in Tailscale mode. Exposure profile of the
-RTP forward in public mode: Asterisk binds ports only for active calls
-(kernel drops the rest), active TX calls are DTLS-SRTP, and `strictrtp`
-(default on) locks each session to its learned peer.
+the box itself (it also STUN-probes from inside the RTP range and reports
+whether the NAT/forward preserves ports). Exposure profile of the RTP
+forward: Asterisk binds ports only for active calls (kernel drops the
+rest), active TX calls are DTLS-SRTP, and `strictrtp` (default on) locks
+each session to its learned peer.
 
 ## Test procedure
 
-0. If this box doesn't already have HTTPS: `sudo bash tx-spike/setup-https.sh <hostname> <email>` (or `setup-tailscale.sh` — see "Which HTTPS setup script?" above)
+0. If this box doesn't already have HTTPS: `sudo bash tx-spike/setup-https.sh <hostname> <email>`
 1. `sudo bash tx-spike/apply.sh`
 2. Open `https://<host>/static/tx-test.html`, paste the printed password.
 3. Connect & Register → expect REGISTERED.

@@ -11,11 +11,7 @@
 #           /etc/asterisk/http.conf      (enabled=yes on loopback bind)
 #           /etc/asterisk/pjsip.conf     (append transport/endpoint/auth/aor)
 #           /etc/asterisk/custom/extensions.conf  (create context)
-#           /etc/asterisk/rtp.conf       (stunaddr in public mode, or
-#                                          [ice_host_candidates] mappings to
-#                                          this box's Tailscale IP in
-#                                          Tailscale mode — see
-#                                          henwen-https-mode below)
+#           /etc/asterisk/rtp.conf       (stunaddr, for remote WebRTC ICE)
 #           /etc/apache2/sites-enabled/henwen-ssl.conf (WSS proxy line)
 #           /etc/asterisk/henwen-tx.secret        (generated SIP password)
 # Does NOT restart Asterisk — modules are loaded live; app_rpt keeps running.
@@ -31,25 +27,15 @@ RPT_CONF_PATH="${RPT_CONF_PATH:-/etc/asterisk/rpt.conf}"
 [ "$(id -u)" = 0 ] || { echo "Run as root (sudo)"; exit 1; }
 
 # apply.sh only wires up Asterisk PJSIP/WebRTC + the WSS proxy — it assumes
-# setup-https.sh or setup-tailscale.sh already gave this box HTTPS and left
-# $APACHE_CONF in place. Check that explicitly and fail with a clear pointer
-# rather than letting the "== Backing up" step below die on a bare `cp:
-# cannot stat` a few lines later (the actual bug report this guards against).
+# setup-https.sh already gave this box HTTPS and left $APACHE_CONF in place.
+# Check that explicitly and fail with a clear pointer rather than letting
+# the "== Backing up" step below die on a bare `cp: cannot stat` a few
+# lines later.
 if [ ! -f "$APACHE_CONF" ]; then
   echo "ERROR: $APACHE_CONF not found."
   echo ""
-  EXISTING_MODE=$(cat /etc/asterisk/henwen-https-mode 2>/dev/null || true)
-  if [ -n "$EXISTING_MODE" ]; then
-    echo "This box has a henwen-https-mode marker set to '$EXISTING_MODE', but the vhost"
-    echo "it should have created is missing — that setup script started but didn't finish"
-    echo "(e.g. setup-tailscale.sh failing at the certificate step is the most common way to"
-    echo "land in this state). Re-run it:"
-  else
-    echo "Browser TX needs HTTPS set up first, before apply.sh — run whichever matches your"
-    echo "situation:"
-  fi
-  echo "  sudo bash $SPIKE_DIR/setup-https.sh <hostname> <email>   # public hostname, ports forwarded"
-  echo "  sudo bash $SPIKE_DIR/setup-tailscale.sh                  # no port forwarding (Tailscale)"
+  echo "Browser TX needs HTTPS set up first, before apply.sh:"
+  echo "  sudo bash $SPIKE_DIR/setup-https.sh <hostname> <email>"
   exit 1
 fi
 
@@ -107,72 +93,13 @@ else
   chown asterisk:asterisk /etc/asterisk/custom/extensions.conf
 fi
 
-echo "== rtp.conf (ICE addressing for remote WebRTC operators)"
+echo "== rtp.conf (STUN for remote WebRTC operators)"
 cp /etc/asterisk/rtp.conf "$BACKUP_DIR/" 2>/dev/null || true
-RTP_CONF=/etc/asterisk/rtp.conf
-HTTPS_MODE=$(cat /etc/asterisk/henwen-https-mode 2>/dev/null || echo public)
-STUN_BEGIN="; BEGIN $MARKER: stunaddr"
-STUN_END="; END $MARKER: stunaddr"
-ICE_BEGIN="; BEGIN $MARKER: ice_host_candidates"
-ICE_END="; END $MARKER: ice_host_candidates"
-
-# Strip any block a previous run of this script added, so re-running always
-# reflects the *current* mode instead of accumulating stale config from a
-# prior public<->Tailscale switch.
-sed -i "/^${STUN_BEGIN}\$/,/^${STUN_END}\$/d" "$RTP_CONF"
-sed -i "/^${ICE_BEGIN}\$/,/^${ICE_END}\$/d" "$RTP_CONF"
-
-if [ "$HTTPS_MODE" = "tailscale" ]; then
-  # No port-forwarded public IP exists to discover via STUN in this mode —
-  # the address that's actually reachable by a remote tailnet browser is
-  # this box's Tailscale IP. rtp.conf's [ice_host_candidates] section exists
-  # for exactly this (see its comments further up in the file): remap each
-  # local interface's real address to the Tailscale IP so it's what gets
-  # advertised in ICE, instead of a private LAN address no tailnet peer can
-  # reach. include_local_address keeps LAN-direct clients working too.
-  TS_IP=$(tailscale ip -4 2>/dev/null || true)
-  if [ -z "$TS_IP" ]; then
-    echo "   WARNING: 'tailscale ip -4' returned nothing (is Tailscale up?) — skipping ICE candidate override; TX will only work for LAN-local browsers until this is fixed and apply.sh is re-run"
-  else
-    LOCAL_IPS=$(ip -4 -o addr show scope global 2>/dev/null | awk '$2 != "tailscale0" {print $4}' | cut -d/ -f1 | grep -vxF "$TS_IP" || true)
-    if [ -z "$LOCAL_IPS" ]; then
-      echo "   WARNING: found no non-Tailscale local IPv4 address to remap — skipping"
-    else
-      # [ice_host_candidates] ships as a commented-out example section in
-      # stock rtp.conf; appending our own active lines only lands under it
-      # correctly if the header itself is actually present.
-      grep -qE "^\[ice_host_candidates\]" "$RTP_CONF" || echo -e "\n[ice_host_candidates]" >> "$RTP_CONF"
-      {
-        echo "$ICE_BEGIN"
-        for ip in $LOCAL_IPS; do
-          echo "${ip} => ${TS_IP},include_local_address"
-        done
-        echo "$ICE_END"
-      } >> "$RTP_CONF"
-      echo "   advertising Tailscale IP $TS_IP in place of: $(echo "$LOCAL_IPS" | tr '\n' ' ')"
-    fi
-  fi
-  RAW_STUN=$(grep -E "^stunaddr=" "$RTP_CONF" || true)
-  if [ "$RAW_STUN" = "stunaddr=stun.l.google.com:3478" ]; then
-    # Exactly the value earlier (pre-marker) versions of this script wrote —
-    # safe to retire automatically now that ice_host_candidates covers
-    # Tailscale mode; a hand-customized value is left alone (below).
-    sed -i "s|^stunaddr=stun\.l\.google\.com:3478\$|; stunaddr=stun.l.google.com:3478 ; disabled by $MARKER: superseded by ice_host_candidates in Tailscale mode|" "$RTP_CONF"
-    echo "   disabled a pre-existing stunaddr line from an earlier apply.sh run"
-  elif [ -n "$RAW_STUN" ]; then
-    echo "   NOTE: a pre-existing (non-HenWen-managed) stunaddr line is also set ($RAW_STUN) —"
-    echo "   rtp.conf's own docs say not to combine that with ice_host_candidates; consider removing it"
-  fi
+if grep -qE "^stunaddr" /etc/asterisk/rtp.conf; then
+  echo "   stunaddr already set, skipping"
 else
-  if grep -qE "^stunaddr" "$RTP_CONF"; then
-    echo "   stunaddr already set, skipping"
-  else
-    # Must land inside [general] (stunaddr is a [general]-only option, and
-    # rtp.conf has [ice_host_candidates] later in the file — appending at
-    # EOF would silently scope it under that section instead).
-    sed -i "s|^\[general\]\$|[general]\n${STUN_BEGIN}\n; learn our public (server-reflexive) ICE candidate so remote WebRTC\n; operators can reach us — without it, media from any non-LAN browser\n; never flows (SIP signaling rides TCP 443 via Apache, but RTP is\n; direct UDP).\nstunaddr=stun.l.google.com:3478\n${STUN_END}|" "$RTP_CONF"
-    grep -qE "^stunaddr" "$RTP_CONF" || { echo "   FAILED to set stunaddr"; exit 1; }
-  fi
+  sed -i "s|^\[general\]\$|[general]\n; $MARKER: learn our public (server-reflexive) ICE candidate so\n; remote WebRTC operators can reach us — without it, media from any\n; non-LAN browser never flows (SIP signaling rides TCP 443 via Apache,\n; but RTP is direct UDP).\nstunaddr=stun.l.google.com:3478|" /etc/asterisk/rtp.conf
+  grep -qE "^stunaddr" /etc/asterisk/rtp.conf || { echo "   FAILED to set stunaddr"; exit 1; }
 fi
 
 echo "== rtp.conf (narrow RTP port range)"
@@ -191,7 +118,11 @@ echo "== Loading Asterisk modules (live, no restart)"
 grep -E "^load = " "$SPIKE_DIR/modules.snippet" | awk '{print $3}' | while read -r m; do
   out=$(asterisk -rx "module load $m" 2>&1) || true
   case "$out" in
-    *"Loaded $m"*|*"Already loaded"*|*"is already loaded"*) : ;;
+    # Covers every phrasing Asterisk has used for "this is already resident,
+    # nothing to do" across versions (e.g. "already loaded and running.") —
+    # a module hot-loading fine at boot via modules.conf but refusing a
+    # second live "module load" here is normal, not a failure.
+    *"Loaded $m"*|*"Already loaded"*|*"already loaded"*|*"is already loaded"*) : ;;
     *) echo "   $m: $out" ;;
   esac
 done
@@ -211,23 +142,14 @@ fi
 apache2ctl configtest 2>&1 | grep -q "Syntax OK" || { echo "   Apache configtest FAILED — restoring backup"; cp "$BACKUP_DIR/henwen-ssl.conf" "$APACHE_CONF"; exit 1; }
 # `reload` requires an already-active service. Config just passed
 # configtest, so if apache2 isn't running, start it fresh instead of
-# failing outright — and if that *also* fails, say something more useful
-# than systemd's bare "not active, cannot reload" (the actual bug report
-# this guards against: Tailscale mode binds Apache to this box's Tailscale
-# IP, and a reboot can start Apache before tailscaled brings that interface
-# up, leaving Apache permanently failed until someone notices).
+# failing outright — and if that *also* fails, print the actual log
+# instead of just systemd's bare "not active, cannot reload".
 if systemctl is-active --quiet apache2; then
   systemctl reload apache2
 elif ! systemctl start apache2; then
   echo "   ERROR: apache2 failed to start. Recent log:"
   journalctl -u apache2 --no-pager -n 15 | sed 's/^/     /'
   echo "   Browser TX's WSS proxy and the HTTPS kiosk both depend on Apache — fix this before testing TX."
-  if [ "$HTTPS_MODE" = "tailscale" ]; then
-    echo "   Common cause in Tailscale mode: Apache is bound to this box's Tailscale IP (ports.conf's"
-    echo "   'Listen <ip>:<port>' line) and started before tailscaled brought that interface up, or the"
-    echo "   tailnet reassigned this box's IP since setup-tailscale.sh last ran. Re-run it:"
-    echo "     sudo bash $SPIKE_DIR/setup-tailscale.sh"
-  fi
   exit 1
 fi
 
@@ -236,10 +158,10 @@ asterisk -rx "http show status" | head -6
 asterisk -rx "pjsip show endpoints" | head -12
 echo
 
-# Read back whatever hostname/port setup-https.sh or setup-tailscale.sh (or
-# the operator, by hand) recorded, rather than assuming any particular
-# domain or that it's always 443. Fall back to grepping the vhost directly
-# for installs set up before these marker files existed.
+# Read back whatever hostname/port setup-https.sh (or the operator, by
+# hand) recorded, rather than assuming any particular domain or that it's
+# always 443. Fall back to grepping the vhost directly for installs set up
+# before these marker files existed.
 WSHOST=$(cat /etc/asterisk/henwen-https-hostname 2>/dev/null || true)
 if [ -z "$WSHOST" ]; then
     WSHOST=$(grep -h "ServerName" "$APACHE_CONF" 2>/dev/null | awk '{print $2}' | head -1)
@@ -248,7 +170,6 @@ WSHOST="${WSHOST:-$(hostname -f 2>/dev/null || hostname)}"
 WSPORT=$(cat /etc/asterisk/henwen-https-port 2>/dev/null || echo 443)
 WSPORT_SUFFIX=""
 [ "$WSPORT" != "443" ] && WSPORT_SUFFIX=":${WSPORT}"
-HTTPS_MODE=$(cat /etc/asterisk/henwen-https-mode 2>/dev/null || echo public)
 
 echo "Done. SIP credentials for the test page:"
 echo "  WSS URL:  wss://${WSHOST}${WSPORT_SUFFIX}/asterisk-ws"
@@ -256,9 +177,5 @@ echo "  Username: henwen-tx"
 echo "  Password: $(cat /etc/asterisk/henwen-tx.secret)"
 echo "  Dial:     2$NODENUM   (node $NODENUM, phone-control mode: *99 = PTT, # = unkey)"
 echo "Port check: sudo bash $SPIKE_DIR/check-ports.sh   (verifies forwards/NAT/WSS)"
-if [ "$HTTPS_MODE" = "tailscale" ]; then
-    echo "Tailscale mode: no router forwards needed — reachable only from devices on your tailnet."
-else
-    echo "Required router forwards: TCP ${WSPORT}, UDP 10000-10100 -> this machine"
-fi
+echo "Required router forwards: TCP ${WSPORT}, UDP 10000-10100 -> this machine"
 echo "Rollback:  sudo bash $SPIKE_DIR/rollback.sh"

@@ -4,20 +4,17 @@
 # Verifies every network requirement the feature has, from this box, and
 # reports PASS/FAIL per item. Run any time; changes nothing.
 #
-# Reads /etc/asterisk/henwen-https-{port,mode,hostname} (written by
-# setup-https.sh or setup-tailscale.sh) so this adapts to whichever HTTPS
-# setup was actually used — a custom port, or Tailscale (no forwarding at
-# all) — instead of assuming the public/443 path unconditionally. Falls
-# back to public/443 defaults if those markers don't exist yet.
+# Reads /etc/asterisk/henwen-https-{port,hostname} (written by
+# setup-https.sh) so this adapts to a custom --port instead of assuming
+# 443 unconditionally. Falls back to the 443 default if those markers
+# don't exist yet.
 #
-# What the browser TX feature needs (public/certbot mode):
+# What the browser TX feature needs:
 #   TCP <https-port> in → Apache (HTTPS kiosk + WSS signaling proxy)  [router forward]
 #   UDP 10000-10100  in → Asterisk RTP media                          [router forward]
 #   UDP out  → STUN (stun.l.google.com) for both sides' ICE candidates
-# In Tailscale mode, none of the above need a router forward — everything
-# rides the tailnet directly.
 # Asterisk's builtin HTTP server (8088) must be loopback-ONLY — it is checked
-# as a negative requirement in both modes.
+# as a negative requirement.
 set -u
 PASS=0; FAIL=0; WARN=0
 ok()   { echo "  PASS  $1"; PASS=$((PASS+1)); }
@@ -25,14 +22,13 @@ bad()  { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 warn() { echo "  WARN  $1"; WARN=$((WARN+1)); }
 
 HTTPS_PORT=$(cat /etc/asterisk/henwen-https-port 2>/dev/null || echo 443)
-HTTPS_MODE=$(cat /etc/asterisk/henwen-https-mode 2>/dev/null || echo public)
 WSHOST=$(cat /etc/asterisk/henwen-https-hostname 2>/dev/null || true)
 if [ -z "$WSHOST" ]; then
   WSHOST=$(grep -h "ServerName" /etc/apache2/sites-enabled/henwen-ssl.conf 2>/dev/null | awk '{print $2}' | head -1)
 fi
 
 echo "== Configuration"
-echo "        HTTPS mode: ${HTTPS_MODE}   port: ${HTTPS_PORT}   host: ${WSHOST:-?}"
+echo "        port: ${HTTPS_PORT}   host: ${WSHOST:-?}"
 
 echo "== Local services"
 if ss -tln 2>/dev/null | grep -q ":${HTTPS_PORT} "; then ok "Apache listening on TCP ${HTTPS_PORT}"; else bad "nothing listening on TCP ${HTTPS_PORT}"; fi
@@ -61,30 +57,10 @@ if [ -n "${RTPEND:-}" ] && [ "$RTPEND" -le 10200 ] 2>/dev/null; then
 else
   warn "RTP range is wide (${RTPSTART:-?}-${RTPEND:-?}) — apply.sh narrows it to 10000-10100"
 fi
-if [ "$HTTPS_MODE" = "tailscale" ]; then
-  # No port-forwarded public IP in this mode, so stunaddr isn't the right
-  # check — apply.sh instead remaps local addresses to the Tailscale IP via
-  # [ice_host_candidates] (see rtp.conf's own comments on that section).
-  TS_IP=$(tailscale ip -4 2>/dev/null || true)
-  ICE_MAP=$(grep -E "^[0-9.]+[[:space:]]*=>" /etc/asterisk/rtp.conf 2>/dev/null | head -1)
-  if [ -n "$TS_IP" ] && echo "$ICE_MAP" | grep -qE "=> *${TS_IP}(,|\$)"; then
-    ok "ice_host_candidates advertises the Tailscale IP ($ICE_MAP)"
-  elif [ -z "$TS_IP" ]; then
-    bad "could not determine this box's Tailscale IP ('tailscale ip -4' returned nothing) — is Tailscale up?"
-  elif [ -n "$ICE_MAP" ]; then
-    bad "ice_host_candidates is set but doesn't map to this box's current Tailscale IP ($TS_IP): $ICE_MAP — re-run apply.sh (IP may have changed)"
-  else
-    bad "no ice_host_candidates mapping in rtp.conf — remote tailnet operators will see your private LAN address in ICE candidates and get no audio. Re-run apply.sh"
-  fi
-  if grep -qE "^stunaddr" /etc/asterisk/rtp.conf; then
-    warn "stunaddr is also set in rtp.conf — its own docs say not to combine that with ice_host_candidates"
-  fi
+if grep -qE "^stunaddr" /etc/asterisk/rtp.conf; then
+  ok "stunaddr set ($(grep -E '^stunaddr' /etc/asterisk/rtp.conf | cut -d= -f2))"
 else
-  if grep -qE "^stunaddr" /etc/asterisk/rtp.conf; then
-    ok "stunaddr set ($(grep -E '^stunaddr' /etc/asterisk/rtp.conf | cut -d= -f2))"
-  else
-    bad "stunaddr not set in rtp.conf — remote (non-tailnet) operators will get no audio"
-  fi
+  bad "stunaddr not set in rtp.conf — remote operators will get no audio"
 fi
 
 echo "== WSS signaling path (through Apache, as a browser would)"
@@ -103,16 +79,8 @@ else
   warn "could not determine the HTTPS hostname (no henwen-https-hostname marker and no ServerName in henwen-ssl.conf); skipped WSS probe"
 fi
 
-if [ "$HTTPS_MODE" = "tailscale" ]; then
-  echo "== NAT / router forward"
-  echo "        Tailscale mode — nothing is forwarded through your router, so the public-NAT/STUN"
-  echo "        probe below doesn't apply and is skipped. RTP should reach directly over the"
-  echo "        tailnet between this box's Tailscale interface and any tailnet-joined browser."
-  echo "        If TX has no audio from a tailnet device, that's the first thing to check --"
-  echo "        not port forwarding."
-else
-  echo "== NAT / router forward (STUN probe from inside the RTP range)"
-  STUN_OUT=$(python3 - <<'EOF'
+echo "== NAT / router forward (STUN probe from inside the RTP range)"
+STUN_OUT=$(python3 - <<'EOF'
 import socket, os, struct, sys
 
 def stun_probe(local_port):
@@ -166,26 +134,21 @@ if tried == 0:
     print("  WARN  all probe ports busy (active calls) — re-run when idle")
 EOF
 )
-  echo "$STUN_OUT"
-  # Fold the embedded probe's own PASS/FAIL/WARN lines into this script's
-  # running totals so the final summary below actually reflects them.
-  while IFS= read -r line; do
-    case "$line" in
-      *"  PASS  "*) PASS=$((PASS+1)) ;;
-      *"  FAIL  "*) FAIL=$((FAIL+1)) ;;
-      *"  WARN  "*) WARN=$((WARN+1)) ;;
-    esac
-  done <<< "$STUN_OUT"
-fi
+echo "$STUN_OUT"
+# Fold the embedded probe's own PASS/FAIL/WARN lines into this script's
+# running totals so the final summary below actually reflects them.
+while IFS= read -r line; do
+  case "$line" in
+    *"  PASS  "*) PASS=$((PASS+1)) ;;
+    *"  FAIL  "*) FAIL=$((FAIL+1)) ;;
+    *"  WARN  "*) WARN=$((WARN+1)) ;;
+  esac
+done <<< "$STUN_OUT"
 
 echo "== Existing AllStarLink ports (unchanged by browser TX, for reference)"
 if ss -uln 2>/dev/null | grep -q ":4569 "; then ok "IAX2 on UDP 4569 listening (needs its existing router forward)"; else warn "IAX2 4569 not listening"; fi
 
 echo
 echo "Summary: $PASS pass, $FAIL fail, $WARN warn"
-if [ "$HTTPS_MODE" = "tailscale" ]; then
-  echo "Tailscale mode: no router forwards required."
-else
-  echo "Router forwards required for browser TX:  TCP ${HTTPS_PORT},  UDP ${RTPSTART:-10000}-${RTPEND:-10100}"
-fi
+echo "Router forwards required for browser TX:  TCP ${HTTPS_PORT},  UDP ${RTPSTART:-10000}-${RTPEND:-10100}"
 [ "$FAIL" -eq 0 ]
