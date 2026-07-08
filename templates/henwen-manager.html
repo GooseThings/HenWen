@@ -1940,6 +1940,25 @@ sudo bash /opt/HenWen/tx-spike/apply.sh                              # either wa
       </div>
     </div>
 
+    <div class="card" id="update-settings-card" style="display:none">
+      <div class="card-header"><h2>Software Update</h2></div>
+      <div class="card-body">
+        <p id="update-settings-status" style="margin-bottom:12px;color:var(--text2)">Checking&hellip;</p>
+        <div class="btn-row">
+          <button class="btn btn-sm" onclick="checkForUpdate()">Check for Updates</button>
+          <button class="btn btn-sm btn-warn" onclick="launchUpdater()">Force Update</button>
+        </div>
+        <p style="margin-top:10px;font-size:0.85rem;color:var(--text2)">
+          Pulls the latest code from GitHub's <span class="mono">main</span> branch and restarts
+          if anything changed — unlike the notice bar, this isn't gated on a tagged release, so
+          it can pull unreleased commits. See
+          <a href="https://github.com/GooseThings/HenWen/commits/main" target="_blank" rel="noopener" style="color:var(--accent)">recent commits</a>
+          or <a href="https://github.com/GooseThings/HenWen/releases" target="_blank" rel="noopener" style="color:var(--accent)">Releases</a>
+          first if you want to know what's changed.
+        </p>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-header"><h2>About HenWen</h2></div>
       <div class="card-body" style="line-height:1.7">
@@ -4518,6 +4537,10 @@ async function applyRoleNav() {
      or disabling it is a compliance concern, not just an operational one. */
   var nodeIdBtn = document.getElementById('nav-node-id');
   if (nodeIdBtn) nodeIdBtn.style.display = (role === 'superuser') ? '' : 'none';
+  /* Only superuser can trigger an update (shell/deploy access, and the
+     backend enforces this too) — matches checkForUpdate()'s own gate. */
+  var updateCard = document.getElementById('update-settings-card');
+  if (updateCard) updateCard.style.display = (role === 'superuser') ? '' : 'none';
   /* Only superuser sees the higher-risk COP quick actions (node-wide link
      outage, disabling the transmit time-limit safety mechanism) — matching
      the same allowlist enforced server-side in /api/dtmf/cop. */
@@ -4550,13 +4573,27 @@ async function checkForUpdate() {
   // Only superusers are in a position to act on an update (shell/deploy
   // access), so admins don't get this notice.
   if (window._henwenRole !== 'superuser') return;
-  if (sessionStorage.getItem('henwen_update_dismissed')) return;
   var r = await api('/api/update-check');
-  if (!r.ok || !r.data || !r.data.update_available) return;
+  if (!r.ok || !r.data) return;
+  var d = r.data;
+
+  // Persistent Settings-page status — independent of the dismissible bar
+  // below, so it's still visible after a "Dismiss" or once the release tag
+  // catches up to what's already running.
+  var statusEl = document.getElementById('update-settings-status');
+  if (statusEl) {
+    statusEl.innerHTML = 'Running <strong>' + d.current + '</strong>. Latest published release: ' +
+      (d.latest ? '<strong>' + d.latest + '</strong>' : 'unknown') +
+      (d.update_available
+        ? ' &mdash; <a href="' + d.url + '" target="_blank" rel="noopener" style="color:var(--accent)">view</a>.'
+        : (d.latest ? ' (up to date).' : '.'));
+  }
+
+  if (sessionStorage.getItem('henwen_update_dismissed') || !d.update_available) return;
   document.getElementById('update-msg').textContent =
-    'A new HenWen release is available: ' + r.data.latest +
-    ' (currently running ' + r.data.current + ').';
-  document.getElementById('update-link').href = r.data.url;
+    'A new HenWen release is available: ' + d.latest +
+    ' (currently running ' + d.current + ').';
+  document.getElementById('update-link').href = d.url;
   document.getElementById('update-bar').classList.add('show');
 }
 
@@ -4566,18 +4603,24 @@ function dismissUpdateBar() {
 }
 
 async function launchUpdater() {
-  if (!confirm('Launch the updater now?\n\nHenWen will pull the latest release and restart '
-             + 'itself automatically. This briefly disconnects everyone (kiosk playback, '
-             + 'active calls, and this page).')) return;
+  if (!confirm('Update HenWen now?\n\nThis pulls the latest code from GitHub\'s main branch '
+             + '(not necessarily a tagged release) and restarts automatically if anything '
+             + 'changed. This briefly disconnects everyone (kiosk playback, active calls, '
+             + 'and this page).')) return;
   var msgEl = document.getElementById('update-msg');
-  var prevMsg = msgEl.textContent;
-  msgEl.textContent = 'Launching updater...';
+  var statusEl = document.getElementById('update-settings-status');
+  var prevMsg = msgEl ? msgEl.textContent : '';
+  var prevStatus = statusEl ? statusEl.innerHTML : '';
+  if (msgEl) msgEl.textContent = 'Launching updater...';
+  if (statusEl) statusEl.textContent = 'Launching updater...';
   var r = await api('/api/update/launch', {method: 'POST'});
   if (r.ok) {
-    msgEl.textContent = r.data.message;
+    if (msgEl) msgEl.textContent = r.data.message;
+    if (statusEl) statusEl.textContent = r.data.message;
     log('Updater launched: ' + r.data.message, 'OK');
   } else {
-    msgEl.textContent = prevMsg;
+    if (msgEl) msgEl.textContent = prevMsg;
+    if (statusEl) statusEl.innerHTML = prevStatus;
     var err = (r.data && (r.data.error || r.data.hint)) || 'Failed to launch updater.';
     alert(err);
     log('Updater launch failed: ' + err, 'ERROR');
