@@ -209,7 +209,27 @@ else
   grep -q "asterisk-ws" "$APACHE_CONF" || { echo "   FAILED to insert proxy line"; exit 1; }
 fi
 apache2ctl configtest 2>&1 | grep -q "Syntax OK" || { echo "   Apache configtest FAILED — restoring backup"; cp "$BACKUP_DIR/henwen-ssl.conf" "$APACHE_CONF"; exit 1; }
-systemctl reload apache2
+# `reload` requires an already-active service. Config just passed
+# configtest, so if apache2 isn't running, start it fresh instead of
+# failing outright — and if that *also* fails, say something more useful
+# than systemd's bare "not active, cannot reload" (the actual bug report
+# this guards against: Tailscale mode binds Apache to this box's Tailscale
+# IP, and a reboot can start Apache before tailscaled brings that interface
+# up, leaving Apache permanently failed until someone notices).
+if systemctl is-active --quiet apache2; then
+  systemctl reload apache2
+elif ! systemctl start apache2; then
+  echo "   ERROR: apache2 failed to start. Recent log:"
+  journalctl -u apache2 --no-pager -n 15 | sed 's/^/     /'
+  echo "   Browser TX's WSS proxy and the HTTPS kiosk both depend on Apache — fix this before testing TX."
+  if [ "$HTTPS_MODE" = "tailscale" ]; then
+    echo "   Common cause in Tailscale mode: Apache is bound to this box's Tailscale IP (ports.conf's"
+    echo "   'Listen <ip>:<port>' line) and started before tailscaled brought that interface up, or the"
+    echo "   tailnet reassigned this box's IP since setup-tailscale.sh last ran. Re-run it:"
+    echo "     sudo bash $SPIKE_DIR/setup-tailscale.sh"
+  fi
+  exit 1
+fi
 
 echo "== Verification"
 asterisk -rx "http show status" | head -6

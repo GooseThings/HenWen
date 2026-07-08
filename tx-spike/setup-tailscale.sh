@@ -35,6 +35,13 @@
 #                                                            reachable off
 #                                                            the tailnet)
 #           /etc/apache2/sites-available/henwen-ssl.conf  (new)
+#           /etc/systemd/system/apache2.service.d/henwen-tailscale.conf (new —
+#                                                            orders Apache
+#                                                            after tailscaled
+#                                                            so a reboot can't
+#                                                            start it before
+#                                                            the IP it's bound
+#                                                            to exists)
 #           /var/lib/tailscale/certs/                     (cert + key)
 #           a systemd timer (henwen-tailscale-cert-renew) for renewal
 #           /etc/asterisk/henwen-https-{port,mode,hostname} (marker files
@@ -128,8 +135,27 @@ a2enmod ssl proxy proxy_http proxy_wstunnel headers rewrite >/dev/null
 # ── Bind Apache to the Tailscale IP only ─────────────────────
 echo "[5/8] Binding Apache's HTTPS listener to the Tailscale interface only..."
 sed -i -E 's/^([[:space:]]*)Listen 443[[:space:]]*$/\1# Listen 443  (disabled by setup-tailscale.sh -- see the IP-scoped Listen below; this vhost must not be reachable off the tailnet)/' /etc/apache2/ports.conf
-grep -qxF "Listen ${TS_IP}:${HTTPS_PORT}" /etc/apache2/ports.conf 2>/dev/null || \
-    echo "Listen ${TS_IP}:${HTTPS_PORT}" >> /etc/apache2/ports.conf
+# Tagged so a re-run can find and remove *this exact* line before adding a
+# fresh one -- if the tailnet ever reassigns this box's IP (device
+# re-registration, key expiry+rejoin), leaving the old Listen line behind
+# would make Apache refuse to start at all (every configured Listen address
+# must bind successfully), not just skip the dead one.
+sed -i -E "/# HenWen browser transmitter: Tailscale IP\$/d" /etc/apache2/ports.conf
+echo "Listen ${TS_IP}:${HTTPS_PORT}  # HenWen browser transmitter: Tailscale IP" >> /etc/apache2/ports.conf
+
+# Apache binding to a specific Tailscale IP only works once that interface
+# exists -- without an explicit ordering dependency, a reboot can start
+# Apache before tailscaled has brought tailscale0 up, which makes the
+# Listen directive above fail to bind and leaves Apache in a permanently
+# failed state until someone notices and restarts it by hand. This is the
+# most common way a working TX setup goes silently dead after a reboot.
+mkdir -p /etc/systemd/system/apache2.service.d
+cat > /etc/systemd/system/apache2.service.d/henwen-tailscale.conf <<'EOF'
+[Unit]
+Wants=tailscaled.service
+After=tailscaled.service
+EOF
+systemctl daemon-reload
 
 # ── Write the SSL vhost ───────────────────────────────────────
 echo "[6/8] Writing Apache vhost for $MAGIC_DNS_NAME..."
@@ -146,7 +172,16 @@ cat > "$SSL_AVAIL" <<VHOST
 VHOST
 a2ensite "${CONF_NAME}-ssl.conf" >/dev/null
 apache2ctl configtest
-systemctl reload apache2
+# `reload` requires an already-active service -- on a fresh apache2 install
+# it may not be running yet (e.g. policy-rc.d blocking auto-start on some
+# minimal/cloud images), which would otherwise fail this script right here
+# with "apache2.service is not active, cannot reload" despite everything
+# above having gone fine.
+if systemctl is-active --quiet apache2; then
+    systemctl reload apache2
+else
+    systemctl start apache2
+fi
 
 # ── Renewal timer (tailscale cert doesn't auto-renew) ────────
 echo "[7/8] Installing daily renewal timer..."
