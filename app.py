@@ -3363,7 +3363,11 @@ def get_uptime():
         return "unknown"
 
 
-RELEASE_POLL_INTERVAL = 86400.0   # 24 hours
+RELEASE_POLL_INTERVAL  = 86400.0   # 24 hours between successful checks
+RELEASE_RETRY_INTERVAL = 3600.0    # retry sooner after a failed check — one
+                                   # transient network error at boot+30s
+                                   # shouldn't mean a full day with no
+                                   # update-availability info
 
 _latest_release_cache = {"tag": "", "url": ""}
 _latest_release_lock  = threading.Lock()
@@ -3398,7 +3402,9 @@ def _release_poll_loop():
             with _latest_release_lock:
                 _latest_release_cache.update(result)
             log("INFO", f"[UPDATE-POLL] Latest published release: {result['tag'] or 'none'}")
-        time.sleep(RELEASE_POLL_INTERVAL)
+            time.sleep(RELEASE_POLL_INTERVAL)
+        else:
+            time.sleep(RELEASE_RETRY_INTERVAL)
 
 
 def start_release_poller():
@@ -5931,6 +5937,19 @@ def api_asterisk_command():
 
 @app.route("/api/update-check")
 def api_update_check():
+    """?refresh=1 checks GitHub live instead of only reading the daily
+    poller's cache — the Settings page's "Check for Updates" button passes
+    it, since the whole point of a manual click is "ask right now", and the
+    background cache can be up to 24h behind a just-published release.
+    Manual clicks are rare and admin-gated, so there's no rate concern.
+    On a failed live fetch, falls back to the cache and says so."""
+    refreshed = None
+    if request.args.get("refresh"):
+        result = _fetch_latest_release()
+        refreshed = result is not None
+        if result:
+            with _latest_release_lock:
+                _latest_release_cache.update(result)
     latest = get_latest_release()
     latest_tag = latest["tag"]
     return jsonify({
@@ -5939,6 +5958,9 @@ def api_update_check():
         "url":              latest["url"] or f"https://github.com/{GITHUB_REPO}/releases/latest",
         "update_available": bool(latest_tag) and HENWEN_VERSION != "unknown"
                             and latest_tag > HENWEN_VERSION,
+        # None = no live check requested; False = requested but GitHub was
+        # unreachable (values shown are the last cached check)
+        "refreshed":        refreshed,
     })
 
 

@@ -1977,7 +1977,7 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
       <div class="card-body">
         <p id="update-settings-status" style="margin-bottom:12px;color:var(--text2)">Checking&hellip;</p>
         <div class="btn-row">
-          <button class="btn btn-sm" onclick="checkForUpdate()">Check for Updates</button>
+          <button class="btn btn-sm" onclick="checkForUpdate(true)">Check for Updates</button>
           <button class="btn btn-sm btn-warn" onclick="launchUpdater()">Force Update</button>
         </div>
         <p style="margin-top:10px;font-size:0.85rem;color:var(--text2)">
@@ -4676,24 +4676,35 @@ window.addEventListener('DOMContentLoaded', async function() {
   checkForUpdate();
 });
 
-async function checkForUpdate() {
+async function checkForUpdate(live) {
   // Only superusers are in a position to act on an update (shell/deploy
   // access), so admins don't get this notice.
   if (window._henwenRole !== 'superuser') return;
-  var r = await api('/api/update-check');
-  if (!r.ok || !r.data) return;
+  // live=true (the Settings button) asks the server to hit GitHub right now
+  // instead of reading its daily poller cache — a just-published release can
+  // be up to 24h newer than that cache, which used to make the button
+  // report "up to date" against stale data.
+  var statusEl = document.getElementById('update-settings-status');
+  if (live && statusEl) statusEl.textContent = 'Checking GitHub…';
+  var r = await api('/api/update-check' + (live ? '?refresh=1' : ''));
+  if (!r.ok || !r.data) {
+    if (live && statusEl) statusEl.textContent = 'Update check failed — see Diagnostics.';
+    return;
+  }
   var d = r.data;
 
   // Persistent Settings-page status — independent of the dismissible bar
   // below, so it's still visible after a "Dismiss" or once the release tag
   // catches up to what's already running.
-  var statusEl = document.getElementById('update-settings-status');
   if (statusEl) {
     statusEl.innerHTML = 'Running <strong>' + d.current + '</strong>. Latest published release: ' +
       (d.latest ? '<strong>' + d.latest + '</strong>' : 'unknown') +
       (d.update_available
         ? ' &mdash; <a href="' + d.url + '" target="_blank" rel="noopener" style="color:var(--accent)">view</a>.'
-        : (d.latest ? ' (up to date).' : '.'));
+        : (d.latest ? ' (up to date).' : '.')) +
+      (d.refreshed === false
+        ? ' <span style="color:var(--warn,#e0a030)">GitHub was unreachable — showing the last cached check.</span>'
+        : '');
   }
 
   if (sessionStorage.getItem('henwen_update_dismissed') || !d.update_available) return;

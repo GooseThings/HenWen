@@ -1,5 +1,10 @@
 # Changelog
 
+## v2026.07.08.4
+
+- **Fixed: the Settings page's "Check for Updates" button reported "up to date" against stale data.** It only re-read the background poller's cache, which is refreshed once every 24 hours — a release published after that day's check was invisible until the next one. The button now asks GitHub live (`/api/update-check?refresh=1`), updates the cache with the result, and clearly says when GitHub was unreachable and cached data is being shown instead. The automatic on-page-load check still uses the cache, as before.
+- **Fixed: a failed daily release check waited the full 24 hours before trying again** — one transient network error at startup meant a whole day with no update-availability info. Failures now retry after an hour.
+
 ## v2026.07.08.3
 
 - **Fixed: a new severe weather alert's forced playback (`max_defer_sec`) never fired on its first play.** `created_at` is stored by SQLite in UTC but was compared against local time, so the "how long has this been due" clock started hours negative in any US timezone — the first announcement of a new Tornado/Severe Thunderstorm Warning could defer indefinitely behind a continuously busy channel, which is exactly the situation the force exists for. Replays (based on `last_played`, stored in local time) were unaffected.
