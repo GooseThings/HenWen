@@ -4976,6 +4976,97 @@ def api_tx_config():
     return resp
 
 
+TX_CHECK_PORTS_SCRIPT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "tx-spike", "check-ports.sh"
+)
+
+
+@app.route("/api/tx/diagnostics")
+def api_tx_diagnostics():
+    """One-click check of everything the browser TX button needs, for the
+    Manager's TX Diagnostics page. Admin/superuser only, same as
+    /api/tx/config. Two layers:
+      1. Fast in-process checks (secret file, PJSIP endpoint, local node,
+         whether *this* request itself arrived over HTTPS) covering "was
+         apply.sh/setup-https.sh ever run at all".
+      2. tx-spike/check-ports.sh (read-only, changes nothing) covering the
+         network/NAT layer neither of the setup scripts can verify for
+         themselves — reused rather than reimplemented so the two never
+         drift apart.
+    """
+    if session.get('role') not in ('admin', 'superuser'):
+        return jsonify({"error": "Admin access required"}), 403
+
+    checks = []
+
+    def add(label, ok, detail, warn=False):
+        checks.append({
+            "label": label,
+            "status": "warn" if warn else ("pass" if ok else "fail"),
+            "detail": detail,
+        })
+
+    try:
+        with open(TX_SECRET_PATH) as f:
+            secret_configured = bool(f.read().strip())
+    except OSError:
+        secret_configured = False
+    add("Browser TX configured", secret_configured,
+        "SIP secret present at " + TX_SECRET_PATH if secret_configured else
+        "Not set up yet — run: sudo bash /opt/HenWen/tx-spike/apply.sh")
+
+    content = read_conf_file(RPT_CONF_PATH)
+    nodes   = get_node_numbers(content) if content else []
+    add("Local node found in rpt.conf", bool(nodes),
+        f"Node {nodes[0]}" if nodes else "No [NNNN] stanza found in rpt.conf")
+
+    is_https = request.is_secure or request.headers.get("X-Forwarded-Proto", "").lower() == "https"
+    add("This page loaded over HTTPS", is_https,
+        "Secure context confirmed" if is_https else
+        "You're viewing the Manager over plain HTTP — the TX button needs "
+        "https:// (or localhost) to get microphone access at all",
+        warn=not is_https)
+
+    try:
+        with _ami_pool_lock:
+            ami = _ami_ensure_connected()
+            out = ami.command(f"pjsip show endpoint {TX_SIP_USER}")
+        found = any(l.strip().startswith("Endpoint:") and TX_SIP_USER in l for l in out)
+        add("PJSIP endpoint registered in Asterisk", found,
+            f"'{TX_SIP_USER}' endpoint present" if found else
+            f"No '{TX_SIP_USER}' endpoint — run tx-spike/apply.sh (or re-run it if it was rolled back)")
+    except Exception as e:
+        add("PJSIP endpoint registered in Asterisk", False, f"Could not query AMI: {e}")
+
+    script_output = ""
+    if not os.path.isfile(TX_CHECK_PORTS_SCRIPT):
+        add("Network/port checks (check-ports.sh)", False,
+            "tx-spike/check-ports.sh not found on disk — reinstall or update HenWen", warn=True)
+    else:
+        try:
+            proc = subprocess.run(["bash", TX_CHECK_PORTS_SCRIPT],
+                                   capture_output=True, text=True, timeout=30)
+            script_output = proc.stdout + proc.stderr
+            for line in script_output.splitlines():
+                m = re.match(r'^\s*(PASS|FAIL|WARN)\s+(.*)$', line)
+                if m:
+                    status, detail = m.group(1), m.group(2).strip()
+                    add(detail, status == "PASS", detail, warn=(status == "WARN"))
+        except subprocess.TimeoutExpired:
+            add("Network/port checks (check-ports.sh)", False, "Timed out after 30s")
+        except Exception as e:
+            add("Network/port checks (check-ports.sh)", False, str(e))
+
+    summary = {
+        "pass": sum(1 for c in checks if c["status"] == "pass"),
+        "fail": sum(1 for c in checks if c["status"] == "fail"),
+        "warn": sum(1 for c in checks if c["status"] == "warn"),
+    }
+    log("INFO", f"[TX-DIAG] {session.get('username', '?')} ran TX diagnostics: "
+                f"{summary['pass']} pass, {summary['fail']} fail, {summary['warn']} warn")
+    return jsonify({"checks": checks, "summary": summary, "raw_output": script_output})
+
+
 # ---------------------------------------------------------------------------
 # Audio monitoring — one ffmpeg per node, broadcast to N simultaneous clients
 #
