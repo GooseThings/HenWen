@@ -43,7 +43,7 @@ import pwd
 import grp
 import secrets
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for, send_file, Response, stream_with_context
 from flask.sessions import SecureCookieSessionInterface
@@ -293,7 +293,12 @@ def get_db():
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    # timeout= is SQLite's busy wait. Several background threads (AMI poll
+    # loop, announcer, connector scheduler, NWS poller) plus request handlers
+    # all write to this one file, so a writer routinely queues behind another
+    # thread's transaction — wait it out rather than surfacing "database is
+    # locked" at the default 5s.
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
     conn.row_factory = sqlite3.Row
     # The schema/migration statements below are idempotent but not free, and
     # get_db() is called many times per second (poll loop, get_setting(), every
@@ -302,6 +307,15 @@ def get_db():
     # IF NOT EXISTS or a guarded one-shot migration.
     if _db_ready:
         return conn
+    # WAL lets readers proceed while a writer commits and sharply reduces
+    # writer-vs-writer contention across this app's many threads. The setting
+    # is persistent per database file, so once is enough; it can fail if
+    # another connection happens to hold a lock at this exact instant, in
+    # which case the next cold start sets it — never worth failing startup.
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError:
+        pass
     conn.execute("""CREATE TABLE IF NOT EXISTS favorites (
         id      INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
@@ -974,24 +988,38 @@ class AMIClient:
         self._sock.sendall(text.encode("utf-8"))
 
     def _recv_until(self, sentinel: str, timeout: float = None) -> str:
+        """Read until `sentinel` arrives, or raise ConnectionError.
+
+        Raising (rather than returning whatever partial data was received by
+        the deadline) matters for protocol integrity: after a silent partial
+        return, the real response could still straggle in and sit in the
+        socket buffer, where it would be consumed as the answer to the NEXT
+        action — every response off by one from then on, with nothing ever
+        noticing. An exception instead propagates to ami_send_command() /
+        _poll_loop(), which invalidate the connection and reconnect,
+        resynchronizing the stream. Socket errors propagate for the same
+        reason."""
         deadline = time.time() + (timeout or self.timeout)
         buf = ""
+        closed = False
         self._sock.settimeout(0.5)
-        while time.time() < deadline:
-            try:
-                chunk = self._sock.recv(4096)
+        try:
+            while time.time() < deadline:
+                try:
+                    chunk = self._sock.recv(4096)
+                except socket.timeout:
+                    continue
                 if not chunk:
+                    closed = True
                     break
                 buf += chunk.decode("utf-8", errors="replace")
                 if sentinel in buf:
-                    break
-            except socket.timeout:
-                continue
-            except Exception as e:
-                log("WARN", f"[AMI] recv error: {e}")
-                break
-        self._sock.settimeout(self.timeout)
-        return buf
+                    return buf
+        finally:
+            self._sock.settimeout(self.timeout)
+        why = "connection closed" if closed else "timed out"
+        raise ConnectionError(f"AMI: {why} waiting for response terminator "
+                              f"({len(buf)} byte(s) received)")
 
     def _send_action(self, params: dict):
         msg = "".join(f"{k}: {v}\r\n" for k, v in params.items()) + "\r\n"
@@ -1026,8 +1054,10 @@ class AMIClient:
         except OSError as e:
             raise Exception(f"AMI connect failed: {e}")
 
-        banner = self._recv_until("\r\n", timeout=5)
-        banner = banner.strip()
+        try:
+            banner = self._recv_until("\r\n", timeout=5).strip()
+        except ConnectionError:
+            banner = ""   # fall through to the friendlier diagnostic below
         log("INFO", f"[AMI] Banner: {banner!r}")
         if not banner:
             raise Exception(
@@ -1313,6 +1343,20 @@ def _poll_loop():
                 continue
 
             _alert_events = []  # (ev_type, local_node_str, peer_str) — processed outside lock
+            # Deferred DB work — collected while holding the AMI lock, executed
+            # only after it's released. A SQLite write can sit on the busy
+            # timeout when another thread's transaction is in flight; doing
+            # that inside _ami_pool_lock froze every AMI command (kiosk
+            # connects, the announcer, Smart Connector) behind a database
+            # stall.
+            _conn_opens   = []  # (local_node_str, peer, direction)
+            _conn_closes  = []  # (local_node_str, peer)
+            _link_prunes  = []  # (local_node_str, peer) — permanent/temp tracking rows to drop
+            _idle_saves   = []  # (local_node_str, peer, monitor, last_active)
+            _idle_deletes = []  # (local_node_str, peer)
+            # Read once per cycle, before taking the lock — get_setting() opens
+            # a DB connection of its own.
+            idle_timeout = int(get_setting('kiosk_idle_timeout_sec', '600') or 600)
             # Union of every locally-hosted node's connected peers this cycle —
             # _link_stats is shared across ALL local nodes, so pruning it must
             # wait until every node has been polled (see below).
@@ -1382,32 +1426,17 @@ def _poll_loop():
                         prev_est    = _prev_connected_map.get(node_str, set())
                         directions  = status.get("link_direction", {})
                         for peer in est_set - prev_est:
-                            info = lookup_node(peer)
-                            _db_conn_open(node_str, peer,
-                                          info.get("callsign", ""),
-                                          info.get("location", ""),
-                                          directions.get(peer, ""))
+                            # DB insert (and its lookup_node, which can hit the
+                            # network on a cache miss) deferred past the lock.
+                            _conn_opens.append((node_str, peer, directions.get(peer, "")))
                             _alert_events.append(("connect", node_str, peer))
                         for peer in prev_est - all_set:
                             # Was established before and has now fully gone
-                            _db_conn_close(node_str, peer)
+                            _conn_closes.append((node_str, peer))
                             _alert_events.append(("disconnect", node_str, peer))
                             with _kiosk_temp_lock:
                                 _kiosk_temp_conns.pop((node_str, peer), None)
-                            try:
-                                pdb = get_db()
-                                pdb.execute(
-                                    "DELETE FROM permanent_links WHERE local_node=? AND peer_node=?",
-                                    (node_str, peer)
-                                )
-                                pdb.execute(
-                                    "DELETE FROM kiosk_temp_conns WHERE local_node=? AND peer_node=?",
-                                    (node_str, peer)
-                                )
-                                pdb.commit()
-                            except Exception as _e:
-                                log("WARN", f"[KIOSK] Failed to prune link tracking for "
-                                            f"{node_str}->{peer}: {_e}")
+                            _link_prunes.append((node_str, peer))
                         _prev_connected_map[node_str] = est_set
 
                         # Kiosk idle-timeout: update last_active when local or peer is keyed.
@@ -1430,11 +1459,9 @@ def _poll_loop():
                                     # the idle clock), not on every 1s tick while keyed.
                                     _idle_touches.append((ln, pn, info.get('monitor', False),
                                                           info['last_active']))
-                        for (ln, pn, _mon, _la) in _idle_touches:
-                            _db_temp_conn_save(ln, pn, _mon, False, _la)
+                        _idle_saves.extend(_idle_touches)
 
                         # Fire idle disconnects (outside _kiosk_temp_lock to avoid deadlock)
-                        idle_timeout = int(get_setting('kiosk_idle_timeout_sec', '600') or 600)
                         _idle_dc    = []
                         _idle_stale = []
                         with _kiosk_temp_lock:
@@ -1450,8 +1477,7 @@ def _poll_loop():
                                     # AMI cache hasn't caught up to yet is never purged.)
                                     (_idle_dc if pn in all_set else _idle_stale).append((ln, pn))
                                     del _kiosk_temp_conns[(ln, pn)]
-                        for (ln, pn) in _idle_dc + _idle_stale:
-                            _db_temp_conn_delete(ln, pn)
+                        _idle_deletes.extend(_idle_dc + _idle_stale)
                         for (ln, pn) in _idle_dc:
                             try:
                                 # ilink 1, not 11, is correct here (unlike the manual disconnect
@@ -1475,6 +1501,33 @@ def _poll_loop():
                     _ami_last_error = str(e)
                     log("ERROR", f"[AMI-POLL] Error during poll: {e}")
                     _ami_invalidate()
+
+            # Deferred DB writes — the AMI lock is released now, so a busy
+            # database can no longer stall AMI commands. All helpers below are
+            # individually best-effort (they catch and log their own errors).
+            for (ln, pn, direction) in _conn_opens:
+                info = lookup_node(pn)   # may hit the network on a cache miss
+                _db_conn_open(ln, pn, info.get("callsign", ""),
+                              info.get("location", ""), direction)
+            for (ln, pn) in _conn_closes:
+                _db_conn_close(ln, pn)
+            for (ln, pn) in _link_prunes:
+                try:
+                    pdb = get_db()
+                    pdb.execute(
+                        "DELETE FROM permanent_links WHERE local_node=? AND peer_node=?",
+                        (ln, pn))
+                    pdb.execute(
+                        "DELETE FROM kiosk_temp_conns WHERE local_node=? AND peer_node=?",
+                        (ln, pn))
+                    pdb.commit()
+                except Exception as _e:
+                    log("WARN", f"[KIOSK] Failed to prune link tracking for "
+                                f"{ln}->{pn}: {_e}")
+            for (ln, pn, _mon, _la) in _idle_saves:
+                _db_temp_conn_save(ln, pn, _mon, False, _la)
+            for (ln, pn) in _idle_deletes:
+                _db_temp_conn_delete(ln, pn)
 
             # Process node connect/disconnect alerts outside lock (may do network I/O)
             for ev_type, local, peer in _alert_events:
@@ -1573,6 +1626,10 @@ def _favstats_poll_loop():
     while True:
         any_success = False
         any_429     = False
+        nodes       = []   # must be bound before the try — it's referenced after
+                           # the except below, so a DB error raised before the
+                           # SELECT completes would otherwise turn into a
+                           # NameError there, killing this thread for good
         try:
             db    = get_db()
             nodes = [r["node"] for r in db.execute("SELECT DISTINCT node FROM favorites").fetchall()]
@@ -2169,13 +2226,14 @@ def _fetch_keyed_nodes():
     """
     now  = time.time()
     pool = []
-    try:
-        req = urlreq.Request(ASL_KEYED_STATS_URL, headers={"User-Agent": "HenWen/1.0 (keyed monitor)"})
-        with urlreq.urlopen(req, timeout=10) as resp:
-            page = resp.read().decode("utf-8", "replace")
-    except Exception as e:
-        log("DEBUG", f"[GLOBAL-ACTIVITY] Keyed page fetch failed: {e}")
-        return pool
+    # Fetch failures propagate to _global_activity_poll_loop's handler.
+    # Swallowing them here and returning [] made a network outage look like
+    # a successful "0 nodes keyed" sweep: the cache timestamp got stamped
+    # fresh (so the kiosk claimed up-to-date data while pins silently aged
+    # out) and the loop's exponential backoff could never trigger.
+    req = urlreq.Request(ASL_KEYED_STATS_URL, headers={"User-Agent": "HenWen/1.0 (keyed monitor)"})
+    with urlreq.urlopen(req, timeout=10) as resp:
+        page = resp.read().decode("utf-8", "replace")
 
     for row in _KEYED_ROW_RE.findall(page):
         tds = _KEYED_TD_RE.findall(row)
@@ -2282,17 +2340,14 @@ _ECHOLINK_TD_RE     = re.compile(r'<td[^>]*>(.*?)</td>', re.S)
 
 def _fetch_echolink_directory():
     """Scrape echolink.org/logins.jsp for currently-online repeaters, links,
-    and conferences. Returns [] on any failure (fail-soft — the poll loop
-    leaves the existing cache in place rather than blanking it on a
-    transient outage)."""
+    and conferences. Raises on fetch failure — the poll loop catches it,
+    backs off exponentially, and leaves the existing cache in place rather
+    than blanking it on a transient outage. (A swallowed failure returning
+    [] also skipped the cache update, but made the backoff unreachable.)"""
     rows_out = []
-    try:
-        req = urlreq.Request(ECHOLINK_LOGINS_URL, headers={"User-Agent": "HenWen/1.0 (echolink directory)"})
-        with urlreq.urlopen(req, timeout=20) as resp:
-            page = resp.read().decode("utf-8", "replace")
-    except Exception as e:
-        log("WARN", f"[ECHOLINK] Directory fetch failed: {e}")
-        return rows_out
+    req = urlreq.Request(ECHOLINK_LOGINS_URL, headers={"User-Agent": "HenWen/1.0 (echolink directory)"})
+    with urlreq.urlopen(req, timeout=20) as resp:
+        page = resp.read().decode("utf-8", "replace")
 
     anchors = list(_ECHOLINK_ANCHOR_RE.finditer(page))
     for i, m in enumerate(anchors):
@@ -2366,7 +2421,17 @@ def _fetch_weather(location: str) -> dict:
     with _weather_lock:
         entry = _weather_cache.get(loc)
         if entry and (time.time() - entry["ts"]) < WEATHER_INTERVAL:
-            return entry["data"]
+            if entry["data"] is not None:
+                return entry["data"]
+            # A recent fetch failed and we're inside its shortened retry
+            # window (the error path below caches data=None to schedule the
+            # retry). Serve the same degraded response that failing request
+            # returned — previously this handed back the raw None, i.e. the
+            # endpoint responded with a literal JSON null.
+            good = _weather_last_good.get(loc)
+            if good:
+                return {**good, "stale": True, "error": None}
+            return {"error": "Weather unavailable", "location": loc, "stale": True}
 
     try:
         url = WTTR_URL.format(urlparse.quote_plus(loc))
@@ -4784,9 +4849,11 @@ def api_status_connect():
     else:
         ilink_mode = "3"
     try:
-        with _ami_pool_lock:
-            ami = _ami_ensure_connected()
-            result = ami.rpt_cmd(local_node, f"ilink {ilink_mode} {remote_node}")
+        # Via ami_send_command (not a raw _ami_ensure_connected) so a
+        # connection that broke since the last poll gets invalidated and
+        # retried on a fresh socket instead of failing the user's click.
+        result = ami_send_command(
+            lambda ami: ami.rpt_cmd(local_node, f"ilink {ilink_mode} {remote_node}"))
         now = time.time()
         with _kiosk_temp_lock:
             _kiosk_temp_conns[(local_node, remote_node)] = {
@@ -4852,9 +4919,8 @@ def api_status_disconnect():
             return jsonify({"error": "This connection is managed by Smart Connector. "
                                       "Only an admin or superuser can disconnect it."}), 403
     try:
-        with _ami_pool_lock:
-            ami = _ami_ensure_connected()
-            result = ami.rpt_cmd(local_node, f"ilink 11 {remote_node}")
+        result = ami_send_command(
+            lambda ami: ami.rpt_cmd(local_node, f"ilink 11 {remote_node}"))
         log("INFO", f"[API] /api/status/disconnect {local_node} -> {remote_node}")
         return jsonify({"ok": True, "output": result})
     except Exception as e:
@@ -5028,9 +5094,8 @@ def api_tx_diagnostics():
         warn=not is_https)
 
     try:
-        with _ami_pool_lock:
-            ami = _ami_ensure_connected()
-            out = ami.command(f"pjsip show endpoint {TX_SIP_USER}")
+        out = ami_send_command(
+            lambda ami: ami.command(f"pjsip show endpoint {TX_SIP_USER}"))
         found = any(l.strip().startswith("Endpoint:") and TX_SIP_USER in l for l in out)
         add("PJSIP endpoint registered in Asterisk", found,
             f"'{TX_SIP_USER}' endpoint present" if found else
@@ -6701,7 +6766,16 @@ def _run_due_announcements():
                             due_since = (datetime.strptime(row["last_played"], "%Y-%m-%d %H:%M:%S")
                                          + timedelta(minutes=row["interval_min"]))
                         else:
-                            due_since = datetime.strptime(row["created_at"], "%Y-%m-%d %H:%M:%S")
+                            # created_at defaults to SQLite's datetime('now'),
+                            # which is UTC — `now` here is local time. Compared
+                            # raw, waited_sec started hours NEGATIVE in any US
+                            # timezone, so the FIRST play of a new alert (the
+                            # one that matters most) could never be forced past
+                            # a busy channel. last_played above is written in
+                            # local time, so that branch was always consistent.
+                            due_since = (datetime.strptime(row["created_at"], "%Y-%m-%d %H:%M:%S")
+                                         .replace(tzinfo=timezone.utc)
+                                         .astimezone().replace(tzinfo=None))
                         waited_sec = (now - due_since).total_seconds()
                         forced = waited_sec >= max_defer
                     except Exception:
