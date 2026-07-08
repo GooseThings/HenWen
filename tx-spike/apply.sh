@@ -30,6 +30,29 @@ RPT_CONF_PATH="${RPT_CONF_PATH:-/etc/asterisk/rpt.conf}"
 
 [ "$(id -u)" = 0 ] || { echo "Run as root (sudo)"; exit 1; }
 
+# apply.sh only wires up Asterisk PJSIP/WebRTC + the WSS proxy — it assumes
+# setup-https.sh or setup-tailscale.sh already gave this box HTTPS and left
+# $APACHE_CONF in place. Check that explicitly and fail with a clear pointer
+# rather than letting the "== Backing up" step below die on a bare `cp:
+# cannot stat` a few lines later (the actual bug report this guards against).
+if [ ! -f "$APACHE_CONF" ]; then
+  echo "ERROR: $APACHE_CONF not found."
+  echo ""
+  EXISTING_MODE=$(cat /etc/asterisk/henwen-https-mode 2>/dev/null || true)
+  if [ -n "$EXISTING_MODE" ]; then
+    echo "This box has a henwen-https-mode marker set to '$EXISTING_MODE', but the vhost"
+    echo "it should have created is missing — that setup script started but didn't finish"
+    echo "(e.g. setup-tailscale.sh failing at the certificate step is the most common way to"
+    echo "land in this state). Re-run it:"
+  else
+    echo "Browser TX needs HTTPS set up first, before apply.sh — run whichever matches your"
+    echo "situation:"
+  fi
+  echo "  sudo bash $SPIKE_DIR/setup-https.sh <hostname> <email>   # public hostname, ports forwarded"
+  echo "  sudo bash $SPIKE_DIR/setup-tailscale.sh                  # no port forwarding (Tailscale)"
+  exit 1
+fi
+
 # Local node number: same convention app.py's get_node_numbers() uses
 # (first top-level [NNNN] stanza in rpt.conf, 4-7 digits) so the TX feature
 # always keys the same node HenWen itself treats as primary. Pass it
