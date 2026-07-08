@@ -134,7 +134,37 @@ a2enmod ssl proxy proxy_http proxy_wstunnel headers rewrite >/dev/null
 
 # ── Bind Apache to the Tailscale IP only ─────────────────────
 echo "[5/8] Binding Apache's HTTPS listener to the Tailscale interface only..."
-sed -i -E 's/^([[:space:]]*)Listen 443[[:space:]]*$/\1# Listen 443  (disabled by setup-tailscale.sh -- see the IP-scoped Listen below; this vhost must not be reachable off the tailnet)/' /etc/apache2/ports.conf
+
+# Disabling the wildcard "Listen 443" below is only safe if nothing else on
+# this box depends on it -- plenty of ASL3 boxes also run other Apache-
+# hosted tools (AllScan, Supermon, a personal site, ...) on their own
+# *:443 vhost. Apache can't bind both a wildcard and an IP-specific Listen
+# on the same port (the wildcard already claims it), so disabling it out
+# from under another site would silently make that site unreachable on its
+# normal address -- reachable only via the Tailscale IP, or not at all.
+# Bug report: exactly this happened to a user whose AllScan install went
+# unreachable after running this script.
+OTHER_443=$(grep -lE '<VirtualHost[^>]*:443' /etc/apache2/sites-enabled/*.conf 2>/dev/null \
+            | grep -vxF "/etc/apache2/sites-enabled/${CONF_NAME}-ssl.conf" || true)
+if [ -n "$OTHER_443" ] && [ "$HTTPS_PORT" = "443" ]; then
+    echo ""
+    echo "  ERROR: another Apache site is already using port 443 on this box:"
+    echo "$OTHER_443" | sed 's/^/    /'
+    echo ""
+    echo "  Disabling the wildcard 'Listen 443' (needed to bind HenWen's vhost to only"
+    echo "  this box's Tailscale IP) would make the site(s) above unreachable on their"
+    echo "  normal address. Re-run with a dedicated port for HenWen instead, e.g.:"
+    echo "    sudo bash $0 --port 8443"
+    exit 1
+fi
+
+# Only disable the wildcard when we actually need port 443 ourselves --
+# with --port already pointed elsewhere, there's no conflict to avoid, and
+# leaving "Listen 443" alone means whatever else uses it keeps working
+# without operator intervention.
+if [ "$HTTPS_PORT" = "443" ]; then
+    sed -i -E 's/^([[:space:]]*)Listen 443[[:space:]]*$/\1# Listen 443  (disabled by setup-tailscale.sh -- see the IP-scoped Listen below; this vhost must not be reachable off the tailnet)/' /etc/apache2/ports.conf
+fi
 # Tagged so a re-run can find and remove *this exact* line before adding a
 # fresh one -- if the tailnet ever reassigns this box's IP (device
 # re-registration, key expiry+rejoin), leaving the old Listen line behind
