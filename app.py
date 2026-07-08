@@ -6020,6 +6020,202 @@ def api_set_secret_key():
         return jsonify({"error": str(e)}), 500
 
 
+# ── App settings (ports) ──────────────────────────────────────────────────
+#
+# Two ports are safe to expose here because HenWen owns both ends of each:
+# the Flask/gunicorn bind port (HenWen.service) and the AMI port (also
+# HenWen.service, but must agree with manager.conf's own `port =`, which
+# Asterisk itself binds). The HTTPS port deliberately isn't here — that's
+# Apache's `ports.conf`/vhost/certbot territory, provisioned once by
+# tx-spike/setup-https.sh's `--port` flag; rewriting that live from a web
+# request is a different, much larger blast radius than these two.
+PORT_MIN = 1024
+PORT_MAX = 65535
+
+
+@app.route("/api/settings/ports")
+def api_get_ports():
+    if session.get('role') != 'superuser':
+        return jsonify({"error": "Superuser access required"}), 403
+    return jsonify({
+        "flask_port":          PORT,
+        "ami_port":            AMI_PORT,
+        "service_file":        SERVICE_FILE_PATH,
+        "service_file_exists": os.path.exists(SERVICE_FILE_PATH),
+        "manager_conf":        MANAGER_CONF,
+        "manager_conf_exists": os.path.exists(MANAGER_CONF),
+    })
+
+
+@app.route("/api/settings/ports", methods=["POST"])
+def api_set_ports():
+    """
+    Change the Flask/gunicorn bind port and/or the AMI port, writing every
+    place each one actually needs to agree:
+      - Flask port: HenWen.service's `Environment=PORT=` line (read by the
+        dev-mode `app.run()` path) AND the `--bind 0.0.0.0:<port>` gunicorn
+        actually listens on in production — today those two can silently
+        disagree, since only --bind matters under gunicorn and nothing
+        kept them in sync. This route always writes both together.
+      - AMI port: HenWen.service's `Environment=AMI_PORT=` line AND
+        manager.conf's own `port =` for the stanza Asterisk itself binds —
+        these must match or HenWen can't reach AMI at all after restart.
+    Restarts HenWen (and reloads Asterisk's manager module first, for an
+    AMI port change, so the new bindport is live before HenWen reconnects
+    to it) so the new value(s) actually take effect. The response is sent
+    before either happens, same reasoning as the SECRET_KEY route above:
+    a Flask-port change means the browser's current URL stops working the
+    moment gunicorn rebinds, so the caller needs the new port back to know
+    where to navigate next.
+    """
+    if session.get('role') != 'superuser':
+        return jsonify({"error": "Superuser access required"}), 403
+
+    data            = request.json or {}
+    raw_flask_port  = data.get("flask_port")
+    raw_ami_port    = data.get("ami_port")
+
+    if raw_flask_port is None and raw_ami_port is None:
+        return jsonify({"error": "Provide flask_port and/or ami_port"}), 400
+
+    def _valid_port(p):
+        try:
+            p = int(p)
+        except (TypeError, ValueError):
+            return None
+        return p if PORT_MIN <= p <= PORT_MAX else None
+
+    new_flask_port = None
+    new_ami_port   = None
+    if raw_flask_port is not None:
+        new_flask_port = _valid_port(raw_flask_port)
+        if new_flask_port is None:
+            return jsonify({"error": f"flask_port must be a number between {PORT_MIN} and {PORT_MAX}"}), 400
+    if raw_ami_port is not None:
+        new_ami_port = _valid_port(raw_ami_port)
+        if new_ami_port is None:
+            return jsonify({"error": f"ami_port must be a number between {PORT_MIN} and {PORT_MAX}"}), 400
+    if new_flask_port is not None and new_ami_port is not None and new_flask_port == new_ami_port:
+        return jsonify({"error": "flask_port and ami_port can't be the same"}), 400
+    for p, label in ((new_flask_port, "flask_port"), (new_ami_port, "ami_port")):
+        if p == 8088:
+            return jsonify({"error": f"{label} can't be 8088 — that's Asterisk's builtin HTTP/WS "
+                                      "server, hardcoded into the Browser TX Apache proxy"}), 400
+
+    if not os.path.exists(SERVICE_FILE_PATH):
+        return jsonify({"error": f"Service file not found: {SERVICE_FILE_PATH}"}), 404
+    if new_ami_port is not None and not os.path.exists(MANAGER_CONF):
+        return jsonify({"error": f"manager.conf not found: {MANAGER_CONF}"}), 404
+
+    try:
+        with open(SERVICE_FILE_PATH) as f:
+            content = f.read()
+
+        if new_flask_port is not None:
+            content, n1 = re.subn(r'^Environment="?PORT=\d+"?[ \t]*$',
+                                   f'Environment=PORT={new_flask_port}', content,
+                                   count=1, flags=re.MULTILINE)
+            content, n2 = re.subn(r'(--bind\s+[^:\s]*:)\d+', rf'\g<1>{new_flask_port}',
+                                   content, count=1)
+            if not n1 or not n2:
+                return jsonify({"error": "Could not find both the PORT environment line and the "
+                                          "gunicorn --bind flag in the service file to update — "
+                                          "it may not match the expected format"}), 500
+
+        if new_ami_port is not None:
+            content, n = re.subn(r'^Environment="?AMI_PORT=\d+"?[ \t]*$',
+                                  f'Environment=AMI_PORT={new_ami_port}', content,
+                                  count=1, flags=re.MULTILINE)
+            if not n:
+                return jsonify({"error": "Could not find the AMI_PORT environment line in the "
+                                          "service file to update"}), 500
+
+        fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(SERVICE_FILE_PATH), prefix=".henwen_svc_")
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp_path, SERVICE_FILE_PATH)
+        log("INFO", f"[SETTINGS] Ports updated in {SERVICE_FILE_PATH} "
+                     f"(flask={new_flask_port}, ami={new_ami_port})")
+
+        if new_ami_port is not None:
+            with open(MANAGER_CONF) as f:
+                mgr_content = f.read()
+            mgr_content, n = re.subn(r'^(\s*port\s*=\s*)\d+', rf'\g<1>{new_ami_port}',
+                                      mgr_content, count=1, flags=re.MULTILINE)
+            if not n:
+                return jsonify({"error": f"No 'port = ' line found in {MANAGER_CONF} to update — "
+                                          "set it there manually to match, then retry"}), 500
+            mfd, mtmp_path = tempfile.mkstemp(dir=os.path.dirname(MANAGER_CONF), prefix=".henwen_mgr_")
+            with os.fdopen(mfd, "w") as f:
+                f.write(mgr_content)
+                f.flush()
+                os.fsync(f.fileno())
+            os.rename(mtmp_path, MANAGER_CONF)
+            log("INFO", f"[SETTINGS] AMI port updated in {MANAGER_CONF} -> {new_ami_port}")
+
+        dr = _systemctl("daemon-reload", timeout=15)
+        if dr.returncode != 0:
+            stderr = dr.stderr.strip()
+            log("ERROR", f"[SETTINGS] daemon-reload failed after port change: {stderr}")
+            hint = ("Service account lacks sudo rights for systemctl — re-run "
+                    "install.sh to install the henwen-systemctl sudoers rule."
+                    if "password" in stderr.lower() or "authoriz" in stderr.lower()
+                    else "Check: journalctl -u HenWen -n 30")
+            return jsonify({
+                "error": f"Port(s) written, but 'systemctl daemon-reload' failed: "
+                        f"{stderr or dr.returncode}. Changes will not take effect until "
+                        "the service is manually restarted.",
+                "hint": hint,
+            }), 500
+
+        def _delayed_restart():
+            time.sleep(1.0)
+            if new_ami_port is not None:
+                # Reload Asterisk's manager module first so it's already
+                # listening on the new bindport by the time HenWen restarts
+                # and tries to reconnect to it.
+                try:
+                    ami_send_command(lambda ami: ami.command("module reload manager"))
+                except Exception as e:
+                    log("WARN", f"[SETTINGS] 'module reload manager' failed (Asterisk may still be "
+                                 f"on the old AMI port until its next restart): {e}")
+            log("INFO", f"[SETTINGS] Restarting {SERVICE_NAME} to apply new port(s)")
+            r = _systemctl("restart", SERVICE_NAME, timeout=30)
+            if r.returncode != 0:
+                log("ERROR", f"[SETTINGS] Restart of {SERVICE_NAME} failed after "
+                            f"port change: {r.stderr.strip()}")
+
+        threading.Thread(target=_delayed_restart, daemon=True).start()
+
+        msg = "Restarting HenWen now to apply the change."
+        if new_flask_port is not None:
+            msg += (f" The web UI is moving to port {new_flask_port} — this page will "
+                    f"disconnect and NOT reload itself; navigate to the new port manually.")
+        else:
+            msg += " This page will briefly disconnect, then reload it."
+
+        return jsonify({
+            "success":    True,
+            "flask_port": new_flask_port,
+            "ami_port":   new_ami_port,
+            "message":    msg,
+        })
+    except PermissionError as e:
+        log("ERROR", f"[SETTINGS] Permission denied writing port settings: {e}")
+        return jsonify({"error": str(e),
+                        "hint": f"The service account ({os.environ.get('USER', 'asterisk')}) "
+                                "cannot write the root-owned unit file/manager.conf directly. "
+                                "Edit PORT/AMI_PORT in "
+                                f"{SERVICE_FILE_PATH} (and manager.conf's port= to match) as "
+                                "root, then `systemctl daemon-reload && systemctl restart "
+                                f"{SERVICE_NAME}`."}), 403
+    except Exception as e:
+        log("ERROR", f"[SETTINGS] port update failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/auth/change-password", methods=["POST"])
 def api_change_password():
     data       = request.json or {}
