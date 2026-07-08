@@ -214,16 +214,22 @@ if systemctl is-active --quiet "$SERVICE_NAME"; then
     # ── Optional: HTTPS for the browser TX button ─────────
     # Only relevant to the browser-transmit feature (getUserMedia/WebRTC
     # need a secure context) — the kiosk and everything else work fine
-    # over plain HTTP. Requires a public hostname pointed at this box, so
-    # it's opt-in and skipped entirely on a non-interactive install.
+    # over plain HTTP. Opt-in and skipped entirely on a non-interactive
+    # install. Two setup paths depending on the network situation — see
+    # tx-spike/README.md's "Which HTTPS setup script?" for the full
+    # breakdown (custom ports, ISPs that block port 80 too, etc).
     if [ -t 0 ]; then
         echo ""
-        read -p "  Set up HTTPS now for the browser TX button? Requires a public hostname pointed at this box. [y/N]: " SETUP_HTTPS
-        if [[ "$SETUP_HTTPS" =~ ^[Yy] ]]; then
-            bash "$INSTALL_DIR/tx-spike/setup-https.sh" || echo "  HTTPS setup failed — you can re-run it later: sudo bash $INSTALL_DIR/tx-spike/setup-https.sh"
-        else
-            echo "  Skipped. Run 'sudo bash $INSTALL_DIR/tx-spike/setup-https.sh' later if you want browser TX."
-        fi
+        echo "  Browser TX (talk through the node from the Kiosk) needs HTTPS. Set it up now?"
+        echo "    1) Public hostname (Let's Encrypt) — needs a domain pointed at this box"
+        echo "    2) Tailscale — no port forwarding at all, only your tailnet can reach it"
+        echo "    3) Skip for now"
+        read -p "  Choice [1/2/3, default 3]: " HTTPS_CHOICE
+        case "$HTTPS_CHOICE" in
+            1) bash "$INSTALL_DIR/tx-spike/setup-https.sh" || echo "  HTTPS setup failed — you can re-run it later: sudo bash $INSTALL_DIR/tx-spike/setup-https.sh" ;;
+            2) bash "$INSTALL_DIR/tx-spike/setup-tailscale.sh" || echo "  Tailscale setup failed — you can re-run it later: sudo bash $INSTALL_DIR/tx-spike/setup-tailscale.sh" ;;
+            *) echo "  Skipped. Run 'sudo bash $INSTALL_DIR/tx-spike/setup-https.sh' or 'setup-tailscale.sh' later if you want browser TX." ;;
+        esac
     fi
 else
     echo ""

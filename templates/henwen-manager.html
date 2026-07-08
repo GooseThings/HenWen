@@ -1236,13 +1236,17 @@ sudo asterisk -rx "module reload manager"</pre>
     <div class="card">
       <div class="card-header"><h2>Setup Guide</h2></div>
       <div class="card-body">
-        <p style="margin-bottom:10px">TX needs HTTPS (skip if this box already has it) and the Asterisk-side PJSIP/WebRTC config, in that order:</p>
-        <pre class="codeblock">sudo bash /opt/HenWen/tx-spike/setup-https.sh &lt;hostname&gt; &lt;email&gt;
-sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
+        <p style="margin-bottom:10px">TX needs HTTPS (skip if this box already has it) and the Asterisk-side PJSIP/WebRTC config, in that order. Pick whichever HTTPS setup matches your situation:</p>
+        <pre class="codeblock">sudo bash /opt/HenWen/tx-spike/setup-https.sh &lt;hostname&gt; &lt;email&gt;   # public hostname, ports forwarded
+sudo bash /opt/HenWen/tx-spike/setup-tailscale.sh                    # no port forwarding at all (Tailscale)
+sudo bash /opt/HenWen/tx-spike/apply.sh                              # either way, then this</pre>
         <p style="margin-bottom:10px;color:var(--text2);font-size:0.9rem">
-          <span class="mono">setup-https.sh</span> requires a public hostname already pointed at this
-          box and ports 80/443 forwarded — see <span class="mono">tx-spike/README.md</span> for the full
-          network requirements (router forwards, LAN-only notes). Both scripts are safe to re-run.
+          <span class="mono">setup-https.sh</span> requires a public hostname already pointed at this box
+          and port 80 forwarded (plus your chosen HTTPS port — <span class="mono">--port N</span> if not
+          443; <span class="mono">--dns-manual</span> if your ISP blocks port 80 too).
+          <span class="mono">setup-tailscale.sh</span> needs none of that but only devices on your tailnet
+          can reach the Kiosk. See <span class="mono">tx-spike/README.md</span> for the full breakdown. All
+          scripts are safe to re-run.
         </p>
       </div>
     </div>

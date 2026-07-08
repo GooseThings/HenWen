@@ -181,7 +181,7 @@ sudo /opt/HenWen/venv/bin/pip install -r /opt/HenWen/requirements.txt
 sudo systemctl restart HenWen
 ```
 
-Installer-driven system changes (Apache/HTTPS for the TX button, the MixMonitor module check, sudoers rules, the journald cap) only run from `install.sh` itself — neither this quick-update path nor the in-app "Launch Updater" self-update button touches system config, by design, since an unattended updater must never silently open ports or request a public certificate. If you're upgrading an existing install and want the browser TX button's HTTPS set up, run it directly: `sudo bash /opt/HenWen/tx-spike/setup-https.sh <hostname> <email>`.
+Installer-driven system changes (Apache/HTTPS for the TX button, the MixMonitor module check, sudoers rules, the journald cap) only run from `install.sh` itself — neither this quick-update path nor the in-app "Launch Updater" self-update button touches system config, by design, since an unattended updater must never silently open ports, request a public certificate, or join a Tailscale network. If you're upgrading an existing install and want the browser TX button's HTTPS set up, run it directly: `sudo bash /opt/HenWen/tx-spike/setup-https.sh <hostname> <email>` (or `tx-spike/setup-tailscale.sh` — see [Browser TX](#browser-tx-transmit) above).
 
 ### Full reinstall
 
@@ -280,8 +280,10 @@ Lets Admin and Superuser accounts key up and talk through the node straight from
 
 This is opt-in and needs two things set up once, in order, from the box's own shell (not the web UI):
 
-1. **HTTPS.** Browsers block microphone access outside a secure context, so the Kiosk needs to be served over `https://` (plain `http://<lan-ip>:5000`, the installer's default, doesn't qualify). If you don't already have this, `install.sh` offers to set it up interactively, or run it any time: `sudo bash /opt/HenWen/tx-spike/setup-https.sh <hostname> <email>` — requires a public hostname already pointed at this box and ports 80/443 forwarded.
-2. **Asterisk PJSIP/WebRTC config:** `sudo bash /opt/HenWen/tx-spike/apply.sh` — enables the needed Asterisk modules, adds a locked-down SIP endpoint, and wires the WSS signaling proxy through Apache.
+1. **HTTPS.** Browsers block microphone access outside a secure context, so the Kiosk needs to be served over `https://` (plain `http://<lan-ip>:5000`, the installer's default, doesn't qualify). `install.sh` offers to set this up interactively, or run it any time — pick whichever matches your situation:
+   - **Public hostname:** `sudo bash /opt/HenWen/tx-spike/setup-https.sh <hostname> <email>` — needs a public hostname already pointed at this box and port 80 forwarded (for the cert challenge) plus port 443 (or `--port N` for a different one — useful if your ISP blocks forwarding ports below 1000). If your ISP blocks port 80 too, add `--dns-manual` to use a DNS-based challenge instead (works with any DNS provider, doesn't auto-renew).
+   - **No port forwarding at all** (blocked ISP, CGNAT, cloud VM you don't want publicly exposed, or you just don't want the Kiosk reachable off your own devices): `sudo bash /opt/HenWen/tx-spike/setup-tailscale.sh` — uses [Tailscale](https://tailscale.com) to get a real certificate and reach the Kiosk over a private mesh network instead, no router changes needed. Only devices signed into your tailnet can reach it.
+2. **Asterisk PJSIP/WebRTC config:** `sudo bash /opt/HenWen/tx-spike/apply.sh` — enables the needed Asterisk modules, adds a locked-down SIP endpoint, and wires the WSS signaling proxy through Apache. Works the same regardless of which HTTPS option you picked above.
 
 Once both have run, the TX button appears automatically for Admin/Superuser sessions. Use **Manager → TX Diagnostics** any time to check readiness end to end (HTTPS, PJSIP endpoint, Apache, RTP/STUN, NAT) without leaving the browser. Full network requirements (router forwards, LAN-only notes) and rollback are in [`tx-spike/README.md`](tx-spike/README.md).
 
@@ -396,12 +398,14 @@ HenWen/
 ├── uninstall.sh              # Uninstaller
 ├── update.sh                 # Self-updater (git pull + restart), launched from the Manager's "Launch Updater" button
 ├── ami-setup.sh              # Verifies/fixes the Asterisk AMI (manager.conf) configuration
-├── tx-spike/                   # Browser TX (transmit) setup — see the Browser TX section above
-│   ├── setup-https.sh          # Provisions Apache + a Let's Encrypt cert
-│   ├── apply.sh                # Enables Asterisk PJSIP/WebRTC + wires the WSS proxy
-│   ├── check-ports.sh          # Read-only network/NAT diagnostic (also powers Manager → TX Diagnostics)
-│   ├── rollback.sh             # Restores everything apply.sh touched
-│   └── README.md               # Full setup details, network requirements, router forwards
+├── tx-spike/                     # Browser TX (transmit) setup — see the Browser TX section above
+│   ├── setup-https.sh            # Provisions Apache + a Let's Encrypt cert (public hostname)
+│   ├── setup-tailscale.sh        # Alternative to setup-https.sh — no port forwarding, Tailscale-only access
+│   ├── renew-tailscale-cert.sh   # Daily renewal for the Tailscale-issued cert (installed as a systemd timer)
+│   ├── apply.sh                  # Enables Asterisk PJSIP/WebRTC + wires the WSS proxy
+│   ├── check-ports.sh            # Read-only network/NAT diagnostic (also powers Manager → TX Diagnostics)
+│   ├── rollback.sh               # Restores everything apply.sh touched
+│   └── README.md                 # Full setup details, network requirements, router forwards
 ├── README.md
 ├── CHANGELOG.md
 ├── CLAUDE.md                 # Guidance for Claude Code when working in this repo
