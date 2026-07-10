@@ -1,5 +1,10 @@
 # Changelog
 
+## v2026.07.10
+
+- **Added: AllStar node search.** The kiosk's EchoLink modal is now a combined "Node Search" modal with AllStar and EchoLink tabs. The AllStar tab searches every registered AllStarLink node (~37,000, served from the local `astdb.txt` cache — no external requests per keystroke) by node number, callsign, description, or location, with exact and prefix matches ranked first. Each result offers the same Connect and ★ Favorite buttons as the EchoLink tab, and its node number links to the node's stats.allstarlink.org page. Live online/offline status is deliberately *not* probed per result: the stats API rate-limits small bursts hard enough to temporarily block the node's IP (see the favorites poller's pacing notes), which would break favorites status too.
+- **Changed: the search (formerly "EL") and net-schedule calendar buttons moved from the header to the node card**, just above Recent Connections. The Search button still appears only after login, since connecting bridges RF; the calendar remains always visible.
+
 ## v2026.07.08.4
 
 - **Fixed: the Settings page's "Check for Updates" button reported "up to date" against stale data.** It only re-read the background poller's cache, which is refreshed once every 24 hours — a release published after that day's check was invisible until the next one. The button now asks GitHub live (`/api/update-check?refresh=1`), updates the cache with the result, and clearly says when GitHub was unreachable and cached data is being shown instead. The automatic on-page-load check still uses the cache, as before.

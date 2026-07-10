@@ -109,6 +109,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   text-decoration: none; display: inline-flex; align-items: center; gap: 4px;
   transition: color .15s, border-color .15s; }
 .btn-icon:hover { color: var(--text); border-color: var(--text2); }
+.search-tab.active { color: var(--accent); border-color: var(--accent); }
 
 /* ── Weather ticker + net-schedule reminder bars ── */
 .bars-row { display: flex; gap: 10px; flex-shrink: 0; }
@@ -498,8 +499,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     </div>
     <div class="header-clock-wrap" style="display:flex;align-items:center;gap:10px">
       <div class="header-clock" id="clock">--:--:--</div>
-      <button class="btn-icon" id="net-cal-btn" onclick="openNetModal()" title="Net Schedule — scheduled net reminders">&#128197;</button>
-      <button class="btn-icon" id="echolink-search-btn" onclick="openEchoLinkModal()" title="EchoLink — search currently-online stations to connect to" style="display:none">&#128225;EL</button>
     </div>
     <div class="header-actions">
       <div id="kiosk-user-bar" style="display:none;align-items:center;gap:8px;font-size:0.75rem">
@@ -538,6 +537,12 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <div style="color:var(--text2);font-size:.9rem">Loading&hellip;</div>
       </div>
       <div class="node-history">
+        <!-- Search stays hidden until login (it bridges RF, like every other
+             connect path); the net-schedule calendar is always visible. -->
+        <div style="display:flex;gap:6px;margin-bottom:8px;flex-shrink:0">
+          <button class="btn-icon" id="node-search-btn" onclick="openSearchModal()" title="Search the AllStar and EchoLink directories for nodes to connect to" style="display:none">&#128269; Search</button>
+          <button class="btn-icon" id="net-cal-btn" onclick="openNetModal()" title="Net Schedule — scheduled net reminders">&#128197;</button>
+        </div>
         <div class="node-history-title card-title">Recent Connections</div>
         <div class="node-history-list" id="node-history-list">
           <div class="empty-msg" style="font-size:.75rem">Loading&hellip;</div>
@@ -714,20 +719,25 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     </div>
   </div>
 
-  <!-- EchoLink search modal — gated to logged-in users and up; the trigger
-       button itself (#echolink-search-btn) stays hidden until login, unlike
-       the always-visible net-schedule button, since this bridges RF. -->
-  <div id="echolink-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;align-items:center;justify-content:center">
+  <!-- Node search modal (AllStar directory + EchoLink tabs) — gated to
+       logged-in users and up; the trigger button itself (#node-search-btn)
+       stays hidden until login, unlike the always-visible net-schedule
+       button, since this bridges RF. -->
+  <div id="search-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;align-items:center;justify-content:center">
     <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:22px 26px;width:520px;max-width:92vw;max-height:86vh;overflow-y:auto">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-        <div style="font-size:0.95rem;font-weight:700">&#128225; EchoLink</div>
-        <button onclick="closeEchoLinkModal()" style="background:none;border:none;color:var(--text2);font-size:1.1rem;cursor:pointer;line-height:1;padding:2px 6px">&#10005;</button>
+        <div style="font-size:0.95rem;font-weight:700">&#128269; Node Search</div>
+        <button onclick="closeSearchModal()" style="background:none;border:none;color:var(--text2);font-size:1.1rem;cursor:pointer;line-height:1;padding:2px 6px">&#10005;</button>
       </div>
-      <input id="echolink-f-query" type="text" placeholder="Search callsign or node number&hellip;" maxlength="50"
-             oninput="searchEchoLinkDebounced()" autocomplete="off"
+      <div style="display:flex;gap:6px;margin-bottom:10px">
+        <button class="btn-icon search-tab active" id="search-tab-asl" onclick="setSearchTab('asl')">AllStar</button>
+        <button class="btn-icon search-tab" id="search-tab-el" onclick="setSearchTab('el')">&#128225; EchoLink</button>
+      </div>
+      <input id="search-f-query" type="text" placeholder="Search node number, callsign, or location&hellip;" maxlength="50"
+             oninput="searchNodesDebounced()" autocomplete="off"
              style="width:100%;box-sizing:border-box;margin-bottom:10px;padding:6px 9px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-size:0.85rem">
-      <div id="echolink-results" style="display:flex;flex-direction:column;gap:6px">
-        <div class="empty-msg" style="font-size:0.8rem">Currently-online repeaters, links, and conferences — type at least 2 characters to search.</div>
+      <div id="search-results" style="display:flex;flex-direction:column;gap:6px">
+        <div class="empty-msg" style="font-size:0.8rem">Every registered AllStar node, online or not — search by node number, callsign, or location.</div>
       </div>
     </div>
   </div>
@@ -1396,46 +1406,102 @@ async function deleteNet(id) {
   fetchNets();
 }
 
-/* ── EchoLink search ──
-   Directory is a server-side cache (see _echolink_poll_loop in app.py) of
-   currently-online repeaters/links/conferences scraped from echolink.org —
-   there's no live per-keystroke round trip to EchoLink itself. */
+/* ── Node search modal (AllStar + EchoLink tabs) ──
+   The AllStar tab searches the server's local astdb.txt cache — every
+   registered node, online or not (see /api/asl/search). The EchoLink tab
+   searches a server-side cache (see _echolink_poll_loop in app.py) of
+   currently-online repeaters/links/conferences scraped from echolink.org.
+   Neither makes a live per-keystroke round trip to an external service. */
 var _ekLabel = {repeater: 'Repeater', link: 'Link', conference: 'Conference'};
+var _searchTab = 'asl';
+var _searchSeq = 0;   /* drops stale in-flight responses on tab switch / retype */
+var _SEARCH_HINT = {
+  asl: 'Every registered AllStar node, online or not — search by node number, callsign, or location.',
+  el:  'Currently-online repeaters, links, and conferences — type at least 2 characters to search.'
+};
 
-function openEchoLinkModal() {
-  document.getElementById('echolink-modal-overlay').style.display = 'flex';
-  document.getElementById('echolink-f-query').focus();
+function openSearchModal() {
+  document.getElementById('search-modal-overlay').style.display = 'flex';
+  document.getElementById('search-f-query').focus();
 }
 
-function closeEchoLinkModal() {
-  document.getElementById('echolink-modal-overlay').style.display = 'none';
+function closeSearchModal() {
+  document.getElementById('search-modal-overlay').style.display = 'none';
 }
 
-var _ekSearchTimer = null;
-function searchEchoLinkDebounced() {
-  clearTimeout(_ekSearchTimer);
-  _ekSearchTimer = setTimeout(searchEchoLink, 300);
+function setSearchTab(tab) {
+  _searchTab = tab;
+  document.getElementById('search-tab-asl').classList.toggle('active', tab === 'asl');
+  document.getElementById('search-tab-el').classList.toggle('active', tab === 'el');
+  searchNodes();
+  document.getElementById('search-f-query').focus();
 }
 
-async function searchEchoLink() {
-  var box = document.getElementById('echolink-results');
-  var q   = document.getElementById('echolink-f-query').value.trim();
+var _searchTimer = null;
+function searchNodesDebounced() {
+  clearTimeout(_searchTimer);
+  _searchTimer = setTimeout(searchNodes, 300);
+}
+
+async function searchNodes() {
+  var box = document.getElementById('search-results');
+  var q   = document.getElementById('search-f-query').value.trim();
   if (q.length < 2) {
-    box.innerHTML = '<div class="empty-msg" style="font-size:0.8rem">Currently-online repeaters, links, and conferences — type at least 2 characters to search.</div>';
+    box.innerHTML = '<div class="empty-msg" style="font-size:0.8rem">' + _SEARCH_HINT[_searchTab] + '</div>';
     return;
   }
+  var seq = ++_searchSeq;
+  var url = (_searchTab === 'el' ? '/api/echolink/search' : '/api/asl/search') + '?q=' + encodeURIComponent(q);
   var r;
   try {
-    r = await apiFetch('/api/echolink/search?q=' + encodeURIComponent(q), {cache: 'no-store'});
+    r = await apiFetch(url, {cache: 'no-store'});
   } catch (e) { return; }
-  if (r.status === 401) { openKioskLogin(searchEchoLink, []); return; }
+  if (r.status === 401) { openKioskLogin(searchNodes, []); return; }
   if (!r.ok) return;
   var d = await r.json();
-  renderEchoLinkResults(d.results || []);
+  if (seq !== _searchSeq) return;   /* a newer search superseded this one */
+  if (_searchTab === 'el') renderEchoLinkResults(d.results || []);
+  else renderAslResults(d.results || [], d.total || 0);
+}
+
+/* AllStar results: node number links to its stats.allstarlink.org page.
+   astdb has no online/offline signal, and probing the stats API per result
+   would trip its burst rate-limiting (see _favstats_poll_loop in app.py),
+   so no live status is shown here. */
+function renderAslResults(results, total) {
+  var box = document.getElementById('search-results');
+  if (!results.length) {
+    box.innerHTML = '<div class="empty-msg" style="font-size:0.8rem">No matching nodes</div>';
+    return;
+  }
+  var localNode = (window._lastBoardNodes && window._lastBoardNodes[0])
+                  ? window._lastBoardNodes[0].node : '';
+  var html = results.map(function(x) {
+    var connBtn = localNode
+      ? '<button class="sb-btn connect" onclick="sbConnect(\'' + esc(localNode) + '\',\'' + esc(x.node) +
+        '\',this,false,false)">Connect</button>'
+      : '';
+    var favBtn = '<button class="sb-btn fav" onclick="sbAddFavorite(\'' + esc(x.node) + '\',this,\'' +
+      esc(x.callsign) + '\')" title="Add ' + esc(x.callsign || x.node) + ' to your Favorites list">&#9733;</button>';
+    var detail = [x.desc, x.location].filter(Boolean).map(esc).join(' &middot; ');
+    return '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:6px">' +
+      '<div style="min-width:0;overflow:hidden">' +
+        '<div style="font-size:0.85rem;font-weight:600">' + nodeLink(x.node, 'hist-num') +
+          (x.callsign ? ' ' + esc(x.callsign) : '') +
+        '</div>' +
+        (detail ? '<div style="font-size:0.76rem;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + detail + '</div>' : '') +
+      '</div>' +
+      '<div style="flex-shrink:0;display:flex;gap:4px">' + connBtn + favBtn + '</div>' +
+    '</div>';
+  }).join('');
+  if (total > results.length) {
+    html += '<div class="empty-msg" style="font-size:0.72rem">Showing first ' + results.length + ' of ' + total + ' matches — refine your search</div>';
+  }
+  box.innerHTML = html;
 }
 
 function renderEchoLinkResults(results) {
-  var box = document.getElementById('echolink-results');
+  var box = document.getElementById('search-results');
   if (!results.length) {
     box.innerHTML = '<div class="empty-msg" style="font-size:0.8rem">No matching stations currently online</div>';
     return;
@@ -2020,7 +2086,7 @@ async function kioskLogin() {
     var pl = document.getElementById('perm-label');
     if (pl) pl.style.display = (d.role === 'admin' || d.role === 'superuser') ? '' : 'none';
     _txUpdateBtn();
-    _echolinkUpdateBtn();
+    _searchUpdateBtn();
     loadFavorites();
     if (_pendingAction) {
       _pendingAction.fn.apply(null, _pendingAction.args);
@@ -2045,7 +2111,7 @@ async function kioskLogout() {
   updateKioskUserBar(null, null);
   if (_tx.armed) disarmTx();
   _txUpdateBtn();
-  _echolinkUpdateBtn();
+  _searchUpdateBtn();
   loadFavorites();
   sbToast('Logged out', true);
 }
@@ -2079,7 +2145,7 @@ async function checkKioskSession() {
 
   /* TX button: admin/superuser + HTTPS + feature configured server-side */
   _txUpdateBtn();
-  _echolinkUpdateBtn();
+  _searchUpdateBtn();
 
   /* "Logged in: N" is only clickable for superusers — everyone else (including
      admins) just sees the plain count, same as today. */
@@ -2399,10 +2465,11 @@ async function _txUpdateBtn() {
   } catch (e) { btn.style.display = 'none'; }
 }
 
-/* EchoLink search: gated to any logged-in role, no server-side "configured"
-   probe needed (unlike TX) — the search endpoint itself 401s appropriately. */
-function _echolinkUpdateBtn() {
-  var btn = document.getElementById('echolink-search-btn');
+/* Node search (AllStar + EchoLink): gated to any logged-in role, no
+   server-side "configured" probe needed (unlike TX) — the search endpoints
+   themselves 401 appropriately. */
+function _searchUpdateBtn() {
+  var btn = document.getElementById('node-search-btn');
   if (!btn) return;
   btn.style.display = window._kioskRole ? '' : 'none';
 }

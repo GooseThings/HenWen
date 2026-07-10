@@ -631,7 +631,7 @@ def check_auth():
                       'api_audio_stream', 'api_audio_check', 'api_audio_stop',
                       'api_audio_client_log',
                       'api_nets_create', 'api_nets_update', 'api_nets_delete',
-                      'api_echolink_search'}
+                      'api_echolink_search', 'api_asl_search'}
 
     endpoint  = request.endpoint
     is_public = endpoint in _PUBLIC
@@ -4413,6 +4413,48 @@ def api_echolink_search():
         snapshot, ts = list(_echolink_cache), _echolink_cache_ts
     matches = [r for r in snapshot if q_lower in r["call"].lower() or q in r["node"]][:50]
     resp = jsonify({"results": matches, "updated": ts})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/api/asl/search")
+def api_asl_search():
+    """Search the local astdb.txt node directory (see load_astdb) by node
+    number, callsign, description, or location substring. Same login gate as
+    the EchoLink search (_USER_OR_ABOVE in check_auth) — results feed the
+    same connect flow. Unlike the EchoLink directory this lists every
+    *registered* node, not just currently-online ones: astdb carries no
+    online/offline signal, and per-result probes of stats.allstarlink.org
+    are off the table (its API rate-limits bursts hard — see the pacing
+    notes in _favstats_poll_loop), so the UI links each result to its
+    stats page instead of claiming live status here."""
+    q = request.args.get("q", "").strip()
+    if len(q) < 2:
+        return jsonify({"results": [], "total": 0})
+    if not _astdb_loaded:
+        load_astdb()
+    q_lower = q.lower()
+    matches = []
+    for node, info in list(_astdb_cache.items()):
+        if (q in node
+                or q_lower in info["callsign"].lower()
+                or q_lower in info["desc"].lower()
+                or q_lower in info["location"].lower()):
+            matches.append({"node": node,
+                            "callsign": info["callsign"],
+                            "desc":     info["desc"],
+                            "location": info["location"]})
+
+    # Exact node/callsign hits first, then prefix hits, then everything else;
+    # numeric node order within each band (astdb node keys are all digits, so
+    # len-then-string compares numerically).
+    def _rank(m):
+        exact  = m["node"] == q or m["callsign"].lower() == q_lower
+        prefix = m["node"].startswith(q) or m["callsign"].lower().startswith(q_lower)
+        return (0 if exact else 1 if prefix else 2, len(m["node"]), m["node"])
+    matches.sort(key=_rank)
+
+    resp = jsonify({"results": matches[:50], "total": len(matches)})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
