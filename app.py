@@ -3643,8 +3643,7 @@ def api_save():
             errors.append(err)
     # Cross-field: funcchar and endchar must differ
     if not is_macro_stanza and not is_schedule_stanza and not errors:
-        parsed_conf = parse_rpt_conf(content)
-        sec_vals = {k: v.get("value", "") for k, v in parsed_conf.get(section, {}).items()}
+        sec_vals = {k: v.get("value", "") for k, v in parse_stanza_settings(content, section).items()}
         for k, info in changes.items():
             if info.get("enabled", True):
                 sec_vals[k] = info.get("value", "")
@@ -5209,8 +5208,28 @@ def api_tx_diagnostics():
 #
 # ffmpeg stderr is captured and emitted at WARN so codec errors, format
 # mismatches, etc. appear in journalctl.
+#
+# A WebM byte stream is only decodable from its very start: the init segment
+# (EBML header + Segment Info + Tracks) precedes the first Cluster, and a
+# browser joining mid-stream without it fails its first append outright
+# (Chrome: CHUNK_DEMUXER_ERROR_APPEND_FAILED "Found Cluster element before
+# Info"). _read_loop therefore parses ffmpeg's output just enough to capture
+# the init segment once and split the rest on Cluster boundaries: every
+# client queue is seeded with the cached init segment on join, then receives
+# whole ~200 ms Clusters (see _drain_webm).
 # ---------------------------------------------------------------------------
 import queue as _queue_mod
+
+_WEBM_CLUSTER_ID = b'\x1f\x43\xb6\x75'   # EBML ID of a Matroska/WebM Cluster
+
+
+def _webm_vint_len(first_byte):
+    """Length in bytes (1–8) of an EBML variable-size integer whose first
+    byte is `first_byte`, or 0 if invalid (no length-marker bit set)."""
+    for i in range(8):
+        if first_byte & (0x80 >> i):
+            return i + 1
+    return 0
 
 _audio_lock   = threading.Lock()
 _audio_active = {}   # node -> _AudioBroadcast
@@ -5264,6 +5283,9 @@ class _AudioBroadcast:
         self._clients    = []       # list of Queue
         self._client_meta = {}      # id(q) -> {'remote':.., 'connected_at':.., 'drops':0}
         self._dead       = False
+        self._init_segment = None   # WebM init segment (EBML header..Tracks),
+                                    # captured by _drain_webm and replayed to
+                                    # every client that joins after it went by
 
         self._started_at   = time.monotonic()
         self._chunks_out   = 0
@@ -5286,8 +5308,14 @@ class _AudioBroadcast:
     # ── client management ────────────────────────────────────────────────────
 
     def add_client(self, remote_addr='?'):
-        q = _queue_mod.Queue(maxsize=150)  # ~3 s of audio; drop oldest if client stalls
+        q = _queue_mod.Queue(maxsize=25)  # ~5 s of ~200 ms Clusters; drop oldest if client stalls
         with self._lock:
+            if self._init_segment is not None:
+                # Late joiner: the stream's init segment already went by.
+                # Seed it first so the browser's demuxer sees a valid WebM
+                # start instead of a bare mid-stream Cluster (which Chrome
+                # rejects with CHUNK_DEMUXER_ERROR_APPEND_FAILED).
+                q.put_nowait(self._init_segment)
             self._clients.append(q)
             self._client_meta[id(q)] = {
                 'remote':       remote_addr,
@@ -5397,8 +5425,85 @@ class _AudioBroadcast:
         except Exception:
             pass
 
+    def _drain_webm(self, buf):
+        """
+        Split accumulated ffmpeg output into WebM-structural units, mutating
+        `buf` in place (an incomplete tail stays behind for the next read).
+
+        The bytes before the first Cluster are the stream's init segment
+        (EBML header + Segment Info + Tracks); it is captured once into
+        self._init_segment and delivered here to clients already connected,
+        while add_client() replays it to every later joiner — a WebM stream
+        is not decodable from any other starting point.
+
+        Returns a list of complete Clusters (~200 ms of audio each, per
+        -cluster_time_limit) to fan out. Whole-Cluster granularity means a
+        late joiner starts on a decodable boundary and a stalled client's
+        drop-oldest queue loses whole Clusters instead of shearing the byte
+        stream mid-element (the client SourceBuffer runs in 'sequence' mode,
+        which splices over a missing Cluster seamlessly).
+        """
+        items = []
+        while True:
+            if self._init_segment is None:
+                i = buf.find(_WEBM_CLUSTER_ID)
+                if i == -1:
+                    break                      # header still incomplete
+                init = bytes(buf[:i])
+                del buf[:i]
+                with self._lock:
+                    # Set and deliver under one lock hold so a concurrently
+                    # added client gets the init segment exactly once
+                    # (add_client seeds it only when it is already set).
+                    self._init_segment = init
+                    for q in self._clients:
+                        try:
+                            q.put_nowait(init)
+                        except _queue_mod.Full:
+                            pass
+                continue
+            if len(buf) < 5:
+                break                          # need Cluster ID + size byte
+            if buf[:4] != _WEBM_CLUSTER_ID:
+                # Lost sync (shouldn't happen — this muxer emits known-size
+                # Clusters): resync by scanning for the next Cluster ID.
+                j = buf.find(_WEBM_CLUSTER_ID, 1)
+                if j == -1:
+                    break
+                items.append(bytes(buf[:j]))
+                del buf[:j]
+                continue
+            vlen = _webm_vint_len(buf[4])
+            if vlen == 0 or len(buf) < 4 + vlen:
+                if vlen == 0:
+                    # Invalid size byte — treat as lost sync.
+                    j = buf.find(_WEBM_CLUSTER_ID, 4)
+                    if j != -1:
+                        items.append(bytes(buf[:j]))
+                        del buf[:j]
+                        continue
+                break
+            size = buf[4] & (0xFF >> vlen)     # size value, marker bit cleared
+            for b in buf[5:4 + vlen]:
+                size = (size << 8) | b
+            if size == (1 << (7 * vlen)) - 1:
+                # Unknown-size Cluster: it ends only where the next one starts.
+                j = buf.find(_WEBM_CLUSTER_ID, 4)
+                if j == -1:
+                    break
+                items.append(bytes(buf[:j]))
+                del buf[:j]
+                continue
+            total = 4 + vlen + size
+            if len(buf) < total:
+                break
+            items.append(bytes(buf[:total]))
+            del buf[:total]
+        return items
+
     def _read_loop(self):
         first_chunk = True
+        buf = bytearray()
         try:
             while True:
                 chunk = self.ffmpeg_proc.stdout.read1(2048)
@@ -5414,8 +5519,12 @@ class _AudioBroadcast:
                     first_chunk = False
                 self._chunks_out += 1
                 self._bytes_out  += len(chunk)
-                self._fanout(chunk)
+                buf += chunk
+                for item in self._drain_webm(buf):
+                    self._fanout(item)
         finally:
+            if buf:
+                self._fanout(bytes(buf))   # flush the partial tail at EOF
             self._fanout(None)   # unblock every waiting generate()
             rc = self.ffmpeg_proc.poll()
             uptime = time.monotonic() - self._started_at
@@ -5547,6 +5656,9 @@ def _start_broadcast(node):
     # -cluster_time_limit 200 forces a new WebM cluster every 200 ms so the
     # browser receives ~600-byte chunks 5×/s instead of ~300-byte chunks 10×/s.
     # Fewer appendBuffer() calls per second reduces browser-side MSE overhead.
+    # _drain_webm also relies on this: it makes the muxer emit complete,
+    # known-size Clusters, which is what lets the fan-out align on Cluster
+    # boundaries for late joiners.
     # -probesize 32 / -analyzeduration 0: skip format probing so encoding
     # starts immediately (avoids several-hundred-ms startup silence).
     ffmpeg_cmd = [
