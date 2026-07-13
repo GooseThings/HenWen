@@ -294,11 +294,16 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .leaflet-container { background: #0d1117 !important; }
 .leaflet-tile { filter: invert(90%) hue-rotate(180deg) brightness(0.85) saturate(0.8); }
 #map.map-native .leaflet-tile { filter: none; }
+/* Radar tiles carry real weather colors — never run them through the dark-mode invert. */
+.leaflet-tile.radar-tile { filter: none !important; }
 .leaflet-control-zoom a { background: var(--bg3) !important; color: var(--text) !important;
   border-color: var(--border) !important; }
 .map-ctl { display: flex; align-items: center; gap: 5px; margin-left: auto; flex-wrap: wrap; }
 .map-ctl-sel { background: var(--bg3); border: 1px solid var(--border); color: var(--text);
   border-radius: 4px; padding: 2px 5px; font-size: 0.7rem; cursor: pointer; }
+.map-ctl-radar { display: flex; align-items: center; gap: 4px; color: var(--text2);
+  font-size: 0.7rem; cursor: pointer; user-select: none; }
+.map-ctl-radar input { cursor: pointer; }
 .popup-node-link { color: var(--accent); font-weight: 600; text-decoration: none; }
 
 /* ── Favorites sidebar ── */
@@ -609,6 +614,9 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       <div class="card-header">
         <span class="card-title">Network Map</span>
         <div class="map-ctl">
+          <label class="map-ctl-radar" title="Overlay live NEXRAD weather radar (NOAA/Iowa Mesonet)">
+            <input type="checkbox" id="map-radar-chk" onchange="toggleRadar(this.checked)"> Radar
+          </label>
           <select class="map-ctl-sel" id="map-tile-sel" onchange="changeTiles(this.value)">
             <option value="dark">OSM Dark</option>
             <option value="carto-dk">Dark (CartoDB)</option>
@@ -919,6 +927,47 @@ function changeTiles(key) {
   _currentTile.bringToBack();
   document.getElementById('map').classList.toggle('map-native', !def.darkFilter);
   localStorage.setItem('henwen-maptiles', key);
+  /* Radar sits between the base tiles and the markers — re-assert that order
+     since removing/re-adding the base layer above resets z-index stacking. */
+  if (_radarLayer && _map.hasLayer(_radarLayer)) _radarLayer.bringToFront();
+}
+
+/* ── NEXRAD radar overlay ──
+   Iowa Environmental Mesonet's public NEXRAD composite-reflectivity tile
+   cache (no API key, no auth) — same free-public-service posture as the
+   NWS alerts feed. Tiles refresh server-side roughly every 5 minutes; a
+   TileLayer with a stable URL won't re-fetch already-rendered tiles on its
+   own, so radarRefreshTick() below forces reloads by changing a cache-bust
+   query param on a 5-minute cadence. */
+var RADAR_TILE_URL = 'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/{z}/{x}/{y}.png';
+var _radarLayer     = null;
+var _radarTimer     = null;
+
+function radarUrlWithBust() {
+  var bucket = Math.floor(Date.now() / 300000); /* new value every 5 minutes */
+  return RADAR_TILE_URL + '?_=' + bucket;
+}
+
+function toggleRadar(on) {
+  localStorage.setItem('henwen-radar', on ? '1' : '0');
+  if (on) {
+    if (!_radarLayer) {
+      _radarLayer = L.tileLayer(radarUrlWithBust(), {
+        maxZoom: 18, maxNativeZoom: 10, opacity: 0.65, zIndex: 5,
+        className: 'radar-tile', attribution: ''
+      });
+    }
+    _radarLayer.addTo(_map);
+    _radarLayer.bringToFront();
+    if (!_radarTimer) _radarTimer = setInterval(radarRefreshTick, 300000);
+  } else {
+    if (_radarLayer) _map.removeLayer(_radarLayer);
+    if (_radarTimer) { clearInterval(_radarTimer); _radarTimer = null; }
+  }
+}
+
+function radarRefreshTick() {
+  if (_radarLayer && _map.hasLayer(_radarLayer)) _radarLayer.setUrl(radarUrlWithBust());
 }
 
 function initMap() {
@@ -938,6 +987,12 @@ function initMap() {
   var sel = document.getElementById('map-tile-sel');
   if (sel) sel.value = saved;
   changeTiles(saved);
+
+  /* Load saved radar pref */
+  var radarChk = document.getElementById('map-radar-chk');
+  var radarOn = localStorage.getItem('henwen-radar') === '1';
+  if (radarChk) radarChk.checked = radarOn;
+  if (radarOn) toggleRadar(true);
 
   _map.on('zoomend', function() { updateMap(); });
 
@@ -1573,11 +1628,7 @@ async function refreshBoard() {
           '</div>' +
           '<div class="keyed-label ' + (healthy ? 'healthy' : 'down') + '">' + (healthy ? 'ONLINE' : 'OFFLINE') + '</div>' +
         '</div>' +
-        (n.locked ? '<div class="locked-badge" title="' + esc(n.locked_by ? 'Locked by ' + n.locked_by : 'Locked by the node owner') + '">&#128274; LOCKED</div>' : '') +
-        '<div class="link-count">Linked: <span>' + (n.connected ? n.connected.length : 0) + '</span>' +
-          ' &nbsp;·&nbsp; Keyups: <span>' + (n.own_keyups || 0) + '</span></div>' +
-        '<div class="link-count" style="text-align:center;margin-top:4px">Announcements: <span>' + (data.active_announcements || 0) + '</span></div>' +
-        '<div class="link-count" style="text-align:center">Connectors: <span>' + (data.scheduled_connectors || 0) + '</span></div>';
+        (n.locked ? '<div class="locked-badge" title="' + esc(n.locked_by ? 'Locked by ' + n.locked_by : 'Locked by the node owner') + '">&#128274; LOCKED</div>' : '');
     }
 
     /* Update hosted-node star pins */

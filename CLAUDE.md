@@ -120,6 +120,7 @@ Sessions are plain signed cookies — there is no server-side session store. To 
 - `https://api.weather.gov` — NWS active alerts (`/alerts/active`) and zone lookup (`/points/{lat},{lon}`), no API key, requires a descriptive `User-Agent`
 - `https://huggingface.co/rhasspy/piper-voices` — Piper TTS voice model downloads (`.onnx`/`.onnx.json`), on demand
 - `https://nominatim.openstreetmap.org` — geocodes a node's free-text location string to lat/lon, feeding both the kiosk map and the NWS zone lookup; rate-limited to 1 req/1.1s in-process
+- `https://mesonet.agron.iastate.edu/cache/tile.py/...nexrad-n0q-900913/{z}/{x}/{y}.png` — Iowa Environmental Mesonet's public NEXRAD composite-reflectivity tile cache, no API key; fetched client-side directly by the browser as an optional Leaflet overlay on the kiosk map (toggled via the map's "Radar" checkbox), not proxied through the backend
 
 ### Service identity
 
