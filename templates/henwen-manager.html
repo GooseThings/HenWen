@@ -2070,7 +2070,7 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
           </div>
           <div>
             <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:4px">Role</label>
-            <select id="uf-role" style="width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg3);color:var(--text);font-size:0.88rem">
+            <select id="uf-role" onchange="onUfRoleChange()" style="width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg3);color:var(--text);font-size:0.88rem">
               <option value="owner">owner — Full access + node lockout (locks out everyone else)</option>
               <option value="superuser">superuser — Full access including raw editor</option>
               <option value="admin">admin — Manager access, no raw editor</option>
@@ -2095,6 +2095,15 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
             <div style="font-size:0.75rem;color:var(--text2);margin-top:3px">Leave blank to use the global default &middot; 0 = never expire</div>
           </div>
         </div>
+        <div class="form-row" id="uf-restrict-disc-row" style="margin-bottom:14px;display:none">
+          <div>
+            <label style="display:inline-flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:0.86rem">
+              <input type="checkbox" id="uf-restrict-disconnect" style="width:auto;margin-top:3px">
+              <span>Restrict disconnect — this user can listen, TX, and make the first connection if none is
+                active, but can never disconnect a node</span>
+            </label>
+          </div>
+        </div>
         <div style="display:flex;gap:8px">
           <button class="btn btn-primary" onclick="saveUser()">Save</button>
           <button class="btn" onclick="hideUserForm()">Cancel</button>
@@ -2115,7 +2124,8 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
             <th style="text-align:center">User</th>
           </tr></thead>
           <tbody>
-            <tr><td>Kiosk (connect/disconnect)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
+            <tr><td>Kiosk (connect/disconnect)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;&#185;&#185;</td></tr>
+            <tr><td>Browser TX (mic transmit)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
             <tr><td>Permanent kiosk connections</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
             <tr><td>Dashboard &amp; Node Control</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
             <tr><td>General Settings</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
@@ -2140,7 +2150,10 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
         <p class="muted" style="font-size:0.72rem;padding:8px 12px;margin:0">
           &#185; Safe DTMF functions: Force ID, TX Enable/Disable, Link Enable, Autopatch
           Enable/Disable, Timeout Timer Enable, Query System State, Parrot Mode Enable/Disable,
-          Flush All Telemetry.
+          Flush All Telemetry.<br>
+          &#185;&#185; Individual User accounts can be marked "Restrict disconnect" in User
+          Management — they can still listen, TX, and make the first connection, but can never
+          disconnect a node.
         </p>
       </div>
     </div>
@@ -5972,6 +5985,11 @@ async function loadUsers() {
                   : u.role === 'admin'     ? 'rgba(88,166,255,.12);color:var(--accent)'
                   :                          'rgba(63,185,80,.1);color:var(--green)';
     var roleBadge = '<span style="background:' + roleColor + ';padding:1px 7px;border-radius:3px;font-size:0.75rem;font-weight:600">' + esc(u.role) + '</span>';
+    if (u.restrict_disconnect) {
+      roleBadge += ' <span style="background:rgba(255,179,0,.15);color:var(--warn);padding:1px 7px;' +
+        'border-radius:3px;font-size:0.72rem;font-weight:600" title="Can listen, TX, and make the first ' +
+        'connection, but cannot disconnect a node">no-disconnect</span>';
+    }
     var created = u.created_at ? new Date(u.created_at + 'Z').toLocaleDateString() : '—';
     var timeoutDisplay = u.session_idle_timeout === null || u.session_idle_timeout === undefined
       ? '<span style="color:var(--text2);font-size:0.82rem">30 min (default)</span>'
@@ -5984,7 +6002,7 @@ async function loadUsers() {
       + '<td>' + timeoutDisplay + '</td>'
       + '<td style="color:var(--text2);font-size:0.82rem">' + created + '</td>'
       + '<td><div class="btn-row">'
-      + '<button class="btn btn-sm" onclick="editUser(' + u.id + ',\'' + esc(u.username) + '\',\'' + esc(u.role) + '\',' + (u.session_idle_timeout === null || u.session_idle_timeout === undefined ? 'null' : u.session_idle_timeout) + ')">Edit</button>'
+      + '<button class="btn btn-sm" onclick="editUser(' + u.id + ',\'' + esc(u.username) + '\',\'' + esc(u.role) + '\',' + (u.session_idle_timeout === null || u.session_idle_timeout === undefined ? 'null' : u.session_idle_timeout) + ',' + (u.restrict_disconnect ? 'true' : 'false') + ')">Edit</button>'
       + '<button class="btn btn-warn btn-sm" onclick="deleteUser(' + u.id + ',\'' + esc(u.username) + '\')">Delete</button>'
       + '</div></td>'
       + '</tr>';
@@ -6003,6 +6021,13 @@ function restrictRoleOptions() {
   });
 }
 
+/* "Restrict disconnect" only makes sense for role='user' — other roles
+   bypass the disconnect gate entirely regardless of this flag. */
+function onUfRoleChange() {
+  var row = document.getElementById('uf-restrict-disc-row');
+  if (row) row.style.display = (document.getElementById('uf-role').value === 'user') ? '' : 'none';
+}
+
 function showCreateUserForm() {
   document.getElementById('user-form-card').style.display = '';
   document.getElementById('user-form-title').textContent = 'New User';
@@ -6014,12 +6039,14 @@ function showCreateUserForm() {
   document.getElementById('uf-password').value      = '';
   document.getElementById('uf-password2').value     = '';
   document.getElementById('uf-idle-timeout').value  = '';
+  document.getElementById('uf-restrict-disconnect').checked = false;
   document.getElementById('uf-pw-label').textContent = 'Password';
   document.getElementById('uf-status').textContent  = '';
+  onUfRoleChange();
   document.getElementById('user-form-card').scrollIntoView({behavior:'smooth'});
 }
 
-function editUser(id, username, role, idleTimeoutSecs) {
+function editUser(id, username, role, idleTimeoutSecs, restrictDisconnect) {
   document.getElementById('user-form-card').style.display = '';
   document.getElementById('user-form-title').textContent = 'Edit: ' + username;
   document.getElementById('uf-id').value            = id;
@@ -6031,6 +6058,8 @@ function editUser(id, username, role, idleTimeoutSecs) {
   document.getElementById('uf-password2').value     = '';
   document.getElementById('uf-pw-label').textContent = 'New Password (leave blank to keep current)';
   document.getElementById('uf-status').textContent  = '';
+  document.getElementById('uf-restrict-disconnect').checked = !!restrictDisconnect;
+  onUfRoleChange();
   /* Convert stored seconds → minutes for the input; blank = global default */
   var inp = document.getElementById('uf-idle-timeout');
   if (idleTimeoutSecs === null || idleTimeoutSecs === undefined) {
@@ -6059,7 +6088,7 @@ async function saveUser() {
   if (!id && pw.length < 8) { st.style.color='var(--red)'; st.textContent='Password must be at least 8 characters.'; return; }
   if (pw && pw.length < 8) { st.style.color='var(--red)'; st.textContent='Password must be at least 8 characters.'; return; }
 
-  var payload = {role: role};
+  var payload = {role: role, restrict_disconnect: document.getElementById('uf-restrict-disconnect').checked};
   if (!id) payload.username = uname;
   if (pw) payload.password = pw;
 

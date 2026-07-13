@@ -370,6 +370,11 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .idle-badge { font-size: 0.68rem; padding: 1px 6px; border-radius: 3px; font-weight: 600;
   background: rgba(88,166,255,.1); color: var(--accent); white-space: nowrap; }
 .idle-badge.warn { background: rgba(255,179,0,.15); color: var(--warn); }
+/* No-timeout state: same badge, faded, instead of disappearing entirely */
+.idle-badge.off { opacity: 0.45; }
+.idle-restore-btn { background: none; border: none; color: inherit; cursor: pointer;
+  font-size: 0.8rem; padding: 0; line-height: 1; opacity: 0.75; }
+.idle-restore-btn:hover { opacity: 1; }
 /* ✕ inside the idle badge — dismisses the timeout itself (No Timeout) */
 .idle-squash-btn { background: none; border: none; color: inherit; cursor: pointer;
   font-size: 0.75rem; padding: 0 0 0 5px; line-height: 1; opacity: 0.6; }
@@ -395,6 +400,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 #tx-meter-fill.hot  { background: var(--warn); }
 #tx-meter-fill.clip { background: var(--red); }
 #tx-gain { width: 110px; accent-color: var(--accent); flex-shrink: 0; }
+#listen-volume { width: 70px; accent-color: var(--accent); flex-shrink: 0; }
+#listen-volume:disabled { cursor: not-allowed; }
 
 /* Transmit / Monitor mode badge in node rows */
 .mode-badge { font-size: 0.65rem; padding: 1px 6px; border-radius: 3px; font-weight: 600; white-space: nowrap; }
@@ -543,7 +550,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <!-- Search stays hidden until login (it bridges RF, like every other
              connect path); the net-schedule calendar is always visible. -->
         <div style="display:flex;gap:6px;margin-bottom:8px;flex-shrink:0">
-          <button class="btn-icon" id="node-search-btn" onclick="openSearchModal()" title="Search the AllStar and EchoLink directories for nodes to connect to" style="display:none">&#128269; Search</button>
+          <button class="btn-icon" id="node-search-btn" onclick="openSearchModal()" title="Search the AllStar and EchoLink directories for nodes to connect to" style="display:none">&#128269;</button>
           <button class="btn-icon" id="net-cal-btn" onclick="openNetModal()" title="Net Schedule — scheduled net reminders">&#128197;</button>
         </div>
         <div class="node-history-title card-title">Recent Connections</div>
@@ -561,6 +568,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <span style="margin-left:auto;display:flex;align-items:center;gap:6px">
           <span id="listen-delay-note" style="font-size:0.65rem;color:var(--text2);font-style:italic;display:none">~1s delay</span>
           <button class="btn-icon" id="tx-btn" onclick="openTx()" style="display:none" title="Transmit from your microphone through this node">&#127908; TX</button>
+          <span id="listen-vol-row" style="display:flex;align-items:center;gap:4px;opacity:0.4">
+            <span style="font-size:0.8rem;color:var(--text2)" title="Listen volume">&#128266;</span>
+            <input type="range" id="listen-volume" min="0" max="100" value="100" disabled title="Listen volume — separate from your device's system volume">
+          </span>
           <button class="btn-icon" id="listen-btn" onclick="toggleListen()" title="Stream live audio from this node — expect ~1 second delay">&#9834; Listen</button>
         </span>
       </div>
@@ -1564,7 +1575,9 @@ async function refreshBoard() {
         '</div>' +
         (n.locked ? '<div class="locked-badge" title="' + esc(n.locked_by ? 'Locked by ' + n.locked_by : 'Locked by the node owner') + '">&#128274; LOCKED</div>' : '') +
         '<div class="link-count">Linked: <span>' + (n.connected ? n.connected.length : 0) + '</span>' +
-          ' &nbsp;·&nbsp; Keyups: <span>' + (n.own_keyups || 0) + '</span></div>';
+          ' &nbsp;·&nbsp; Keyups: <span>' + (n.own_keyups || 0) + '</span></div>' +
+        '<div class="link-count" style="text-align:center;margin-top:4px">Announcements: <span>' + (data.active_announcements || 0) + '</span></div>' +
+        '<div class="link-count" style="text-align:center">Connectors: <span>' + (data.scheduled_connectors || 0) + '</span></div>';
     }
 
     /* Update hosted-node star pins */
@@ -1636,6 +1649,16 @@ async function refreshBoard() {
               esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)" ' +
               'title="Reset idle timer to zero — stays a temporary connection">Reset</button>';
           }
+        } else if (c.permanent === false && c.no_timeout === true) {
+          var isAdmin2 = window._kioskRole === 'admin' || window._kioskRole === 'superuser' || window._kioskRole === 'owner';
+          /* Faded instead of hidden — the clock re-enables the idle timer
+             (admin/superuser/owner only, same gate as squash/reset above). */
+          var clockBtn = isAdmin2
+            ? '<button class="idle-restore-btn" onclick="sbRestoreIdle(\'' +
+                esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)" ' +
+                'title="Enable the idle-timeout auto-disconnect for this connection">&#128339;</button>'
+            : '<span title="No timeout — idle-disconnect disabled">&#128339;</span>';
+          idleBadge = '<span class="idle-badge off">' + clockBtn + '</span>';
         } else if (c.permanent === true) {
           idleBadge = '<span class="idle-badge">Permanent</span>';
         }
@@ -1646,6 +1669,10 @@ async function refreshBoard() {
           ? '<button class="sb-btn disconnect" data-label="X" disabled ' +
               'style="opacity:.4;cursor:not-allowed" ' +
               'title="Managed by Smart Connector — only an admin or superuser can disconnect this">&#128274;</button>'
+          : (window._kioskRestrictDisconnect && !isAdminRole)
+          ? '<button class="sb-btn disconnect" data-label="X" disabled ' +
+              'style="opacity:.4;cursor:not-allowed" ' +
+              'title="Your account isn\'t permitted to disconnect nodes">&#128274;</button>'
           : '<button class="sb-btn disconnect" title="Disconnect" data-label="X" onclick="sbDisconnect(\'' +
               esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)">X</button>';
         return '<div class="node-row">' +
@@ -1961,6 +1988,28 @@ async function sbSquashIdle(localNode, remoteNode, btn) {
   }
 }
 
+async function sbRestoreIdle(localNode, remoteNode, btn) {
+  if (btn) { btn.disabled = true; }
+  try {
+    var r = await apiFetch('/api/status/restore-idle', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({local_node: localNode, remote_node: remoteNode})
+    });
+    var d = await r.json();
+    if (r.ok && d.ok) {
+      sbToast('Idle timer re-enabled for ' + remoteNode, true);
+      setTimeout(refreshBoard, 500);
+    } else {
+      sbToast('Failed: ' + (d.error || r.status), false);
+      if (btn) { btn.disabled = false; }
+    }
+  } catch(e) {
+    sbToast('Error: ' + e.message, false);
+    if (btn) { btn.disabled = false; }
+  }
+}
+
 async function sbResetIdle(localNode, remoteNode, btn) {
   if (btn) { btn.disabled = true; }
   try {
@@ -2082,6 +2131,7 @@ async function kioskLogin() {
   }
   if (r.ok && d.ok) {
     window._kioskRole = d.role;
+    window._kioskRestrictDisconnect = !!d.restrict_disconnect;
     /* session.clear() on the server invalidated the CSRF token from the meta tag;
        refresh _csrfToken so subsequent apiFetch calls don't get 400s. */
     if (d.csrf_token) _csrfToken = d.csrf_token;
@@ -2138,16 +2188,20 @@ async function checkKioskSession() {
   var d = await r.json();
   if (d.logged_in) {
     window._kioskRole = d.role;
+    window._kioskRestrictDisconnect = !!d.restrict_disconnect;
     updateKioskUserBar(d.username, d.role);
   } else {
     window._kioskRole = '';
+    window._kioskRestrictDisconnect = false;
     updateKioskUserBar(null, null);
   }
   /* Show Permanent checkbox only for admin/superuser */
   var pl = document.getElementById('perm-label');
   if (pl) pl.style.display = (window._kioskRole === 'admin' || window._kioskRole === 'superuser' || window._kioskRole === 'owner') ? '' : 'none';
 
-  /* TX button: admin/superuser + HTTPS + feature configured server-side */
+  /* TX button: any logged-in role + HTTPS + feature configured server-side.
+     Account creation itself is already gated to admin/superuser/owner, so
+     any account that exists at all has already been vetted to transmit. */
   _txUpdateBtn();
   _searchUpdateBtn();
 
@@ -2224,6 +2278,10 @@ function renderFavorites() {
       actions = '<button class="sb-btn disconnect" disabled ' +
         'style="opacity:.4;cursor:not-allowed" ' +
         'title="Managed by Smart Connector — only an admin or superuser can disconnect this">Disconnect</button>';
+    } else if (isConn && window._kioskRestrictDisconnect && !isAdmin) {
+      actions = '<button class="sb-btn disconnect" disabled ' +
+        'style="opacity:.4;cursor:not-allowed" ' +
+        'title="Your account isn\'t permitted to disconnect nodes">Disconnect</button>';
     } else if (isConn) {
       actions = '<button class="sb-btn disconnect" onclick="favDisconnect(\'' +
         esc(localNode) + '\',\'' + esc(f.node) + '\',this)">Disconnect</button>';
@@ -2460,8 +2518,9 @@ function _txSetBtn(html, color) {
 async function _txUpdateBtn() {
   var btn = document.getElementById('tx-btn');
   if (!btn) return;
-  var eligible = (window._kioskRole === 'admin' || window._kioskRole === 'superuser' || window._kioskRole === 'owner')
-                 && window.isSecureContext && navigator.mediaDevices && window.WebSocket;
+  /* Any logged-in role may TX — account creation itself is already gated to
+     admin/superuser/owner, so any account that exists has been vetted. */
+  var eligible = !!window._kioskRole && window.isSecureContext && navigator.mediaDevices && window.WebSocket;
   if (!eligible) { btn.style.display = 'none'; return; }
   try {
     var r = await apiFetch('/api/tx/config?probe=1');
@@ -2733,12 +2792,21 @@ var _LISTEN_START_MS = 12000;  // give up on a stalled connection after 12 s
    was backgrounded and throttled), and rate-limited by a cooldown so a lag
    hovering near the threshold can't cause repeated pops. Bands are relative to
    the target (T = _LISTEN_TARGET_S):
-     lag ≤ T+0.20s        → 1.00× (wide dead-band absorbs jitter)
-     T+0.20…T+0.75s       → 1.05× (imperceptible)
+     lag ≤ T+0.35s        → 1.00× (wide dead-band absorbs jitter)
+     T+0.35…T+0.75s       → 1.05× (imperceptible)
      T+0.75…T+1.75s       → 1.12× (barely noticeable)
      T+1.75…T+JUMP_LAG    → 1.25× (fast but still smooth via WSOLA — no pop)
-     > T+_LISTEN_JUMP_LAG → hard jump to liveEdge−T (last resort, cooldown-gated) */
-var _LISTEN_TARGET_S   = 0.5;            // baseline playback latency behind the live edge
+     > T+_LISTEN_JUMP_LAG → hard jump to liveEdge−T (last resort, cooldown-gated)
+
+   T itself was bumped from 0.5s to 0.75s (2026-07-13): live telemetry showed
+   steady-state lag resting around 0.6-0.9s even on clean links — the
+   ~200ms cluster granularity (-cluster_time_limit in app.py's ffmpeg cmd)
+   plus normal network/parse overhead puts a floor under 0.5s+0.20s, so the
+   controller was riding the 1.05x band almost continuously instead of only
+   during real jitter. If this proves to add noticeable latency for
+   listeners, revert both this and the +0.35s dead-band above back to
+   0.5/0.20. */
+var _LISTEN_TARGET_S   = 0.75;           // baseline playback latency behind the live edge
 var _LISTEN_STARTUP_S  = 0.5;            // pre-buffer this much before the first play()
 
 /* Adaptive latency: some remote networks (traffic shapers, TLS-inspecting
@@ -2792,9 +2860,32 @@ function _listenSetBtn(html, color, disabled) {
   btn.innerHTML = html;
   btn.style.color = color || '';
   btn.disabled = !!disabled;
+  var active = (color === 'var(--green)');
   var note = document.getElementById('listen-delay-note');
-  if (note) note.style.display = (color === 'var(--green)') ? '' : 'none';
+  if (note) note.style.display = active ? '' : 'none';
+  var volRow = document.getElementById('listen-vol-row');
+  if (volRow) volRow.style.opacity = active ? '1' : '0.4';
+  var vol = document.getElementById('listen-volume');
+  if (vol) vol.disabled = !active;
 }
+
+/* Listen volume attenuates only the <audio> element's own playback gain —
+   independent of the OS/system volume slider. #node-audio is a single
+   static element reused across every Listen start/stop, so setting
+   .volume once here persists through reconnects with no extra wiring.
+   Persisted per browser. */
+(function() {
+  var audio = document.getElementById('node-audio');
+  var vol   = document.getElementById('listen-volume');
+  var saved = parseInt(localStorage.getItem('henwen-listen-volume') || '100', 10);
+  if (!(saved >= 0 && saved <= 100)) saved = 100;
+  vol.value = saved;
+  audio.volume = saved / 100;
+  vol.addEventListener('input', function() {
+    audio.volume = vol.value / 100;
+    localStorage.setItem('henwen-listen-volume', vol.value);
+  });
+})();
 
 function _startListen() {
   var node = (window._lastBoardNodes && window._lastBoardNodes[0])
@@ -2995,7 +3086,7 @@ function _doStartListenMSE(audio, node) {
         rate = 1.25;   // fast catch-up, still smooth via WSOLA — avoids a pop
       } else if (lag > _listenTargetS + 0.75) {
         rate = 1.12;
-      } else if (lag > _listenTargetS + 0.20) {
+      } else if (lag > _listenTargetS + 0.35) {
         rate = 1.05;
       } else {
         rate = 1.0;

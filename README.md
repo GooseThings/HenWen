@@ -12,7 +12,7 @@ A browser-based web interface for managing and using your AllStarLink 3 node. Al
 - Edit `rpt.conf` field-by-field (validated dropdowns and range-checked inputs sourced from the official ASL3 docs) or switch to a raw text editor
 - Connect, disconnect, and **Monitor** (listen-only, `ilink 2`) remote nodes from the browser
 - **Stream live receive audio** from your node to any browser tab — WebM/Opus over HTTP, multiple simultaneous listeners
-- **Transmit from the browser** — Admin/Superuser accounts can key up and talk through the node with no radio, straight from the Kiosk (requires one-time HTTPS + Asterisk setup, see [Browser TX](#browser-tx-transmit) below)
+- **Transmit from the browser** — any logged-in account can key up and talk through the node with no radio, straight from the Kiosk (requires one-time HTTPS + Asterisk setup, see [Browser TX](#browser-tx-transmit) below)
 - **Status Board** (`/status`) — full-screen kiosk display for TVs and public screens: connected nodes, global activity feed, network map with grayline, weather bar
 - **Smart Connector** — automatically link to a net node on a schedule (daily, weekly, monthly, one-time, and more), wait for the local node to go idle before connecting, then disconnect after an idle timeout
 - **Announcements** — upload audio files, or type a message and have it read aloud via text-to-speech, and schedule either to play on a node at configured times
@@ -214,7 +214,7 @@ The Status Board at `/status` (or **Status Board ↗** in the sidebar) is design
 
 Features: live node status, connected node list, global activity feed, network map with grayline, and a weather bar.
 
-Admin and Superuser accounts can connect/disconnect nodes directly from the Status Board. Kiosk (User) accounts see a login prompt and are limited to one active connection at a time.
+Owner, Superuser, and Admin accounts can connect/disconnect nodes directly from the Status Board. Kiosk (User) accounts see a login prompt and are limited to one active connection at a time; an individual User account can also be marked **Restrict disconnect** in User Management, letting it listen, TX, and make the first connection but never disconnect one.
 
 The footer shows how many users are currently logged in across the app. The **Manager** link in the header opens the manager in a new tab, so the kiosk display keeps running undisturbed.
 
@@ -231,9 +231,11 @@ Manage accounts under **Manager → User Management**.
 | **Owner** | Everything a Superuser has, plus **Node Lockout** — can lock a node to put the whole system read-only for every other role, itself exempt |
 | **Superuser** | Full access including raw `rpt.conf` editor |
 | **Admin** | Full access except raw editor |
-| **User (Kiosk)** | Connect/disconnect nodes only; no settings |
+| **User (Kiosk)** | Connect/disconnect nodes, listen, and TX; no settings. Can optionally be marked **Restrict disconnect** (below) |
 
 Kiosk accounts can be given a **Favorites** list of pre-configured nodes to connect to quickly from the Status Board.
+
+Any User account can also be checked **Restrict disconnect** in User Management — it can still listen, TX, and make the first connection when nothing else is connected, but it can never disconnect a node (the kiosk shows a locked disconnect button instead). This is enforced server-side, live against the account's current setting, not cached in the session.
 
 ### Node Lockout
 
@@ -283,14 +285,14 @@ Plays a configurable sound file for FCC-required station identification. Trigger
 
 ## Browser TX (Transmit)
 
-Lets Admin and Superuser accounts key up and talk through the node straight from the Kiosk — a **TX** button in the header opens a hold-to-talk bar (mic gain slider with live level meter, radio-style RX mute while keyed, and fail-safes that unkey on release/blur/tab-hide/page-close or after 5 minutes idle). No radio required. Audio goes browser → Asterisk directly over WebRTC; it never touches the HenWen/Flask process.
+Lets any logged-in account key up and talk through the node straight from the Kiosk — a **TX** button in the header opens a hold-to-talk bar (mic gain slider with live level meter, radio-style RX mute while keyed, and fail-safes that unkey on release/blur/tab-hide/page-close or after 5 minutes idle). No radio required. Audio goes browser → Asterisk directly over WebRTC; it never touches the HenWen/Flask process. Since only Owner/Superuser/Admin can create accounts in the first place, any account that exists has already been vetted to transmit.
 
 This is opt-in and needs two things set up once, in order, from the box's own shell (not the web UI):
 
 1. **HTTPS.** Browsers block microphone access outside a secure context, so the Kiosk needs to be served over `https://` (plain `http://<lan-ip>:5000`, the installer's default, doesn't qualify). If you don't already have this, `install.sh` offers to set it up interactively, or run it any time: `sudo bash /opt/HenWen/tx-spike/setup-https.sh <hostname> <email>` — needs a public hostname already pointed at this box and port 80 forwarded (for the cert challenge) plus port 443 (or `--port N` for a different one — useful if your ISP blocks forwarding ports below 1000). If your ISP blocks port 80 too, add `--dns-manual` to use a DNS-based challenge instead (works with any DNS provider, doesn't auto-renew). No public hostname or port forwarding available at all (CGNAT, blocked ISP, a cloud box you don't want publicly exposed)? HenWen doesn't script this case, but any third-party service that can front HTTPS for a local port works — Tailscale Serve/Funnel, Cloudflare Tunnel, and similar all fit, as long as they proxy plain HTTP to this box's Flask port and a WebSocket-capable proxy to Asterisk's `:8088` for `/asterisk-ws` (see `tx-spike/pjsip.snippet`/`apply.sh` for exactly what that endpoint needs).
 2. **Asterisk PJSIP/WebRTC config:** `sudo bash /opt/HenWen/tx-spike/apply.sh` — enables the needed Asterisk modules, adds a locked-down SIP endpoint, and wires the WSS signaling proxy through Apache.
 
-Once both have run, the TX button appears automatically for Admin/Superuser sessions. Use **Manager → TX Diagnostics** any time to check readiness end to end (HTTPS, PJSIP endpoint, Apache, RTP/STUN, NAT) without leaving the browser. Full network requirements (router forwards, LAN-only notes) and rollback are in [`tx-spike/README.md`](tx-spike/README.md).
+Once both have run, the TX button appears automatically for any logged-in session. Use **Manager → TX Diagnostics** any time to check readiness end to end (HTTPS, PJSIP endpoint, Apache, RTP/STUN, NAT) without leaving the browser — that diagnostics page itself is still Admin/Superuser/Owner only. Full network requirements (router forwards, LAN-only notes) and rollback are in [`tx-spike/README.md`](tx-spike/README.md).
 
 ---
 
@@ -335,7 +337,7 @@ systemctl status HenWen
 - `install.sh` checks for this at install time (unloads any `noload =>` blacklist entry in `modules.conf` and loads the module live if Asterisk is already running) — re-run `sudo bash install.sh` if you're not sure it ran, or if the module truly isn't installed, reinstall/repair your Asterisk modules package.
 
 **TX button doesn't appear on the Kiosk:**
-- Only shows for Admin/Superuser sessions, and only when the browser considers the page a secure context (`https://`, not plain `http://<lan-ip>:5000`) and the server confirms TX is configured.
+- Only shows for logged-in sessions, and only when the browser considers the page a secure context (`https://`, not plain `http://<lan-ip>:5000`) and the server confirms TX is configured.
 - Go to **Manager → TX Diagnostics** and click **Run Diagnostics** for a full end-to-end check (HTTPS, PJSIP endpoint, Apache, RTP/STUN, NAT) — see [Browser TX](#browser-tx-transmit) above if it hasn't been set up yet.
 
 **Announcements or Node ID audio won't upload:**

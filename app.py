@@ -581,6 +581,14 @@ def get_db():
         conn.commit()
     except Exception:
         pass  # column already exists
+    # Restricted 'user' accounts (User Management → "Restrict disconnect")
+    # can listen/TX and make the first connection but can never disconnect a
+    # node — 0 (default) preserves today's behavior for every existing account.
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN restrict_disconnect INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass  # column already exists
 
     # Seed kiosk defaults
     for _k, _v in [
@@ -660,7 +668,8 @@ def check_auth():
                       'api_audio_stream', 'api_audio_check', 'api_audio_stop',
                       'api_audio_client_log',
                       'api_nets_create', 'api_nets_update', 'api_nets_delete',
-                      'api_echolink_search', 'api_asl_search'}
+                      'api_echolink_search', 'api_asl_search',
+                      'api_tx_config'}
 
     endpoint  = request.endpoint
     is_public = endpoint in _PUBLIC
@@ -805,6 +814,7 @@ def login():
             session["idle_timeout"] = new_user["session_idle_timeout"] if new_user["session_idle_timeout"] is not None else SESSION_IDLE_TIMEOUT
             session["sid"] = secrets.token_hex(16)
             touch_active_session(session["sid"], username)
+            _seed_default_favorites(new_user["id"])
             log("INFO", f"[AUTH] Initial account created for '{username}' (role=owner)")
             return redirect(url_for('index'))
 
@@ -864,6 +874,7 @@ def api_login():
         # the already-loaded status page meta tag.  Return the fresh token so
         # the JS can update _csrfToken without requiring a full page reload.
         return jsonify({"ok": True, "role": user["role"], "username": username,
+                        "restrict_disconnect": bool(user["restrict_disconnect"]),
                         "csrf_token": generate_csrf()})
     log("WARN", f"[AUTH] API Login failed for '{username}'")
     return jsonify({"error": "Invalid username or password"}), 401
@@ -880,10 +891,13 @@ def api_csrf_token():
 def api_session():
     """Public endpoint — returns current session state for the kiosk page."""
     if session.get("logged_in"):
+        row = get_db().execute("SELECT restrict_disconnect FROM users WHERE id=?",
+                               (session.get("user_id"),)).fetchone()
         return jsonify({
             "logged_in": True,
             "username":  session.get("username", ""),
             "role":      session.get("role", ""),
+            "restrict_disconnect": bool(row["restrict_disconnect"]) if row else False,
         })
     return jsonify({"logged_in": False})
 
@@ -4083,7 +4097,8 @@ def api_alerts_test():
 @app.route("/api/users")
 def api_users_list():
     rows = get_db().execute(
-        "SELECT id, username, role, created_at, session_idle_timeout FROM users ORDER BY role DESC, username"
+        "SELECT id, username, role, created_at, session_idle_timeout, restrict_disconnect "
+        "FROM users ORDER BY role DESC, username"
     ).fetchall()
     return jsonify({"users": [dict(r) for r in rows]})
 
@@ -4094,6 +4109,9 @@ def api_users_create():
     username    = str(data.get("username", "")).strip()
     password    = str(data.get("password", ""))
     role        = str(data.get("role", "user")).strip()
+    # Only meaningful for role='user' — other roles already bypass the
+    # disconnect gate entirely, so the flag is simply ignored for them.
+    restrict_disconnect = bool(data.get("restrict_disconnect", False)) and role == "user"
     caller_role = session.get('role', '')
     if not re.match(r'^[A-Za-z0-9_.-]{2,32}$', username):
         return jsonify({"error": "Username must be 2-32 chars: letters, digits, _ . -"}), 400
@@ -4110,10 +4128,13 @@ def api_users_create():
         return jsonify({"error": "Admins can only create user accounts"}), 403
     db = get_db()
     try:
-        db.execute("INSERT INTO users (username, password_hash, role) VALUES (?,?,?)",
-                   (username, generate_password_hash(password), role))
+        cur = db.execute(
+            "INSERT INTO users (username, password_hash, role, restrict_disconnect) VALUES (?,?,?,?)",
+            (username, generate_password_hash(password), role, int(restrict_disconnect)))
         db.commit()
-        log("INFO", f"[USERS] Created user '{username}' role={role} by {caller_role}")
+        _seed_default_favorites(cur.lastrowid)
+        log("INFO", f"[USERS] Created user '{username}' role={role} "
+                    f"restrict_disconnect={restrict_disconnect} by {caller_role}")
         return jsonify({"ok": True})
     except sqlite3.IntegrityError:
         return jsonify({"error": f"Username '{username}' already exists."}), 409
@@ -4168,6 +4189,11 @@ def api_users_update(uid):
                 updates.append("session_idle_timeout=?"); params.append(secs)
             except (TypeError, ValueError):
                 return jsonify({"error": "Idle timeout must be a number"}), 400
+    if "restrict_disconnect" in data:
+        # Only meaningful for role='user' — other roles bypass the disconnect
+        # gate entirely regardless of this flag.
+        restrict_disconnect = bool(data["restrict_disconnect"]) and new_role == "user"
+        updates.append("restrict_disconnect=?"); params.append(int(restrict_disconnect))
     if not updates:
         return jsonify({"ok": True, "note": "Nothing to update"})
     params.append(uid)
@@ -4201,6 +4227,23 @@ def api_users_delete(uid):
 
 
 # ── Favorites API ─────────────────────────────────────────────────────────────
+
+# Seeded into every newly-created account's Favorites list, so the kiosk
+# shows how the feature looks right away instead of an empty list. Purely a
+# starting point — each user can remove any or all of these like any other
+# favorite.
+DEFAULT_FAVORITE_NODES = ['64549', '666380', '27664', '55553']
+
+
+def _seed_default_favorites(user_id):
+    db = get_db()
+    for node in DEFAULT_FAVORITE_NODES:
+        info  = lookup_node(node)
+        label = info.get("callsign") or info.get("desc") or f"Node {node}"
+        db.execute("INSERT OR IGNORE INTO favorites (user_id, node, label) VALUES (?,?,?)",
+                   (user_id, node, label))
+    db.commit()
+
 
 @app.route("/api/favorites")
 def api_favorites():
@@ -4755,6 +4798,12 @@ def api_status_board():
         ).fetchall()
     }
     locked_nodes = get_locked_nodes()
+    active_announcements = db.execute(
+        "SELECT COUNT(*) FROM announcements WHERE enabled=1"
+    ).fetchone()[0]
+    scheduled_connectors = db.execute(
+        "SELECT COUNT(*) FROM connectors WHERE enabled=1 AND schedule_type != 'manual' AND connect_time IS NOT NULL"
+    ).fetchone()[0]
 
     node_data = []
     for node in nodes:
@@ -4848,6 +4897,8 @@ def api_status_board():
         "ami_connected":    _ami_connected,
         "active_users":     get_active_user_count(),
         "connector_warning": _connector_upcoming_disconnect_all(),
+        "active_announcements": active_announcements,
+        "scheduled_connectors": scheduled_connectors,
     })
     resp.headers["Cache-Control"] = "no-store"
     return resp
@@ -5045,6 +5096,15 @@ def api_status_disconnect():
     caller_role = session.get('role', '')
     if caller_role not in ('admin', 'superuser', 'owner'):
         db = get_db()
+        # Restricted user accounts (User Management → "Restrict disconnect")
+        # may listen/TX and make the first connection like any user account,
+        # but can never tear one down — checked live against the DB, not
+        # cached in the session, so a mid-session restriction change takes
+        # effect on the very next attempt.
+        urow = db.execute("SELECT restrict_disconnect FROM users WHERE id=?",
+                          (session.get('user_id'),)).fetchone()
+        if urow and urow["restrict_disconnect"]:
+            return jsonify({"error": "Your account isn't permitted to disconnect nodes."}), 403
         managed = db.execute(
             "SELECT 1 FROM connectors WHERE enabled=1 AND state='connected' "
             "AND local_node=? AND target_node=?",
@@ -5101,6 +5161,33 @@ def api_status_squash_idle():
     return jsonify({"ok": True})
 
 
+@app.route("/api/status/restore-idle", methods=["POST"])
+def api_status_restore_idle():
+    """Undo /api/status/squash-idle — re-enable the idle-timeout auto-disconnect
+    for a connection that was exempted from it. Resets the idle clock to now,
+    since time spent exempted was never counted as elapsed idle time."""
+    if session.get('role') not in ('admin', 'superuser', 'owner'):
+        return jsonify({"error": "Admin access required"}), 403
+    data        = request.json or {}
+    local_node  = str(data.get("local_node",  "")).strip()
+    remote_node = str(data.get("remote_node", "")).strip()
+    if not re.match(r'^\d{4,7}$', local_node):
+        return jsonify({"error": "Invalid local_node"}), 400
+    if not re.match(r'^\d{4,7}$', remote_node):
+        return jsonify({"error": "Invalid remote_node"}), 400
+    key = (local_node, remote_node)
+    with _kiosk_temp_lock:
+        if key not in _kiosk_temp_conns or _kiosk_temp_conns[key].get('permanent'):
+            return jsonify({"error": "Not a tracked temporary connection"}), 404
+        _kiosk_temp_conns[key]['no_timeout']  = False
+        _kiosk_temp_conns[key]['last_active'] = time.time()
+        info = dict(_kiosk_temp_conns[key])
+    _db_temp_conn_save(local_node, remote_node, info.get('monitor', False),
+                       False, info['last_active'])
+    log("INFO", f"[API] /api/status/restore-idle {local_node} -> {remote_node}: idle timeout re-enabled")
+    return jsonify({"ok": True})
+
+
 @app.route("/api/status/reset-idle", methods=["POST"])
 def api_status_reset_idle():
     """Reset the idle-timeout clock for a temporary connection back to zero, without
@@ -5142,12 +5229,14 @@ TX_WS_PATH     = os.environ.get("TX_WS_PATH", "/asterisk-ws")
 
 @app.route("/api/tx/config")
 def api_tx_config():
-    """SIP credentials for the browser transmitter. Admin/superuser only —
-    this keys an RF transmitter under the club callsign, so it's gated at
-    least as tightly as the other RF-consequential features. ?probe=1 answers
+    """SIP credentials for the browser transmitter. Any logged-in role — this
+    keys an RF transmitter under the club callsign, but account creation
+    itself is already gated to admin/superuser/owner, so any account that
+    exists has already been vetted to transmit; login alone (enforced by
+    _USER_OR_ABOVE in check_auth) is the real gate here. ?probe=1 answers
     availability only (no secret, no log line) for deciding button visibility."""
-    if session.get('role') not in ('admin', 'superuser', 'owner'):
-        return jsonify({"error": "Admin access required"}), 403
+    if not session.get('logged_in'):
+        return jsonify({"error": "Authentication required"}), 401
     try:
         with open(TX_SECRET_PATH) as f:
             secret = f.read().strip()
@@ -5749,6 +5838,21 @@ def _start_broadcast(node):
     # boundaries for late joiners.
     # -probesize 32 / -analyzeduration 0: skip format probing so encoding
     # starts immediately (avoids several-hundred-ms startup silence).
+    #
+    # -af AGC chain: hot nodes (loud mic/RX audio) were clipping on speech
+    # peaks. dynaudnorm rides the gain to keep the signal near its target
+    # peak (quiet stretches brought up, loud stretches brought down);
+    # alimiter is a true-peak brick wall behind it in case a fast transient
+    # gets past dynaudnorm's smoothing. level=false on alimiter is load-
+    # bearing — alimiter's default level=true re-normalizes output loudness
+    # to match input, which was measured to silently undo the limiting on a
+    # fully-clipped test signal (peak stayed pinned at full scale). Verified
+    # against a synthetic clipped-tone fixture pushed through this exact
+    # chain incl. the Opus round-trip: 0 clipped samples, peak ~90% FS, and
+    # the filter's gaussian-window smoothing added only ~5ms of onset delay
+    # — negligible against the stream's ~0.75s live-edge target. If this
+    # sounds like it's pumping/over-processing on your traffic, the first
+    # things to relax are m (max gain) down or f (frame length) up.
     ffmpeg_cmd = [
         'ffmpeg', '-loglevel', 'warning',
         '-probesize', '32',
@@ -5756,6 +5860,8 @@ def _start_broadcast(node):
         '-fflags', '+nobuffer',
         '-f', 's16le', '-ar', '8000', '-ac', '1', '-channel_layout', 'mono',
         '-i', fifo_out_path,
+        '-af', 'dynaudnorm=f=200:g=15:p=0.95:m=6,'
+               'alimiter=limit=0.85:attack=5:release=50:level=false',
         '-ar', '48000',        # resample to Opus native rate before encoding
         '-c:a', 'libopus', '-b:a', '24k',
         '-vbr', 'off',         # CBR — keep a steady ~24 kbps byte flow even when the node

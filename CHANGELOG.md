@@ -1,5 +1,18 @@
 # Changelog
 
+## v2026.07.13.4
+
+- **Added: new accounts start with 4 default Favorites** (nodes 64549, 666380, 27664, 55553) instead of an empty list, so the Favorites feature has something to show right away. Fully editable/removable like any other favorite — this only seeds the list at account-creation time, never re-adds anything afterward.
+
+## v2026.07.13.3
+
+- **Changed: disabling a connection's idle timer ("No Timeout") no longer removes its badge from the Connected Nodes list.** It now stays visible, faded, reading "No Timeout" with a 🕐 clock button in place of the ✕ — clicking it re-enables the idle-timeout auto-disconnect (resetting the clock to now, via a new `/api/status/restore-idle` endpoint) instead of leaving it permanently exempted with no way back short of disconnecting and reconnecting.
+
+## v2026.07.13.2
+
+- **Added: "Restrict disconnect" option for User accounts.** User Management can now mark an individual User-role account so it can never disconnect a node — it can still listen, use Browser TX, and make the first connection when nothing is already connected, same as any User account, but the Disconnect button is replaced with a locked icon and `/api/status/disconnect` refuses the request server-side, checked live against the account's current setting rather than cached in the session.
+- **Changed: Browser TX is no longer Admin/Superuser/Owner only.** Any logged-in account (including User/Kiosk) can now use the TX button, since account creation itself is already gated to Owner/Superuser/Admin — any account that exists has already been vetted to transmit. The Manager's TX Diagnostics troubleshooting page remains Admin/Superuser/Owner only.
+
 ## v2026.07.13
 
 - **Added: Owner role and Node Lockout.** A new top-tier `owner` role has every Superuser privilege plus one more: the ability to lock a node (Manager → Node Control → Node Lockout). While any node is locked, every other role — Superuser and Admin included — is limited to read-only access system-wide; any mutating request (kiosk connect/disconnect, settings changes, everything) is refused with a 423 "Locked by the node owner" until an Owner unlocks it. Enforced once, centrally, in `check_auth()` rather than at each individual route's own role check. The Status Board's Node card shows a **LOCKED** badge whenever the node is in this state. Lock state is tracked per node in a new `node_lockouts` table.
