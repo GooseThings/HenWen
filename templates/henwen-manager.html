@@ -657,6 +657,19 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
       </div>
     </div>
 
+    <div class="card" id="node-lockout-card">
+      <div class="card-header"><h2>Node Lockout</h2></div>
+      <div class="card-body">
+        <p class="muted" style="font-size:0.82rem;margin-top:0">
+          Locking a node puts the whole system into read-only mode for every role but Owner
+          &mdash; Superuser and Admin included. The kiosk shows a LOCKED badge while active.
+        </p>
+        <div id="node-lockout-body">
+          <span class="muted"><span class="spinner"></span> Loading lockout status...</span>
+        </div>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-header"><h2>Connect / Disconnect</h2></div>
       <div class="card-body">
@@ -2030,7 +2043,7 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
   <!-- User Management -->
   <section class="page" id="page-user-mgmt">
     <div class="page-title">User Management</div>
-    <div class="page-sub">Create and manage user accounts. Roles: <strong>superuser</strong> (full access), <strong>admin</strong> (manager access, no raw editor), <strong>user</strong> (Kiosk only).</div>
+    <div class="page-sub">Create and manage user accounts. Roles: <strong>owner</strong> (full access + node lockout), <strong>superuser</strong> (full access), <strong>admin</strong> (manager access, no raw editor), <strong>user</strong> (Kiosk only).</div>
     <div class="card">
       <div class="card-header">
         <h2>Users</h2>
@@ -2058,6 +2071,7 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
           <div>
             <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:4px">Role</label>
             <select id="uf-role" style="width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg3);color:var(--text);font-size:0.88rem">
+              <option value="owner">owner — Full access + node lockout (locks out everyone else)</option>
               <option value="superuser">superuser — Full access including raw editor</option>
               <option value="admin">admin — Manager access, no raw editor</option>
               <option value="user">user — Kiosk + connect/disconnect only</option>
@@ -2095,28 +2109,32 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
         <table class="table table-sm mb-0" style="font-size:0.82rem">
           <thead><tr>
             <th>Feature</th>
+            <th style="text-align:center">Owner</th>
             <th style="text-align:center">Superuser</th>
             <th style="text-align:center">Admin</th>
             <th style="text-align:center">User</th>
           </tr></thead>
           <tbody>
-            <tr><td>Kiosk (connect/disconnect)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
-            <tr><td>Permanent kiosk connections</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>Dashboard &amp; Node Control</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>General Settings</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>DTMF Control (safe functions&#185;)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>DTMF Control (Link Disable, Timeout Disable, all others)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>Node ID (FCC station ID)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>Announcements, Smart Connector</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>Backups (view/diff/download/restore)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>Backups (delete)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>Alerts, Conn. History</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>AMI Diagnostics</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>Asterisk Console</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>Kiosk Settings</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>User Management (create Users)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>User Management (create Admins/Superusers)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
-            <tr><td>Raw Editor (direct rpt.conf edit)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Kiosk (connect/disconnect)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td></tr>
+            <tr><td>Permanent kiosk connections</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Dashboard &amp; Node Control</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>General Settings</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>DTMF Control (safe functions&#185;)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>DTMF Control (Link Disable, Timeout Disable, all others)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Node ID (FCC station ID)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Announcements, Smart Connector</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Backups (view/diff/download/restore)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Backups (delete)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Alerts, Conn. History</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>AMI Diagnostics</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Asterisk Console</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Kiosk Settings</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>User Management (create Users)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>User Management (create Admins/Superusers)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>User Management (create Owners)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Raw Editor (direct rpt.conf edit)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Node Lockout (lock out all other roles)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Exempt from another owner's lockout</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
           </tbody>
         </table>
         <p class="muted" style="font-size:0.72rem;padding:8px 12px;margin:0">
@@ -2277,7 +2295,7 @@ function showPage(id) {
   currentPage = id;
 
   if      (id === 'dashboard')    { refreshDashboard(); startDiagPolling(); }
-  else if (id === 'node-control') { loadFavorites(); startNcPolling(); startFavStatusPolling(); }
+  else if (id === 'node-control') { loadFavorites(); startNcPolling(); startFavStatusPolling(); renderNodeLockoutCard(); }
   else if (id === 'raw-editor')   rawLoad();
   else if (id === 'backups')        loadBackups();
   else if (id === 'conn-history')   chLoad(0);
@@ -3702,6 +3720,47 @@ async function nwsDeleteAlert(id, name) {
   else { var d = await r.json(); alert('Error: ' + (d.error || r.status)); }
 }
 
+/* ── Node Lockout ───────────────────────────────────────────────────────── */
+async function renderNodeLockoutCard() {
+  var body = document.getElementById('node-lockout-body');
+  if (!body) return;
+  var r = await api('/api/status/board');
+  if (!r.ok) { body.innerHTML = '<span class="muted">Error loading lockout status.</span>'; return; }
+  var nodes = r.data.nodes || [];
+  if (!nodes.length) { body.innerHTML = '<span class="muted">No nodes configured.</span>'; return; }
+  var isOwner = window._henwenRole === 'owner';
+  body.innerHTML = nodes.map(function(n) {
+    var statusHtml = n.locked
+      ? '<span style="color:var(--danger);font-weight:600">&#128274; LOCKED' +
+        (n.locked_by ? ' by ' + esc(n.locked_by) : '') + '</span>'
+      : '<span class="muted">Unlocked</span>';
+    var actionHtml = isOwner
+      ? (n.locked
+          ? '<button class="btn btn-sm" onclick="toggleNodeLockout(\'' + esc(n.node) + '\', false, this)">Unlock</button>'
+          : '<button class="btn btn-sm btn-danger" onclick="toggleNodeLockout(\'' + esc(n.node) + '\', true, this)">Lock</button>')
+      : '<span class="muted" style="font-size:0.78rem">Owner only</span>';
+    return '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">' +
+      '<div><strong>' + esc(n.node) + '</strong>' + (n.callsign ? ' &mdash; ' + esc(n.callsign) : '') + '</div>' +
+      '<div style="display:flex;align-items:center;gap:12px">' + statusHtml + actionHtml + '</div>' +
+    '</div>';
+  }).join('');
+}
+
+async function toggleNodeLockout(node, locked, btn) {
+  if (btn) btn.disabled = true;
+  var r = await api('/api/nodes/' + encodeURIComponent(node) + '/lockout', {
+    method:  'POST',
+    headers: {'Content-Type': 'application/json'},
+    body:    JSON.stringify({locked: locked}),
+  });
+  if (!r.ok) {
+    alert('Error: ' + (r.data.error || r.status));
+    if (btn) btn.disabled = false;
+    return;
+  }
+  renderNodeLockoutCard();
+}
+
 /* ── Node Control — live status polling ──────────────────────────────────── */
 
 function startNcPolling() {
@@ -4630,30 +4689,38 @@ async function applyRoleNav() {
   var d = await r.json();
   var role = d.role || '';
   window._henwenRole = role;
-  /* Only superuser sees Raw Editor and Asterisk Console */
+  /* Owner has every Superuser privilege plus exclusive node-lockout control,
+     so everywhere below that's gated to 'superuser' also admits 'owner'. */
+  var isSuper = (role === 'superuser' || role === 'owner');
+  /* Only superuser/owner sees Raw Editor and Asterisk Console */
   var rawBtn = document.getElementById('nav-raw-editor');
-  if (rawBtn) rawBtn.style.display = (role === 'superuser') ? '' : 'none';
+  if (rawBtn) rawBtn.style.display = isSuper ? '' : 'none';
   var consoleBtn = document.getElementById('nav-ast-console');
-  if (consoleBtn) consoleBtn.style.display = (role === 'superuser') ? '' : 'none';
-  /* Only superuser can use Node ID (FCC station ID playback) — misconfiguring
+  if (consoleBtn) consoleBtn.style.display = isSuper ? '' : 'none';
+  /* Only superuser/owner can use Node ID (FCC station ID playback) — misconfiguring
      or disabling it is a compliance concern, not just an operational one. */
   var nodeIdBtn = document.getElementById('nav-node-id');
-  if (nodeIdBtn) nodeIdBtn.style.display = (role === 'superuser') ? '' : 'none';
-  /* Only superuser can trigger an update (shell/deploy access, and the
+  if (nodeIdBtn) nodeIdBtn.style.display = isSuper ? '' : 'none';
+  /* Only superuser/owner can trigger an update (shell/deploy access, and the
      backend enforces this too) — matches checkForUpdate()'s own gate. */
   var updateCard = document.getElementById('update-settings-card');
-  if (updateCard) updateCard.style.display = (role === 'superuser') ? '' : 'none';
-  /* Only superuser can change ports (matches the backend gate on
+  if (updateCard) updateCard.style.display = isSuper ? '' : 'none';
+  /* Only superuser/owner can change ports (matches the backend gate on
      /api/settings/ports) — a wrong web-UI port change is self-locking
      without shell access to fix it back. */
   var portsCard = document.getElementById('ports-settings-card');
-  if (portsCard) portsCard.style.display = (role === 'superuser') ? '' : 'none';
-  /* Only superuser sees the higher-risk COP quick actions (node-wide link
+  if (portsCard) portsCard.style.display = isSuper ? '' : 'none';
+  /* Only superuser/owner sees the higher-risk COP quick actions (node-wide link
      outage, disabling the transmit time-limit safety mechanism) — matching
      the same allowlist enforced server-side in /api/dtmf/cop. */
   document.querySelectorAll('.dtmf-su-only').forEach(function(btn) {
-    btn.style.display = (role === 'superuser') ? '' : 'none';
+    btn.style.display = isSuper ? '' : 'none';
   });
+  /* Node Lockout card (Node Control page): visible to everyone so all roles
+     can see whether the system is currently locked, but the lock/unlock
+     controls themselves only render for Owner — enforced again server-side
+     in /api/nodes/<node>/lockout. */
+  renderNodeLockoutCard();
 }
 
 window.addEventListener('DOMContentLoaded', async function() {
@@ -5900,7 +5967,8 @@ async function loadUsers() {
     return;
   }
   tbody.innerHTML = users.map(function(u) {
-    var roleColor = u.role === 'superuser' ? 'rgba(248,81,73,.15);color:var(--red)'
+    var roleColor = u.role === 'owner'     ? 'rgba(255,179,0,.18);color:var(--warn)'
+                  : u.role === 'superuser' ? 'rgba(248,81,73,.15);color:var(--red)'
                   : u.role === 'admin'     ? 'rgba(88,166,255,.12);color:var(--accent)'
                   :                          'rgba(63,185,80,.1);color:var(--green)';
     var roleBadge = '<span style="background:' + roleColor + ';padding:1px 7px;border-radius:3px;font-size:0.75rem;font-weight:600">' + esc(u.role) + '</span>';
@@ -5923,12 +5991,25 @@ async function loadUsers() {
   }).join('');
 }
 
+/* Roles ranked above the caller's own can't be granted (enforced server-side
+   too) — hide them from the dropdown so it's not just a confusing 403. */
+var ROLE_RANK = {user: 0, admin: 1, superuser: 2, owner: 3};
+function restrictRoleOptions() {
+  var myRank = ROLE_RANK[window._henwenRole] || 0;
+  document.querySelectorAll('#uf-role option').forEach(function(opt) {
+    var hide = (ROLE_RANK[opt.value] || 0) > myRank;
+    opt.disabled = hide;
+    opt.style.display = hide ? 'none' : '';
+  });
+}
+
 function showCreateUserForm() {
   document.getElementById('user-form-card').style.display = '';
   document.getElementById('user-form-title').textContent = 'New User';
   document.getElementById('uf-id').value            = '';
   document.getElementById('uf-username').value      = '';
   document.getElementById('uf-username').disabled   = false;
+  restrictRoleOptions();
   document.getElementById('uf-role').value          = 'user';
   document.getElementById('uf-password').value      = '';
   document.getElementById('uf-password2').value     = '';
@@ -5944,6 +6025,7 @@ function editUser(id, username, role, idleTimeoutSecs) {
   document.getElementById('uf-id').value            = id;
   document.getElementById('uf-username').value      = username;
   document.getElementById('uf-username').disabled   = true;
+  restrictRoleOptions();
   document.getElementById('uf-role').value          = role;
   document.getElementById('uf-password').value      = '';
   document.getElementById('uf-password2').value     = '';

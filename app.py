@@ -512,6 +512,15 @@ def get_db():
         last_poll_error    TEXT
     )""")
     conn.commit()
+    # Per-node lockout: presence of a row means that node is locked by its
+    # Owner. Only one lockout state per node, so `node` is the primary key
+    # rather than an autoincrement id.
+    conn.execute("""CREATE TABLE IF NOT EXISTS node_lockouts (
+        node       TEXT PRIMARY KEY,
+        locked_by  TEXT NOT NULL DEFAULT '',
+        locked_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    )""")
+    conn.commit()
     # Kiosk-editable scheduled-net reminders — shared across all visitors (not
     # per-user like favorites), since a net schedule is repeater-wide info.
     # A row is either 'weekly' (repeats every week on `weekday`, 0=Monday..
@@ -603,11 +612,31 @@ def set_setting(key, value):
 
 
 # ---------------------------------------------------------------------------
+# Node lockout (Owner-only)
+# ---------------------------------------------------------------------------
+def get_locked_nodes():
+    """{node: {'locked_by': ..., 'locked_at': ...}} for every currently-locked node."""
+    rows = get_db().execute("SELECT node, locked_by, locked_at FROM node_lockouts").fetchall()
+    return {r["node"]: {"locked_by": r["locked_by"], "locked_at": r["locked_at"]} for r in rows}
+
+
+def is_any_node_locked():
+    return get_db().execute("SELECT 1 FROM node_lockouts LIMIT 1").fetchone() is not None
+
+
+# ---------------------------------------------------------------------------
 # Authentication
 # ---------------------------------------------------------------------------
+# Role hierarchy, low to high. Used to stop a caller from assigning or
+# managing an account at a role above their own (e.g. a Superuser granting
+# themselves or someone else 'owner').
+ROLE_RANK = {'user': 0, 'admin': 1, 'superuser': 2, 'owner': 3}
+
+
 def is_auth_configured():
     try:
-        row = get_db().execute("SELECT id FROM users WHERE role='superuser'").fetchone()
+        row = get_db().execute(
+            "SELECT id FROM users WHERE role IN ('owner', 'superuser')").fetchone()
         return row is not None
     except Exception:
         return False
@@ -691,6 +720,17 @@ def check_auth():
                 role = row['role']
                 session['role'] = role
 
+    # Node lockout: while the Owner has locked any node, every other role
+    # (including Superuser/Admin) is read-only system-wide — only GET/HEAD/
+    # OPTIONS requests pass. This is a stricter, cross-cutting rule layered
+    # on top of every endpoint's own role check below, so it's enforced here
+    # once rather than at each of the ~30 individual gates scattered through
+    # the route functions. Public endpoints (including login/logout) already
+    # returned above and are never touched by this.
+    if logged_in and role != 'owner' and request.method not in ('GET', 'HEAD', 'OPTIONS') \
+            and is_any_node_locked():
+        return jsonify({"error": "Locked by the node owner", "locked": True}), 423
+
     if endpoint in _USER_OR_ABOVE:
         if not logged_in:
             return jsonify({"error": "Authentication required"}), 401
@@ -702,7 +742,7 @@ def check_auth():
             return jsonify({"error": "Authentication required"}), 401
         return redirect(url_for('login'))
 
-    if role not in ('admin', 'superuser'):
+    if role not in ('admin', 'superuser', 'owner'):
         if request.path.startswith('/api/'):
             return jsonify({"error": "Admin access required"}), 403
         return redirect(url_for('status_board'))
@@ -751,19 +791,21 @@ def login():
                 return render_template("login.html", setup_mode=True,
                                        error="Passwords do not match.")
             db = get_db()
+            # The very first account is the node Owner — top of the role
+            # hierarchy, since there's no one else yet to have granted it.
             db.execute("INSERT OR REPLACE INTO users (username, password_hash, role) VALUES (?,?,?)",
-                       (username, generate_password_hash(password), "superuser"))
+                       (username, generate_password_hash(password), "owner"))
             db.commit()
             new_user = db.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
             session.clear()
             session["logged_in"]    = True
             session["username"]     = username
-            session["role"]         = "superuser"
+            session["role"]         = "owner"
             session["user_id"]      = new_user["id"]
             session["idle_timeout"] = new_user["session_idle_timeout"] if new_user["session_idle_timeout"] is not None else SESSION_IDLE_TIMEOUT
             session["sid"] = secrets.token_hex(16)
             touch_active_session(session["sid"], username)
-            log("INFO", f"[AUTH] Initial account created for '{username}'")
+            log("INFO", f"[AUTH] Initial account created for '{username}' (role=owner)")
             return redirect(url_for('index'))
 
         # Normal login
@@ -3607,7 +3649,7 @@ def api_save():
     raw     = data.get("raw_content")
 
     if raw is not None:
-        if session.get('role') != 'superuser':
+        if session.get('role') not in ('superuser', 'owner'):
             return jsonify({"error": "Superuser access required for raw editor"}), 403
         log("INFO", f"[API] /api/save raw content ({len(raw)} bytes)")
         try:
@@ -3827,7 +3869,7 @@ def api_backup_restore(name):
 
 @app.route("/api/backups/<name>", methods=["DELETE"])
 def api_backup_delete(name):
-    if session.get('role') != 'superuser':
+    if session.get('role') not in ('superuser', 'owner'):
         return jsonify({"error": "Superuser access required to delete backups"}), 403
     if not re.match(r'^rpt\.conf\.\d{8}_\d{6}\.bak$', name):
         return jsonify({"error": "Invalid filename"}), 400
@@ -4057,10 +4099,14 @@ def api_users_create():
         return jsonify({"error": "Username must be 2-32 chars: letters, digits, _ . -"}), 400
     if len(password) < 8:
         return jsonify({"error": "Password must be at least 8 characters."}), 400
-    if role not in ("superuser", "admin", "user"):
-        return jsonify({"error": "Role must be superuser, admin, or user"}), 400
+    if role not in ("owner", "superuser", "admin", "user"):
+        return jsonify({"error": "Role must be owner, superuser, admin, or user"}), 400
+    # No one may grant a role above their own — otherwise a Superuser could
+    # promote themselves (or anyone) straight to Owner.
+    if ROLE_RANK.get(role, 0) > ROLE_RANK.get(caller_role, -1):
+        return jsonify({"error": "You cannot assign a role higher than your own"}), 403
     # Admins can only create user-level accounts
-    if caller_role == 'admin' and role in ('superuser', 'admin'):
+    if caller_role == 'admin' and role in ('owner', 'superuser', 'admin'):
         return jsonify({"error": "Admins can only create user accounts"}), 403
     db = get_db()
     try:
@@ -4082,9 +4128,15 @@ def api_users_update(uid):
     if not user:
         return jsonify({"error": "User not found"}), 404
     new_role = str(data.get("role", user["role"])).strip()
-    # Admins cannot elevate accounts to admin/superuser, or edit existing elevated accounts
-    if caller_role == 'admin' and (user["role"] in ('superuser', 'admin') or
-                                    new_role in ('superuser', 'admin')):
+    # No one may manage an account ranked above their own, or assign a role
+    # above their own — otherwise a Superuser could edit/promote an Owner,
+    # or promote someone (including themselves) straight to Owner.
+    if (ROLE_RANK.get(user["role"], 0) > ROLE_RANK.get(caller_role, -1) or
+            ROLE_RANK.get(new_role, 0) > ROLE_RANK.get(caller_role, -1)):
+        return jsonify({"error": "You cannot manage an account ranked above your own"}), 403
+    # Admins cannot elevate accounts to owner/admin/superuser, or edit existing elevated accounts
+    if caller_role == 'admin' and (user["role"] in ('owner', 'superuser', 'admin') or
+                                    new_role in ('owner', 'superuser', 'admin')):
         return jsonify({"error": "Admins can only manage user accounts"}), 403
     # Prevent removing the last superuser
     if user["role"] == "superuser" and new_role != "superuser":
@@ -4094,8 +4146,8 @@ def api_users_update(uid):
     updates = []
     params  = []
     if "role" in data:
-        if new_role not in ("superuser", "admin", "user"):
-            return jsonify({"error": "Role must be superuser, admin, or user"}), 400
+        if new_role not in ("owner", "superuser", "admin", "user"):
+            return jsonify({"error": "Role must be owner, superuser, admin, or user"}), 400
         updates.append("role=?"); params.append(new_role)
     if "password" in data:
         pw = data["password"]
@@ -4134,7 +4186,9 @@ def api_users_delete(uid):
         return jsonify({"error": "User not found"}), 404
     if session.get("user_id") == uid:
         return jsonify({"error": "Cannot delete your own account."}), 400
-    if caller_role == 'admin' and user["role"] in ('superuser', 'admin'):
+    if ROLE_RANK.get(user["role"], 0) > ROLE_RANK.get(caller_role, -1):
+        return jsonify({"error": "You cannot delete an account ranked above your own"}), 403
+    if caller_role == 'admin' and user["role"] in ('owner', 'superuser', 'admin'):
         return jsonify({"error": "Admins can only manage user accounts"}), 403
     if user["role"] == "superuser":
         su_count = db.execute("SELECT COUNT(*) FROM users WHERE role='superuser'").fetchone()[0]
@@ -4656,7 +4710,7 @@ def api_ami_perm_connect():
 
 @app.route("/api/sysinfo")
 def api_sysinfo():
-    if session.get("role") not in ("admin", "superuser"):
+    if session.get("role") not in ("admin", "superuser", "owner"):
         return jsonify({"error": "Admin access required"}), 403
     creds       = parse_manager_conf()
     ami_user    = creds.get("user") or "NOT CONFIGURED"
@@ -4700,6 +4754,7 @@ def api_status_board():
             "SELECT local_node, target_node FROM connectors WHERE enabled=1 AND state='connected'"
         ).fetchall()
     }
+    locked_nodes = get_locked_nodes()
 
     node_data = []
     for node in nodes:
@@ -4778,6 +4833,8 @@ def api_status_board():
             "own_keyups": own_keyups,
             "connected":  connected_details,
             "stale":      cached.get("stale", True),
+            "locked":     node in locked_nodes,
+            "locked_by":  locked_nodes.get(node, {}).get("locked_by"),
         })
 
     resp = jsonify({
@@ -4796,12 +4853,43 @@ def api_status_board():
     return resp
 
 
+@app.route("/api/nodes/<node>/lockout", methods=["POST"])
+def api_node_lockout(node):
+    """
+    Owner-only. Locking a node puts the whole system into a system-wide,
+    read-only lockout (enforced once, centrally, in check_auth()) for every
+    role but Owner — Superuser and Admin included. The lock state itself is
+    tracked per node so the Owner can see/target which node they locked,
+    even though the practical effect while any node is locked is global.
+    """
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the node owner can lock or unlock a node"}), 403
+    content = read_conf_file(RPT_CONF_PATH)
+    valid_nodes = get_node_numbers(content) if content else []
+    if node not in valid_nodes:
+        return jsonify({"error": f"Unknown node {node}"}), 400
+    data   = request.json or {}
+    locked = bool(data.get("locked", True))
+    db = get_db()
+    if locked:
+        db.execute(
+            "INSERT INTO node_lockouts (node, locked_by, locked_at) VALUES (?,?,datetime('now')) "
+            "ON CONFLICT(node) DO UPDATE SET locked_by=excluded.locked_by, locked_at=excluded.locked_at",
+            (node, session.get('username', ''))
+        )
+    else:
+        db.execute("DELETE FROM node_lockouts WHERE node=?", (node,))
+    db.commit()
+    log("INFO", f"[LOCKOUT] Node {node} {'locked' if locked else 'unlocked'} by {session.get('username', '')}")
+    return jsonify({"ok": True, "node": node, "locked": locked})
+
+
 @app.route("/api/status/active_users")
 def api_status_active_users():
     """Superuser-only detail behind the footer's 'Logged in: N' count — who's
     actually logged in, their role, and how long each has been idle. Everyone
     else (including admins) only ever sees the plain count from api_status_board."""
-    if session.get('role') != 'superuser':
+    if session.get('role') not in ('superuser', 'owner'):
         return jsonify({"error": "Superuser access required"}), 403
     resp = jsonify({"users": get_active_sessions_detail()})
     resp.headers["Cache-Control"] = "no-store"
@@ -4881,7 +4969,7 @@ def api_status_connect():
     # session could otherwise hit this endpoint directly and stack links).
     if caller_role == 'user' and get_cached_status(local_node).get('connected'):
         return jsonify({"error": "Only one connection at a time is allowed for your account. Disconnect the current node first."}), 403
-    permanent   = bool(data.get("permanent", False)) and caller_role in ('admin', 'superuser')
+    permanent   = bool(data.get("permanent", False)) and caller_role in ('admin', 'superuser', 'owner')
     monitor     = bool(data.get("monitor", False))
     # ilink 3  = transient transceive (default — remote can drop it, no auto-reconnect)
     # ilink 13 = permanent transceive (auto-reconnects if far end drops it)
@@ -4955,7 +5043,7 @@ def api_status_disconnect():
     # against live connector state (not client-supplied data) so a user-role
     # session can't just omit the info to bypass this.
     caller_role = session.get('role', '')
-    if caller_role not in ('admin', 'superuser'):
+    if caller_role not in ('admin', 'superuser', 'owner'):
         db = get_db()
         managed = db.execute(
             "SELECT 1 FROM connectors WHERE enabled=1 AND state='connected' "
@@ -4988,7 +5076,7 @@ def api_status_squash_idle():
     connect time) — so this only sets a distinct 'no_timeout' flag that the
     idle-timeout poller skips, and issues no AMI command at all.
     """
-    if session.get('role') not in ('admin', 'superuser'):
+    if session.get('role') not in ('admin', 'superuser', 'owner'):
         return jsonify({"error": "Admin access required"}), 403
     data        = request.json or {}
     local_node  = str(data.get("local_node",  "")).strip()
@@ -5018,7 +5106,7 @@ def api_status_reset_idle():
     """Reset the idle-timeout clock for a temporary connection back to zero, without
     making it permanent — the connection still auto-disconnects after the configured
     idle timeout, just measured from now instead of whenever it last went idle."""
-    if session.get('role') not in ('admin', 'superuser'):
+    if session.get('role') not in ('admin', 'superuser', 'owner'):
         return jsonify({"error": "Admin access required"}), 403
     data        = request.json or {}
     local_node  = str(data.get("local_node",  "")).strip()
@@ -5058,7 +5146,7 @@ def api_tx_config():
     this keys an RF transmitter under the club callsign, so it's gated at
     least as tightly as the other RF-consequential features. ?probe=1 answers
     availability only (no secret, no log line) for deciding button visibility."""
-    if session.get('role') not in ('admin', 'superuser'):
+    if session.get('role') not in ('admin', 'superuser', 'owner'):
         return jsonify({"error": "Admin access required"}), 403
     try:
         with open(TX_SECRET_PATH) as f:
@@ -5107,7 +5195,7 @@ def api_tx_diagnostics():
          themselves — reused rather than reimplemented so the two never
          drift apart.
     """
-    if session.get('role') not in ('admin', 'superuser'):
+    if session.get('role') not in ('admin', 'superuser', 'owner'):
         return jsonify({"error": "Admin access required"}), 403
 
     checks = []
@@ -5887,7 +5975,7 @@ def api_asterisk_log():
       lines  (int, default 100, max 2000)
       filter (str, optional) — case-insensitive substring filter
     """
-    if session.get('role') != 'superuser':
+    if session.get('role') not in ('superuser', 'owner'):
         return jsonify({"error": "Superuser access required"}), 403
     try:
         n = min(int(request.args.get("lines", 100)), 2000)
@@ -5940,7 +6028,7 @@ def api_diagnostics():
     /api/asterisk/log).
     """
     role = session.get("role", "")
-    if role not in ("admin", "superuser"):
+    if role not in ("admin", "superuser", "owner"):
         return jsonify({"error": "Admin access required"}), 403
     try:
         limit = min(int(request.args.get("lines", 400)), 1500)
@@ -6027,7 +6115,7 @@ def api_asterisk_verbose():
     Body: {"level": N}  where N is 0–9.
     Equivalent to running 'asterisk -rvvv' (level=3) from the command line.
     """
-    if session.get('role') != 'superuser':
+    if session.get('role') not in ('superuser', 'owner'):
         return jsonify({"error": "Superuser access required"}), 403
     data = request.get_json(force=True)
     try:
@@ -6057,7 +6145,7 @@ def api_asterisk_command():
     A small blocklist prevents commands that could stop or restart Asterisk
     from the CLI page (dedicated buttons exist for restart/reload).
     """
-    if session.get('role') != 'superuser':
+    if session.get('role') not in ('superuser', 'owner'):
         return jsonify({"error": "Superuser access required"}), 403
     data = request.get_json(force=True)
     cmd  = str(data.get("command", "")).strip()
@@ -6125,7 +6213,7 @@ def api_update_launch():
     than a plain subprocess so the script survives outside HenWen.service's
     cgroup: `systemctl restart HenWen` at the end of the script would
     otherwise kill the very process running it."""
-    if session.get('role') != 'superuser':
+    if session.get('role') not in ('superuser', 'owner'):
         return jsonify({"error": "Superuser access required"}), 403
 
     if not os.path.exists(UPDATE_SCRIPT_PATH):
@@ -6276,7 +6364,7 @@ PORT_MAX = 65535
 
 @app.route("/api/settings/ports")
 def api_get_ports():
-    if session.get('role') != 'superuser':
+    if session.get('role') not in ('superuser', 'owner'):
         return jsonify({"error": "Superuser access required"}), 403
     return jsonify({
         "flask_port":          PORT,
@@ -6309,7 +6397,7 @@ def api_set_ports():
     moment gunicorn rebinds, so the caller needs the new port back to know
     where to navigate next.
     """
-    if session.get('role') != 'superuser':
+    if session.get('role') not in ('superuser', 'owner'):
         return jsonify({"error": "Superuser access required"}), 403
 
     data            = request.json or {}
@@ -6495,7 +6583,7 @@ def api_lookup(node):
 
 @app.route("/api/debug/nodedb")
 def api_debug_nodedb():
-    if session.get("role") not in ("admin", "superuser"):
+    if session.get("role") not in ("admin", "superuser", "owner"):
         return jsonify({"error": "Admin access required"}), 403
     astdb_status = {}
     for path in ASTDB_PATHS:
@@ -8618,7 +8706,7 @@ def start_id_monitor():
 
 @app.route("/api/id")
 def api_id_list():
-    if session.get('role') != 'superuser':
+    if session.get('role') not in ('superuser', 'owner'):
         return jsonify({"error": "Superuser access required"}), 403
     db   = get_db()
     rows = db.execute("SELECT * FROM id_configs ORDER BY name COLLATE NOCASE").fetchall()
@@ -8645,7 +8733,7 @@ def api_id_list():
 
 @app.route("/api/id", methods=["POST"])
 def api_id_create():
-    if session.get('role') != 'superuser':
+    if session.get('role') not in ('superuser', 'owner'):
         return jsonify({"error": "Superuser access required"}), 403
     data = request.json or {}
     name           = str(data.get("name",           "")).strip()
@@ -8678,7 +8766,7 @@ def api_id_create():
 
 @app.route("/api/id/<int:iid>", methods=["PATCH"])
 def api_id_update(iid):
-    if session.get('role') != 'superuser':
+    if session.get('role') not in ('superuser', 'owner'):
         return jsonify({"error": "Superuser access required"}), 403
     db  = get_db()
     row = db.execute("SELECT * FROM id_configs WHERE id=?", (iid,)).fetchone()
@@ -8712,7 +8800,7 @@ def api_id_update(iid):
 
 @app.route("/api/id/<int:iid>", methods=["DELETE"])
 def api_id_delete(iid):
-    if session.get('role') != 'superuser':
+    if session.get('role') not in ('superuser', 'owner'):
         return jsonify({"error": "Superuser access required"}), 403
     db  = get_db()
     row = db.execute("SELECT * FROM id_configs WHERE id=?", (iid,)).fetchone()
@@ -8728,7 +8816,7 @@ def api_id_delete(iid):
 
 @app.route("/api/id/<int:iid>/toggle", methods=["POST"])
 def api_id_toggle(iid):
-    if session.get('role') != 'superuser':
+    if session.get('role') not in ('superuser', 'owner'):
         return jsonify({"error": "Superuser access required"}), 403
     db  = get_db()
     row = db.execute("SELECT * FROM id_configs WHERE id=?", (iid,)).fetchone()
@@ -8746,7 +8834,7 @@ def api_id_toggle(iid):
 
 @app.route("/api/id/<int:iid>/play", methods=["POST"])
 def api_id_play(iid):
-    if session.get('role') != 'superuser':
+    if session.get('role') not in ('superuser', 'owner'):
         return jsonify({"error": "Superuser access required"}), 403
     db  = get_db()
     row = db.execute("SELECT * FROM id_configs WHERE id=?", (iid,)).fetchone()
@@ -8765,7 +8853,7 @@ def api_id_play(iid):
 @app.route("/api/id/upload", methods=["POST"])
 def api_id_upload():
     """Upload and convert a sound file; returns the Asterisk-relative path for use in sound_path."""
-    if session.get('role') != 'superuser':
+    if session.get('role') not in ('superuser', 'owner'):
         return jsonify({"error": "Superuser access required"}), 403
     if "file" not in request.files:
         return jsonify({"error": "No file"}), 400
@@ -8867,7 +8955,7 @@ def api_dtmf_cop():
         return jsonify({"error": "node must be numeric"}), 400
     if not function.isdigit():
         return jsonify({"error": "function must be a positive integer"}), 400
-    if int(function) not in _DTMF_COP_ADMIN_SAFE and session.get('role') != 'superuser':
+    if int(function) not in _DTMF_COP_ADMIN_SAFE and session.get('role') not in ('superuser', 'owner'):
         return jsonify({"error": f"cop {function} requires a superuser account"}), 403
     if function == "1" and not confirm:
         return jsonify({"error": "cop 1 kills the entire Asterisk process (killall -9 asterisk) "
@@ -8897,7 +8985,7 @@ def api_dtmf_status():
         return jsonify({"error": "node must be numeric"}), 400
     if not function.isdigit():
         return jsonify({"error": "function must be a positive integer"}), 400
-    if int(function) not in _DTMF_STATUS_ADMIN_SAFE and session.get('role') != 'superuser':
+    if int(function) not in _DTMF_STATUS_ADMIN_SAFE and session.get('role') not in ('superuser', 'owner'):
         return jsonify({"error": f"status {function} requires a superuser account"}), 403
     def _send(ami):
         lines = ami.command(f"rpt cmd {node} status {function}")

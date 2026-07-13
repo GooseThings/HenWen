@@ -18,7 +18,7 @@ A browser-based web interface for managing and using your AllStarLink 3 node. Al
 - **Announcements** — upload audio files, or type a message and have it read aloud via text-to-speech, and schedule either to play on a node at configured times
 - **Weather Alerts** — automatically play Tornado/Severe Thunderstorm/Flash Flood alerts from the National Weather Service on your node, repeating at an interval for as long as they stay active, no manual action needed once configured
 - **Node ID** — FCC-compliant background ID monitor: plays a sound file on key-up, on interval during continuous activity, and after the node goes idle
-- **Multi-user accounts** — Superuser, Admin, and User (Kiosk) roles; kiosk accounts can connect/disconnect nodes but cannot access settings
+- **Multi-user accounts** — Owner, Superuser, Admin, and User (Kiosk) roles; kiosk accounts can connect/disconnect nodes but cannot access settings; an Owner can lock a node to put everyone else in read-only mode
 - **Asterisk Console** — live log viewer, CLI command runner, and verbosity control, all from the browser
 - Automatic `rpt.conf` backups on every save
 - Dashboard with system vitals, AMI diagnostics, and a Reload/Restart Asterisk button
@@ -67,7 +67,7 @@ Open a browser and go to:
 http://YOUR_NODE_IP:5000
 ```
 
-The first time you visit, you will be prompted to create the **initial Superuser account**. This account has full access to everything. Set a strong password — it is stored as a salted hash and cannot be recovered if lost.
+The first time you visit, you will be prompted to create the **initial Owner account**. This account has full access to everything, plus exclusive Node Lockout control. Set a strong password — it is stored as a salted hash and cannot be recovered if lost.
 
 After creating the account you will be logged in and taken to the Dashboard.
 
@@ -228,11 +228,16 @@ Manage accounts under **Manager → User Management**.
 
 | Role | Access |
 |------|--------|
+| **Owner** | Everything a Superuser has, plus **Node Lockout** — can lock a node to put the whole system read-only for every other role, itself exempt |
 | **Superuser** | Full access including raw `rpt.conf` editor |
 | **Admin** | Full access except raw editor |
 | **User (Kiosk)** | Connect/disconnect nodes only; no settings |
 
 Kiosk accounts can be given a **Favorites** list of pre-configured nodes to connect to quickly from the Status Board.
+
+### Node Lockout
+
+Under **Manager → Node Control → Node Lockout**, an Owner account can lock any locally-hosted node. While any node is locked, every other role — Admin and Superuser included — is limited to read-only access system-wide (viewing pages still works; anything that changes state, including kiosk connect/disconnect, is refused with a "Locked by the node owner" error) until an Owner unlocks it. The Status Board's Node card shows a **LOCKED** badge whenever the node is in this state.
 
 ---
 

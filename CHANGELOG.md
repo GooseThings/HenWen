@@ -1,5 +1,11 @@
 # Changelog
 
+## v2026.07.13
+
+- **Added: Owner role and Node Lockout.** A new top-tier `owner` role has every Superuser privilege plus one more: the ability to lock a node (Manager → Node Control → Node Lockout). While any node is locked, every other role — Superuser and Admin included — is limited to read-only access system-wide; any mutating request (kiosk connect/disconnect, settings changes, everything) is refused with a 423 "Locked by the node owner" until an Owner unlocks it. Enforced once, centrally, in `check_auth()` rather than at each individual route's own role check. The Status Board's Node card shows a **LOCKED** badge whenever the node is in this state. Lock state is tracked per node in a new `node_lockouts` table.
+- **Changed: the very first account created during initial setup is now the Owner**, not the Superuser — since Owner sits above Superuser, bootstrapping any other way would leave no account able to reach it. `is_auth_configured()` now recognizes either role, so upgraded installs with an existing Superuser and no Owner don't re-trigger setup mode.
+- **Fixed: a Superuser could promote any account (including their own) straight to Owner**, bypassing the hierarchy entirely. User management (`/api/users` create/update/delete) now enforces a strict role rank (user < admin < superuser < owner): no caller can grant a role above their own, or edit/delete an account ranked above their own. The Manager's user-role dropdown also hides options above the caller's rank client-side.
+
 ## v2026.07.10.2
 
 - **Fixed: every rpt.conf save from the settings editor failed silently.** `/api/save`'s funcchar/endchar cross-field check called `parse_rpt_conf()`, a function that doesn't exist — every save (any node or the general stanza, any field) hit a `NameError` and 500'd. The activity log did report the failure, but nothing changed in the UI otherwise, so it looked like clicking Save simply did nothing. Now uses the existing `parse_stanza_settings()` helper, which already resolves a stanza's effective (template + own-override) values.

@@ -198,6 +198,9 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   color: var(--text2); }
 .keyed-label.healthy { color: var(--green); }
 .keyed-label.down { color: var(--danger); }
+.locked-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 0.72rem;
+  font-weight: 700; letter-spacing: .06em; text-transform: uppercase; padding: 2px 8px;
+  border-radius: 3px; margin-top: 4px; background: rgba(219,68,55,.15); color: var(--danger); }
 .link-count { font-size: 0.82rem; color: var(--text2); }
 .link-count span { color: var(--text); font-weight: 600; }
 
@@ -1559,6 +1562,7 @@ async function refreshBoard() {
           '</div>' +
           '<div class="keyed-label ' + (healthy ? 'healthy' : 'down') + '">' + (healthy ? 'ONLINE' : 'OFFLINE') + '</div>' +
         '</div>' +
+        (n.locked ? '<div class="locked-badge" title="' + esc(n.locked_by ? 'Locked by ' + n.locked_by : 'Locked by the node owner') + '">&#128274; LOCKED</div>' : '') +
         '<div class="link-count">Linked: <span>' + (n.connected ? n.connected.length : 0) + '</span>' +
           ' &nbsp;·&nbsp; Keyups: <span>' + (n.own_keyups || 0) + '</span></div>';
     }
@@ -1618,7 +1622,7 @@ async function refreshBoard() {
           var secs = c.idle_elapsed % 60;
           var ts   = mins + ':' + (secs < 10 ? '0' : '') + secs;
           var warn = (typeof c.idle_remaining === 'number') && c.idle_remaining < 120;
-          var isAdmin = window._kioskRole === 'admin' || window._kioskRole === 'superuser';
+          var isAdmin = window._kioskRole === 'admin' || window._kioskRole === 'superuser' || window._kioskRole === 'owner';
           /* The ✕ inside the badge dismisses the idle timeout itself (No
              Timeout); Reset just puts the countdown back to zero. */
           var squashX = isAdmin
@@ -1637,7 +1641,7 @@ async function refreshBoard() {
         }
         var badges = modeBadge + idleBadge;
         var dotClass = !isConn ? ' connecting' : (c.keyed ? ' keyed' : '');
-        var isAdminRole = window._kioskRole === 'admin' || window._kioskRole === 'superuser';
+        var isAdminRole = window._kioskRole === 'admin' || window._kioskRole === 'superuser' || window._kioskRole === 'owner';
         var dcBtn = (c.connector_managed && !isAdminRole)
           ? '<button class="sb-btn disconnect" data-label="X" disabled ' +
               'style="opacity:.4;cursor:not-allowed" ' +
@@ -2084,7 +2088,7 @@ async function kioskLogin() {
     closeKioskModal();
     updateKioskUserBar(d.username, d.role);
     var pl = document.getElementById('perm-label');
-    if (pl) pl.style.display = (d.role === 'admin' || d.role === 'superuser') ? '' : 'none';
+    if (pl) pl.style.display = (d.role === 'admin' || d.role === 'superuser' || d.role === 'owner') ? '' : 'none';
     _txUpdateBtn();
     _searchUpdateBtn();
     loadFavorites();
@@ -2141,7 +2145,7 @@ async function checkKioskSession() {
   }
   /* Show Permanent checkbox only for admin/superuser */
   var pl = document.getElementById('perm-label');
-  if (pl) pl.style.display = (window._kioskRole === 'admin' || window._kioskRole === 'superuser') ? '' : 'none';
+  if (pl) pl.style.display = (window._kioskRole === 'admin' || window._kioskRole === 'superuser' || window._kioskRole === 'owner') ? '' : 'none';
 
   /* TX button: admin/superuser + HTTPS + feature configured server-side */
   _txUpdateBtn();
@@ -2151,7 +2155,7 @@ async function checkKioskSession() {
      admins) just sees the plain count, same as today. */
   var auToggle = document.getElementById('f-active-users-toggle');
   if (auToggle) {
-    if (window._kioskRole === 'superuser') {
+    if (window._kioskRole === 'superuser' || window._kioskRole === 'owner') {
       auToggle.style.cursor = 'pointer';
       auToggle.title = "Click to see who's logged in";
       auToggle.onclick = toggleActiveUsersPanel;
@@ -2204,7 +2208,7 @@ function renderFavorites() {
   var localNode = (window._lastBoardNodes && window._lastBoardNodes[0])
                   ? window._lastBoardNodes[0].node : '';
 
-  var isAdmin = (window._kioskRole === 'admin' || window._kioskRole === 'superuser');
+  var isAdmin = (window._kioskRole === 'admin' || window._kioskRole === 'superuser' || window._kioskRole === 'owner');
   /* Warning banner only applies to kiosk users who are limited to one connection */
   fw.style.display = (anyConn && !isAdmin) ? '' : 'none';
   fc.textContent   = _favorites.length + ' saved';
@@ -2255,7 +2259,7 @@ function renderFavorites() {
 async function favConnect(localNode, remoteNode, btn) {
   var role = window._kioskRole || '';
   /* Single-connection rule applies to user role only */
-  if (role !== 'admin' && role !== 'superuser') {
+  if (role !== 'admin' && role !== 'superuser' && role !== 'owner') {
     var connSet = {};
     (window._lastBoardNodes || []).forEach(function(n) {
       (n.connected || []).forEach(function(c) { connSet[c.node] = true; });
@@ -2271,7 +2275,7 @@ async function favConnect(localNode, remoteNode, btn) {
 
 async function favMonitor(localNode, remoteNode, btn) {
   var role = window._kioskRole || '';
-  if (role !== 'admin' && role !== 'superuser') {
+  if (role !== 'admin' && role !== 'superuser' && role !== 'owner') {
     var connSet = {};
     (window._lastBoardNodes || []).forEach(function(n) {
       (n.connected || []).forEach(function(c) { connSet[c.node] = true; });
@@ -2456,7 +2460,7 @@ function _txSetBtn(html, color) {
 async function _txUpdateBtn() {
   var btn = document.getElementById('tx-btn');
   if (!btn) return;
-  var eligible = (window._kioskRole === 'admin' || window._kioskRole === 'superuser')
+  var eligible = (window._kioskRole === 'admin' || window._kioskRole === 'superuser' || window._kioskRole === 'owner')
                  && window.isSecureContext && navigator.mediaDevices && window.WebSocket;
   if (!eligible) { btn.style.display = 'none'; return; }
   try {
