@@ -1,5 +1,9 @@
 # Changelog
 
+## v2026.07.14
+
+- **Added: NEXRAD weather radar overlay on the kiosk network map.** A "Radar" checkbox next to the map's tile-style picker layers live composite reflectivity from Iowa Environmental Mesonet's public tile cache (same free, no-API-key posture as the existing NWS alerts feed) over the Leaflet base map. Radar tiles are excluded from the dark-mode color-invert filter so weather colors render correctly under any base style, refresh automatically every 5 minutes, and the on/off state persists across reloads.
+
 ## v2026.07.13.4
 
 - **Added: new accounts start with 4 default Favorites** (nodes 64549, 666380, 27664, 55553) instead of an empty list, so the Favorites feature has something to show right away. Fully editable/removable like any other favorite — this only seeds the list at account-creation time, never re-adds anything afterward.
