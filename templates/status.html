@@ -343,6 +343,19 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   font-size: 0.65rem; padding: 0 0 0 2px; margin-left: auto; opacity: 0.45;
   line-height: 1; flex-shrink: 0; }
 .fav-del-btn:hover { color: #f85149; opacity: 1; }
+.fav-sort-controls { margin-left: auto; display: flex; gap: 4px; align-items: center; }
+.fav-sort-select { font-size: 0.66rem; padding: 2px 4px; border-radius: 4px; border: 1px solid var(--border);
+  background: var(--bg3); color: var(--text2); cursor: pointer; }
+.fav-sort-dir-btn { background: var(--bg3); border: 1px solid var(--border); border-radius: 4px;
+  color: var(--text2); font-size: 0.7rem; padding: 2px 6px; cursor: pointer; line-height: 1; }
+.fav-sort-dir-btn:hover { color: var(--text); }
+.fav-sort-dir-btn[disabled] { opacity: 0.35; cursor: not-allowed; }
+.fav-row.fav-draggable { cursor: grab; }
+.fav-row.fav-dragging { opacity: 0.4; }
+.fav-row.fav-drag-over { border-top: 2px solid var(--accent); }
+.fav-drag-handle { cursor: grab; color: var(--text2); opacity: 0.5; font-size: 0.75rem;
+  padding-right: 2px; flex-shrink: 0; }
+.fav-drag-handle:hover { opacity: 0.9; }
 
 
 /* ── Status-board action buttons ── */
@@ -645,6 +658,15 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       <div class="card-header">
         <span class="card-title">Favorites</span>
         <span class="card-count" id="fav-count"></span>
+        <div class="fav-sort-controls">
+          <select id="fav-sort-field" class="fav-sort-select" onchange="onFavSortChange()" title="Sort favorites by">
+            <option value="custom">Custom (drag)</option>
+            <option value="node">Node #</option>
+            <option value="name">Name</option>
+            <option value="location">Location</option>
+          </select>
+          <button id="fav-sort-dir-btn" class="fav-sort-dir-btn" onclick="toggleFavSortDir()" title="Toggle sort direction">&#8593;</button>
+        </div>
       </div>
       <div id="fav-warn" class="fav-warn" style="display:none">
         &#9888; Disconnect all nodes first
@@ -2276,6 +2298,76 @@ async function checkKioskSession() {
 /* ── Favorites sidebar ── */
 var _favorites = [];
 
+/* Sort preference is view-only and per-browser (localStorage), separate from
+   the server-side custom order: "custom" displays favorites.sort_order as-is
+   (and is the only mode drag-to-reorder can edit); the other fields re-sort
+   the already-loaded list on the client without touching sort_order, so
+   switching back to Custom always returns to the persisted drag order. */
+var _favSort = {field: 'custom', dir: 'asc'};
+
+function initFavSort() {
+  try {
+    var saved = JSON.parse(localStorage.getItem('henwen_fav_sort') || 'null');
+    if (saved && saved.field) _favSort = saved;
+  } catch(e) {}
+  var sel = document.getElementById('fav-sort-field');
+  if (sel) sel.value = _favSort.field;
+  _updateFavSortDirBtn();
+}
+
+function _saveFavSort() {
+  try { localStorage.setItem('henwen_fav_sort', JSON.stringify(_favSort)); } catch(e) {}
+}
+
+function _updateFavSortDirBtn() {
+  var btn = document.getElementById('fav-sort-dir-btn');
+  if (!btn) return;
+  var isCustom = _favSort.field === 'custom';
+  btn.disabled = isCustom;
+  btn.innerHTML = _favSort.dir === 'desc' ? '&#8595;' : '&#8593;';
+  btn.title = isCustom ? 'Drag rows to reorder' :
+    (_favSort.dir === 'desc' ? 'Descending (click for ascending)' : 'Ascending (click for descending)');
+}
+
+function onFavSortChange() {
+  var sel = document.getElementById('fav-sort-field');
+  _favSort.field = sel ? sel.value : 'custom';
+  _saveFavSort();
+  _updateFavSortDirBtn();
+  renderFavorites();
+}
+
+function toggleFavSortDir() {
+  if (_favSort.field === 'custom') return;
+  _favSort.dir = (_favSort.dir === 'desc') ? 'asc' : 'desc';
+  _saveFavSort();
+  _updateFavSortDirBtn();
+  renderFavorites();
+}
+
+/* Favorites arrive from /api/favorites already in server custom order
+   (sort_order, id) — Custom mode displays that order untouched so dragging
+   always operates on the true underlying list. Other modes return a sorted
+   copy for display only. */
+function _favoritesForDisplay() {
+  if (_favSort.field === 'custom') return _favorites;
+  var dir = (_favSort.dir === 'desc') ? -1 : 1;
+  var field = _favSort.field;
+  return _favorites.slice().sort(function(a, b) {
+    var av, bv;
+    if (field === 'node') {
+      av = parseInt(a.node, 10) || 0; bv = parseInt(b.node, 10) || 0;
+    } else if (field === 'location') {
+      av = (a.location || '').toLowerCase(); bv = (b.location || '').toLowerCase();
+    } else {
+      av = (a.label || a.callsign || '').toLowerCase(); bv = (b.label || b.callsign || '').toLowerCase();
+    }
+    if (av < bv) return -1 * dir;
+    if (av > bv) return 1 * dir;
+    return 0;
+  });
+}
+
 async function loadFavorites() {
   try {
     var r = await apiFetch('/api/favorites', {cache: 'no-store'});
@@ -2284,6 +2376,54 @@ async function loadFavorites() {
     _favorites = d.favorites || [];
     renderFavorites();
   } catch(e) {}
+}
+
+var _favDragNode = null;
+
+function favRowDragStart(ev, node) {
+  _favDragNode = node;
+  ev.currentTarget.classList.add('fav-dragging');
+  ev.dataTransfer.effectAllowed = 'move';
+  try { ev.dataTransfer.setData('text/plain', node); } catch(e) {}
+}
+
+function favRowDragOver(ev) {
+  ev.preventDefault();
+  ev.currentTarget.classList.add('fav-drag-over');
+}
+
+function favRowDragLeave(ev) {
+  ev.currentTarget.classList.remove('fav-drag-over');
+}
+
+function favRowDragEnd(ev) {
+  ev.currentTarget.classList.remove('fav-dragging');
+  document.querySelectorAll('.fav-drag-over').forEach(function(el) { el.classList.remove('fav-drag-over'); });
+}
+
+async function favRowDrop(ev, targetNode) {
+  ev.preventDefault();
+  ev.currentTarget.classList.remove('fav-drag-over');
+  var dragNode = _favDragNode;
+  _favDragNode = null;
+  if (!dragNode || dragNode === targetNode) return;
+
+  var fromIdx = _favorites.findIndex(function(f) { return f.node === dragNode; });
+  var toIdx   = _favorites.findIndex(function(f) { return f.node === targetNode; });
+  if (fromIdx === -1 || toIdx === -1) return;
+
+  var moved = _favorites.splice(fromIdx, 1)[0];
+  _favorites.splice(toIdx, 0, moved);
+  renderFavorites();
+
+  try {
+    var r = await apiFetch('/api/favorites/reorder', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({order: _favorites.map(function(f) { return f.node; })})
+    });
+    if (!r.ok) loadFavorites();  /* resync on failure (e.g. session expired) */
+  } catch(e) { loadFavorites(); }
 }
 
 function renderFavorites() {
@@ -2318,11 +2458,18 @@ function renderFavorites() {
   fw.style.display = (anyConn && !isAdmin) ? '' : 'none';
   fc.textContent   = _favorites.length + ' saved';
 
-  fl.innerHTML = _favorites.map(function(f) {
+  var isCustomSort = _favSort.field === 'custom';
+
+  fl.innerHTML = _favoritesForDisplay().map(function(f) {
     var isConn  = !!connSet[f.node];
     var dot     = isConn ? '<span class="fav-conn-dot"></span>' : '';
     var name    = f.label || f.callsign || '';
     var loc     = f.location || '';
+    var handle  = isCustomSort ? '<span class="fav-drag-handle" title="Drag to reorder">&#9776;</span>' : '';
+    var dragAttrs = isCustomSort ?
+      ' draggable="true" ondragstart="favRowDragStart(event,\'' + esc(f.node) + '\')"' +
+      ' ondragover="favRowDragOver(event)" ondragleave="favRowDragLeave(event)"' +
+      ' ondrop="favRowDrop(event,\'' + esc(f.node) + '\')" ondragend="favRowDragEnd(event)"' : '';
 
     var actions;
     if (isConn && connectorManagedSet[f.node] && !isAdmin) {
@@ -2351,9 +2498,9 @@ function renderFavorites() {
         esc(localNode) + '\',\'' + esc(f.node) + '\',this)">Monitor</button>';
     }
 
-    return '<div class="fav-row">' +
+    return '<div class="fav-row' + (isCustomSort ? ' fav-draggable' : '') + '"' + dragAttrs + '>' +
       '<div class="fav-body">' +
-        '<div class="fav-top">' + dot +
+        '<div class="fav-top">' + handle + dot +
           nodeLink(f.node, 'fav-num') +
           (f.callsign ? callsignLink(f.callsign, 'fav-call', name) : (name ? '<span class="fav-call">' + esc(name) + '</span>' : '')) +
           '<button class="fav-del-btn" onclick="removeFavorite(\'' + esc(f.node) + '\')" title="Remove from Favorites">✕</button>' +
@@ -3436,6 +3583,7 @@ refreshBoard();
 refreshWeather();
 refreshActivity();
 refreshHistory();
+initFavSort();
 loadFavorites();
 checkKioskSession();
 fetchNets();

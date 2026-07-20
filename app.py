@@ -94,8 +94,8 @@ TTS_VOICES_DIR  = os.environ.get("TTS_VOICES_DIR",   "/var/lib/asterisk/henwen_t
 # shell, so a bare "piper" subprocess call would fail with FileNotFoundError.
 PIPER_BIN       = os.environ.get("PIPER_BIN",
                                   os.path.join(os.path.dirname(sys.executable), "piper"))
-SERVICE_FILE_PATH = os.environ.get("SERVICE_FILE_PATH",
-                                    f"/etc/systemd/system/{SERVICE_NAME}.service")
+_DEFAULT_SERVICE_FILE_PATH = f"/etc/systemd/system/{SERVICE_NAME}.service"
+SERVICE_FILE_PATH = os.environ.get("SERVICE_FILE_PATH", _DEFAULT_SERVICE_FILE_PATH)
 SECURE_COOKIES       = os.environ.get("SECURE_COOKIES", "false").lower() == "true"
 SESSION_IDLE_TIMEOUT = int(os.environ.get("SESSION_IDLE_TIMEOUT", "1800"))  # 30 minutes
 
@@ -164,6 +164,8 @@ SYSTEMD_RUN_PATH = "/usr/bin/systemd-run"
 if not os.path.exists(SYSTEMD_RUN_PATH):
     SYSTEMD_RUN_PATH = "/bin/systemd-run"
 UPDATE_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "update.sh")
+ROTATE_SECRET_KEY_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rotate_secret_key.sh")
+UPDATE_SERVICE_PORTS_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "update_service_ports.sh")
 
 
 def _systemctl(*args, timeout=30):
@@ -341,6 +343,18 @@ def get_db():
             conn.execute("""INSERT OR IGNORE INTO favorites (user_id, node, label, added)
                 SELECT ?, node, label, added FROM _favorites_v1""", (first["id"],))
         conn.execute("DROP TABLE IF EXISTS _favorites_v1")
+        conn.commit()
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(favorites)").fetchall()]
+    if 'sort_order' not in cols:
+        # NULL for pre-existing rows; backfilled immediately below using each
+        # row's id order (today's implicit display order) so the new custom
+        # drag-to-reorder list starts out matching what users already see
+        # instead of every row collapsing to the same rank.
+        conn.execute("ALTER TABLE favorites ADD COLUMN sort_order INTEGER")
+        conn.execute("""UPDATE favorites SET sort_order = (
+            SELECT COUNT(*) FROM favorites f2
+            WHERE f2.user_id = favorites.user_id AND f2.id <= favorites.id
+        )""")
         conn.commit()
     conn.execute("""CREATE TABLE IF NOT EXISTS settings (
         key   TEXT PRIMARY KEY,
@@ -1209,6 +1223,27 @@ class AMIClient:
         log("DEBUG", f"[AMI] CMD output lines: {len(output)}")
         return output
 
+    def module_load(self, module: str) -> bool:
+        """
+        Load an Asterisk module via the dedicated ModuleLoad AMI action.
+
+        The generic Command action blacklists CLI-equivalent commands for
+        security reasons — "Command: module load <mod>" comes back
+        "Response: Error / Message: Command blacklisted" rather than
+        actually loading anything, even though "module show"/other
+        read-only CLI commands work fine through Command. ModuleLoad is a
+        first-class AMI action specifically carved out for this and isn't
+        blacklisted. Verified live against this Asterisk build.
+        """
+        log("INFO", f"[AMI] ModuleLoad: {module!r}")
+        self._send_action({'Action': 'ModuleLoad', 'Module': module, 'LoadType': 'load'})
+        raw = self._recv_until('\r\n\r\n', timeout=self.timeout)
+        pkt = self._parse_packet(raw)
+        ok  = pkt.get('Response') == 'Success'
+        if not ok:
+            log("WARN", f"[AMI] ModuleLoad failed for {module!r}: {pkt.get('Message', raw[:200])}")
+        return ok
+
     # ── app_rpt helpers ───────────────────────────────────────────────────────
 
     def rpt_cmd(self, node: str, subcmd: str) -> dict:
@@ -1493,6 +1528,7 @@ def _poll_loop():
                             with _kiosk_temp_lock:
                                 _kiosk_temp_conns.pop((node_str, peer), None)
                             _link_prunes.append((node_str, peer))
+                            _forget_keyed(peer)
                         _prev_connected_map[node_str] = est_set
 
                         # Kiosk idle-timeout: update last_active when local or peer is keyed.
@@ -1859,6 +1895,20 @@ def _record_keyed(node: str):
             _keyed_history[0]["ts"] = entry["ts"]
         else:
             _keyed_history.appendleft(entry)
+
+
+def _forget_keyed(node: str):
+    """Drop a node's entry from the keyed history, if present.
+
+    Called on disconnect so its green activity pin disappears immediately
+    instead of lingering on the map for the rest of the configured pin
+    duration (Map Pin Duration setting) after it's no longer linked.
+    """
+    with _keyed_history_lock:
+        for i, e in enumerate(_keyed_history):
+            if e["node"] == node:
+                del _keyed_history[i]
+                break
 
 
 # ── Connection history DB helpers ──────────────────────────────────────────────
@@ -4237,11 +4287,11 @@ DEFAULT_FAVORITE_NODES = ['64549', '666380', '27664', '55553']
 
 def _seed_default_favorites(user_id):
     db = get_db()
-    for node in DEFAULT_FAVORITE_NODES:
+    for i, node in enumerate(DEFAULT_FAVORITE_NODES):
         info  = lookup_node(node)
         label = info.get("callsign") or info.get("desc") or f"Node {node}"
-        db.execute("INSERT OR IGNORE INTO favorites (user_id, node, label) VALUES (?,?,?)",
-                   (user_id, node, label))
+        db.execute("INSERT OR IGNORE INTO favorites (user_id, node, label, sort_order) VALUES (?,?,?,?)",
+                   (user_id, node, label, i))
     db.commit()
 
 
@@ -4254,7 +4304,8 @@ def api_favorites():
         return resp
     try:
         db   = get_db()
-        rows = db.execute("SELECT * FROM favorites WHERE user_id=? ORDER BY id", (user_id,)).fetchall()
+        rows = db.execute(
+            "SELECT * FROM favorites WHERE user_id=? ORDER BY sort_order, id", (user_id,)).fetchall()
         favs = [dict(r) for r in rows]
         for fav in favs:
             fav.update(lookup_node(fav["node"]))
@@ -4303,8 +4354,11 @@ def api_fav_add():
         label = info.get("callsign") or info.get("desc") or f"Node {node}"
     try:
         db = get_db()
-        db.execute("INSERT OR IGNORE INTO favorites (user_id, node, label) VALUES (?,?,?)",
-                   (user_id, node, label))
+        next_order = db.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM favorites WHERE user_id=?",
+            (user_id,)).fetchone()[0]
+        db.execute("INSERT OR IGNORE INTO favorites (user_id, node, label, sort_order) VALUES (?,?,?,?)",
+                   (user_id, node, label, next_order))
         db.commit()
         log("INFO", f"[API] Favorite added: user_id={user_id} node={node} label={label!r}")
         return jsonify({"success": True, "node": node, "label": label})
@@ -4341,6 +4395,33 @@ def api_fav_label():
         db = get_db()
         db.execute("UPDATE favorites SET label=? WHERE user_id=? AND node=?",
                    (label, user_id, node))
+        db.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/favorites/reorder", methods=["POST"])
+def api_fav_reorder():
+    """
+    Persist the custom drag-to-reorder sequence for the current user's
+    Favorites. `order` is the full list of node numbers in the desired
+    display order; sort_order is rewritten to match its index. Scoped to
+    user_id in the UPDATE, so a node number that isn't actually one of this
+    user's favorites is silently a no-op rather than an error.
+    """
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": "Authentication required"}), 401
+    data  = request.json or {}
+    order = data.get("order")
+    if not isinstance(order, list) or not order:
+        return jsonify({"error": "order must be a non-empty list of node numbers"}), 400
+    try:
+        db = get_db()
+        for idx, node in enumerate(order):
+            db.execute("UPDATE favorites SET sort_order=? WHERE user_id=? AND node=?",
+                       (idx, user_id, str(node).strip()))
         db.commit()
         return jsonify({"success": True})
     except Exception as e:
@@ -5414,19 +5495,41 @@ _audio_active = {}   # node -> _AudioBroadcast
 _AUDIO_RELAY_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'audio_relay.py')
 
 
+def _node_rxchannel(node):
+    """The node's effective `rxchannel` setting from rpt.conf, resolving
+    template inheritance (parse_stanza_settings already handles that). Used
+    by _find_node_channel() as a config-driven fallback: a node configured
+    with e.g. `rxchannel = Local/pseudo` (simplex-only, no attached
+    radio/USRP/voter hardware) never puts its node number anywhere in the
+    live channel name, Location, or Application columns the other match
+    strategies scan for — the channel is always literally named after
+    rxchannel's own value instead (e.g. `Local/pseudo@default-00000000;1`).
+    Returns None if unset, unreadable, or commented out."""
+    content = read_conf_file(RPT_CONF_PATH)
+    if content is None:
+        return None
+    entry = parse_stanza_settings(content, str(node)).get("rxchannel")
+    if not entry or entry.get("commented"):
+        return None
+    return entry.get("value", "").strip() or None
+
+
 def _find_node_channel(node):
     """
     Return the Asterisk channel name for a local node by scanning
-    'core show channels'. Matches either a channel name containing '/<node>'
-    (radio/USB-style local channels) or a Location/Application column
+    'core show channels'. Matches a channel name containing '/<node>'
+    (radio/USB-style local channels), a Location/Application column
     identifying the node (e.g. a trunked IAX2 channel running Rpt(<node>),
-    where the node number never appears in the channel name itself).
+    where the node number never appears in the channel name itself), or —
+    when neither of those find anything — a channel name literally starting
+    with the node's configured rxchannel value (see _node_rxchannel()).
     Returns None if not found.
     """
     def _cmd(ami):
         return {'lines': ami.command('core show channels')}
     try:
-        lines = ami_send_command(_cmd).get('lines', [])
+        lines  = ami_send_command(_cmd).get('lines', [])
+        rxchan = _node_rxchannel(node)
         for line in lines:
             parts = line.split()
             if not parts:
@@ -5436,6 +5539,8 @@ def _find_node_channel(node):
             if len(parts) > 1 and parts[1].startswith(f'{node}@'):
                 return parts[0]
             if f'({node})' in line:
+                return parts[0]
+            if rxchan and parts[0].startswith(rxchan):
                 return parts[0]
     except Exception as e:
         log('WARN', f'[AUDIO] channel search failed: {e}')
@@ -5904,8 +6009,8 @@ def _start_broadcast(node):
     def _ensure_mm_module(ami):
         lines = ami.command('module show like app_mixmonitor')
         if not any('app_mixmonitor' in l for l in lines):
-            ami.command('module load app_mixmonitor.so')
-            log('INFO', '[AUDIO] Loaded app_mixmonitor.so on demand')
+            if ami.module_load('app_mixmonitor.so'):
+                log('INFO', '[AUDIO] Loaded app_mixmonitor.so on demand')
         return {'ok': True}
     try:
         ami_send_command(_ensure_mm_module)
@@ -6031,7 +6136,19 @@ def api_audio_check(node):
             issues.append(f'ffmpeg probe failed: {e}')
     def _check_module(ami):
         lines = ami.command('module show like app_mixmonitor')
-        return {'loaded': any('app_mixmonitor' in l for l in lines)}
+        loaded = any('app_mixmonitor' in l for l in lines)
+        if not loaded:
+            # Same on-demand load _start_broadcast() does right before
+            # MixMonitor — app_mixmonitor.so isn't in ASL3's default module
+            # list, so on a fresh Asterisk start (or after a module unload)
+            # it's simply not loaded yet. Load it here too instead of just
+            # reporting failure, otherwise this diagnostic permanently blocks
+            # the Listen button until someone loads it by hand, even though
+            # actually starting a broadcast would have loaded it anyway.
+            if ami.module_load('app_mixmonitor.so'):
+                log('INFO', '[AUDIO] Loaded app_mixmonitor.so on demand (check)')
+                loaded = True
+        return {'loaded': loaded}
     try:
         if not ami_send_command(_check_module).get('loaded'):
             issues.append('app_mixmonitor.so not loaded in Asterisk')
@@ -6377,6 +6494,86 @@ def api_get_secret_key():
     })
 
 
+SECRET_KEY_CHARSET_RE = re.compile(r'^[A-Za-z0-9_-]{16,128}$')
+
+
+def _atomic_replace(path: str, content: str, prefix: str = ".henwen_tmp_"):
+    """Write content to path via write-to-temp-then-rename in the same
+    directory, so a reader never observes a partial file and a crash
+    mid-write never corrupts the original. Raises PermissionError if the
+    directory isn't writable by the caller — shared by every SERVICE_FILE_PATH/
+    MANAGER_CONF rewrite in this file (SECRET_KEY, ports)."""
+    fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path), prefix=prefix)
+    with os.fdopen(fd, "w") as f:
+        f.write(content)
+        f.flush()
+        os.fsync(f.fileno())
+    os.rename(tmp_path, path)
+
+
+def _write_secret_key_direct(new_key: str):
+    """Rewrite SERVICE_FILE_PATH's Environment="SECRET_KEY=..." line in
+    place. Raises PermissionError if the caller (normally the unprivileged
+    `asterisk` service account) can't write the root-owned unit file — the
+    route falls back to _write_secret_key_via_sudo_helper() when that
+    happens."""
+    with open(SERVICE_FILE_PATH) as f:
+        content = f.read()
+
+    # Matches both quoted (Environment="SECRET_KEY=...") and unquoted
+    # (Environment=SECRET_KEY=...) forms used across this project's files.
+    pattern  = re.compile(r'^Environment="?SECRET_KEY=[^"\n]*"?[ \t]*$', re.MULTILINE)
+    new_line = f'Environment="SECRET_KEY={new_key}"'
+    if pattern.search(content):
+        content = pattern.sub(new_line, content, count=1)
+    else:
+        content = re.sub(r'(\[Service\]\s*\n)', r'\1' + new_line + "\n", content, count=1)
+
+    _atomic_replace(SERVICE_FILE_PATH, content, prefix=".henwen_svc_")
+
+
+def _write_secret_key_via_sudo_helper(new_key: str):
+    """Fallback for when _write_secret_key_direct() hits PermissionError.
+    rotate_secret_key.sh is the one piece of code install.sh's sudoers rule
+    grants NOPASSWD root rights to — it does this exact edit and nothing
+    else (no reload/restart; that stays here, via the pre-existing
+    _systemctl() sudo rule). The key is piped over stdin, never argv, so it
+    never appears in `ps` output. Raises RuntimeError with the script's
+    stderr on failure (missing sudoers rule, rejected charset, etc.).
+
+    sudo's env_reset strips SERVICE_FILE_PATH/SERVICE_NAME before the script
+    ever sees them, so it always targets its own hardcoded default path —
+    correct only when SERVICE_FILE_PATH here still equals that same default.
+    Callers must not invoke this after a custom SERVICE_FILE_PATH override,
+    or the script would silently "succeed" against the wrong file while the
+    operator's actual unit file is never touched."""
+    r = subprocess.run(
+        [SUDO_PATH, "-n", ROTATE_SECRET_KEY_SCRIPT_PATH],
+        input=new_key + "\n", capture_output=True, text=True, timeout=15,
+    )
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout or f"exit code {r.returncode}").strip())
+
+
+def _write_service_ports_via_sudo_helper(new_flask_port, new_ami_port):
+    """Ports-route counterpart to _write_secret_key_via_sudo_helper() —
+    same rationale, same constraints (stdin only, default-path-only). Unlike
+    the SECRET_KEY helper this one re-derives the substitutions itself
+    rather than accepting precomputed file content: trusting content
+    computed by the unprivileged caller would let it write anything
+    (including a new ExecStart=/User=) into a root-owned unit file this same
+    sudoers rule can then daemon-reload+restart into effect. Does not touch
+    manager.conf — that file is asterisk:asterisk and the caller already
+    writes it directly."""
+    r = subprocess.run(
+        [SUDO_PATH, "-n", UPDATE_SERVICE_PORTS_SCRIPT_PATH],
+        input=f"{new_flask_port or ''}\n{new_ami_port or ''}\n",
+        capture_output=True, text=True, timeout=15,
+    )
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout or f"exit code {r.returncode}").strip())
+
+
 @app.route("/api/settings/secret_key", methods=["POST"])
 def api_set_secret_key():
     """
@@ -6388,35 +6585,33 @@ def api_set_secret_key():
     data    = request.json or {}
     new_key = str(data.get("secret_key", "")).strip()
 
-    if new_key and len(new_key) < 16:
-        return jsonify({"error": "Secret key must be at least 16 characters"}), 400
     if not new_key:
         new_key = secrets.token_hex(32)
         log("INFO", "[SETTINGS] Generated a new random SECRET_KEY")
+    elif not SECRET_KEY_CHARSET_RE.match(new_key):
+        return jsonify({"error": "Secret key must be 16-128 characters, "
+                                  "letters/numbers/underscore/hyphen only"}), 400
 
     if not os.path.exists(SERVICE_FILE_PATH):
         return jsonify({"error": f"Service file not found: {SERVICE_FILE_PATH}",
                         "hint": "Set SERVICE_FILE_PATH if the unit file lives elsewhere."}), 404
 
     try:
-        with open(SERVICE_FILE_PATH) as f:
-            content = f.read()
-
-        # Matches both quoted (Environment="SECRET_KEY=...") and unquoted
-        # (Environment=SECRET_KEY=...) forms used across this project's files.
-        pattern  = re.compile(r'^Environment="?SECRET_KEY=[^"\n]*"?[ \t]*$', re.MULTILINE)
-        new_line = f'Environment="SECRET_KEY={new_key}"'
-        if pattern.search(content):
-            content = pattern.sub(new_line, content, count=1)
-        else:
-            content = re.sub(r'(\[Service\]\s*\n)', r'\1' + new_line + "\n", content, count=1)
-
-        fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(SERVICE_FILE_PATH), prefix=".henwen_svc_")
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.rename(tmp_path, SERVICE_FILE_PATH)
+        try:
+            _write_secret_key_direct(new_key)
+        except PermissionError as direct_err:
+            if SERVICE_FILE_PATH != _DEFAULT_SERVICE_FILE_PATH:
+                # rotate_secret_key.sh always targets the default path (sudo's
+                # env_reset strips any override before the script sees it) —
+                # falling back here against a customized SERVICE_FILE_PATH
+                # would silently edit the wrong file. Skip straight to the
+                # manual-instructions error below instead.
+                raise
+            try:
+                _write_secret_key_via_sudo_helper(new_key)
+            except Exception as sudo_err:
+                raise PermissionError(
+                    f"{direct_err}; sudo fallback also failed: {sudo_err}") from direct_err
         log("INFO", f"[SETTINGS] SECRET_KEY updated in {SERVICE_FILE_PATH}")
 
         dr = _systemctl("daemon-reload", timeout=15)
@@ -6454,8 +6649,9 @@ def api_set_secret_key():
         log("ERROR", f"[SETTINGS] Permission denied writing {SERVICE_FILE_PATH}: {e}")
         return jsonify({"error": str(e),
                         "hint": f"The service account ({os.environ.get('USER', 'asterisk')}) "
-                                "cannot write the root-owned unit file directly. Rotate the "
-                                "key by editing SECRET_KEY in "
+                                "cannot write the root-owned unit file directly, and the "
+                                "sudo fallback (rotate_secret_key.sh) also failed — re-run "
+                                "install.sh to install its sudoers rule, or edit SECRET_KEY in "
                                 f"{SERVICE_FILE_PATH} as root, then "
                                 "`systemctl daemon-reload && systemctl restart "
                                 f"{SERVICE_NAME}`."}), 403
@@ -6574,12 +6770,20 @@ def api_set_ports():
                 return jsonify({"error": "Could not find the AMI_PORT environment line in the "
                                           "service file to update"}), 500
 
-        fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(SERVICE_FILE_PATH), prefix=".henwen_svc_")
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.rename(tmp_path, SERVICE_FILE_PATH)
+        try:
+            _atomic_replace(SERVICE_FILE_PATH, content, prefix=".henwen_svc_")
+        except PermissionError as direct_err:
+            if SERVICE_FILE_PATH != _DEFAULT_SERVICE_FILE_PATH:
+                # update_service_ports.sh always targets the default path
+                # (sudo's env_reset strips any override first) — falling
+                # back here against a customized SERVICE_FILE_PATH would
+                # silently edit the wrong file.
+                raise
+            try:
+                _write_service_ports_via_sudo_helper(new_flask_port, new_ami_port)
+            except Exception as sudo_err:
+                raise PermissionError(
+                    f"{direct_err}; sudo fallback also failed: {sudo_err}") from direct_err
         log("INFO", f"[SETTINGS] Ports updated in {SERVICE_FILE_PATH} "
                      f"(flask={new_flask_port}, ami={new_ami_port})")
 
@@ -6591,12 +6795,7 @@ def api_set_ports():
             if not n:
                 return jsonify({"error": f"No 'port = ' line found in {MANAGER_CONF} to update — "
                                           "set it there manually to match, then retry"}), 500
-            mfd, mtmp_path = tempfile.mkstemp(dir=os.path.dirname(MANAGER_CONF), prefix=".henwen_mgr_")
-            with os.fdopen(mfd, "w") as f:
-                f.write(mgr_content)
-                f.flush()
-                os.fsync(f.fileno())
-            os.rename(mtmp_path, MANAGER_CONF)
+            _atomic_replace(MANAGER_CONF, mgr_content, prefix=".henwen_mgr_")
             log("INFO", f"[SETTINGS] AMI port updated in {MANAGER_CONF} -> {new_ami_port}")
 
         dr = _systemctl("daemon-reload", timeout=15)
@@ -6650,8 +6849,9 @@ def api_set_ports():
         log("ERROR", f"[SETTINGS] Permission denied writing port settings: {e}")
         return jsonify({"error": str(e),
                         "hint": f"The service account ({os.environ.get('USER', 'asterisk')}) "
-                                "cannot write the root-owned unit file/manager.conf directly. "
-                                "Edit PORT/AMI_PORT in "
+                                "cannot write the root-owned unit file directly, and the sudo "
+                                "fallback (update_service_ports.sh) also failed — re-run "
+                                "install.sh to install its sudoers rule, or edit PORT/AMI_PORT in "
                                 f"{SERVICE_FILE_PATH} (and manager.conf's port= to match) as "
                                 "root, then `systemctl daemon-reload && systemctl restart "
                                 f"{SERVICE_NAME}`."}), 403

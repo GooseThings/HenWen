@@ -285,6 +285,18 @@ body {
 .card-header h2 { font-size: 0.97rem; font-weight: 600; }
 .card-body { padding: 14px; }
 
+.fav-sort-select { font-size: 0.78rem; padding: 4px 6px; border-radius: 4px; border: 1px solid var(--border);
+  background: var(--bg3); color: var(--text2); cursor: pointer; }
+.fav-sort-dir-btn { background: var(--bg3); border: 1px solid var(--border); border-radius: 4px;
+  color: var(--text2); font-size: 0.8rem; padding: 4px 8px; cursor: pointer; line-height: 1; }
+.fav-sort-dir-btn:hover { color: var(--text); }
+.fav-sort-dir-btn[disabled] { opacity: 0.35; cursor: not-allowed; }
+#fav-tbody tr.fav-draggable { cursor: grab; }
+#fav-tbody tr.fav-dragging { opacity: 0.4; }
+#fav-tbody tr.fav-drag-over { border-top: 2px solid var(--accent); }
+.fav-drag-handle { cursor: grab; color: var(--text2); opacity: 0.5; font-size: 0.85rem; padding-right: 4px; }
+.fav-drag-handle:hover { opacity: 0.9; }
+
 .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(155px, 1fr)); gap: 10px; }
 .stat-box  { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; }
 .stat-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text2); margin-bottom: 3px; }
@@ -716,7 +728,16 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     <div class="card">
       <div class="card-header">
         <h2>Favorites</h2>
-        <button class="btn btn-sm btn-primary" onclick="toggleFavForm()">Add Node</button>
+        <div style="display:flex;gap:8px;align-items:center">
+          <select id="mgr-fav-sort-field" class="fav-sort-select" onchange="onMgrFavSortChange()" title="Sort favorites by">
+            <option value="custom">Custom (drag)</option>
+            <option value="node">Node #</option>
+            <option value="name">Name</option>
+            <option value="location">Location</option>
+          </select>
+          <button id="mgr-fav-sort-dir-btn" class="fav-sort-dir-btn" onclick="toggleMgrFavSortDir()" title="Toggle sort direction">&#8593;</button>
+          <button class="btn btn-sm btn-primary" onclick="toggleFavForm()">Add Node</button>
+        </div>
       </div>
       <div id="fav-form" style="display:none;padding:14px 18px;border-bottom:1px solid var(--border)">
         <div class="form-row">
@@ -735,9 +756,9 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
         </div>
       </div>
       <table class="tbl">
-        <thead><tr><th>Node</th><th>Label</th><th>Callsign</th><th>Location</th><th>Keyed</th><th>Connected</th><th>Actions</th></tr></thead>
+        <thead><tr><th></th><th>Node</th><th>Label</th><th>Callsign</th><th>Location</th><th>Keyed</th><th>Connected</th><th>Actions</th></tr></thead>
         <tbody id="fav-tbody">
-          <tr><td colspan="7" class="muted" style="padding:14px">Loading...</td></tr>
+          <tr><td colspan="8" class="muted" style="padding:14px">Loading...</td></tr>
         </tbody>
       </table>
     </div>
@@ -3269,7 +3290,7 @@ async function loadBackups() {
       + '<button class="btn btn-sm" onclick="backupDiff(\'' + n + '\')">Diff</button>'
       + '<button class="btn btn-sm" onclick="backupDownload(\'' + n + '\')">Download</button>'
       + '<button class="btn btn-primary btn-sm" onclick="backupRestore(\'' + n + '\')">Restore</button>'
-      + (window._henwenRole === 'superuser'
+      + (window._henwenRole === 'superuser' || window._henwenRole === 'owner'
           ? '<button class="btn btn-warn btn-sm" onclick="backupDelete(\'' + n + '\')">Delete</button>'
           : '')
       + '</div></td>'
@@ -4004,21 +4025,104 @@ function toggleFavForm() {
   }
 }
 
+/* Sort preference shares the 'henwen_fav_sort' localStorage key with the
+   kiosk Status Board's Favorites sidebar — same concept, same browser, no
+   reason for the two to drift. Custom mode shows/edits the server-side
+   sort_order (drag-to-reorder); other fields re-sort the loaded list for
+   display only. */
+var _mgrFavorites = [];
+var _mgrFavSort    = {field: 'custom', dir: 'asc'};
+
+function initMgrFavSort() {
+  try {
+    var saved = JSON.parse(localStorage.getItem('henwen_fav_sort') || 'null');
+    if (saved && saved.field) _mgrFavSort = saved;
+  } catch(e) {}
+  var sel = document.getElementById('mgr-fav-sort-field');
+  if (sel) sel.value = _mgrFavSort.field;
+  _updateMgrFavSortDirBtn();
+}
+
+function _saveMgrFavSort() {
+  try { localStorage.setItem('henwen_fav_sort', JSON.stringify(_mgrFavSort)); } catch(e) {}
+}
+
+function _updateMgrFavSortDirBtn() {
+  var btn = document.getElementById('mgr-fav-sort-dir-btn');
+  if (!btn) return;
+  var isCustom = _mgrFavSort.field === 'custom';
+  btn.disabled = isCustom;
+  btn.innerHTML = _mgrFavSort.dir === 'desc' ? '&#8595;' : '&#8593;';
+  btn.title = isCustom ? 'Drag rows to reorder' :
+    (_mgrFavSort.dir === 'desc' ? 'Descending (click for ascending)' : 'Ascending (click for descending)');
+}
+
+function onMgrFavSortChange() {
+  var sel = document.getElementById('mgr-fav-sort-field');
+  _mgrFavSort.field = sel ? sel.value : 'custom';
+  _saveMgrFavSort();
+  _updateMgrFavSortDirBtn();
+  renderMgrFavorites();
+}
+
+function toggleMgrFavSortDir() {
+  if (_mgrFavSort.field === 'custom') return;
+  _mgrFavSort.dir = (_mgrFavSort.dir === 'desc') ? 'asc' : 'desc';
+  _saveMgrFavSort();
+  _updateMgrFavSortDirBtn();
+  renderMgrFavorites();
+}
+
+function _mgrFavoritesForDisplay() {
+  if (_mgrFavSort.field === 'custom') return _mgrFavorites;
+  var dir   = (_mgrFavSort.dir === 'desc') ? -1 : 1;
+  var field = _mgrFavSort.field;
+  return _mgrFavorites.slice().sort(function(a, b) {
+    var av, bv;
+    if (field === 'node') {
+      av = parseInt(a.node, 10) || 0; bv = parseInt(b.node, 10) || 0;
+    } else if (field === 'location') {
+      av = (a.location || '').toLowerCase(); bv = (b.location || '').toLowerCase();
+    } else {
+      av = (a.label || a.callsign || '').toLowerCase(); bv = (b.label || b.callsign || '').toLowerCase();
+    }
+    if (av < bv) return -1 * dir;
+    if (av > bv) return 1 * dir;
+    return 0;
+  });
+}
+
 async function loadFavorites() {
   var tbody = document.getElementById('fav-tbody');
-  tbody.innerHTML = '<tr><td colspan="7" class="muted" style="padding:14px">Loading...</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="8" class="muted" style="padding:14px">Loading...</td></tr>';
   var r = await api('/api/favorites');
   if (!r.ok) {
-    tbody.innerHTML = '<tr><td colspan="7" class="muted" style="padding:14px">' + esc(r.data.error || 'Failed') + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="muted" style="padding:14px">' + esc(r.data.error || 'Failed') + '</td></tr>';
     return;
   }
-  var favs = r.data.favorites;
-  if (!favs || !favs.length) {
-    tbody.innerHTML = '<tr><td colspan="7" class="muted" style="padding:14px">No favorites yet. Use Add Node above.</td></tr>';
+  _mgrFavorites = r.data.favorites || [];
+  initMgrFavSort();
+  renderMgrFavorites();
+  ncLog('Favorites loaded: ' + _mgrFavorites.length, 'DEBUG');
+  updateFavoritesStatus();
+}
+
+function renderMgrFavorites() {
+  var tbody = document.getElementById('fav-tbody');
+  if (!tbody) return;
+  if (!_mgrFavorites.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="muted" style="padding:14px">No favorites yet. Use Add Node above.</td></tr>';
     return;
   }
-  tbody.innerHTML = favs.map(function(f) {
-    return '<tr>'
+  var isCustomSort = _mgrFavSort.field === 'custom';
+  tbody.innerHTML = _mgrFavoritesForDisplay().map(function(f) {
+    var handle = isCustomSort ? '<span class="fav-drag-handle" title="Drag to reorder">&#9776;</span>' : '';
+    var dragAttrs = isCustomSort ?
+      ' draggable="true" ondragstart="mgrFavDragStart(event,\'' + esc(f.node) + '\')"' +
+      ' ondragover="mgrFavDragOver(event)" ondragleave="mgrFavDragLeave(event)"' +
+      ' ondrop="mgrFavDrop(event,\'' + esc(f.node) + '\')" ondragend="mgrFavDragEnd(event)"' : '';
+    return '<tr' + (isCustomSort ? ' class="fav-draggable"' : '') + dragAttrs + '>'
+      + '<td>' + handle + '</td>'
       + '<td class="mono">' + esc(f.node) + '</td>'
       + '<td>' + esc(f.label) + '</td>'
       + '<td>' + esc(f.callsign || '') + '</td>'
@@ -4032,8 +4136,57 @@ async function loadFavorites() {
       + '</div></td>'
       + '</tr>';
   }).join('');
-  ncLog('Favorites loaded: ' + favs.length, 'DEBUG');
-  updateFavoritesStatus();
+}
+
+var _mgrFavDragNode = null;
+
+function mgrFavDragStart(ev, node) {
+  _mgrFavDragNode = node;
+  ev.currentTarget.classList.add('fav-dragging');
+  ev.dataTransfer.effectAllowed = 'move';
+  try { ev.dataTransfer.setData('text/plain', node); } catch(e) {}
+}
+
+function mgrFavDragOver(ev) {
+  ev.preventDefault();
+  ev.currentTarget.classList.add('fav-drag-over');
+}
+
+function mgrFavDragLeave(ev) {
+  ev.currentTarget.classList.remove('fav-drag-over');
+}
+
+function mgrFavDragEnd(ev) {
+  ev.currentTarget.classList.remove('fav-dragging');
+  document.querySelectorAll('#fav-tbody tr.fav-drag-over').forEach(function(el) { el.classList.remove('fav-drag-over'); });
+}
+
+async function mgrFavDrop(ev, targetNode) {
+  ev.preventDefault();
+  ev.currentTarget.classList.remove('fav-drag-over');
+  var dragNode = _mgrFavDragNode;
+  _mgrFavDragNode = null;
+  if (!dragNode || dragNode === targetNode) return;
+
+  var fromIdx = _mgrFavorites.findIndex(function(f) { return f.node === dragNode; });
+  var toIdx   = _mgrFavorites.findIndex(function(f) { return f.node === targetNode; });
+  if (fromIdx === -1 || toIdx === -1) return;
+
+  var moved = _mgrFavorites.splice(fromIdx, 1)[0];
+  _mgrFavorites.splice(toIdx, 0, moved);
+  renderMgrFavorites();
+
+  var r = await api('/api/favorites/reorder', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({order: _mgrFavorites.map(function(f) { return f.node; })})
+  });
+  if (!r.ok) {
+    ncLog('Reorder failed: ' + (r.data.error || r.status), 'ERROR');
+    loadFavorites();
+  } else {
+    updateFavoritesStatus();
+  }
 }
 
 // Keyed/connected-count for favorites comes from the public AllStarLink
@@ -4490,7 +4643,7 @@ async function applySecretKey() {
 var _portsOriginal = {flask_port: null, ami_port: null};
 
 async function loadPortsStatus() {
-  if (window._henwenRole !== 'superuser') return;
+  if (window._henwenRole !== 'superuser' && window._henwenRole !== 'owner') return;
   var el = document.getElementById('ports-status');
   el.innerHTML = '<span class="muted">Loading...</span>';
   var r = await api('/api/settings/ports');
@@ -4757,9 +4910,9 @@ window.addEventListener('DOMContentLoaded', async function() {
 });
 
 async function checkForUpdate(live) {
-  // Only superusers are in a position to act on an update (shell/deploy
+  // Only superuser/owner are in a position to act on an update (shell/deploy
   // access), so admins don't get this notice.
-  if (window._henwenRole !== 'superuser') return;
+  if (window._henwenRole !== 'superuser' && window._henwenRole !== 'owner') return;
   // live=true (the Settings button) asks the server to hit GitHub right now
   // instead of reading its daily poller cache — a just-published release can
   // be up to 24h newer than that cache, which used to make the button
