@@ -7080,6 +7080,21 @@ def _ann_sound_path(slug: str) -> str:
     return os.path.join(SOUNDS_DIR, f"{slug}.ulaw")
 
 
+def _ensure_sounds_dir():
+    """os.makedirs(SOUNDS_DIR) can fail (e.g. the asterisk user lacking
+    permission to create it under a root-owned parent) — call sites need this
+    caught and turned into a JSON error response rather than propagating as
+    an unhandled exception, which Flask renders as an HTML error page that
+    breaks every caller expecting JSON. Returns None on success, or a
+    (response, status_code) tuple on failure."""
+    try:
+        os.makedirs(SOUNDS_DIR, exist_ok=True)
+        return None
+    except OSError as e:
+        log("ERROR", f"[ANNOUNCE] Could not create SOUNDS_DIR ({SOUNDS_DIR}): {e}")
+        return jsonify({"error": f"Server cannot access its sounds directory: {e}"}), 500
+
+
 def _run_due_announcements():
     now = datetime.now()
     now_min = now.hour * 60 + now.minute
@@ -7319,7 +7334,9 @@ def api_ann_create():
     if ext not in ALLOWED_UPLOAD_EXTS:
         return jsonify({"error": f"Unsupported file type: {ext}"}), 400
 
-    os.makedirs(SOUNDS_DIR, exist_ok=True)
+    err = _ensure_sounds_dir()
+    if err:
+        return err
 
     base_slug = _ann_slug(name)
     slug      = _ann_unique_slug(base_slug)
@@ -7393,7 +7410,9 @@ def api_ann_create_tts():
         return jsonify({"error": f"Voice '{voice}' is not downloaded yet — "
                                  "download it first from the voice picker."}), 400
 
-    os.makedirs(SOUNDS_DIR, exist_ok=True)
+    err = _ensure_sounds_dir()
+    if err:
+        return err
 
     base_slug = _ann_slug(name)
     slug      = _ann_unique_slug(base_slug)
@@ -7597,7 +7616,9 @@ def api_tts_preview():
         return jsonify({"error": f"Voice '{voice}' is not downloaded yet — "
                                  "download it first from the voice picker."}), 400
 
-    os.makedirs(SOUNDS_DIR, exist_ok=True)
+    err = _ensure_sounds_dir()
+    if err:
+        return err
     slug = "_tts_preview"
     dest = _ann_sound_path(slug)
     try:
@@ -8982,7 +9003,9 @@ def api_id_upload():
     slug      = _ann_unique_slug(base_slug)
     dest      = _ann_sound_path(slug)
 
-    os.makedirs(SOUNDS_DIR, exist_ok=True)
+    err = _ensure_sounds_dir()
+    if err:
+        return err
     with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
         tmp_path = tmp.name
         f.save(tmp_path)

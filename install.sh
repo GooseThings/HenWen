@@ -59,6 +59,15 @@ mkdir -p /var/lib/asterisk/henwen_tts_voices
 chown asterisk:asterisk /var/lib/asterisk/henwen_tts_voices
 chmod 750 /var/lib/asterisk/henwen_tts_voices
 
+# ── Announcement sound directory ───────────────────────────
+# Uploaded/TTS-synthesized announcement audio (SOUNDS_DIR). Must live under
+# Asterisk's own sounds dir so "rpt localplay <node> henwen/<slug>" resolves,
+# but that parent dir is root:root 0755 — the asterisk user can't create the
+# henwen/ subdirectory itself, so it has to exist before the service starts.
+mkdir -p /usr/share/asterisk/sounds/henwen
+chown asterisk:asterisk /usr/share/asterisk/sounds/henwen
+chmod 750 /usr/share/asterisk/sounds/henwen
+
 # Fix ownership of the database so the service can write it as the asterisk user
 if [ -f /etc/asterisk/henwen.db ]; then
     chown asterisk:asterisk /etc/asterisk/henwen.db
