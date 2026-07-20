@@ -5417,7 +5417,10 @@ _AUDIO_RELAY_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '
 def _find_node_channel(node):
     """
     Return the Asterisk channel name for a local node by scanning
-    'core show channels' for any channel whose name contains '/<node>'.
+    'core show channels'. Matches either a channel name containing '/<node>'
+    (radio/USB-style local channels) or a Location/Application column
+    identifying the node (e.g. a trunked IAX2 channel running Rpt(<node>),
+    where the node number never appears in the channel name itself).
     Returns None if not found.
     """
     def _cmd(ami):
@@ -5426,7 +5429,13 @@ def _find_node_channel(node):
         lines = ami_send_command(_cmd).get('lines', [])
         for line in lines:
             parts = line.split()
-            if parts and f'/{node}' in parts[0]:
+            if not parts:
+                continue
+            if f'/{node}' in parts[0]:
+                return parts[0]
+            if len(parts) > 1 and parts[1].startswith(f'{node}@'):
+                return parts[0]
+            if f'({node})' in line:
                 return parts[0]
     except Exception as e:
         log('WARN', f'[AUDIO] channel search failed: {e}')
