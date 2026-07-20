@@ -1,5 +1,10 @@
 # Changelog
 
+## v2026.07.20
+
+- **Fixed: creating a TTS announcement, or uploading an FCC ID sound, could fail with a confusing "Unexpected token '<'" browser error instead of a real message.** `/usr/share/asterisk/sounds` is root-owned, so the `asterisk` user HenWen runs as couldn't create the `henwen/` subdirectory under it the first time an announcement or ID-sound route needed it — the resulting `PermissionError` ran before that route's own error handling, so Flask served its default HTML error page instead of JSON, and the Manager UI showed a raw JS parse error rather than the actual problem. All four affected routes (announcement upload, TTS create, TTS preview, ID sound upload) now return a proper JSON error, and `install.sh` pre-creates the directory with the right ownership so new installs never hit this in the first place.
+- **Fixed: the Listen button failed to find a channel for nodes running over a trunked/IAX2 connection.** `_find_node_channel()` only matched channel names literally containing `/<node>`, which misses nodes whose Rpt instance runs over an incoming IAX2 trunk — there the node number appears only in the Location and Application columns of `core show channels`, not the channel name itself. The match now catches those too.
+
 ## v2026.07.14
 
 - **Added: NEXRAD weather radar overlay on the kiosk network map.** A "Radar" checkbox next to the map's tile-style picker layers live composite reflectivity from Iowa Environmental Mesonet's public tile cache (same free, no-API-key posture as the existing NWS alerts feed) over the Leaflet base map. Radar tiles are excluded from the dark-mode color-invert filter so weather colors render correctly under any base style, refresh automatically every 5 minutes, and the on/off state persists across reloads.
