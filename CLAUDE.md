@@ -35,7 +35,24 @@ cd /opt/HenWen
 sudo bash install.sh   # copies files to /opt/HenWen, installs venv, enables service
 ```
 
-There are no tests and no linter configuration.
+There is no linter configuration. Unit tests exist under `tests/` — see **Testing** below.
+
+## Testing
+
+`tests/` holds pytest-based unit/regression tests for the pure logic in `app.py` (rpt.conf parsing/validation, NWS alert helpers, connector scheduling, active-session tracking) plus a handful of Flask-test-client route smoke tests (login/setup flow, session, role gating). There's no coverage of the AMI client, audio pipeline, or background poll loops themselves — those need a live Asterisk/AMI to exercise meaningfully.
+
+**Setup (one-time):**
+```bash
+python3 -m venv venv   # or reuse /opt/HenWen/venv if this checkout *is* the live install
+./venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+```
+
+**Run:**
+```bash
+./venv/bin/pytest
+```
+
+`tests/conftest.py` sets `HENWEN_SKIP_STARTUP=1` (and points `DB_PATH`/`RPT_CONF_PATH`/`SOUNDS_DIR`/etc. at a temp dir) *before* importing `app.py` — that env var is the only test-specific seam in `app.py` itself: it skips the unconditional module-load startup block (AMI poller, favstats/NWS/release pollers, `load_astdb()`, ...) described below, since none of that should run — or touch real `/etc/asterisk` paths — just because the module got imported by pytest. It's a no-op in every other context (gunicorn, `python3 app.py`), so production startup is unchanged. Each test that touches the DB gets its own fresh sqlite file via the `fresh_db`/`client` fixtures — see conftest.py for how (`DB_PATH` and the `_db_ready` schema-init flag both get monkeypatched per-test, since `get_db()` only runs its schema/migration statements once per process by design).
 
 ## Architecture
 

@@ -9138,22 +9138,26 @@ def api_dtmf_status():
 
 # ---------------------------------------------------------------------------
 # Startup — load node DB and start background AMI poller
-# These run regardless of whether we're under gunicorn or direct python.
+# These run regardless of whether we're under gunicorn or direct python —
+# except under the test suite (HENWEN_SKIP_STARTUP=1, set by tests/conftest.py)
+# where importing this module must not spin up AMI/network polling threads
+# or touch real /etc/asterisk paths.
 # ---------------------------------------------------------------------------
-load_astdb()
-_db_conn_startup_cleanup()
-_rehydrate_permanent_links()
-_rehydrate_kiosk_temp_conns()
-start_poller()
-start_favstats_poller()
-start_global_activity_poller()
-start_echolink_directory_poller()
-start_geocode_worker()
-start_announcer()
-start_connector_scheduler()
-start_id_monitor()
-start_nws_alert_poller()
-start_release_poller()
+if not os.environ.get("HENWEN_SKIP_STARTUP"):
+    load_astdb()
+    _db_conn_startup_cleanup()
+    _rehydrate_permanent_links()
+    _rehydrate_kiosk_temp_conns()
+    start_poller()
+    start_favstats_poller()
+    start_global_activity_poller()
+    start_echolink_directory_poller()
+    start_geocode_worker()
+    start_announcer()
+    start_connector_scheduler()
+    start_id_monitor()
+    start_nws_alert_poller()
+    start_release_poller()
 
 if __name__ == "__main__":
     log("INFO", "Starting in direct-run mode (not via gunicorn)")
