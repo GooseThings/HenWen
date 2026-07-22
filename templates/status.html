@@ -100,7 +100,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .header-brand strong { color: var(--accent); font-size: 1rem; }
 .header-logo { height: 48px; width: 48px; object-fit: contain; flex-shrink: 0;
   filter: drop-shadow(0 0 6px rgba(63,185,80,.35)); }
-.header-actions { display: flex; align-items: center; gap: 10px; }
 /* Clock frame lives in .bars-row now (see #clock-bar), styled like the
    weather/net frames next to it — .clock-time deliberately sets no
    font-size of its own so it inherits .weather-bar's, keeping it visually
@@ -113,18 +112,17 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   transition: color .15s, border-color .15s; }
 .btn-icon:hover { color: var(--text); border-color: var(--text2); }
 
-/* Node window's utility row (search/net-schedule/login/layout-edit/
-   fullscreen/manager). nowrap + tightened per-button padding (icon-only
-   buttons don't need the wider 10px horizontal padding .btn-icon uses
-   elsewhere for icon+text combos like Listen/TX) so the whole row reliably
-   fits on one line even at phone widths; overflow-x:auto is just a safety
-   net for the narrowest devices rather than something expected to trigger. */
-.node-actions { display: flex; gap: 5px; margin-bottom: 8px; flex-shrink: 0;
-  align-items: center; flex-wrap: nowrap; overflow-x: auto; }
-.node-actions-right { margin-left: auto; display: flex; align-items: center;
-  gap: 5px; flex-wrap: nowrap; flex-shrink: 0; }
-.node-actions .btn-icon { padding: 5px 7px; flex-shrink: 0; }
-.node-actions #kiosk-login-btn { padding: 5px 10px; }
+/* Header's utility row (search/net-schedule/login/layout-edit/fullscreen/
+   manager) — lives in .header-actions, on the right of .header-brand via
+   .header's justify-content:space-between. nowrap + tightened per-button
+   padding (icon-only buttons don't need the wider 10px horizontal padding
+   .btn-icon uses elsewhere for icon+text combos like Listen/TX) so the
+   whole row reliably fits on one line even at phone widths; overflow-x:auto
+   is just a safety net for the narrowest devices rather than something
+   expected to trigger. */
+.header-actions { display: flex; gap: 5px; align-items: center; flex-wrap: nowrap; overflow-x: auto; }
+.header-actions .btn-icon { padding: 5px 7px; flex-shrink: 0; }
+.header-actions #kiosk-login-btn { padding: 5px 10px; }
 
 /* Inline SVG icons (Lucide, ISC license) — see the sprite comment near the
    top of <body> for the add-a-new-icon recipe. `.icon` is the one place
@@ -269,12 +267,11 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .link-count { font-size: 0.82rem; color: var(--text2); }
 .link-count span { color: var(--text); font-weight: 600; }
 
-/* ── Dashboard grid: resizable/movable/collapsible cards (desktop only — see
+/* ── Dashboard grid: resizable/movable/hideable cards (desktop only — see
    dashSupported() in JS; mobile keeps the fixed stacked layout untouched).
    Move and resize controls are hidden until .content-area gets .dash-edit
    (toggled by the layout-dashboard header button) so the kiosk stays clean
-   for passive viewing; collapse stays available all the time since it's a
-   low-risk, commonly-useful action on its own. */
+   for passive viewing. */
 .dash-card { position: relative; }
 .dash-header-grip { cursor: grab; color: var(--text2); opacity: 0; width: 0; margin-right: 0;
   overflow: hidden; display: inline-flex; align-items: center; flex-shrink: 0;
@@ -283,33 +280,18 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .content-area.dash-edit .dash-header-grip:hover { opacity: 1; }
 .dash-header-grip:active { cursor: grabbing; }
 .dash-card.dash-dragging { opacity: .35; }
-.dash-collapse-btn { background: none; border: none; color: var(--text2); cursor: pointer;
-  padding: 2px; margin-left: 6px; flex-shrink: 0; display: inline-flex; align-items: center;
-  border-radius: 4px; transition: color .15s; }
-.dash-collapse-btn:hover { color: var(--text); }
-.dash-collapse-btn svg { transition: transform .15s; }
-.dash-card.dash-collapsed .dash-collapse-btn svg { transform: rotate(-90deg); }
-/* Hide (fully removes the card, freeing its space to the rest of the tree —
-   unlike collapse, which just shrinks it to a header). Gated to edit mode
-   like the grip, not "available all the time" like collapse: it's a more
-   drastic, less-easily-undone action from the card itself (undoing it means
-   going to the "hidden panels" menu, not just clicking the same spot again),
-   so it stays out of the way during passive kiosk viewing. */
+/* Hide fully removes the card, freeing its space to the rest of the tree.
+   Gated to edit mode like the grip: it's a more drastic, less-easily-undone
+   action from the card itself (undoing it means going to the "hidden
+   panels" menu, not just clicking the same spot again), so it stays out of
+   the way during passive kiosk viewing. */
 .dash-hide-btn { background: none; border: none; color: var(--text2); cursor: pointer;
   padding: 2px; margin-left: 0; flex-shrink: 0; display: inline-flex; align-items: center;
   border-radius: 4px; opacity: 0; width: 0; overflow: hidden;
   transition: opacity .15s, color .15s, width .15s, margin-left .15s; }
 .content-area.dash-edit .dash-hide-btn { opacity: .6; width: 1em; margin-left: 6px; }
 .content-area.dash-edit .dash-hide-btn:hover { opacity: 1; color: var(--danger); }
-/* Scoped to desktop widths, not just gated in JS: toggleDashCollapse() already
-   refuses to collapse anything while !dashSupported(), but the .dash-collapsed
-   class it sets earlier can still be sitting on an element from a prior
-   desktop-width session (same page, window resized narrower; or the same
-   localStorage state simply rendered at a narrower width). Without this
-   media guard the rule would still hide that card's content on mobile, where
-   there's no collapse control left to undo it. */
 @media (min-width: 861px) {
-  .dash-card.dash-collapsed > *:not(.card-header) { display: none !important; }
   .dash-card.dash-fully-hidden { display: none !important; }
 }
 /* Dividers are the real "resize columns/rows" control: absolutely-positioned
@@ -634,7 +616,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
   /* Resizable/movable/collapsible cards are desktop-only (see dashSupported()
      in JS) — hide their controls entirely here rather than leave dead UI. */
-  .dash-header-grip, .dash-collapse-btn, .dash-hide-btn, .dash-divider, #dash-drop-indicator, #dash-edit-btn, #dash-hidden-wrap { display: none !important; }
+  .dash-header-grip, .dash-hide-btn, .dash-divider, #dash-drop-indicator, #dash-edit-btn, #dash-hidden-wrap { display: none !important; }
 
   /* Cards no longer share an implicit grid-row height, so each gets its own
      cap with an internally-scrolling list instead of flexing to fill a row. */
@@ -805,9 +787,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <rect width="7" height="9" x="14" y="12" rx="1" />
     <rect width="7" height="5" x="3" y="16" rx="1" />
   </symbol>
-  <symbol id="icon-chevron-down" viewBox="0 0 24 24">
-    <path d="m6 9 6 6 6-6" />
-  </symbol>
   <symbol id="icon-eye-off" viewBox="0 0 24 24">
     <path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49" />
     <path d="M14.084 14.158a3 3 0 0 1-4.242-4.242" />
@@ -837,6 +816,21 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       <audio id="node-audio" preload="none">
         <source type="audio/webm; codecs=opus">
       </audio>
+      <!-- Search stays hidden until login (it bridges RF, like every other
+           connect path); the net-schedule calendar is always visible. -->
+      <button class="btn-icon" id="node-search-btn" onclick="openSearchModal()" title="Search the AllStar and EchoLink directories for nodes to connect to" style="display:none"><svg class="icon"><use href="#icon-search"></use></svg></button>
+      <button class="btn-icon" id="net-cal-btn" onclick="openNetModal()" title="Net Schedule — scheduled net reminders"><svg class="icon"><use href="#icon-calendar-days"></use></svg></button>
+      <div id="kiosk-user-bar" style="display:none;align-items:center;gap:6px;font-size:0.75rem;flex-shrink:0">
+        <button class="btn-icon" onclick="kioskLogout()" title="Logout"><svg class="icon"><use href="#icon-door-open"></use></svg></button>
+      </div>
+      <button class="btn-icon" id="kiosk-login-btn" onclick="openKioskLogin()" style="display:none">Login</button>
+      <div id="dash-hidden-wrap" style="position:relative;display:inline-flex">
+        <button class="btn-icon" id="dash-hidden-btn" onclick="toggleDashHiddenMenu(event)" title="Hidden panels" style="display:none"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
+        <div id="dash-hidden-menu" style="display:none;position:absolute;top:100%;right:0;margin-top:6px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:6px;min-width:170px;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:50;font-size:0.78rem"></div>
+      </div>
+      <button class="btn-icon" id="dash-edit-btn" onclick="toggleDashEditMode()" title="Rearrange, resize, or hide the panels below"><svg class="icon"><use href="#icon-layout-dashboard"></use></svg></button>
+      <button class="btn-icon" onclick="toggleFS()" title="Fullscreen"><svg class="icon"><use href="#icon-maximize"></use></svg></button>
+      <a class="btn-icon" href="/henwen-manager" target="_blank" rel="noopener" title="Manager"><svg class="icon"><use href="#icon-book-open"></use></svg></a>
     </div>
   </header>
 
@@ -885,35 +879,11 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <span class="dash-header-grip" draggable="true" title="Drag to move"
               ondragstart="dashDragStart(event,'node')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
         <span class="card-title">Node</span>
-        <!-- No hide button here, unlike the other five cards: this card's header is the only place
-             the layout-edit toggle and "hidden panels" restore menu live (see node-actions-right
-             below) — hiding it would hide those controls along with it and lock the user out of
-             both edit mode and the only way to unhide anything. toggleDashHide() also refuses
-             'node' server-side (client-side, really) as a second line of defense. -->
-        <button class="dash-collapse-btn" onclick="toggleDashCollapse('node',event)" title="Collapse"><svg class="icon"><use href="#icon-chevron-down"></use></svg></button>
+        <button class="dash-hide-btn" onclick="toggleDashHide('node',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
       </div>
       <div id="node-info">
         <div class="node-label">NODE</div>
         <div style="color:var(--text2);font-size:.9rem">Loading&hellip;</div>
-      </div>
-      <!-- Search stays hidden until login (it bridges RF, like every other
-           connect path); the net-schedule calendar is always visible. -->
-      <div class="node-actions">
-        <button class="btn-icon" id="node-search-btn" onclick="openSearchModal()" title="Search the AllStar and EchoLink directories for nodes to connect to" style="display:none"><svg class="icon"><use href="#icon-search"></use></svg></button>
-        <button class="btn-icon" id="net-cal-btn" onclick="openNetModal()" title="Net Schedule — scheduled net reminders"><svg class="icon"><use href="#icon-calendar-days"></use></svg></button>
-        <span class="node-actions-right">
-          <div id="kiosk-user-bar" style="display:none;align-items:center;gap:6px;font-size:0.75rem;flex-shrink:0">
-            <button class="btn-icon" onclick="kioskLogout()" title="Logout"><svg class="icon"><use href="#icon-door-open"></use></svg></button>
-          </div>
-          <button class="btn-icon" id="kiosk-login-btn" onclick="openKioskLogin()" style="display:none">Login</button>
-          <div id="dash-hidden-wrap" style="position:relative;display:inline-flex">
-            <button class="btn-icon" id="dash-hidden-btn" onclick="toggleDashHiddenMenu(event)" title="Hidden panels" style="display:none"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
-            <div id="dash-hidden-menu" style="display:none;position:absolute;top:100%;right:0;margin-top:6px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:6px;min-width:170px;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:50;font-size:0.78rem"></div>
-          </div>
-          <button class="btn-icon" id="dash-edit-btn" onclick="toggleDashEditMode()" title="Rearrange, resize, or collapse the panels below"><svg class="icon"><use href="#icon-layout-dashboard"></use></svg></button>
-          <button class="btn-icon" onclick="toggleFS()" title="Fullscreen"><svg class="icon"><use href="#icon-maximize"></use></svg></button>
-          <a class="btn-icon" href="/henwen-manager" target="_blank" rel="noopener" title="Manager"><svg class="icon"><use href="#icon-book-open"></use></svg></a>
-        </span>
       </div>
     </div>
 
@@ -925,7 +895,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
               ondragstart="dashDragStart(event,'history')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
         <span class="card-title">Recent Connections</span>
         <button class="dash-hide-btn" onclick="toggleDashHide('history',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
-        <button class="dash-collapse-btn" onclick="toggleDashCollapse('history',event)" title="Collapse"><svg class="icon"><use href="#icon-chevron-down"></use></svg></button>
       </div>
       <div class="history-list" id="history-list">
         <div class="empty-msg" style="font-size:.75rem">Loading&hellip;</div>
@@ -949,7 +918,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
           </span>
           <button class="btn-icon" id="listen-btn" onclick="toggleListen()" title="Stream live audio from this node — expect ~1 second delay"><svg class="icon"><use href="#icon-headphones"></use></svg> Listen</button>
           <button class="dash-hide-btn" onclick="toggleDashHide('connected',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
-          <button class="dash-collapse-btn" onclick="toggleDashCollapse('connected',event)" title="Collapse"><svg class="icon"><use href="#icon-chevron-down"></use></svg></button>
         </span>
       </div>
       <div id="tx-bar" style="display:none">
@@ -1014,7 +982,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
           </select>
         </div>
         <button class="dash-hide-btn" onclick="toggleDashHide('map',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
-        <button class="dash-collapse-btn" onclick="toggleDashCollapse('map',event)" title="Collapse"><svg class="icon"><use href="#icon-chevron-down"></use></svg></button>
       </div>
       <div id="map"></div>
     </div>
@@ -1028,7 +995,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <span class="card-title">Latest Activity</span>
         <span class="card-count" id="act-count"></span>
         <button class="dash-hide-btn" style="margin-left:auto" onclick="toggleDashHide('activity',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
-        <button class="dash-collapse-btn" onclick="toggleDashCollapse('activity',event)" title="Collapse"><svg class="icon"><use href="#icon-chevron-down"></use></svg></button>
       </div>
       <div class="activity-list" id="activity-list">
         <div class="empty-msg">Loading&hellip;</div>
@@ -1052,7 +1018,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
           <button id="fav-sort-dir-btn" class="fav-sort-dir-btn" onclick="toggleFavSortDir()" title="Toggle sort direction"><svg class="icon"><use href="#icon-arrow-up"></use></svg></button>
         </div>
         <button class="dash-hide-btn" onclick="toggleDashHide('favorites',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
-        <button class="dash-collapse-btn" onclick="toggleDashCollapse('favorites',event)" title="Collapse"><svg class="icon"><use href="#icon-chevron-down"></use></svg></button>
       </div>
       <div id="fav-warn" class="fav-warn" style="display:none">
         <svg class="icon"><use href="#icon-triangle-alert"></use></svg> Disconnect all nodes first
@@ -4444,14 +4409,13 @@ window.addEventListener('resize', function() {
    node, they can never overlap or leave a gap by construction; no
    collision search needed anywhere in this file.
 
-   Collapsing a card overrides just its own rendered row-span down to a
-   header-only height (_dashCollapsed) at render time, independent of the
+   Hiding a card (see the Hide/unhide section further down) overrides just
+   its own rendered box to display:none at render time, independent of the
    tree; it doesn't reflow neighbors into the freed space — the user has
    resize for that if they want to reclaim it by hand. */
 var DASH_COLS = 12, DASH_ROWS = 24;
 var DASH_GAP = 10;             /* must match .content-area's CSS `gap` */
 var DASH_MIN_CS = 2, DASH_MIN_RS = 3;
-var DASH_COLLAPSED_RS = 2;
 var DASH_CARD_IDS = ['node', 'history', 'connected', 'map', 'activity', 'favorites'];
 var DASH_CARD_TITLES = {node: 'Node', history: 'Recent Connections', connected: 'Connected Nodes',
   map: 'Network Map', activity: 'Latest Activity', favorites: 'Favorites'};
@@ -4479,7 +4443,6 @@ var DASH_DEFAULT_TREE = {
 };
 
 var _dashTree = null;   /* null = no customization yet; CSS stylesheet defaults apply untouched */
-var _dashCollapsed = {};
 var _dashHidden = {};
 var _dashHiddenMenuOpen = false;
 var _dashEditOn = false;
@@ -4589,23 +4552,13 @@ function dashLoadSaved() {
        DASH_DEFAULT_TREE's positions, which could overlap. */
     if (!dashValidTree(parsed.tree, seen)) return null;
     if (Object.keys(seen).length !== DASH_CARD_IDS.length) return null;
-    var collapsed = {}, hidden = {};
-    DASH_CARD_IDS.forEach(function(id) {
-      collapsed[id] = !!(parsed.collapsed || {})[id];
-      hidden[id] = !!(parsed.hidden || {})[id];
-    });
+    var hidden = {};
+    DASH_CARD_IDS.forEach(function(id) { hidden[id] = !!(parsed.hidden || {})[id]; });
     /* Never let a saved state come back with every card hidden (e.g. the
        set changed across a version bump) — same fail-safe spirit as
        toggleDashHide()'s "keep at least one visible" guard. */
     if (Object.keys(hidden).every(function(id) { return hidden[id]; })) hidden = {};
-    /* 'node' must never load as hidden, full stop — it's the only card
-       whose header carries the layout-edit toggle and the hidden-panels
-       menu, so a saved state with it hidden (from before toggleDashHide()
-       started refusing that, or hand-edited localStorage) would otherwise
-       leave a returning visitor with no way to undo it. Self-heals on next
-       load instead of requiring a manual localStorage clear. */
-    hidden.node = false;
-    return {tree: parsed.tree, collapsed: collapsed, hidden: hidden};
+    return {tree: parsed.tree, hidden: hidden};
   } catch(e) { return null; }
 }
 
@@ -4615,7 +4568,7 @@ function dashEnsureCustom() {
 
 function dashSave() {
   try {
-    localStorage.setItem(DASH_STORE_KEY, JSON.stringify({tree: _dashTree || DASH_DEFAULT_TREE, collapsed: _dashCollapsed, hidden: _dashHidden}));
+    localStorage.setItem(DASH_STORE_KEY, JSON.stringify({tree: _dashTree || DASH_DEFAULT_TREE, hidden: _dashHidden}));
   } catch(e) {}
 }
 
@@ -4625,30 +4578,25 @@ function dashApply() {
   dashWalk(_dashTree || DASH_DEFAULT_TREE, 1, DASH_COLS + 1, 1, DASH_ROWS + 1, rects, dividers);
   _dashDividerNodes = dividers;
 
-  if (_dashTree || Object.keys(_dashCollapsed).length) {
+  if (_dashTree) {
     DASH_CARD_IDS.forEach(function(id) {
       var el = dashCardEl(id); if (!el) return;
       var r = rects[id]; if (!r) return;
-      var collapsed = !!_dashCollapsed[id];
-      if (collapsed) r = {col: r.col, cs: r.cs, row: r.row, rs: DASH_COLLAPSED_RS};
       el.style.gridColumn = r.col + ' / span ' + r.cs;
       el.style.gridRow = r.row + ' / span ' + r.rs;
-      el.classList.toggle('dash-collapsed', collapsed);
     });
   }
-  /* Hide leaves the split tree untouched — same "own rendered box only,
-     don't reflow neighbors" tradeoff as collapse above, just all the way to
-     display:none instead of header-only height. The card's grid rect is
-     still reserved (its neighbors' rects/dividers are unaffected), so the
-     freed area shows as blank space until the user drags the divider
-     bordering it by hand — there's no tree surgery to undo when unhidden,
-     it just reappears at its old spot. A CSS class + media-scoped rule
-     (like .dash-collapsed above), not a direct style.display write: toggling
-     this class is safe to leave set while the viewport crosses the mobile
-     breakpoint, since the rule that acts on it only exists at desktop
-     widths — an inline display:none here would otherwise stick past that
-     breakpoint with no way for the (desktop-only) unhide controls to clear
-     it again. */
+  /* Hide leaves the split tree untouched — own rendered box only, doesn't
+     reflow neighbors. The card's grid rect is still reserved (its
+     neighbors' rects/dividers are unaffected), so the freed area shows as
+     blank space until the user drags the divider bordering it by hand —
+     there's no tree surgery to undo when unhidden, it just reappears at
+     its old spot. A CSS class + media-scoped rule, not a direct
+     style.display write: toggling this class is safe to leave set while
+     the viewport crosses the mobile breakpoint, since the rule that acts
+     on it only exists at desktop widths — an inline display:none here
+     would otherwise stick past that breakpoint with no way for the
+     (desktop-only) unhide controls to clear it again. */
   DASH_CARD_IDS.forEach(function(id) {
     var el = dashCardEl(id); if (!el) return;
     el.classList.toggle('dash-fully-hidden', !!_dashHidden[id]);
@@ -4689,7 +4637,6 @@ function initDashLayout() {
   var saved = dashLoadSaved();
   if (saved) {
     _dashTree = saved.tree;
-    _dashCollapsed = saved.collapsed;
     _dashHidden = saved.hidden;
   }
   dashApply();   /* still walks DASH_DEFAULT_TREE to position dividers even with nothing saved */
@@ -4705,31 +4652,14 @@ function toggleDashEditMode() {
   if (btn) btn.classList.toggle('active', _dashEditOn);
 }
 
-function toggleDashCollapse(id, ev) {
-  if (ev) ev.stopPropagation();
-  if (!dashSupported()) return;
-  _dashCollapsed[id] = !_dashCollapsed[id];
-  dashApply();
-  dashSave();
-  /* Leaflet caches #map's container size at creation time (see the resize
-     listener below) — collapsing/expanding the map card changes that size
-     without Leaflet knowing, leaving tiles misaligned until nudged. */
-  if (id === 'map') setTimeout(function() { if (_map) _map.invalidateSize(); }, 50);
-}
-
-/* ── Hide/unhide: unlike collapse, hide has no toggle left on the card
-   itself once it's gone (its whole header disappears too), so restoring it
-   goes through the "hidden panels" menu below instead. ── */
+/* ── Hide/unhide: hide has no toggle left on the card itself once it's
+   gone (its whole header disappears too), so restoring it goes through
+   the "hidden panels" menu below instead. ── */
 function dashHiddenIds() { return DASH_CARD_IDS.filter(function(id) { return !!_dashHidden[id]; }); }
 
 function toggleDashHide(id, ev) {
   if (ev) ev.stopPropagation();
   if (!dashSupported()) return;
-  /* 'node' hosts the layout-edit toggle and the "hidden panels" menu itself
-     (see the HTML comment on its card header) — hiding it would take both
-     controls down with it, locking the user out of edit mode with no way
-     back except clearing localStorage by hand. Never allow it. */
-  if (id === 'node') return;
   if (!_dashHidden[id] && dashHiddenIds().length >= DASH_CARD_IDS.length - 1) return;   /* always keep at least one panel visible */
   _dashHidden[id] = !_dashHidden[id];
   dashApply();
