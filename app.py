@@ -38,6 +38,7 @@ import sqlite3
 import threading
 import tempfile
 import fcntl
+import math
 import sys
 import pwd
 import grp
@@ -61,6 +62,15 @@ except ImportError:
     import urllib as urlparse
 
 from collections import deque
+
+# aprslib is optional — shelled-out-style guard so a checkout that hasn't
+# picked up the dependency yet (or an admin who edited requirements.txt)
+# fails cleanly at APRS-poller-start time instead of crashing the whole app
+# at import time, same posture as the Piper TTS binary check.
+try:
+    import aprslib
+except ImportError:
+    aprslib = None
 
 app = Flask(__name__)
 
@@ -153,6 +163,24 @@ _LOG_LEVELS = {"DEBUG": 0, "INFO": 1, "WARN": 2, "ERROR": 3}
 
 # Asterisk log file path (used by the Asterisk Console log viewer)
 ASTERISK_LOG_PATH = os.environ.get("ASTERISK_LOG_PATH", "/var/log/asterisk/messages.log")
+
+# APRS-IS — optional kiosk map layer showing nearby APRS stations. The login
+# callsign is a per-install Kiosk Setting (Manager > Kiosk Settings), not an
+# env var — every HenWen operator using this feature must be a licensed
+# amateur using their own callsign, so it's deliberately a setting each
+# install's admin fills in themselves rather than something this code could
+# default. The feature simply stays off until one is saved (see
+# _aprs_poll_loop()). Passcode "-1" is APRS-IS's documented receive-only
+# login — this app only ever consumes the feed, never injects packets, so
+# there's no need for the operator's real transmit passcode.
+APRS_IS_PASSCODE = os.environ.get("APRS_IS_PASSCODE", "-1").strip()
+APRS_IS_HOST     = os.environ.get("APRS_IS_HOST", "rotate.aprs2.net")
+APRS_IS_PORT     = int(os.environ.get("APRS_IS_PORT", "14580"))
+# Permissive-but-safe: accepts real-world callsign+SSID shapes (N8GMZ,
+# N8GMZ-15, VE3ABC, JA1XYZ-7, ...) while rejecting anything that could break
+# out of the APRS-IS login line this gets embedded in (whitespace, CR/LF,
+# quotes, etc.) — that line is a raw string sent straight over a TCP socket.
+APRS_CALLSIGN_RE = re.compile(r'^[A-Z0-9]{3,9}(-[A-Z0-9]{1,2})?$')
 
 # Full paths — do NOT rely on PATH env under gunicorn/systemd
 SYSTEMCTL_PATH  = "/bin/systemctl"
@@ -523,8 +551,18 @@ def get_db():
         max_defer_sec      INTEGER NOT NULL DEFAULT 120,
         event_types        TEXT    NOT NULL DEFAULT 'Tornado Warning,Severe Thunderstorm Warning',
         last_poll_at       TEXT,
-        last_poll_error    TEXT
+        last_poll_error    TEXT,
+        display_enabled    INTEGER NOT NULL DEFAULT 0,
+        zone_mode          TEXT    NOT NULL DEFAULT 'zone',
+        state              TEXT    NOT NULL DEFAULT ''
     )""")
+    _nws_cfg_cols = {r[1] for r in conn.execute("PRAGMA table_info(nws_alert_config)").fetchall()}
+    if 'display_enabled' not in _nws_cfg_cols:
+        conn.execute("ALTER TABLE nws_alert_config ADD COLUMN display_enabled INTEGER NOT NULL DEFAULT 0")
+    if 'zone_mode' not in _nws_cfg_cols:
+        conn.execute("ALTER TABLE nws_alert_config ADD COLUMN zone_mode TEXT NOT NULL DEFAULT 'zone'")
+    if 'state' not in _nws_cfg_cols:
+        conn.execute("ALTER TABLE nws_alert_config ADD COLUMN state TEXT NOT NULL DEFAULT ''")
     conn.commit()
     # Per-node lockout: presence of a row means that node is locked by its
     # Owner. Only one lockout state per node, so `node` is the primary key
@@ -669,7 +707,8 @@ def check_auth():
     _PUBLIC          = {'login', 'logout', 'static', None,
                         'status_board', 'status_board_redirect',
                         'api_status_board', 'api_status_weather', 'api_status_activity',
-                        'api_status_history',
+                        'api_status_history', 'api_status_nws_alerts',
+                        'api_aprs_stations',
                         'api_login', 'api_session', 'api_csrf_token',
                         'api_favorites', 'api_favorites_status',
                         'api_kiosk_settings_get',
@@ -2406,6 +2445,129 @@ def start_global_activity_poller():
     log("INFO", "[GLOBAL-ACTIVITY] Poller thread launched")
 
 
+# ── APRS-IS — optional kiosk map layer ───────────────────────────────────────
+# A single persistent APRS-IS connection, filtered server-side (via APRS-IS's
+# own login-time range filter) to APRS_MAX_RADIUS_MI around the node's own
+# geocoded location — the largest radius any kiosk viewer can select. Each
+# viewer's actual 1-100mi slider just filters this one shared in-process
+# cache further (see api_aprs_stations), so N simultaneous viewers picking N
+# different radii still only cost one upstream connection, same "one shared
+# cache, many cheap reads" shape as the AMI/favstats/global-activity pollers.
+APRS_MAX_RADIUS_MI = 200
+APRS_STALE_SEC      = 2 * 3600   # drop a station not re-heard from in 2 hours
+_KM_PER_MI          = 1.609344
+
+_aprs_cache  = {}    # {callsign: {"lat","lon","symbol","symbol_table","comment","ts"}}
+_aprs_lock   = threading.Lock()
+_aprs_center = {"lat": None, "lon": None}   # set once the poller resolves the node's location
+
+
+def _haversine_mi(lat1, lon1, lat2, lon2):
+    r = 3958.8  # earth radius, statute miles
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlmb = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlmb / 2) ** 2
+    return 2 * r * math.asin(min(1.0, math.sqrt(a)))
+
+
+def _aprs_home_coords():
+    """Resolve the local node's rpt.conf location to lat/lon — the same
+    source the weather bar and NWS zone lookup use (see
+    api_nws_alerts_detect_zone). Geocoded once; _geocode() caches forever."""
+    content = read_conf_file(RPT_CONF_PATH)
+    nodes = get_node_numbers(content) if content else []
+    location = lookup_node(nodes[0]).get("location", "") if nodes else ""
+    if not location:
+        return None
+    return _geocode(location)
+
+
+def _aprs_on_packet(packet):
+    lat, lon, call = packet.get("latitude"), packet.get("longitude"), packet.get("from")
+    if lat is None or lon is None or not call:
+        return   # non-position packet (message, telemetry, status-only, ...) — nothing to plot
+    with _aprs_lock:
+        _aprs_cache[call] = {
+            "lat": lat, "lon": lon,
+            "symbol": packet.get("symbol", ""),
+            "symbol_table": packet.get("symbol_table", ""),
+            "comment": (packet.get("comment") or "").strip(),
+            "ts": time.time(),
+        }
+
+
+def _aprs_prune_stale():
+    cutoff = time.time() - APRS_STALE_SEC
+    with _aprs_lock:
+        for call in [c for c, s in _aprs_cache.items() if s["ts"] < cutoff]:
+            del _aprs_cache[call]
+
+
+def _aprs_poll_loop():
+    if aprslib is None:
+        log("WARN", "[APRS] aprslib not installed — APRS map layer disabled")
+        return
+
+    backoff = 0
+    last_prune = [0.0]
+    coords = None
+    aprs_filter = None
+
+    def _on_packet(packet):
+        _aprs_on_packet(packet)
+        if time.time() - last_prune[0] > 300:
+            _aprs_prune_stale()
+            last_prune[0] = time.time()
+
+    while True:
+        # Re-read the callsign setting every cycle rather than once at
+        # startup — it's a Manager > Kiosk Settings field an admin can save
+        # at any time, not an env var fixed at process start (see
+        # api_kiosk_settings_put). immortal=False below (rather than letting
+        # aprslib reconnect on its own forever) is what makes this loop come
+        # back around to notice a saved change; a connection that never
+        # drops on its own would only pick up an edit on the next HenWen
+        # restart, which is an acceptable, documented trade-off for a
+        # display-only feature.
+        callsign = (get_setting('aprs_is_callsign', '') or '').strip().upper()
+        if not callsign or not APRS_CALLSIGN_RE.match(callsign):
+            time.sleep(60)
+            continue
+
+        if coords is None:
+            coords = _aprs_home_coords()
+            if not coords:
+                log("WARN", "[APRS] Could not geocode the node's rpt.conf location — retrying in 5 min")
+                time.sleep(300)
+                coords = None
+                continue
+            _aprs_center["lat"] = coords["lat"]
+            _aprs_center["lon"] = coords["lon"]
+            radius_km = APRS_MAX_RADIUS_MI * _KM_PER_MI
+            aprs_filter = f"r/{coords['lat']}/{coords['lon']}/{radius_km:.0f}"
+
+        try:
+            conn = aprslib.IS(callsign, passwd=APRS_IS_PASSCODE,
+                               host=APRS_IS_HOST, port=APRS_IS_PORT)
+            conn.set_filter(aprs_filter)
+            conn.connect()
+            log("INFO", f"[APRS] Connected to {APRS_IS_HOST}:{APRS_IS_PORT} as {callsign} "
+                        f"filter={aprs_filter}")
+            backoff = 0
+            conn.consumer(_on_packet, blocking=True, immortal=False, raw=False)
+        except Exception as e:
+            backoff = min(backoff + 1, 6)
+            sleep_s = min(30 * (2 ** backoff), 900)
+            log("WARN", f"[APRS] Connection error ({e}) — retrying in {sleep_s:.0f}s")
+            time.sleep(sleep_s)
+
+
+def start_aprs_poller():
+    t = threading.Thread(target=_aprs_poll_loop, name="aprs-poller", daemon=True)
+    t.start()
+
+
 # ── EchoLink directory cache ─────────────────────────────────────────────────
 # echolink.org/logins.jsp is a public, unauthenticated snapshot of every
 # currently-logged-in EchoLink station (repeaters, links, conferences, and
@@ -3957,6 +4119,10 @@ def api_kiosk_settings_get():
         "clock_format":        get_setting('kiosk_clock_format', '12'),
         "timezone":            get_setting('kiosk_timezone', 'UTC'),
         "map_pin_duration_min": int(get_setting('kiosk_map_pin_duration_min', '60') or 60),
+        # Public like the rest of this endpoint — a callsign is a public
+        # amateur-radio identifier by regulation, not a secret (same posture
+        # as the club/author callsigns already named in this project).
+        "aprs_is_callsign":    get_setting('aprs_is_callsign', ''),
     })
 
 
@@ -3994,6 +4160,12 @@ def api_kiosk_settings_put():
             set_setting('kiosk_map_pin_duration_min', str(val))
         except (TypeError, ValueError):
             return jsonify({"error": "map_pin_duration_min must be an integer"}), 400
+    if "aprs_is_callsign" in data:
+        callsign = str(data["aprs_is_callsign"]).strip().upper()
+        if callsign and not APRS_CALLSIGN_RE.match(callsign):
+            return jsonify({"error": "Enter a valid callsign (letters/digits, optional -SSID), "
+                                      "e.g. N8GMZ or N8GMZ-15"}), 400
+        set_setting('aprs_is_callsign', callsign)
     return jsonify({"ok": True})
 
 
@@ -4860,6 +5032,48 @@ def api_sysinfo():
     })
 
 
+@app.route("/api/aprs/stations")
+def api_aprs_stations():
+    """Public, unauthenticated — same accessibility as the rest of the Status
+    Board's map data. Returns APRS-IS stations from the shared in-process
+    cache (see _aprs_poll_loop) within `radius` miles (1-100, default 25) of
+    the node's own geocoded location."""
+    try:
+        radius = float(request.args.get("radius", 25))
+    except (TypeError, ValueError):
+        radius = 25
+    radius = max(1, min(APRS_MAX_RADIUS_MI, radius))
+
+    center_lat, center_lon = _aprs_center["lat"], _aprs_center["lon"]
+    if center_lat is None:
+        return jsonify({"stations": [], "center": None, "radius": radius})
+
+    now = time.time()
+    with _aprs_lock:
+        snapshot = list(_aprs_cache.items())
+
+    stations = []
+    for call, s in snapshot:
+        dist = _haversine_mi(center_lat, center_lon, s["lat"], s["lon"])
+        if dist <= radius:
+            stations.append({
+                "callsign":     call,
+                "lat":          s["lat"],
+                "lon":          s["lon"],
+                "symbol":       s["symbol"],
+                "symbol_table": s["symbol_table"],
+                "comment":      s["comment"],
+                "distance_mi":  round(dist, 1),
+                "age_sec":      int(now - s["ts"]),
+            })
+    stations.sort(key=lambda s: s["distance_mi"])
+    return jsonify({
+        "stations": stations,
+        "center":   {"lat": center_lat, "lon": center_lon},
+        "radius":   radius,
+    })
+
+
 @app.route("/api/status/board")
 def api_status_board():
     """
@@ -5039,6 +5253,19 @@ def api_status_weather():
     if not location:
         location = request.args.get("location", "")
     return jsonify(_fetch_weather(location))
+
+
+@app.route("/api/status/nws-alerts")
+def api_status_nws_alerts():
+    """Active NWS alerts for the kiosk weather-bar ticker. Public like the
+    rest of the Status Board — gated only by the Weather Alerts menu's
+    display toggle, independent of whether audio announcements are on."""
+    cfg = _get_nws_alert_config()
+    if not cfg or not cfg["display_enabled"]:
+        return jsonify({"enabled": False, "alerts": []})
+    resp = jsonify({"enabled": True, "alerts": get_nws_display_alerts()})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.route("/api/status/activity")
@@ -7161,6 +7388,27 @@ NWS_ALERTS_BASE_URL = "https://api.weather.gov"
 NWS_USER_AGENT = "HenWen/1.0 (ham radio node manager; https://github.com/GooseThings/HenWen)"
 NWS_ALERT_SPOKEN_PREFIX = "The National Weather Service has issued a "
 
+# Two-letter state/territory codes accepted by NWS's alerts/active?area=
+# param — used for the Weather Alerts menu's "Statewide" scope, an
+# alternative to watching one or more specific county/forecast zones.
+NWS_STATE_NAMES = {
+    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
+    "CA": "California", "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware",
+    "DC": "District of Columbia", "FL": "Florida", "GA": "Georgia", "HI": "Hawaii",
+    "ID": "Idaho", "IL": "Illinois", "IN": "Indiana", "IA": "Iowa",
+    "KS": "Kansas", "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine",
+    "MD": "Maryland", "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota",
+    "MS": "Mississippi", "MO": "Missouri", "MT": "Montana", "NE": "Nebraska",
+    "NV": "Nevada", "NH": "New Hampshire", "NJ": "New Jersey", "NM": "New Mexico",
+    "NY": "New York", "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio",
+    "OK": "Oklahoma", "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island",
+    "SC": "South Carolina", "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas",
+    "UT": "Utah", "VT": "Vermont", "VA": "Virginia", "WA": "Washington",
+    "WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming",
+    "PR": "Puerto Rico", "VI": "U.S. Virgin Islands", "GU": "Guam",
+    "AS": "American Samoa", "MP": "Northern Mariana Islands",
+}
+
 
 def _piper_voice_urls(voice_id: str):
     """(onnx_url, json_url) for a curated voice id. Caller must have already
@@ -7888,6 +8136,47 @@ def _nws_zone_from_latlon(lat: float, lon: float):
         return None
 
 
+def _nws_lookup_zone_name(code: str) -> str:
+    """Resolve one UGC code (e.g. 'MIZ056' or 'MIC077') to its official NWS
+    zone name via api.weather.gov/zones — the source of truth for what a
+    zone code actually covers, rather than trusting whatever label happens
+    to be cached from a previous Detect Zone click or hand-typed entry.
+    Third character of the UGC determines zone type: 'C' = county, anything
+    else (almost always 'Z') = public/fire forecast zone. Returns '' on any
+    lookup failure — callers treat that as 'name unknown', never fatal."""
+    code = code.strip().upper()
+    if len(code) < 3:
+        return ""
+    zone_type = "county" if code[2] == "C" else "forecast"
+    try:
+        url = f"{NWS_ALERTS_BASE_URL}/zones/{zone_type}/{code}"
+        req = urlreq.Request(url, headers={"User-Agent": NWS_USER_AGENT})
+        with urlreq.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        props = data.get("properties", {})
+        name, state = props.get("name", ""), props.get("state", "")
+        if name and state:
+            return f"{name}, {state}"
+        return name or state
+    except Exception as e:
+        log("WARN", f"[NWS] _nws_lookup_zone_name({code}): {e}")
+        return ""
+
+
+def _nws_lookup_area_name(zone_mode: str, zone: str, state: str) -> str:
+    """Authoritative area-name string for whatever scope is configured —
+    used at save time so the stored label always matches the actual zone(s)/
+    state, never a stale value left over from a previous Detect Zone click
+    or a manually-edited zone code that the (read-only) name field never
+    caught up with."""
+    if zone_mode == "state":
+        code = state.strip().upper()
+        return NWS_STATE_NAMES.get(code, code)
+    codes = [c.strip() for c in zone.split(",") if c.strip()]
+    names = [_nws_lookup_zone_name(c) for c in codes]
+    return "; ".join(n for n in names if n) or ", ".join(codes)
+
+
 def _nws_parse_vtec_key(alert_props: dict) -> str:
     """Parse the stable {office}.{phenomena}.{significance}.{ETN} identity
     out of a VTEC string, e.g. '/O.CON.KMKX.TO.W.0075.000000T0000Z-260703T1815Z/'
@@ -7913,13 +8202,24 @@ def _nws_parse_vtec_key(alert_props: dict) -> str:
     return alert_props.get("id", "")
 
 
-def _nws_fetch_active_alerts(zone: str, event_types=None):
-    """Fetch currently-active NWS alerts for a UGC zone/county code, already
+def _nws_fetch_active_alerts(zone_mode: str, zone: str, state: str, event_types=None):
+    """Fetch currently-active NWS alerts for the configured scope, already
     filtered to real (status=='Actual', non-Cancel) alerts, optionally
     further filtered to a set of event names. Raises on network/HTTP
     failure — the poller must NOT prune any tracked alert just because this
-    call failed (fail-safe, not fail-open, for a safety feature)."""
-    url = f"{NWS_ALERTS_BASE_URL}/alerts/active?zone={urlparse.quote(zone)}"
+    call failed (fail-safe, not fail-open, for a safety feature).
+
+    zone_mode == 'state' watches every zone in a state/territory via NWS's
+    ?area= param (e.g. a node whose configured location is too vague to
+    geocode to one specific county — 'Michigan' alone resolves to whatever
+    zone is nearest that state's geographic center, which is misleading).
+    Otherwise `zone` is one or more UGC codes — NWS's ?zone= param natively
+    accepts a comma-separated list, which is what "watch several counties/
+    a larger region" means here; no separate multi-zone code path needed."""
+    if zone_mode == "state":
+        url = f"{NWS_ALERTS_BASE_URL}/alerts/active?area={urlparse.quote(state.strip().upper())}"
+    else:
+        url = f"{NWS_ALERTS_BASE_URL}/alerts/active?zone={urlparse.quote(zone, safe=',')}"
     req = urlreq.Request(url, headers={"User-Agent": NWS_USER_AGENT,
                                         "Accept": "application/geo+json"})
     with urlreq.urlopen(req, timeout=15) as resp:
@@ -8078,8 +8378,18 @@ NWS_ALERT_CONFIG_DEFAULTS = {
     "node": "", "play_cmd": "localplay", "voice": DEFAULT_TTS_VOICE,
     "interval_min": 15, "idle_settle_sec": 10, "max_defer_sec": 120,
     "event_types": "Tornado Warning,Severe Thunderstorm Warning",
-    "last_poll_at": None, "last_poll_error": None,
+    "last_poll_at": None, "last_poll_error": None, "display_enabled": 0,
+    "zone_mode": "zone", "state": "",
 }
+
+
+def _nws_scope_configured(cfg) -> bool:
+    """Is there actually something to watch? A 'state' row with no state
+    picked, or a 'zone' row with no code(s) entered, is the same as
+    unconfigured — the poller skips fetching in either case."""
+    if cfg.get("zone_mode") == "state":
+        return bool((cfg.get("state") or "").strip())
+    return bool((cfg.get("zone") or "").strip())
 
 
 @app.route("/api/nws-alerts/config")
@@ -8109,6 +8419,38 @@ def api_nws_alerts_save_config():
     if play_cmd not in ("localplay", "playback"):
         play_cmd = "localplay"
 
+    zone_mode = str(data.get("zone_mode", "zone")).strip().lower()
+    if zone_mode not in ("zone", "state"):
+        zone_mode = "zone"
+
+    zone  = str(data.get("zone", "")).strip().upper()
+    state = str(data.get("state", "")).strip().upper()
+
+    if zone_mode == "state":
+        if state and state not in NWS_STATE_NAMES:
+            return jsonify({"error": f"Unknown state/territory code: {state}"}), 400
+    else:
+        codes = [c.strip() for c in zone.split(",") if c.strip()]
+        bad_codes = [c for c in codes if not re.match(r'^[A-Z]{2}[A-Z]\d{3}$', c)]
+        if bad_codes:
+            return jsonify({"error": f"Invalid UGC zone code(s): {', '.join(bad_codes)} "
+                                      f"(expected format like MIZ056 or MIC077)"}), 400
+        zone = ",".join(codes)
+
+    # Re-resolve the human-readable area name from the actual zone(s)/state
+    # being saved, rather than trusting whatever the client's (read-only,
+    # detect-or-stale) label field held — otherwise a hand-typed zone code
+    # can silently keep announcing/displaying under an old, unrelated area
+    # name. Skipped when the scope is empty (nothing to resolve) or unchanged
+    # from what's already stored, to avoid a network round-trip on every
+    # unrelated settings tweak (interval, voice, etc.).
+    existing = _get_nws_alert_config() or {}
+    if zone_mode != existing.get("zone_mode") or zone != existing.get("zone") or state != existing.get("state"):
+        zone_area_name = _nws_lookup_area_name(zone_mode, zone, state) if _nws_scope_configured(
+            {"zone_mode": zone_mode, "zone": zone, "state": state}) else ""
+    else:
+        zone_area_name = existing.get("zone_area_name", "")
+
     # Download the voice model now, with the admin watching, rather than
     # lazily when the first real alert fires — deferring it would mean the
     # first real tornado warning is also the first moment a multi-minute
@@ -8123,14 +8465,16 @@ def api_nws_alerts_save_config():
     db.execute(
         """INSERT OR REPLACE INTO nws_alert_config
            (id, enabled, zone, zone_area_name, zone_auto_detected, node, play_cmd, voice,
-            interval_min, idle_settle_sec, max_defer_sec, event_types, last_poll_at, last_poll_error)
+            interval_min, idle_settle_sec, max_defer_sec, event_types, last_poll_at, last_poll_error,
+            display_enabled, zone_mode, state)
            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                    (SELECT last_poll_at FROM nws_alert_config WHERE id=1),
-                   (SELECT last_poll_error FROM nws_alert_config WHERE id=1))""",
+                   (SELECT last_poll_error FROM nws_alert_config WHERE id=1),
+                   ?, ?, ?)""",
         (
             1 if data.get("enabled") else 0,
-            str(data.get("zone", "")).strip(),
-            str(data.get("zone_area_name", "")).strip(),
+            zone,
+            zone_area_name,
             1 if data.get("zone_auto_detected") else 0,
             node,
             play_cmd,
@@ -8139,11 +8483,29 @@ def api_nws_alerts_save_config():
             int(data.get("idle_settle_sec", 10)),
             int(data.get("max_defer_sec", 120)),
             ",".join(event_types),
+            1 if data.get("display_enabled") else 0,
+            zone_mode,
+            state,
         )
     )
     db.commit()
     log("INFO", "[NWS] Alert config saved")
     return jsonify({"ok": True})
+
+
+def _nws_location_is_bare_state(location: str):
+    """True if the node's location string is *just* a US state/territory
+    name or postal abbreviation, with no city/county to narrow it down —
+    geocoding that resolves to some essentially arbitrary point near the
+    state's geographic center, which can produce a misleadingly specific-
+    looking single zone (e.g. 'Michigan' alone resolving to Mount Pleasant,
+    which merely happens to be near the Lower Peninsula's center). Returns
+    the matched two-letter code, or None."""
+    loc = location.strip().lower()
+    for abbr, name in NWS_STATE_NAMES.items():
+        if loc == name.lower() or loc == abbr.lower():
+            return abbr
+    return None
 
 
 @app.route("/api/nws-alerts/detect-zone", methods=["POST"])
@@ -8161,7 +8523,47 @@ def api_nws_alerts_detect_zone():
     result = _nws_zone_from_latlon(coords["lat"], coords["lon"])
     if not result:
         return jsonify({"error": "Could not resolve an NWS zone for that location"}), 400
-    return jsonify({"zone": result["zone"], "area_name": result["area_name"], "location": location})
+    resp = {"zone": result["zone"], "area_name": result["area_name"], "location": location}
+    bare_state = _nws_location_is_bare_state(location)
+    if bare_state:
+        resp["suggested_state"] = bare_state
+        resp["warning"] = (
+            f"Node location is just \"{location}\" — the detected zone ({result['zone']}) is only an "
+            f"approximate guess near the middle of {NWS_STATE_NAMES[bare_state]}, not necessarily where "
+            f"the node actually is. Consider Statewide mode instead, or add a city/county to the node's "
+            f"location in rpt.conf for a precise zone."
+        )
+    return jsonify(resp)
+
+
+@app.route("/api/nws-alerts/states")
+def api_nws_alerts_states():
+    """{code: name} for the Statewide mode's state/territory picker."""
+    return jsonify(NWS_STATE_NAMES)
+
+
+@app.route("/api/nws-alerts/lookup-zone", methods=["POST"])
+def api_nws_alerts_lookup_zone():
+    """Resolve the official NWS name for whatever zone code(s)/state the
+    admin currently has typed in — lets the UI keep the (read-only) area
+    name field honest immediately on manual entry, not just after Save."""
+    data      = request.json or {}
+    zone_mode = str(data.get("zone_mode", "zone")).strip().lower()
+    zone      = str(data.get("zone", "")).strip().upper()
+    state     = str(data.get("state", "")).strip().upper()
+    if zone_mode == "state":
+        if not state:
+            return jsonify({"area_name": ""})
+        if state not in NWS_STATE_NAMES:
+            return jsonify({"error": f"Unknown state/territory code: {state}"}), 400
+        return jsonify({"area_name": NWS_STATE_NAMES[state]})
+    if not zone:
+        return jsonify({"area_name": ""})
+    codes = [c.strip() for c in zone.split(",") if c.strip()]
+    bad_codes = [c for c in codes if not re.match(r'^[A-Z]{2}[A-Z]\d{3}$', c)]
+    if bad_codes:
+        return jsonify({"error": f"Invalid UGC zone code(s): {', '.join(bad_codes)}"}), 400
+    return jsonify({"area_name": _nws_lookup_area_name("zone", zone, "")})
 
 
 @app.route("/api/nws-alerts/status")
@@ -8218,6 +8620,21 @@ _NWS_EXPIRE_GRACE_SEC = 30 * 60  # local safety ceiling: prune a tracked alert t
                                  # even if NWS can't be reached to confirm — see _nws_alert_poll_loop().
 _nws_backoff_level = 0
 
+# In-process cache of currently-active alerts for the kiosk Status Board's
+# scrolling weather-bar ticker — populated by the poller whenever
+# display_enabled is on, independent of the audio `enabled` switch (the
+# Weather Alerts menu lets an admin show alerts on the board without also
+# announcing them on the repeater). Deliberately not sourced from the
+# `announcements` table, since TTS/audio rows are only ever created when
+# the audio switch is on — a display-only admin would otherwise see nothing.
+_nws_display_cache = []
+_nws_display_lock  = threading.Lock()
+
+
+def get_nws_display_alerts():
+    with _nws_display_lock:
+        return list(_nws_display_cache)
+
 
 def _nws_prune_expired_locally(db, now):
     """Delete any tracked NWS alert whose OWN reported expiry is more than
@@ -8265,12 +8682,34 @@ def _nws_alert_poll_loop():
             # Regardless of fetch success — local safety ceiling.
             _nws_prune_expired_locally(db, now)
 
-            if not cfg or not cfg["enabled"] or not cfg["zone"]:
+            # Fetch/track whenever either the audio switch or the kiosk
+            # display switch is on — they're independent surfaces for the
+            # same underlying "what's active in this zone" data.
+            if not cfg or (not cfg["enabled"] and not cfg["display_enabled"]) or not _nws_scope_configured(cfg):
                 success = True  # not an error, just nothing to do — don't back off
+                with _nws_display_lock:
+                    _nws_display_cache.clear()
             else:
                 event_types = [e.strip() for e in cfg["event_types"].split(",") if e.strip()]
-                alerts = _nws_fetch_active_alerts(cfg["zone"], event_types=event_types or None)
+                alerts = _nws_fetch_active_alerts(cfg["zone_mode"], cfg["zone"], cfg["state"],
+                                                   event_types=event_types or None)
                 success = True
+
+                if cfg["display_enabled"]:
+                    with _nws_display_lock:
+                        _nws_display_cache[:] = [
+                            {
+                                "event":    a["event"],
+                                "text":     _nws_alert_spoken_text(a),
+                                "severity": a.get("severity", ""),
+                                "expires":  a.get("expires", ""),
+                                "vtec_key": a["vtec_key"],
+                            }
+                            for a in alerts
+                        ]
+                else:
+                    with _nws_display_lock:
+                        _nws_display_cache.clear()
 
                 current_keys = {a["vtec_key"] for a in alerts}
                 tracked = db.execute(
@@ -8288,11 +8727,12 @@ def _nws_alert_poll_loop():
                         db.commit()
                         log("INFO", f"[NWS] No longer active, pruned: '{row['name']}'")
 
-                for alert in alerts:
-                    try:
-                        _nws_sync_alert(alert, cfg)
-                    except Exception as e:
-                        log("ERROR", f"[NWS] _nws_sync_alert failed for {alert.get('vtec_key')}: {e}")
+                if cfg["enabled"]:
+                    for alert in alerts:
+                        try:
+                            _nws_sync_alert(alert, cfg)
+                        except Exception as e:
+                            log("ERROR", f"[NWS] _nws_sync_alert failed for {alert.get('vtec_key')}: {e}")
 
             db.execute(
                 "UPDATE nws_alert_config SET last_poll_at=?, last_poll_error=? WHERE id=1",
@@ -9358,6 +9798,7 @@ if not os.environ.get("HENWEN_SKIP_STARTUP"):
     start_id_monitor()
     start_nws_alert_poller()
     start_release_poller()
+    start_aprs_poller()
 
 if __name__ == "__main__":
     log("INFO", "Starting in direct-run mode (not via gunicorn)")

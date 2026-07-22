@@ -1059,26 +1059,52 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
   <!-- NWS Weather Alerts -->
   <section class="page" id="page-nws-alerts">
     <div class="page-title">Weather Alerts</div>
-    <div class="page-sub">Automatically play severe weather alerts from the National Weather Service on your node while they remain active.</div>
+    <div class="page-sub">Automatically play severe weather alerts from the National Weather Service on your node, and/or scroll them on the kiosk Status Board, while they remain active.</div>
     <div class="card">
       <div class="card-header"><h2>Configuration</h2></div>
       <div class="card-body">
         <div class="toggle-row">
           <div class="toggle-info">
-            <div class="toggle-key">Enable</div>
-            <div class="toggle-desc">Master switch — polls api.weather.gov and auto-creates TTS announcements for matching active alerts</div>
+            <div class="toggle-key">Play on Repeater</div>
+            <div class="toggle-desc">Polls api.weather.gov and auto-creates TTS announcements for matching active alerts</div>
           </div>
           <label class="switch"><input type="checkbox" id="nws-enabled"><span class="slider"></span></label>
         </div>
 
-        <div style="margin-top:14px">
-          <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:3px">NWS Zone / County Code</label>
-          <div style="font-size:0.75rem;color:var(--text2);margin-bottom:6px">Which area to watch for alerts. Detect it from your node's configured location, or enter a UGC code manually.</div>
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-            <input id="nws-zone" type="text" class="val-input" placeholder="e.g. WIC059" style="width:140px">
-            <input id="nws-zone-area" type="text" class="val-input" placeholder="Area name" style="width:220px" readonly>
-            <button class="btn btn-sm" type="button" onclick="nwsDetectZone()">Detect Zone</button>
+        <div class="toggle-row" style="margin-top:8px">
+          <div class="toggle-info">
+            <div class="toggle-key">Show on Kiosk Board</div>
+            <div class="toggle-desc">Scrolls matching active alerts in the weather bar on the Status Board — works independently of the audio switch above</div>
           </div>
+          <label class="switch"><input type="checkbox" id="nws-display-enabled"><span class="slider"></span></label>
+        </div>
+
+        <div style="margin-top:14px">
+          <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:3px">Coverage Area</label>
+          <div style="font-size:0.75rem;color:var(--text2);margin-bottom:6px">Which area to watch for alerts.</div>
+          <div style="display:flex;gap:16px;margin-bottom:8px">
+            <label style="cursor:pointer;display:flex;align-items:center;gap:6px;font-size:0.85rem">
+              <input type="radio" name="nws-zone-mode" id="nws-mode-zone" value="zone" onchange="nwsModeChanged()"> County / Zone code(s)
+            </label>
+            <label style="cursor:pointer;display:flex;align-items:center;gap:6px;font-size:0.85rem">
+              <input type="radio" name="nws-zone-mode" id="nws-mode-state" value="state" onchange="nwsModeChanged()"> Statewide
+            </label>
+          </div>
+
+          <div id="nws-zone-mode-zone">
+            <div style="font-size:0.75rem;color:var(--text2);margin-bottom:6px">Detect one zone from your node's configured location, or enter one or more UGC codes yourself — comma-separate several to watch a larger region (e.g. <code>MIZ056,MIZ057</code>).</div>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <input id="nws-zone" type="text" class="val-input" placeholder="e.g. MIZ056 or MIZ056,MIZ057" style="width:220px" onblur="nwsRefreshAreaName()">
+              <input id="nws-zone-area" type="text" class="val-input" placeholder="Area name" style="width:220px" readonly>
+              <button class="btn btn-sm" type="button" onclick="nwsDetectZone()">Detect Zone</button>
+            </div>
+          </div>
+
+          <div id="nws-zone-mode-state" style="display:none">
+            <div style="font-size:0.75rem;color:var(--text2);margin-bottom:6px">Watch every zone in one state/territory — a good fit when the node's location isn't precise enough to trust a single detected zone.</div>
+            <select id="nws-state" class="val-input" style="width:260px" onchange="nwsRefreshAreaName()"></select>
+          </div>
+
           <div id="nws-zone-status" class="muted" style="font-size:0.78rem;margin-top:4px"></div>
         </div>
 
@@ -1174,6 +1200,19 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
                    min="1" max="480" value="60">
             <span style="font-size:0.82rem;color:var(--text-muted)">
               How long activity pins remain visible on the Network Map (1–480 min).
+            </span>
+          </div>
+        </div>
+        <div class="form-group" style="margin-top:16px">
+          <label class="form-label">APRS-IS Callsign</label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="text" id="ks-aprs-callsign" class="form-control" style="width:140px;text-transform:uppercase"
+                   maxlength="12" placeholder="e.g. N8GMZ-15">
+            <span style="font-size:0.82rem;color:var(--text-muted)">
+              Powers the optional "APRS" layer on the kiosk's Network Map. Log into APRS-IS
+              (receive-only) as this callsign to pull nearby station positions — leave blank to
+              keep that layer off. Only a licensed amateur's own callsign, please.<br>
+              Takes effect on the connection's next reconnect, or immediately after a HenWen restart.
             </span>
           </div>
         </div>
@@ -3541,9 +3580,55 @@ function populateNwsNodeSelect() {
   }
 }
 
+var _nwsStates = null;
+
+async function nwsLoadStates() {
+  if (_nwsStates) return _nwsStates;
+  var r = await api('/api/nws-alerts/states');
+  _nwsStates = r.ok ? r.data : {};
+  var sel = document.getElementById('nws-state');
+  if (sel) {
+    sel.innerHTML = '<option value="">Select a state/territory…</option>' +
+      Object.keys(_nwsStates).sort(function(a, b) {
+        return _nwsStates[a].localeCompare(_nwsStates[b]);
+      }).map(function(code) {
+        return '<option value="' + esc(code) + '">' + esc(_nwsStates[code]) + ' (' + code + ')</option>';
+      }).join('');
+  }
+  return _nwsStates;
+}
+
+function nwsModeChanged() {
+  var isState = document.getElementById('nws-mode-state').checked;
+  document.getElementById('nws-zone-mode-zone').style.display  = isState ? 'none' : '';
+  document.getElementById('nws-zone-mode-state').style.display = isState ? '' : 'none';
+}
+
+// Keeps the (read-only) area-name preview honest as soon as the admin
+// finishes typing a zone code or picks a state — rather than only finding
+// out at Save time that a hand-typed code didn't match the stale label.
+async function nwsRefreshAreaName() {
+  var isState = document.getElementById('nws-mode-state').checked;
+  var payload = isState
+    ? {zone_mode: 'state', state: document.getElementById('nws-state').value}
+    : {zone_mode: 'zone', zone: document.getElementById('nws-zone').value.trim()};
+  if (!payload.state && !payload.zone) {
+    document.getElementById('nws-zone-area').value = '';
+    return;
+  }
+  var areaEl = document.getElementById('nws-zone-area');
+  areaEl.value = 'Looking up…';
+  var r = await api('/api/nws-alerts/lookup-zone', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)
+  });
+  areaEl.value = r.ok ? (r.data.area_name || '') : ('Error: ' + ((r.data && r.data.error) || r.status));
+}
+
 async function nwsLoad() {
   populateNwsNodeSelect();
   var nodeSel = document.getElementById('nws-node');
+  await nwsLoadStates();
 
   if (!_ttsVoices.length) await loadTtsVoices();
   var voiceSel = document.getElementById('nws-voice');
@@ -3556,8 +3641,14 @@ async function nwsLoad() {
   var r = await api('/api/nws-alerts/config');
   var d = r.ok ? r.data : {};
   document.getElementById('nws-enabled').checked = !!d.enabled;
+  document.getElementById('nws-display-enabled').checked = !!d.display_enabled;
   document.getElementById('nws-zone').value = d.zone || '';
   document.getElementById('nws-zone-area').value = d.zone_area_name || '';
+  var stateSel = document.getElementById('nws-state');
+  if (stateSel) stateSel.value = d.state || '';
+  document.getElementById('nws-mode-zone').checked  = (d.zone_mode !== 'state');
+  document.getElementById('nws-mode-state').checked = (d.zone_mode === 'state');
+  nwsModeChanged();
   nwsBuildEventTypeCheckboxes(d.event_types ? d.event_types.split(',') : NWS_DEFAULT_EVENT_TYPES);
   if (nodeSel && d.node) nodeSel.value = d.node;
   document.getElementById('nws-play-cmd').value = d.play_cmd || 'localplay';
@@ -3582,22 +3673,41 @@ async function nwsDetectZone() {
   st.style.color = 'var(--text2)';
   var r = await api('/api/nws-alerts/detect-zone', {method: 'POST'});
   if (r.ok) {
+    document.getElementById('nws-mode-zone').checked = true;
+    nwsModeChanged();
     document.getElementById('nws-zone').value = r.data.zone;
     document.getElementById('nws-zone-area').value = r.data.area_name;
-    st.textContent = 'Detected from node location "' + r.data.location + '".';
-    st.style.color = 'var(--green)';
+    if (r.data.warning) {
+      st.innerHTML = esc(r.data.warning) +
+        (r.data.suggested_state ? ' <button type="button" class="btn btn-sm" style="margin-left:6px" onclick="nwsUseSuggestedState(\'' +
+          esc(r.data.suggested_state) + '\')">Use Statewide instead</button>' : '');
+      st.style.color = 'var(--warn)';
+    } else {
+      st.textContent = 'Detected from node location "' + r.data.location + '".';
+      st.style.color = 'var(--green)';
+    }
   } else {
     st.textContent = (r.data && r.data.error) || ('Error ' + r.status);
     st.style.color = 'var(--red)';
   }
 }
 
+async function nwsUseSuggestedState(code) {
+  await nwsLoadStates();
+  document.getElementById('nws-mode-state').checked = true;
+  nwsModeChanged();
+  document.getElementById('nws-state').value = code;
+  await nwsRefreshAreaName();
+}
+
 async function nwsSave() {
+  var isState = document.getElementById('nws-mode-state').checked;
   var payload = {
     enabled: document.getElementById('nws-enabled').checked ? 1 : 0,
+    display_enabled: document.getElementById('nws-display-enabled').checked ? 1 : 0,
+    zone_mode: isState ? 'state' : 'zone',
     zone: document.getElementById('nws-zone').value.trim(),
-    zone_area_name: document.getElementById('nws-zone-area').value.trim(),
-    zone_auto_detected: 0,
+    state: document.getElementById('nws-state').value,
     event_types: nwsSelectedEventTypes().join(','),
     node: document.getElementById('nws-node').value,
     play_cmd: document.getElementById('nws-play-cmd').value,
@@ -4814,6 +4924,8 @@ async function ksLoad() {
   ksPopulateTZ(d.timezone || 'UTC');
   var pinInp = document.getElementById('ks-pin-min');
   if (pinInp) pinInp.value = d.map_pin_duration_min || 60;
+  var aprsInp = document.getElementById('ks-aprs-callsign');
+  if (aprsInp) aprsInp.value = d.aprs_is_callsign || '';
 }
 
 async function ksSave() {
@@ -4831,11 +4943,18 @@ async function ksSave() {
   if (isNaN(pinMin) || pinMin < 1 || pinMin > 480) {
     st.textContent = 'Map pin duration must be 1–480 minutes.'; st.style.color = 'var(--danger)'; return;
   }
+  var aprsInp      = document.getElementById('ks-aprs-callsign');
+  var aprsCallsign = aprsInp ? aprsInp.value.trim().toUpperCase() : '';
+  if (aprsCallsign && !/^[A-Z0-9]{3,9}(-[A-Z0-9]{1,2})?$/.test(aprsCallsign)) {
+    st.textContent = 'Enter a valid callsign (letters/digits, optional -SSID), e.g. N8GMZ or N8GMZ-15.';
+    st.style.color = 'var(--danger)'; return;
+  }
   var payload = {
     idle_timeout_sec:     mins * 60,
     clock_format:         fmtEl ? fmtEl.value : '12',
     timezone:             tzEl  ? tzEl.value  : 'UTC',
     map_pin_duration_min: pinMin,
+    aprs_is_callsign:     aprsCallsign,
   };
   var r = await api('/api/kiosk/settings', {
     method:  'PUT',

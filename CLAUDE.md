@@ -71,6 +71,7 @@ Daemon threads launch when gunicorn imports the module:
 - `start_id_monitor()` — monitors node activity to trigger FCC ID audio playback
 - `start_nws_alert_poller()` — polls api.weather.gov for active severe weather alerts (~120s interval, exponential backoff) and manages the lifecycle of auto-created NWS announcement rows; never triggers playback itself, that's still `start_announcer()`'s job
 - `start_release_poller()` — checks GitHub for the latest published HenWen release once a day into an in-process cache (`get_latest_release()`); `/api/update-check` reads that cache instead of hitting GitHub live, and the Manager dashboard surfaces it as a dismissible bar to superusers only (checked once per login/page-load, via `checkForUpdate()` in `henwen-manager.html`)
+- `start_aprs_poller()` — optional; maintains one persistent APRS-IS connection (via the `aprslib` pip package) filtered to `APRS_MAX_RADIUS_MI` around the node's own geocoded location, caching station positions in-process (`_aprs_cache`); no-ops with a log line until an admin saves a login callsign in Manager > Kiosk Settings, or if `aprslib` isn't installed. See "APRS-IS map layer" below.
 
 Because gunicorn runs `--workers 1 --threads 8`, all threads share a single process and in-process cache. Do not increase worker count without rethinking the AMI connection pool.
 
@@ -110,6 +111,14 @@ Dedup/lifecycle tracking (`announcements.external_id`) uses a **parsed VTEC iden
 
 Spoken text is templated (`_nws_alert_spoken_text()`), not NWS's raw headline — see the function for the exact phrasing rules (state names dropped, natural "A, B, and C" county joining, on-the-hour times drop `:00`).
 
+### APRS-IS map layer
+
+Optional "APRS" toggle on the kiosk's Network Map, next to the existing Radar checkbox. `start_aprs_poller()` opens one persistent connection to APRS-IS (`aprslib.IS`, receive-only login with passcode `-1` — this app only ever consumes the feed, never transmits) filtered server-side to `APRS_MAX_RADIUS_MI` (200mi) around the node's own geocoded rpt.conf location, and caches every position packet it sees in `_aprs_cache` (`{callsign: {lat, lon, symbol, comment, ts}}`, keyed by callsign so the latest report replaces the last). `GET /api/aprs/stations?radius=<1-200>` (public, same as the rest of the board's map data) filters that one shared cache by haversine distance per request — so however many kiosk viewers pick however many different radii, it still costs exactly one upstream APRS-IS connection, same "one shared in-process cache, many cheap reads" shape as the AMI/favstats/global-activity pollers. Entries older than `APRS_STALE_SEC` (2h) are pruned locally regardless of connection state, mirroring the NWS poller's local staleness ceiling.
+
+The login callsign (`aprs_is_callsign`) is a Manager > Kiosk Settings field (`/api/kiosk/settings`, same route as idle timeout/clock format/timezone/map pin duration), not an env var — every operator using this feature must be a licensed amateur identifying with their own callsign, so each install's admin fills it in rather than the code defaulting to anything. `_aprs_poll_loop()` re-reads that setting at the top of every reconnect cycle rather than once at startup, so a saved change takes effect on the connection's next natural reconnect (or immediately after a HenWen restart) without needing one — `immortal=False` on the `aprslib` consumer call is what makes drops come back around to that check instead of aprslib reconnecting silently forever with the old identity. The value is validated server-side against `APRS_CALLSIGN_RE` (letters/digits, optional `-SSID`) before being saved or used, since it gets embedded directly in the raw APRS-IS login line. The feature no-ops (log line, not a crash) if no callsign is saved yet or the `aprslib` pip package isn't installed — same "fails cleanly at use-time" posture as Piper TTS.
+
+The frontend's radius slider (1-200mi, default 25) and on/off state are plain `localStorage` prefs, same pattern as the Radar/tile-style toggles; a thin circle outline on the map traces the selected radius around the resolved center. Markers render as a small purple circle (`makeAprsIcon()`), deliberately not the teardrop node-pin or gold hosted-node star, fading with age the same way the global-activity pins do (`aprsPinStyle()`, mirroring `globalPinStyle()`), and live in their own `_aprsMarkers` array on a separate 5-minute poll timer (`APRS_POLL_MS`) so they're untouched by `updateMap()`'s much more frequent node/activity marker rebuild.
+
 ### Templates
 
 - `templates/status.html` — kiosk/status board (`/` and `/status` routes); self-contained SPA with embedded JS (~1800 lines). Contains the live audio player, network map, weather bar, and global activity feed. Accessible without login.
@@ -120,7 +129,7 @@ Spoken text is templated (`_nws_alert_spoken_text()`), not NWS's raw headline �
 
 All config comes from environment variables set in `/etc/systemd/system/HenWen.service`. The service file is the single source of truth for AMI credentials, `SECRET_KEY`, paths, and tuning parameters. After editing the service file: `sudo systemctl daemon-reload && sudo systemctl restart HenWen`.
 
-Key env vars: `AMI_USER`, `AMI_SECRET`, `SECRET_KEY`, `DB_PATH`, `SOUNDS_DIR`, `LOG_LEVEL` (`INFO`/`DEBUG`), `RPT_CONF_PATH`, `TTS_VOICES_DIR`, `PIPER_BIN`.
+Key env vars: `AMI_USER`, `AMI_SECRET`, `SECRET_KEY`, `DB_PATH`, `SOUNDS_DIR`, `LOG_LEVEL` (`INFO`/`DEBUG`), `RPT_CONF_PATH`, `TTS_VOICES_DIR`, `PIPER_BIN`, `APRS_IS_PASSCODE` (default `-1`, receive-only), `APRS_IS_HOST`/`APRS_IS_PORT` (default `rotate.aprs2.net:14580`). The APRS-IS login callsign itself is a Kiosk Setting, not an env var — see "APRS-IS map layer".
 
 ### Auth and security
 
@@ -138,6 +147,7 @@ Sessions are plain signed cookies — there is no server-side session store. To 
 - `https://huggingface.co/rhasspy/piper-voices` — Piper TTS voice model downloads (`.onnx`/`.onnx.json`), on demand
 - `https://nominatim.openstreetmap.org` — geocodes a node's free-text location string to lat/lon, feeding both the kiosk map and the NWS zone lookup; rate-limited to 1 req/1.1s in-process
 - `https://mesonet.agron.iastate.edu/cache/tile.py/...nexrad-n0q-900913/{z}/{x}/{y}.png` — Iowa Environmental Mesonet's public NEXRAD composite-reflectivity tile cache, no API key; fetched client-side directly by the browser as an optional Leaflet overlay on the kiosk map (toggled via the map's "Radar" checkbox), not proxied through the backend
+- `rotate.aprs2.net:14580` (APRS-IS) — nearby APRS station positions for the kiosk map's optional "APRS" layer, via the `aprslib` pip package; receive-only, requires a callsign saved in Manager > Kiosk Settings (feature is off otherwise) — see "APRS-IS map layer" above
 
 ### Service identity
 

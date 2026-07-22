@@ -98,17 +98,41 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .header-brand { display: flex; align-items: center; gap: 10px; color: var(--text2);
   font-size: 0.9rem; letter-spacing: 0.06em; }
 .header-brand strong { color: var(--accent); font-size: 1rem; }
-.header-logo { height: 69px; width: 69px; object-fit: contain; flex-shrink: 0;
+.header-logo { height: 48px; width: 48px; object-fit: contain; flex-shrink: 0;
   filter: drop-shadow(0 0 6px rgba(63,185,80,.35)); }
-.header-clock { font-size: 2.6rem; font-weight: 300; font-variant-numeric: tabular-nums;
-  letter-spacing: 0.04em; }
 .header-actions { display: flex; align-items: center; gap: 10px; }
+/* Clock frame lives in .bars-row now (see #clock-bar), styled like the
+   weather/net frames next to it — .clock-time deliberately sets no
+   font-size of its own so it inherits .weather-bar's, keeping it visually
+   matched to the weather ticker text. */
+.clock-time { font-variant-numeric: tabular-nums; font-weight: 600; }
 
 .btn-icon { background: var(--bg3); border: 1px solid var(--border); color: var(--text2);
   border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 0.82rem;
   text-decoration: none; display: inline-flex; align-items: center; gap: 4px;
   transition: color .15s, border-color .15s; }
 .btn-icon:hover { color: var(--text); border-color: var(--text2); }
+
+/* Node window's utility row (search/net-schedule/login/layout-edit/
+   fullscreen/manager). nowrap + tightened per-button padding (icon-only
+   buttons don't need the wider 10px horizontal padding .btn-icon uses
+   elsewhere for icon+text combos like Listen/TX) so the whole row reliably
+   fits on one line even at phone widths; overflow-x:auto is just a safety
+   net for the narrowest devices rather than something expected to trigger. */
+.node-actions { display: flex; gap: 5px; margin-bottom: 8px; flex-shrink: 0;
+  align-items: center; flex-wrap: nowrap; overflow-x: auto; }
+.node-actions-right { margin-left: auto; display: flex; align-items: center;
+  gap: 5px; flex-wrap: nowrap; flex-shrink: 0; }
+.node-actions .btn-icon { padding: 5px 7px; flex-shrink: 0; }
+.node-actions #kiosk-login-btn { padding: 5px 10px; }
+
+/* Inline SVG icons (Lucide, ISC license) — see the sprite comment near the
+   top of <body> for the add-a-new-icon recipe. `.icon` is the one place
+   size/stroke is set so every icon stays visually consistent by default;
+   override width/height inline for one-off larger uses. */
+.icon { width: 1em; height: 1em; display: inline-block; vertical-align: -0.15em;
+  stroke: currentColor; stroke-width: 2; fill: none;
+  stroke-linecap: round; stroke-linejoin: round; }
 .search-tab.active { color: var(--accent); border-color: var(--accent); }
 
 /* ── Weather ticker + net-schedule reminder bars ── */
@@ -120,6 +144,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   transition: background-color .3s, border-color .3s;
 }
 #weather-bar { flex: 1; min-width: 0; }
+/* Location label + the wrapping item list sit in their own no-wrap row on
+   desktop (ticker-style, one line). Mobile overrides this to flex-wrap so
+   long forecasts don't get clipped — see the mobile media query. */
+#weather-content { display: flex; align-items: center; gap: 14px; flex: 1; min-width: 0; overflow: hidden; }
 .weather-location { color: var(--accent); font-weight: 600; white-space: nowrap; flex-shrink: 0; }
 .weather-sep { color: var(--border); flex-shrink: 0; }
 .weather-items { display: flex; gap: 20px; flex-wrap: wrap; overflow: hidden; }
@@ -141,28 +169,65 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
    stays consistent across the kiosk. */
 .weather-bar-alert { background: rgba(232,113,10,.10); border-color: rgba(232,113,10,.5); }
 
-/* ── Content area: Node info | Connected/Map | Favorites | Global Activity (outer 2 + node full height) ── */
-.content-area { display: grid; grid-template-columns: 210px 1fr 280px 280px; grid-template-rows: 55fr 45fr; gap: 10px; flex: 1; min-height: 0; }
+/* ── NWS severe weather ticker: full-width scrolling bar, shown only while
+   the manager's "Show on Kiosk Board" switch is on and at least one alert
+   is active. Two back-to-back copies of the same item list scroll together
+   and the track loops at exactly -50% so the seam between them is invisible. */
+.nws-alert-bar {
+  background: rgba(224,68,68,.10); border: 1px solid rgba(224,68,68,.5); border-radius: 7px;
+  padding: 5px 14px; display: flex; align-items: center; gap: 14px; flex-shrink: 0;
+  font-size: 0.85rem; overflow: hidden; min-height: 32px;
+}
+.nws-alert-icon { color: var(--danger); font-weight: 700; white-space: nowrap; flex-shrink: 0; }
+.nws-alert-track-wrap { flex: 1; min-width: 0; overflow: hidden; }
+.nws-alert-track { display: inline-flex; gap: 48px; white-space: nowrap; will-change: transform; }
+.nws-alert-item { color: var(--text2); }
+.nws-alert-item strong { color: var(--text); }
+.nws-alert-item.nws-sev-warning strong { color: var(--danger); }
+.nws-alert-item.nws-sev-watch strong,
+.nws-alert-item.nws-sev-advisory strong { color: var(--warn); }
+@keyframes nws-scroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
 
-.connected-card { grid-column: 2 / 4; grid-row: 1; }
+/* ── Content area: Node info | Recent Connections | Connected/Map | Favorites | Latest Activity ──
+   A 12-col x 24-row grid built from `fr` tracks, not fixed px, so it always
+   fills exactly the space .content-area has (same "fits the viewport, never
+   scrolls" behavior the old fixed 4-column grid had) regardless of screen
+   size. The six cards' default positions below reproduce the old layout's
+   proportions in that coordinate space. Once the user drags/resizes a card
+   (see the Dashboard grid section further down), JS takes over with inline
+   grid-column/grid-row on that card — inline style always wins over these
+   stylesheet defaults, and on mobile .content-area switches to display:flex
+   so grid-column/grid-row (inline or not) become no-ops there. */
+.content-area {
+  display: grid; grid-template-columns: repeat(12, 1fr); grid-template-rows: repeat(24, 1fr);
+  gap: 10px; flex: 1; min-height: 0; position: relative;
+}
 
-/* ── Node status card: full height, matching Global Activity / Favorites ── */
+.connected-card { grid-column: 4 / span 6; grid-row: 1 / span 13; }
+
+/* ── Node status card: left column, top half (Recent Connections is its own
+   card sharing this column — see .history-card) ── */
 .node-card {
-  grid-column: 1; grid-row: 1 / span 2;
+  grid-column: 1 / span 3; grid-row: 1 / span 16;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   padding: 16px 12px; display: flex; flex-direction: column;
   gap: 8px; overflow: hidden; min-height: 0;
 }
 #node-info { display: flex; flex-direction: column; align-items: center; gap: 8px; flex-shrink: 0; }
-.node-history {
-  width: 100%; flex: 1; min-height: 0; display: flex; flex-direction: column;
-  justify-content: flex-end;   /* push title + list together to the bottom of the card */
-  margin-top: 4px;
+
+/* ── Recent Connections: left column, bottom half, under the Node card ── */
+.history-card {
+  grid-column: 1 / span 3; grid-row: 17 / span 8;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+  display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
-.node-history-title { flex-shrink: 0; margin-bottom: 4px; border-top: 1px solid var(--border); padding-top: 8px; }
-.node-history-list { flex-shrink: 1; overflow-y: auto; display: flex; flex-direction: column; justify-content: flex-end; }
-.node-history-list::-webkit-scrollbar { width: 3px; }
-.node-history-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+/* No justify-content:flex-end — combined with overflow-y:auto it's a classic
+   flexbox trap: once rows overflow, the browser clips the start of the
+   content instead of leaving it scrollable, so the newest row would render
+   cut off behind .card-header. Rows just stack from the top. */
+.history-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; }
+.history-list::-webkit-scrollbar { width: 3px; }
+.history-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 .hist-row { padding: 6px 2px; border-bottom: 1px solid var(--border); }
 .hist-row:last-child { border-bottom: none; }
 .hist-top { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
@@ -180,7 +245,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .node-location { font-size: 0.78rem; color: var(--text2); text-align: center; }
 
 .keyed-wrap { display: flex; flex-direction: column; align-items: center; gap: 6px; margin: 6px 0 2px; }
-.keyed-dot { width: 56px; height: 56px; border-radius: 50%; background: #222;
+.keyed-dot { width: 39px; height: 39px; border-radius: 50%; background: #222;
   border: 3px solid #333; transition: background .4s, border-color .4s, box-shadow .4s;
   display: flex; align-items: center; justify-content: center; overflow: hidden; }
 .keyed-dot-logo { width: 100%; height: 100%; object-fit: contain; opacity: 0.3; }
@@ -204,13 +269,94 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .link-count { font-size: 0.82rem; color: var(--text2); }
 .link-count span { color: var(--text); font-weight: 600; }
 
+/* ── Dashboard grid: resizable/movable/collapsible cards (desktop only — see
+   dashSupported() in JS; mobile keeps the fixed stacked layout untouched).
+   Move and resize controls are hidden until .content-area gets .dash-edit
+   (toggled by the layout-dashboard header button) so the kiosk stays clean
+   for passive viewing; collapse stays available all the time since it's a
+   low-risk, commonly-useful action on its own. */
+.dash-card { position: relative; }
+.dash-header-grip { cursor: grab; color: var(--text2); opacity: 0; width: 0; margin-right: 0;
+  overflow: hidden; display: inline-flex; align-items: center; flex-shrink: 0;
+  transition: opacity .15s, width .15s, margin-right .15s; }
+.content-area.dash-edit .dash-header-grip { opacity: .6; width: 1em; margin-right: 6px; }
+.content-area.dash-edit .dash-header-grip:hover { opacity: 1; }
+.dash-header-grip:active { cursor: grabbing; }
+.dash-card.dash-dragging { opacity: .35; }
+.dash-collapse-btn { background: none; border: none; color: var(--text2); cursor: pointer;
+  padding: 2px; margin-left: 6px; flex-shrink: 0; display: inline-flex; align-items: center;
+  border-radius: 4px; transition: color .15s; }
+.dash-collapse-btn:hover { color: var(--text); }
+.dash-collapse-btn svg { transition: transform .15s; }
+.dash-card.dash-collapsed .dash-collapse-btn svg { transform: rotate(-90deg); }
+/* Hide (fully removes the card, freeing its space to the rest of the tree —
+   unlike collapse, which just shrinks it to a header). Gated to edit mode
+   like the grip, not "available all the time" like collapse: it's a more
+   drastic, less-easily-undone action from the card itself (undoing it means
+   going to the "hidden panels" menu, not just clicking the same spot again),
+   so it stays out of the way during passive kiosk viewing. */
+.dash-hide-btn { background: none; border: none; color: var(--text2); cursor: pointer;
+  padding: 2px; margin-left: 0; flex-shrink: 0; display: inline-flex; align-items: center;
+  border-radius: 4px; opacity: 0; width: 0; overflow: hidden;
+  transition: opacity .15s, color .15s, width .15s, margin-left .15s; }
+.content-area.dash-edit .dash-hide-btn { opacity: .6; width: 1em; margin-left: 6px; }
+.content-area.dash-edit .dash-hide-btn:hover { opacity: 1; color: var(--danger); }
+/* Scoped to desktop widths, not just gated in JS: toggleDashCollapse() already
+   refuses to collapse anything while !dashSupported(), but the .dash-collapsed
+   class it sets earlier can still be sitting on an element from a prior
+   desktop-width session (same page, window resized narrower; or the same
+   localStorage state simply rendered at a narrower width). Without this
+   media guard the rule would still hide that card's content on mobile, where
+   there's no collapse control left to undo it. */
+@media (min-width: 861px) {
+  .dash-card.dash-collapsed > *:not(.card-header) { display: none !important; }
+  .dash-card.dash-fully-hidden { display: none !important; }
+}
+/* Dividers are the real "resize columns/rows" control: absolutely-positioned
+   overlay strips (positioned/sized by dashPositionDividers() in JS, since
+   their placement/orientation depends on the current shape of the split
+   tree — see the JS comment above DASH_DEFAULT_TREE) laid over the gap
+   between cards. Dragging one moves that shared boundary, growing one
+   region and shrinking the other by the same amount — the two regions come
+   from the *same* split node, so they can never overlap or leave a gap. */
+/* pointer-events:none outside edit mode isn't just visual — these strips are
+   full-size and positioned even when invisible (only their opacity is 0),
+   so without it the mouse would still hit them, showing the resize cursor
+   and "Drag to resize" tooltip, and eating clicks meant for whatever's
+   underneath, even though dashDividerStart() also refuses to act on them
+   while !_dashEditOn. */
+.dash-divider { position: absolute; opacity: 0; pointer-events: none; touch-action: none; z-index: 3;
+  transition: opacity .15s, background-color .15s; border-radius: 3px; }
+.dash-divider.dash-divider-v { cursor: col-resize; }
+.dash-divider.dash-divider-h { cursor: row-resize; }
+.content-area.dash-edit .dash-divider { opacity: .4; background: var(--accent); pointer-events: auto; }
+.dash-divider:hover, .dash-divider.dash-divider-active { opacity: .8 !important; }
+/* Selector must be #dash-edit-btn (its id), not .dash-edit-btn — the button
+   only ever carries class="btn-icon", so a class selector here never
+   matched anything and toggleDashEditMode()'s classList.toggle('active',…)
+   had no visible effect. */
+#dash-edit-btn.active { color: #fff; background: var(--danger); border-color: var(--danger); }
+/* Drop indicator: shown while dragging a card's grip over another card,
+   sized/positioned in dashDragOver() to cover either the whole target (a
+   center-zone drop, which swaps the two cards) or one edge strip of it (an
+   edge-zone drop, which docks the dragged card into a new pane split off
+   that edge) — see dashDropZone(). */
+.dash-drop-indicator { position: fixed; z-index: 20; pointer-events: none;
+  background: rgba(88, 166, 255, .28); border: 2px solid var(--accent); border-radius: 6px;
+  transition: left .08s, top .08s, width .08s, height .08s; }
+
 /* ── Connected nodes ── */
 .connected-card {
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
+/* flex-wrap here (not just the mobile media query) matters once cards are
+   resizable — squeeze a header with several controls (Listen/TX, map layer
+   toggles, favorites sort) into a narrow column and without wrapping the
+   overflow just gets clipped by the card's own overflow:hidden instead of
+   dropping to a second line. */
 .card-header { padding: 12px 18px 8px; border-bottom: 1px solid var(--border);
-  display: flex; align-items: baseline; gap: 10px; flex-shrink: 0; }
+  display: flex; align-items: baseline; gap: 6px 10px; flex-shrink: 0; flex-wrap: wrap; row-gap: 6px; }
 .card-title { font-size: 0.68rem; letter-spacing: .12em; color: var(--text2); text-transform: uppercase; }
 .card-count { font-size: 0.82rem; color: var(--accent); font-weight: 600; }
 .connector-warn-bar {
@@ -258,7 +404,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
 /* ── Activity panel: sits under Connected Nodes, right of the map, matching the map's height ── */
 .activity-card {
-  grid-column: 3; grid-row: 2;
+  grid-column: 7 / span 3; grid-row: 14 / span 11;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
@@ -267,12 +413,13 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .activity-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
 .act-row { display: grid; grid-template-columns: 1fr auto; gap: 0 10px;
-  align-items: center; padding: 8px 14px;
+  align-items: center; padding: 8px 14px; cursor: pointer;
   border-bottom: 1px solid var(--border); transition: background .15s; }
 .act-row:last-child { border-bottom: none; }
 .act-row:hover { background: var(--bg3); }
 .act-dot { width: 7px; height: 7px; border-radius: 50%; align-self: center; flex-shrink: 0; }
 .act-dot.local  { background: var(--green); box-shadow: 0 0 4px rgba(63,185,80,.7); }
+.act-dot.aprs   { background: #a855f7; box-shadow: 0 0 4px rgba(168,85,247,.7); }
 .act-body { display: flex; flex-direction: column; gap: 1px; overflow: hidden; }
 .act-top { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
 .act-node { font-size: 0.9rem; font-weight: 700; font-family: var(--mono); color: var(--accent); text-decoration: none; }
@@ -287,7 +434,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .act-badge.global { background: rgba(88,166,255,.12); color: var(--accent); }
 
 /* ── Map ── */
-.map-card { grid-column: 2; grid-row: 2; min-height: 0;
+.map-card { grid-column: 4 / span 3; grid-row: 14 / span 11; min-height: 0;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; }
 #map { flex: 1; background: #0d1117; }
@@ -308,7 +455,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
 /* ── Favorites sidebar ── */
 .favorites-card {
-  grid-column: 4; grid-row: 1 / span 2;
+  grid-column: 10 / span 3; grid-row: 1 / span 24;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
@@ -451,16 +598,21 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   .board { height: auto; min-height: 100vh; padding: 12px 12px 10px; }
 
   .header { flex-wrap: wrap; row-gap: 8px; }
-  .header-logo { height: 44px; width: 44px; }
+  .header-logo { height: 31px; width: 31px; }
   .header-brand { font-size: 0.8rem; }
   .header-brand strong { font-size: 0.92rem; }
-  .header-clock { font-size: 1.7rem; }
-  .header-clock-wrap { order: 3; flex-basis: 100%; justify-content: center; }
   .header-actions { gap: 6px; }
 
   .bars-row { flex-wrap: wrap; }
   .weather-bar { min-height: 0; overflow: visible; flex-wrap: wrap; }
-  .weather-items { overflow: visible; }
+  #weather-content { flex-wrap: wrap; overflow: visible; row-gap: 6px; }
+  /* The "|" separator only reads right on a single ticker line. Once the bar
+     wraps, hide it and force .weather-items onto its own full-width row
+     below the location — otherwise the separator and the items' own nested
+     wrap (20px gap) fight the outer row-gap (4px) and produce uneven,
+     lopsided spacing between lines. */
+  .weather-sep { display: none; }
+  .weather-items { overflow: visible; flex-basis: 100%; gap: 6px 14px; }
   #net-bar { flex-basis: 100%; }
 
   /* Single scrolling column. Order follows what a kiosk visitor checks
@@ -470,28 +622,31 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     display: flex; flex-direction: column; grid-template-columns: none;
     grid-template-rows: none; flex: none; min-height: 0;
   }
-  .node-card, .connected-card, .map-card, .activity-card, .favorites-card {
+  .node-card, .history-card, .connected-card, .map-card, .activity-card, .favorites-card {
     grid-column: auto; grid-row: auto;
   }
   .node-card    { order: 1; }
-  .connected-card { order: 2; }
-  .map-card     { order: 3; }
-  .activity-card { order: 4; }
-  .favorites-card { order: 5; }
+  .history-card { order: 2; }
+  .connected-card { order: 3; }
+  .map-card     { order: 4; }
+  .activity-card { order: 5; }
+  .favorites-card { order: 6; }
+
+  /* Resizable/movable/collapsible cards are desktop-only (see dashSupported()
+     in JS) — hide their controls entirely here rather than leave dead UI. */
+  .dash-header-grip, .dash-collapse-btn, .dash-hide-btn, .dash-divider, #dash-drop-indicator, #dash-edit-btn, #dash-hidden-wrap { display: none !important; }
 
   /* Cards no longer share an implicit grid-row height, so each gets its own
      cap with an internally-scrolling list instead of flexing to fill a row. */
   .node-card {
     min-height: 0; max-height: none; padding: 14px 12px;
   }
-  .node-history-list { max-height: 160px; }
-  .connected-card, .activity-card, .favorites-card { max-height: 320px; }
+  .connected-card, .activity-card, .favorites-card, .history-card { max-height: 320px; }
   .map-card { height: 340px; flex-shrink: 0; }
 
-  .header-clock, .node-number { font-variant-numeric: tabular-nums; }
-  .node-number { font-size: 1.9rem; }
+  .node-number { font-variant-numeric: tabular-nums; font-size: 1.9rem; }
   .node-callsign { font-size: 1.1rem; }
-  .keyed-dot { width: 46px; height: 46px; }
+  .keyed-dot { width: 32px; height: 32px; }
   .keyed-label { font-size: 0.88rem; }
 
   /* .node-row already wraps instead of truncating (see base styles) — just
@@ -517,6 +672,159 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 </head>
 <body>
 
+<!-- ─────────────────────────────────────────────────────────────────────
+     Icon sprite — Lucide icons (ISC license, https://lucide.dev), inlined
+     so the kiosk stays fully self-contained (no CDN request, no build
+     step). Each <symbol> is one icon; use it anywhere in this file with:
+
+       <svg class="icon"><use href="#icon-NAME"></use></svg>
+
+     The containing element (button/link) needs its own title="..." since
+     the SVG carries no visible text. `.icon` (defined near .btn-icon in
+     <style>) is the single place size/color/stroke-width is controlled —
+     icons inherit color via currentColor, so they follow the existing
+     light/dark theme automatically.
+
+     To add a new icon later:
+       1. curl -sL "https://unpkg.com/lucide-static@latest/icons/<name>.svg"
+          (browse names at https://lucide.dev/icons)
+       2. Take only the inner <path>/<circle>/<rect>/... elements — drop
+          the outer <svg> wrapper's class/width/height/stroke* attributes,
+          since `.icon` supplies those.
+       3. Wrap them: <symbol id="icon-<name>" viewBox="0 0 24 24">...</symbol>
+          and add it below.
+       4. Reference it with <svg class="icon"><use href="#icon-<name>"></use></svg>.
+     ───────────────────────────────────────────────────────────────────── -->
+<svg style="position:absolute;width:0;height:0;overflow:hidden" aria-hidden="true">
+  <symbol id="icon-search" viewBox="0 0 24 24">
+    <path d="m21 21-4.34-4.34" />
+    <circle cx="11" cy="11" r="8" />
+  </symbol>
+  <symbol id="icon-calendar-days" viewBox="0 0 24 24">
+    <path d="M8 2v4" />
+    <path d="M16 2v4" />
+    <rect width="18" height="18" x="3" y="4" rx="2" />
+    <path d="M3 10h18" />
+    <path d="M8 14h.01" />
+    <path d="M12 14h.01" />
+    <path d="M16 14h.01" />
+    <path d="M8 18h.01" />
+    <path d="M12 18h.01" />
+    <path d="M16 18h.01" />
+  </symbol>
+  <symbol id="icon-door-open" viewBox="0 0 24 24">
+    <path d="M11 20H2" />
+    <path d="M11 4.562v16.157a1 1 0 0 0 1.242.97L19 20V5.562a2 2 0 0 0-1.515-1.94l-4-1A2 2 0 0 0 11 4.561z" />
+    <path d="M11 4H8a2 2 0 0 0-2 2v14" />
+    <path d="M14 12h.01" />
+    <path d="M22 20h-3" />
+  </symbol>
+  <symbol id="icon-maximize" viewBox="0 0 24 24">
+    <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+    <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
+    <path d="M3 16v3a2 2 0 0 0 2 2h3" />
+    <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+  </symbol>
+  <symbol id="icon-book-open" viewBox="0 0 24 24">
+    <path d="M12 7v14" />
+    <path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z" />
+  </symbol>
+  <symbol id="icon-star" viewBox="0 0 24 24">
+    <path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z" />
+  </symbol>
+  <symbol id="icon-triangle-alert" viewBox="0 0 24 24">
+    <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" />
+    <path d="M12 9v4" />
+    <path d="M12 17h.01" />
+  </symbol>
+  <symbol id="icon-mic" viewBox="0 0 24 24">
+    <path d="M12 19v3" />
+    <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+    <rect x="9" y="2" width="6" height="13" rx="3" />
+  </symbol>
+  <symbol id="icon-headphones" viewBox="0 0 24 24">
+    <path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a9 9 0 0 1 18 0v7a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3" />
+  </symbol>
+  <symbol id="icon-volume-2" viewBox="0 0 24 24">
+    <path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z" />
+    <path d="M16 9a5 5 0 0 1 0 6" />
+    <path d="M19.364 18.364a9 9 0 0 0 0-12.728" />
+  </symbol>
+  <symbol id="icon-arrow-up" viewBox="0 0 24 24">
+    <path d="m5 12 7-7 7 7" />
+    <path d="M12 19V5" />
+  </symbol>
+  <symbol id="icon-arrow-down" viewBox="0 0 24 24">
+    <path d="M12 5v14" />
+    <path d="m19 12-7 7-7-7" />
+  </symbol>
+  <symbol id="icon-x" viewBox="0 0 24 24">
+    <path d="M18 6 6 18" />
+    <path d="m6 6 12 12" />
+  </symbol>
+  <symbol id="icon-radio-tower" viewBox="0 0 24 24">
+    <path d="M4.9 16.1C1 12.2 1 5.8 4.9 1.9" />
+    <path d="M7.8 4.7a6.14 6.14 0 0 0-.8 7.5" />
+    <circle cx="12" cy="9" r="2" />
+    <path d="M16.2 4.8c2 2 2.26 5.11.8 7.47" />
+    <path d="M19.1 1.9a9.96 9.96 0 0 1 0 14.1" />
+    <path d="M9.5 18h5" />
+    <path d="m8 22 4-11 4 11" />
+  </symbol>
+  <symbol id="icon-lock" viewBox="0 0 24 24">
+    <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
+    <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+  </symbol>
+  <symbol id="icon-clock" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="10" />
+    <path d="M12 6v6l4 2" />
+  </symbol>
+  <symbol id="icon-pause" viewBox="0 0 24 24">
+    <rect x="14" y="3" width="5" height="18" rx="1" />
+    <rect x="5" y="3" width="5" height="18" rx="1" />
+  </symbol>
+  <symbol id="icon-cloud-sun" viewBox="0 0 24 24">
+    <path d="M12 2v2" />
+    <path d="m4.93 4.93 1.41 1.41" />
+    <path d="M20 12h2" />
+    <path d="m19.07 4.93-1.41 1.41" />
+    <path d="M15.947 12.65a4 4 0 0 0-5.925-4.128" />
+    <path d="M13 22H7a5 5 0 1 1 4.9-6H13a3 3 0 0 1 0 6Z" />
+  </symbol>
+  <symbol id="icon-grip-vertical" viewBox="0 0 24 24">
+    <circle cx="9" cy="12" r="1" />
+    <circle cx="9" cy="5" r="1" />
+    <circle cx="9" cy="19" r="1" />
+    <circle cx="15" cy="12" r="1" />
+    <circle cx="15" cy="5" r="1" />
+    <circle cx="15" cy="19" r="1" />
+  </symbol>
+  <symbol id="icon-layout-dashboard" viewBox="0 0 24 24">
+    <rect width="7" height="9" x="3" y="3" rx="1" />
+    <rect width="7" height="5" x="14" y="3" rx="1" />
+    <rect width="7" height="9" x="14" y="12" rx="1" />
+    <rect width="7" height="5" x="3" y="16" rx="1" />
+  </symbol>
+  <symbol id="icon-chevron-down" viewBox="0 0 24 24">
+    <path d="m6 9 6 6 6-6" />
+  </symbol>
+  <symbol id="icon-eye-off" viewBox="0 0 24 24">
+    <path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49" />
+    <path d="M14.084 14.158a3 3 0 0 1-4.242-4.242" />
+    <path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143" />
+    <path d="m2 2 20 20" />
+  </symbol>
+  <symbol id="icon-eye" viewBox="0 0 24 24">
+    <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" />
+    <circle cx="12" cy="12" r="3" />
+  </symbol>
+  <symbol id="icon-move-diagonal-2" viewBox="0 0 24 24">
+    <path d="M19 13v6h-6" />
+    <path d="M5 11V5h6" />
+    <path d="m5 5 14 14" />
+  </symbol>
+</svg>
+
 <div class="board">
 
   <!-- Header -->
@@ -525,28 +833,21 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       <img class="header-logo" src="/static/logo-512.png" alt="HenWen">
       <strong>HenWen</strong> <span>KIOSK</span>
     </div>
-    <div class="header-clock-wrap" style="display:flex;align-items:center;gap:10px">
-      <div class="header-clock" id="clock">--:--:--</div>
-    </div>
     <div class="header-actions">
-      <div id="kiosk-user-bar" style="display:none;align-items:center;gap:8px;font-size:0.75rem">
-        <span id="kiosk-username" style="color:var(--text2)"></span>
-        <button class="btn-icon" onclick="kioskLogout()">Logout</button>
-      </div>
-      <button class="btn-icon" id="kiosk-login-btn" onclick="openKioskLogin()" style="display:none">Login</button>
-      <button class="btn-icon" onclick="toggleFS()" title="Fullscreen">&#x26F6; Fullscreen</button>
-      <a class="btn-icon" href="/henwen-manager" target="_blank" rel="noopener">&#8592; Manager</a>
       <audio id="node-audio" preload="none">
         <source type="audio/webm; codecs=opus">
       </audio>
     </div>
   </header>
 
-  <!-- Weather bar + net-schedule reminder bar: two separate frames so a
+  <!-- Clock + weather bar + net-schedule reminder bar: separate frames so a
        due/soon net only colors its own box, not the weather ticker too. -->
   <div class="bars-row">
+    <div class="weather-bar" id="clock-bar">
+      <div class="clock-time" id="clock">--:--:--</div>
+    </div>
     <div class="weather-bar" id="weather-bar">
-      <div id="weather-content" style="display:flex;align-items:center;gap:14px;flex:1;min-width:0;overflow:hidden">
+      <div id="weather-content">
         <span class="weather-loading">Loading weather&hellip;</span>
       </div>
     </div>
@@ -555,46 +856,100 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     </div>
   </div>
 
-  <!-- Content -->
-  <div class="content-area">
+  <div class="nws-alert-bar" id="nws-alert-bar" style="display:none">
+    <span class="nws-alert-icon"><svg class="icon"><use href="#icon-triangle-alert"></use></svg> WX ALERT</span>
+    <div class="nws-alert-track-wrap" id="nws-alert-track-wrap">
+      <div class="nws-alert-track" id="nws-alert-track"></div>
+    </div>
+  </div>
 
-    <!-- Node status: full-height column matching Global Activity / Favorites -->
-    <div class="node-card">
+  <!-- Content -->
+  <div class="content-area" id="content-area">
+
+    <!-- Dashboard grid dividers: drag to resize (edit mode only). There are always
+         exactly (card count - 1) — one per internal node of the split tree,
+         whatever its current shape — positioned/sized and given their
+         orientation class entirely by dashPositionDividers() in JS. -->
+    <div class="dash-divider" data-divider-idx="0" onpointerdown="dashDividerStart(event,0)" title="Drag to resize"></div>
+    <div class="dash-divider" data-divider-idx="1" onpointerdown="dashDividerStart(event,1)" title="Drag to resize"></div>
+    <div class="dash-divider" data-divider-idx="2" onpointerdown="dashDividerStart(event,2)" title="Drag to resize"></div>
+    <div class="dash-divider" data-divider-idx="3" onpointerdown="dashDividerStart(event,3)" title="Drag to resize"></div>
+    <div class="dash-divider" data-divider-idx="4" onpointerdown="dashDividerStart(event,4)" title="Drag to resize"></div>
+    <!-- Shows which pane a dragged card will dock into (edge = split, center = swap). -->
+    <div id="dash-drop-indicator" class="dash-drop-indicator" style="display:none"></div>
+
+    <!-- Node status: full-height column matching Latest Activity / Favorites -->
+    <div class="node-card dash-card" data-dash-id="node"
+         ondragover="dashDragOver(event)" ondragleave="dashDragLeave(event)" ondrop="dashDrop(event,'node')">
+      <div class="card-header" style="padding:0 0 8px">
+        <span class="dash-header-grip" draggable="true" title="Drag to move"
+              ondragstart="dashDragStart(event,'node')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
+        <span class="card-title">Node</span>
+        <button class="dash-hide-btn" onclick="toggleDashHide('node',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
+        <button class="dash-collapse-btn" onclick="toggleDashCollapse('node',event)" title="Collapse"><svg class="icon"><use href="#icon-chevron-down"></use></svg></button>
+      </div>
       <div id="node-info">
         <div class="node-label">NODE</div>
         <div style="color:var(--text2);font-size:.9rem">Loading&hellip;</div>
       </div>
-      <div class="node-history">
-        <!-- Search stays hidden until login (it bridges RF, like every other
-             connect path); the net-schedule calendar is always visible. -->
-        <div style="display:flex;gap:6px;margin-bottom:8px;flex-shrink:0">
-          <button class="btn-icon" id="node-search-btn" onclick="openSearchModal()" title="Search the AllStar and EchoLink directories for nodes to connect to" style="display:none">&#128269;</button>
-          <button class="btn-icon" id="net-cal-btn" onclick="openNetModal()" title="Net Schedule — scheduled net reminders">&#128197;</button>
-        </div>
-        <div class="node-history-title card-title">Recent Connections</div>
-        <div class="node-history-list" id="node-history-list">
-          <div class="empty-msg" style="font-size:.75rem">Loading&hellip;</div>
-        </div>
+      <!-- Search stays hidden until login (it bridges RF, like every other
+           connect path); the net-schedule calendar is always visible. -->
+      <div class="node-actions">
+        <button class="btn-icon" id="node-search-btn" onclick="openSearchModal()" title="Search the AllStar and EchoLink directories for nodes to connect to" style="display:none"><svg class="icon"><use href="#icon-search"></use></svg></button>
+        <button class="btn-icon" id="net-cal-btn" onclick="openNetModal()" title="Net Schedule — scheduled net reminders"><svg class="icon"><use href="#icon-calendar-days"></use></svg></button>
+        <span class="node-actions-right">
+          <div id="kiosk-user-bar" style="display:none;align-items:center;gap:6px;font-size:0.75rem;flex-shrink:0">
+            <button class="btn-icon" onclick="kioskLogout()" title="Logout"><svg class="icon"><use href="#icon-door-open"></use></svg></button>
+          </div>
+          <button class="btn-icon" id="kiosk-login-btn" onclick="openKioskLogin()" style="display:none">Login</button>
+          <div id="dash-hidden-wrap" style="position:relative;display:inline-flex">
+            <button class="btn-icon" id="dash-hidden-btn" onclick="toggleDashHiddenMenu(event)" title="Hidden panels" style="display:none"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
+            <div id="dash-hidden-menu" style="display:none;position:absolute;top:100%;right:0;margin-top:6px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:6px;min-width:170px;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:50;font-size:0.78rem"></div>
+          </div>
+          <button class="btn-icon" id="dash-edit-btn" onclick="toggleDashEditMode()" title="Rearrange, resize, or collapse the panels below"><svg class="icon"><use href="#icon-layout-dashboard"></use></svg></button>
+          <button class="btn-icon" onclick="toggleFS()" title="Fullscreen"><svg class="icon"><use href="#icon-maximize"></use></svg></button>
+          <a class="btn-icon" href="/henwen-manager" target="_blank" rel="noopener" title="Manager"><svg class="icon"><use href="#icon-book-open"></use></svg></a>
+        </span>
+      </div>
+    </div>
+
+    <!-- Recent Connections -->
+    <div class="history-card dash-card" data-dash-id="history"
+         ondragover="dashDragOver(event)" ondragleave="dashDragLeave(event)" ondrop="dashDrop(event,'history')">
+      <div class="card-header">
+        <span class="dash-header-grip" draggable="true" title="Drag to move"
+              ondragstart="dashDragStart(event,'history')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
+        <span class="card-title">Recent Connections</span>
+        <button class="dash-hide-btn" onclick="toggleDashHide('history',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
+        <button class="dash-collapse-btn" onclick="toggleDashCollapse('history',event)" title="Collapse"><svg class="icon"><use href="#icon-chevron-down"></use></svg></button>
+      </div>
+      <div class="history-list" id="history-list">
+        <div class="empty-msg" style="font-size:.75rem">Loading&hellip;</div>
       </div>
     </div>
 
     <!-- Connected nodes -->
-    <div class="connected-card">
+    <div class="connected-card dash-card" data-dash-id="connected"
+         ondragover="dashDragOver(event)" ondragleave="dashDragLeave(event)" ondrop="dashDrop(event,'connected')">
       <div class="card-header">
+        <span class="dash-header-grip" draggable="true" title="Drag to move"
+              ondragstart="dashDragStart(event,'connected')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
         <span class="card-title">Connected Nodes</span>
         <span class="card-count" id="conn-count"></span>
         <span style="margin-left:auto;display:flex;align-items:center;gap:6px">
           <span id="listen-delay-note" style="font-size:0.65rem;color:var(--text2);font-style:italic;display:none">~1s delay</span>
-          <button class="btn-icon" id="tx-btn" onclick="openTx()" style="display:none" title="Transmit from your microphone through this node">&#127908; TX</button>
+          <button class="btn-icon" id="tx-btn" onclick="openTx()" style="display:none" title="Transmit from your microphone through this node"><svg class="icon"><use href="#icon-mic"></use></svg> TX</button>
           <span id="listen-vol-row" style="display:flex;align-items:center;gap:4px;opacity:0.4">
-            <span style="font-size:0.8rem;color:var(--text2)" title="Listen volume">&#128266;</span>
+            <span style="font-size:0.8rem;color:var(--text2)" title="Listen volume"><svg class="icon"><use href="#icon-volume-2"></use></svg></span>
             <input type="range" id="listen-volume" min="0" max="100" value="100" disabled title="Listen volume — separate from your device's system volume">
           </span>
-          <button class="btn-icon" id="listen-btn" onclick="toggleListen()" title="Stream live audio from this node — expect ~1 second delay">&#9834; Listen</button>
+          <button class="btn-icon" id="listen-btn" onclick="toggleListen()" title="Stream live audio from this node — expect ~1 second delay"><svg class="icon"><use href="#icon-headphones"></use></svg> Listen</button>
+          <button class="dash-hide-btn" onclick="toggleDashHide('connected',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
+          <button class="dash-collapse-btn" onclick="toggleDashCollapse('connected',event)" title="Collapse"><svg class="icon"><use href="#icon-chevron-down"></use></svg></button>
         </span>
       </div>
       <div id="tx-bar" style="display:none">
-        <button id="tx-ptt" disabled>&#127908; PTT &mdash; hold to transmit&ensp;<span style="font-size:0.7rem;font-weight:400">(or hold Space &middot; keys in ~&frac12;s)</span></button>
+        <button id="tx-ptt" disabled><svg class="icon"><use href="#icon-mic"></use></svg> PTT &mdash; hold to transmit&ensp;<span style="font-size:0.7rem;font-weight:400">(or hold Space &middot; keys in ~&frac12;s)</span></button>
         <div id="tx-audio-row">
           <span style="font-size:0.7rem;color:var(--text2);flex-shrink:0">Mic</span>
           <div id="tx-meter"><div id="tx-meter-fill"></div></div>
@@ -604,14 +959,14 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <div id="tx-status" style="font-size:0.75rem;color:var(--accent);min-height:1em">Arming&hellip;</div>
       </div>
       <div class="connector-warn-bar" id="connector-warn-bar" style="display:none">
-        &#9888; <span id="connector-warn-text"></span>
+        <svg class="icon"><use href="#icon-triangle-alert"></use></svg> <span id="connector-warn-text"></span>
       </div>
       <div class="conn-form-bar" id="conn-form-bar">
         <input id="conn-form-node" type="text" placeholder="Node #" maxlength="7"
                onkeydown="if(event.key==='Enter')statusConnectNew()">
         <button class="sb-btn connect" onclick="statusConnectNew()">Connect</button>
         <button class="sb-btn monitor" onclick="statusMonitorNew()">Monitor</button>
-        <button class="sb-btn fav" id="fav-add-btn" onclick="addToFavorites()" title="Add node to your Favorites list">&#9733; Fav</button>
+        <button class="sb-btn fav" id="fav-add-btn" onclick="addToFavorites()" title="Add node to your Favorites list"><svg class="icon"><use href="#icon-star"></use></svg> Fav</button>
         <label class="perm-label" id="perm-label" style="display:none">
           <input type="checkbox" id="conn-perm-chk"> Permanent
         </label>
@@ -623,13 +978,29 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     </div>
 
     <!-- Map -->
-    <div class="map-card">
+    <div class="map-card dash-card" data-dash-id="map"
+         ondragover="dashDragOver(event)" ondragleave="dashDragLeave(event)" ondrop="dashDrop(event,'map')">
       <div class="card-header">
+        <span class="dash-header-grip" draggable="true" title="Drag to move"
+              ondragstart="dashDragStart(event,'map')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
         <span class="card-title">Network Map</span>
         <div class="map-ctl">
           <label class="map-ctl-radar" title="Overlay live NEXRAD weather radar (NOAA/Iowa Mesonet)">
             <input type="checkbox" id="map-radar-chk" onchange="toggleRadar(this.checked)"> Radar
           </label>
+          <label class="map-ctl-radar" title="Show AllStarLink node activity pins and list entries">
+            <input type="checkbox" id="act-asl-chk" checked onchange="toggleAslActivity(this.checked)"> ASL
+          </label>
+          <label class="map-ctl-radar" title="Overlay nearby APRS stations (APRS-IS)">
+            <input type="checkbox" id="map-aprs-chk" onchange="toggleAprs(this.checked)"> APRS
+          </label>
+          <span id="map-aprs-radius-wrap" style="display:none;align-items:center;gap:4px">
+            <input type="range" id="map-aprs-radius" min="1" max="200" value="25"
+                   title="APRS search radius"
+                   oninput="onAprsRadiusInput(this.value)"
+                   onchange="onAprsRadiusChange(this.value)">
+            <span id="map-aprs-radius-val" style="font-size:0.7rem;color:var(--text2);width:3.4em;flex-shrink:0">25 mi</span>
+          </span>
           <select class="map-ctl-sel" id="map-tile-sel" onchange="changeTiles(this.value)">
             <option value="dark">OSM Dark</option>
             <option value="carto-dk">Dark (CartoDB)</option>
@@ -638,15 +1009,22 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
             <option value="satellite">Satellite</option>
           </select>
         </div>
+        <button class="dash-hide-btn" onclick="toggleDashHide('map',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
+        <button class="dash-collapse-btn" onclick="toggleDashCollapse('map',event)" title="Collapse"><svg class="icon"><use href="#icon-chevron-down"></use></svg></button>
       </div>
       <div id="map"></div>
     </div>
 
-    <!-- Global Activity: under Connected Nodes, right of the map, matching the map's height -->
-    <div class="activity-card">
+    <!-- Latest Activity: under Connected Nodes, right of the map, matching the map's height -->
+    <div class="activity-card dash-card" data-dash-id="activity"
+         ondragover="dashDragOver(event)" ondragleave="dashDragLeave(event)" ondrop="dashDrop(event,'activity')">
       <div class="card-header">
-        <span class="card-title">Global Activity</span>
+        <span class="dash-header-grip" draggable="true" title="Drag to move"
+              ondragstart="dashDragStart(event,'activity')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
+        <span class="card-title">Latest Activity</span>
         <span class="card-count" id="act-count"></span>
+        <button class="dash-hide-btn" style="margin-left:auto" onclick="toggleDashHide('activity',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
+        <button class="dash-collapse-btn" onclick="toggleDashCollapse('activity',event)" title="Collapse"><svg class="icon"><use href="#icon-chevron-down"></use></svg></button>
       </div>
       <div class="activity-list" id="activity-list">
         <div class="empty-msg">Loading&hellip;</div>
@@ -654,10 +1032,12 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     </div>
 
     <!-- Favorites sidebar -->
-    <div class="favorites-card">
+    <div class="favorites-card dash-card" data-dash-id="favorites"
+         ondragover="dashDragOver(event)" ondragleave="dashDragLeave(event)" ondrop="dashDrop(event,'favorites')">
       <div class="card-header">
+        <span class="dash-header-grip" draggable="true" title="Drag to move"
+              ondragstart="dashDragStart(event,'favorites')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
         <span class="card-title">Favorites</span>
-        <span class="card-count" id="fav-count"></span>
         <div class="fav-sort-controls">
           <select id="fav-sort-field" class="fav-sort-select" onchange="onFavSortChange()" title="Sort favorites by">
             <option value="custom">Custom (drag)</option>
@@ -665,11 +1045,13 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
             <option value="name">Name</option>
             <option value="location">Location</option>
           </select>
-          <button id="fav-sort-dir-btn" class="fav-sort-dir-btn" onclick="toggleFavSortDir()" title="Toggle sort direction">&#8593;</button>
+          <button id="fav-sort-dir-btn" class="fav-sort-dir-btn" onclick="toggleFavSortDir()" title="Toggle sort direction"><svg class="icon"><use href="#icon-arrow-up"></use></svg></button>
         </div>
+        <button class="dash-hide-btn" onclick="toggleDashHide('favorites',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
+        <button class="dash-collapse-btn" onclick="toggleDashCollapse('favorites',event)" title="Collapse"><svg class="icon"><use href="#icon-chevron-down"></use></svg></button>
       </div>
       <div id="fav-warn" class="fav-warn" style="display:none">
-        &#9888; Disconnect all nodes first
+        <svg class="icon"><use href="#icon-triangle-alert"></use></svg> Disconnect all nodes first
       </div>
       <div class="fav-list" id="fav-list">
         <div class="empty-msg">Loading&hellip;</div>
@@ -680,8 +1062,9 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
   <!-- Footer -->
   <footer class="footer">
-    <span id="f-active-users-wrap" style="position:relative">
+    <span id="f-active-users-wrap" style="position:relative;display:flex;align-items:center;gap:8px">
       <span id="f-active-users-toggle">Logged in: <strong id="f-active-users">—</strong></span>
+      <span id="kiosk-username" style="display:none;color:var(--text2)"></span>
       <div id="f-active-users-panel" style="display:none;position:absolute;bottom:100%;left:0;margin-bottom:6px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;min-width:170px;max-width:260px;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:50;font-size:0.78rem;line-height:1.6"></div>
     </span>
     <span><a href="https://github.com/GooseThings/HenWen" target="_blank" rel="noopener"
@@ -710,8 +1093,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   <div id="net-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;align-items:center;justify-content:center">
     <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:22px 26px;width:520px;max-width:92vw;max-height:86vh;overflow-y:auto">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-        <div style="font-size:0.95rem;font-weight:700">&#128197; Net Schedule</div>
-        <button onclick="closeNetModal()" style="background:none;border:none;color:var(--text2);font-size:1.1rem;cursor:pointer;line-height:1;padding:2px 6px">&#10005;</button>
+        <div style="font-size:0.95rem;font-weight:700"><svg class="icon"><use href="#icon-calendar-days"></use></svg> Net Schedule</div>
+        <button onclick="closeNetModal()" style="background:none;border:none;color:var(--text2);font-size:1.1rem;cursor:pointer;line-height:1;padding:2px 6px"><svg class="icon"><use href="#icon-x"></use></svg></button>
       </div>
 
       <div id="net-form-box" style="background:var(--bg3);border:1px solid var(--border);border-radius:7px;padding:12px 14px;margin-bottom:14px">
@@ -770,12 +1153,12 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   <div id="search-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;align-items:center;justify-content:center">
     <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:22px 26px;width:520px;max-width:92vw;max-height:86vh;overflow-y:auto">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-        <div style="font-size:0.95rem;font-weight:700">&#128269; Node Search</div>
-        <button onclick="closeSearchModal()" style="background:none;border:none;color:var(--text2);font-size:1.1rem;cursor:pointer;line-height:1;padding:2px 6px">&#10005;</button>
+        <div style="font-size:0.95rem;font-weight:700"><svg class="icon"><use href="#icon-search"></use></svg> Node Search</div>
+        <button onclick="closeSearchModal()" style="background:none;border:none;color:var(--text2);font-size:1.1rem;cursor:pointer;line-height:1;padding:2px 6px"><svg class="icon"><use href="#icon-x"></use></svg></button>
       </div>
       <div style="display:flex;gap:6px;margin-bottom:10px">
         <button class="btn-icon search-tab active" id="search-tab-asl" onclick="setSearchTab('asl')">AllStar</button>
-        <button class="btn-icon search-tab" id="search-tab-el" onclick="setSearchTab('el')">&#128225; EchoLink</button>
+        <button class="btn-icon search-tab" id="search-tab-el" onclick="setSearchTab('el')"><svg class="icon"><use href="#icon-radio-tower"></use></svg> EchoLink</button>
       </div>
       <input id="search-f-query" type="text" placeholder="Search node number, callsign, or location&hellip;" maxlength="50"
              oninput="searchNodesDebounced()" autocomplete="off"
@@ -815,17 +1198,61 @@ function nodeLink(node, cssClass) {
     encodeURIComponent(node) + '" target="_blank" rel="noopener">' + esc(node) + '</a>';
 }
 
+/* Amateur radio callsigns always end in one or more letters and always
+   contain at least one digit, but that digit's position varies a lot
+   internationally — some DX prefixes lead with a digit (8N8N), others
+   carry two (N88N) — so this checks general shape rather than a fixed
+   prefix/suffix letter count. Matches everything from a plain 1x2/1x3/2x3
+   US-style call (N8N, N8GMZ, KA8ABC) up to the odder DX shapes (8N8N,
+   N8N8N, 8NN) without also matching a bare operating modifier (R, P, M,
+   MM, AM, QRP) or a bare DX call-area digit (4), since neither of those
+   contains the mandatory trailing letter(s) this regex requires. */
+var CALLSIGN_RE = /^[A-Z0-9]{0,4}[0-9][A-Z]{1,4}$/;
+
+/* QRZ.com only indexes base callsigns — passing it an SSID (APRS-style
+   "-10", EchoLink's "-R"/"-L"/"-C" station-type suffix) or an operating
+   modifier ("/R", "/P", "/M", "/MM", "/QRP", a bare DX call-area digit like
+   "/4", or a DX-entity prefix like "W1/" or "VP9/") 404s instead of loading
+   a profile. Splits on "/", strips a trailing "-SSID" from each side, and
+   picks whichever side actually looks like a complete callsign (CALLSIGN_RE)
+   — preferring the longer match when both sides happen to qualify, since a
+   bare DX-entity prefix (W1, VP9, ...) is short and loses to the full home
+   callsign on the other side of the slash. Falls back to the first cleaned
+   segment if nothing validates, rather than producing no link at all. */
+function _qrzCallsign(raw) {
+  var s = String(raw).toUpperCase().trim();
+  var segments = s.split('/').map(function(seg) {
+    return seg.replace(/-[A-Z0-9]+$/, '');
+  }).filter(Boolean);
+
+  var valid = segments.filter(function(seg) { return CALLSIGN_RE.test(seg); });
+  if (valid.length) {
+    valid.sort(function(a, b) { return b.length - a.length; });
+    return valid[0];
+  }
+  return segments[0] || s.replace(/-[A-Z0-9]+$/, '');
+}
+
 /* Callsign rendered as a link to its QRZ.com profile; empty callsign renders
    nothing. displayText lets a custom label stand in for the link text while
-   the link itself still targets the real callsign (favorites list). EchoLink
-   appends a "-R"/"-L"/"-C" station-type suffix to the callsign (e.g.
-   "K8DAA-R") that QRZ doesn't recognize, so it's stripped for the link
-   target only — the displayed text keeps the full callsign as shown. */
+   the link itself still targets the real callsign (favorites list) — the
+   displayed text always keeps the full original callsign, only the href
+   target is cleaned via _qrzCallsign(). */
 function callsignLink(callsign, cssClass, displayText) {
   if (!callsign) return '';
-  var qrzCall = String(callsign).replace(/-[A-Za-z0-9]+$/, '');
+  var qrzCall = _qrzCallsign(callsign);
   return '<a class="' + cssClass + '" href="https://www.qrz.com/db/' +
     encodeURIComponent(qrzCall) + '" target="_blank" rel="noopener">' + esc(displayText || callsign) + '</a>';
+}
+
+/* APRS station callsign rendered as a link to its aprs.fi tracking page —
+   unlike callsignLink()/QRZ above, this deliberately keeps the callsign
+   exactly as APRS-IS transmitted it (SSID included, e.g. "N8GMZ-9"), since
+   aprs.fi indexes stations by that full identifier, not the base callsign. */
+function aprsFiLink(callsign, cssClass) {
+  if (!callsign) return '';
+  return '<a class="' + (cssClass || '') + '" href="https://aprs.fi/' +
+    encodeURIComponent(callsign) + '" target="_blank" rel="noopener">' + esc(callsign) + '</a>';
 }
 
 var _csrfToken = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
@@ -923,6 +1350,25 @@ var _map            = null;
 var _markers        = [];
 var _currentTile    = null;
 
+/* Maps 'asl:<node>' / 'aprs:<callsign>' -> the single marker (world-copy
+   offset 0, the true-longitude one) representing that entry, so clicking a
+   row in the "Latest Activity" list can fly the map to it and reopen its
+   popup — see focusActivityPin(). Partitioned by key prefix rather than two
+   separate objects since updateMap() and clearAprsMarkers() rebuild their
+   own halves independently and on different cadences. */
+var _actMarkerIndex = {};
+
+/* APRS pins are kept in their own array, separate from _markers — updateMap()
+   clears/rebuilds _markers on every board refresh (every few seconds), but
+   the APRS layer has its own independent poll cadence (see APRS_POLL_MS)
+   and shouldn't flicker/re-fetch on that schedule. */
+var _aprsMarkers    = [];
+var _aprsTimer      = null;
+var APRS_POLL_MS    = 300000;  /* 5 minutes */
+var _lastAprsPoints = [];      /* list-ready APRS entries, mirrors _lastActivityPoints — see renderActivityList() */
+var _aprsCenter       = null;  /* {lat,lon} — cached from the last successful /api/aprs/stations response */
+var _aprsRadiusCircle = null;  /* the thin outline traced around the selected search radius */
+
 /* Data state */
 var _hostedNodes        = [];  /* [{node,callsign,location,lat,lon}] from board refresh */
 var _connectedNodes     = [];  /* [{node,callsign,location,lat,lon,host_lat,host_lon}] */
@@ -1016,6 +1462,24 @@ function initMap() {
   if (radarChk) radarChk.checked = radarOn;
   if (radarOn) toggleRadar(true);
 
+  /* Load saved ASL-activity pref — defaults to on (matches pre-toggle
+     behavior) unless explicitly turned off before. No enable-side fetch
+     needed here, unlike Radar/APRS: this only gates rendering of data
+     refreshActivity() already fetches on its own cycle regardless. */
+  var aslChk = document.getElementById('act-asl-chk');
+  if (aslChk) aslChk.checked = localStorage.getItem('henwen-activity-asl') !== '0';
+
+  /* Load saved APRS pref (checkbox + radius) */
+  var aprsRadius = localStorage.getItem('henwen-aprs-radius') || '25';
+  var aprsRadiusEl = document.getElementById('map-aprs-radius');
+  var aprsRadiusVal = document.getElementById('map-aprs-radius-val');
+  if (aprsRadiusEl) aprsRadiusEl.value = aprsRadius;
+  if (aprsRadiusVal) aprsRadiusVal.textContent = aprsRadius + ' mi';
+  var aprsChk = document.getElementById('map-aprs-chk');
+  var aprsOn = localStorage.getItem('henwen-aprs') === '1';
+  if (aprsChk) aprsChk.checked = aprsOn;
+  if (aprsOn) _aprsEnable(false);
+
   _map.on('zoomend', function() { updateMap(); });
 
   /* While a pin popup is open, updateMap() defers instead of rendering —
@@ -1034,13 +1498,30 @@ function initMap() {
 }
 
 function pinSize() {
-  if (!_map) return [16, 24];
+  /* ASL node/global-activity teardrop pins (makeIcon()) only — APRS circles
+     have their own aprsIconSize() below so this can be tuned independently.
+     Halved from the original table (full-size pins were covering too much
+     of the map), then that halved table bumped +20% per a later request. */
+  if (!_map) return [9.6, 14.4];
   var z = _map.getZoom();
-  if (z <= 2)  return [10, 15];
-  if (z <= 4)  return [14, 21];
-  if (z <= 6)  return [18, 27];
-  if (z <= 8)  return [22, 33];
-  return [26, 39];
+  if (z <= 2)  return [6, 9];
+  if (z <= 4)  return [8.4, 12.6];
+  if (z <= 6)  return [10.8, 16.2];
+  if (z <= 8)  return [13.2, 19.8];
+  return [15.6, 23.4];
+}
+
+function aprsIconSize() {
+  /* APRS circle markers (makeAprsIcon()) — split out from pinSize() so the
+     ASL pin-size bump above doesn't also grow these. Same halved-from-
+     original values pinSize() used before that bump. */
+  if (!_map) return [8, 8];
+  var z = _map.getZoom();
+  if (z <= 2)  return [5, 5];
+  if (z <= 4)  return [7, 7];
+  if (z <= 6)  return [9, 9];
+  if (z <= 8)  return [11, 11];
+  return [13, 13];
 }
 
 function starSize() {
@@ -1077,12 +1558,220 @@ function globalPinStyle(ageSec) {
   return { color: 'rgb(' + rgb.join(',') + ')', opacity: 0.9 - 0.6 * frac };
 }
 
+/* APRS pins fade the same way global-activity pins do, just against the
+   backend's own staleness ceiling (APRS_STALE_SEC in app.py, 2h) instead of
+   the activity window — that's the point at which a station would be
+   pruned from the cache and drop off the map/list entirely anyway. */
+var APRS_PIN_BRIGHT      = [168, 85, 247];   /* #a855f7 */
+var APRS_PIN_MUTED       = [90, 75, 100];    /* dim, desaturated purple-gray */
+var APRS_PIN_FADE_WINDOW = 7200;             /* seconds — mirrors APRS_STALE_SEC */
+
+function aprsPinStyle(ageSec) {
+  var frac = Math.max(0, Math.min(1, ageSec / APRS_PIN_FADE_WINDOW));
+  var rgb = APRS_PIN_BRIGHT.map(function(c, i) {
+    return Math.round(c + (APRS_PIN_MUTED[i] - c) * frac);
+  });
+  return { color: 'rgb(' + rgb.join(',') + ')', opacity: 0.9 - 0.6 * frac };
+}
+
 function makeStarIcon(color) {
   var s = starSize();
   var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + s[0] + '" height="' + s[1] +
     '" viewBox="0 0 32 32"><polygon points="16,2 20,12 31,12 22,19 25,30 16,23 7,30 10,19 1,12 12,12"' +
     ' fill="' + color + '" stroke="white" stroke-width="1.5" opacity="0.95"/></svg>';
   return L.divIcon({ html:svg, iconSize:s, iconAnchor:[s[0]/2,s[1]/2], popupAnchor:[0,-s[1]/2], className:'' });
+}
+
+/* Plain filled circle — deliberately not the node teardrop pin or the
+   hosted-node star, so an APRS station reads as a different kind of thing
+   on the map at a glance. color/opacity default to the un-faded purple;
+   renderAprsMarkers() passes aprsPinStyle()'s age-based values instead. */
+function makeAprsIcon(color, opacity) {
+  var d  = aprsIconSize()[0];
+  var op = (opacity == null) ? 0.9 : opacity;
+  var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + d + '" height="' + d +
+    '" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8" fill="' + (color || '#a855f7') +
+    '" stroke="white" stroke-width="1.5" opacity="' + op + '"/></svg>';
+  return L.divIcon({ html:svg, iconSize:[d,d], iconAnchor:[d/2,d/2], popupAnchor:[0,-d/2], className:'' });
+}
+
+/* ── APRS-IS map layer (optional, toggled from the map controls) ──
+   Independent of updateMap()'s node/activity marker refresh above: the
+   backend keeps one shared APRS-IS connection and caches positions
+   server-side (see /api/aprs/stations), so this only needs to poll that
+   cache on its own slow timer (APRS_POLL_MS) rather than every board
+   refresh. Markers live in _aprsMarkers so updateMap() never touches them. */
+function aprsActivityEnabled() {
+  var chk = document.getElementById('map-aprs-chk');
+  return chk ? chk.checked : false;
+}
+
+function toggleAprs(on) {
+  if (!on) {
+    localStorage.setItem('henwen-aprs', '0');
+    var radiusWrap = document.getElementById('map-aprs-radius-wrap');
+    if (radiusWrap) radiusWrap.style.display = 'none';
+    clearAprsMarkers();
+    _lastAprsPoints = [];
+    renderActivityList();
+    _aprsUpdateRadiusCircle();
+    if (_aprsTimer) { clearInterval(_aprsTimer); _aprsTimer = null; }
+    return;
+  }
+  _aprsEnable(true);
+}
+
+/* Turning the layer on only makes sense once an admin has saved an APRS-IS
+   callsign in Manager > Kiosk Settings (api_kiosk_settings_put) — until
+   then /api/aprs/stations always comes back with center:null. Checking
+   that here means clicking the checkbox with nothing configured reverts
+   it with an explanation instead of silently showing an empty map.
+   toast=false is used for the page-load localStorage restore, so a kiosk
+   that had this on before the callsign got removed just quietly turns
+   back off instead of popping a toast nobody asked for. */
+async function _aprsEnable(toast) {
+  var chk = document.getElementById('map-aprs-chk');
+  var radiusEl = document.getElementById('map-aprs-radius');
+  var radius = radiusEl ? radiusEl.value : 25;
+  var configured = false;
+  try {
+    var r = await fetch('/api/aprs/stations?radius=' + encodeURIComponent(radius));
+    if (r.ok) {
+      var d = await r.json();
+      configured = !!d.center;
+      if (configured) {
+        _aprsCenter = d.center;
+        renderAprsMarkers(d.stations || []);
+      }
+    }
+  } catch (e) { /* configured stays false — handled below */ }
+
+  if (!configured) {
+    if (toast) sbToast('APRS-IS callsign not configured — set one in Manager → Kiosk Settings', false);
+    if (chk) chk.checked = false;
+    localStorage.setItem('henwen-aprs', '0');
+    _lastAprsPoints = [];
+    renderActivityList();
+    _aprsUpdateRadiusCircle();
+    return;
+  }
+
+  localStorage.setItem('henwen-aprs', '1');
+  var radiusWrap = document.getElementById('map-aprs-radius-wrap');
+  if (radiusWrap) radiusWrap.style.display = 'inline-flex';
+  _aprsUpdateRadiusCircle();
+  if (!_aprsTimer) _aprsTimer = setInterval(fetchAprsStations, APRS_POLL_MS);
+}
+
+/* Fired on the radius slider's 'input' event (every tick while dragging) —
+   just moves the label and resizes the circle locally, no fetch. */
+function onAprsRadiusInput(val) {
+  document.getElementById('map-aprs-radius-val').textContent = val + ' mi';
+  _aprsUpdateRadiusCircle();
+}
+
+/* Fired on 'change' (drag released) — this is the one that actually costs
+   a network round-trip, so it only runs once per drag instead of per tick. */
+function onAprsRadiusChange(val) {
+  localStorage.setItem('henwen-aprs-radius', val);
+  if (document.getElementById('map-aprs-chk').checked) fetchAprsStations();
+}
+
+async function fetchAprsStations() {
+  var radiusEl = document.getElementById('map-aprs-radius');
+  var radius = radiusEl ? radiusEl.value : 25;
+  try {
+    var r = await fetch('/api/aprs/stations?radius=' + encodeURIComponent(radius));
+    if (!r.ok) return;
+    var d = await r.json();
+    if (d.center) _aprsCenter = d.center;
+    _aprsUpdateRadiusCircle();
+    renderAprsMarkers(d.stations || []);
+  } catch (e) { /* next timer tick retries — non-fatal */ }
+}
+
+function clearAprsMarkers() {
+  _aprsMarkers.forEach(function(m) { _map.removeLayer(m); });
+  _aprsMarkers = [];
+  Object.keys(_actMarkerIndex).forEach(function(k) {
+    if (k.indexOf('aprs:') === 0) delete _actMarkerIndex[k];
+  });
+}
+
+function renderAprsMarkers(stations) {
+  /* Feeds both the map layer (below) and the "Latest Activity" list
+     (_lastAprsPoints, merged in by renderActivityList()) from the same
+     fetch — see the note at the top of the activity-feed section. */
+  var now = Date.now() / 1000;
+  _lastAprsPoints = stations.map(function(s) {
+    return {
+      callsign: s.callsign,
+      location: s.comment || (s.distance_mi + ' mi away'),
+      lat: s.lat, lon: s.lon,
+      ts: now - (s.age_sec || 0),
+      type: 'aprs',
+    };
+  });
+  renderActivityList();
+
+  if (!_map) return;
+  clearAprsMarkers();
+  stations.forEach(function(s) {
+    var style = aprsPinStyle(s.age_sec || 0);
+    var m = L.marker([s.lat, s.lon], {icon: makeAprsIcon(style.color, style.opacity)})
+      .bindPopup('<b>' + aprsFiLink(s.callsign, 'popup-node-link') + '</b><br>' +
+                 (s.comment ? esc(s.comment) + '<br>' : '') +
+                 '<small>' + s.distance_mi + ' mi &mdash; heard ' + _histDuration(s.age_sec) + ' ago</small>');
+    m.addTo(_map);
+    _aprsMarkers.push(m);
+    _actMarkerIndex['aprs:' + s.callsign] = m;
+  });
+}
+
+/* Thin circle outline tracing the selected search radius around the
+   resolved center — redrawn from _aprsCenter (cached whenever a fetch
+   succeeds) rather than refetched, so dragging the radius slider can
+   resize it live (see the slider's oninput handler) without waiting on a
+   network round-trip. */
+function _aprsUpdateRadiusCircle() {
+  if (!_map || !_aprsCenter || !aprsActivityEnabled()) {
+    if (_aprsRadiusCircle) { _map.removeLayer(_aprsRadiusCircle); _aprsRadiusCircle = null; }
+    return;
+  }
+  var radiusEl = document.getElementById('map-aprs-radius');
+  var miles   = radiusEl ? parseFloat(radiusEl.value) : 25;
+  var meters  = miles * 1609.34;
+  var center  = [_aprsCenter.lat, _aprsCenter.lon];
+  if (_aprsRadiusCircle) {
+    _aprsRadiusCircle.setLatLng(center);
+    _aprsRadiusCircle.setRadius(meters);
+  } else {
+    _aprsRadiusCircle = L.circle(center, {
+      radius: meters, color: 'var(--danger)', weight: 1, fill: false, interactive: false,
+    }).addTo(_map);
+  }
+}
+
+/* Clicking the background of a "Latest Activity" row flies the map to that
+   entry's pin and reopens its popup — key is 'asl:<node>' or
+   'aprs:<callsign>', looked up in _actMarkerIndex (populated by updateMap()'s
+   activity-pins loop and renderAprsMarkers()). Silently does nothing if the
+   entry has no coordinates or its marker isn't currently on the map (e.g.
+   the ASL/APRS layer that produced it just got toggled off). */
+function focusActivityPin(lat, lon, key) {
+  if (!_map || lat == null || lon == null) return;
+  _map.flyTo([lat, lon], Math.max(_map.getZoom(), 9), {duration: 0.75});
+  var marker = _actMarkerIndex[key];
+  if (marker) marker.openPopup();
+}
+
+/* Wrapper for the row's onclick: clicks on an actual link/button inside the
+   row (QRZ/stats.allstarlink.org links, Connect/Monitor/Fav buttons) should
+   behave normally and NOT also fly the map — only a click on the row's
+   background triggers focusActivityPin(). */
+function activityRowClick(e, lat, lon, key) {
+  if (e.target.closest('a, button')) return;
+  focusActivityPin(lat, lon, key);
 }
 
 /* ── Master map renderer ── */
@@ -1097,6 +1786,9 @@ function updateMap() {
   /* Clear markers */
   _markers.forEach(function(m) { _map.removeLayer(m); });
   _markers = [];
+  Object.keys(_actMarkerIndex).forEach(function(k) {
+    if (k.indexOf('asl:') === 0) delete _actMarkerIndex[k];
+  });
 
   var allPinned = [];
   /* Mirrors the grayline's world-copy wrap so pins still show up on the
@@ -1110,7 +1802,7 @@ function updateMap() {
     allPinned.push(n);
     WORLD_OFFSETS.forEach(function(off) {
       var m = L.marker([n.lat, n.lon + off], {icon:makeStarIcon('#ffd700'), zIndexOffset:1000})
-        .bindPopup('<b>&#11088; ' + (n.callsign ? callsignLink(n.callsign, 'popup-node-link') : esc(n.node)) + '</b><br>' +
+        .bindPopup('<b><svg class="icon"><use href="#icon-star"></use></svg> ' + (n.callsign ? callsignLink(n.callsign, 'popup-node-link') : esc(n.node)) + '</b><br>' +
                    esc(n.location||'') + '<br><small>Node ' + nodeLink(n.node, 'popup-node-link') + ' &mdash; this server</small>');
       m.addTo(_map); _markers.push(m);
     });
@@ -1130,10 +1822,11 @@ function updateMap() {
 
   /* 3. Activity pins: local (green, nodes keyed on this server's own hosted
      node) and global (blue, keyed elsewhere on the network) — global pins
-     fade with age toward the edge of the display window. */
-  var actPts = _lastActivityPoints.filter(function(p) {
+     fade with age toward the edge of the display window. Gated by the
+     "ASL" checkbox (map controls), same as APRS pins are gated by "APRS". */
+  var actPts = aslActivityEnabled() ? _lastActivityPoints.filter(function(p) {
     return p.lat != null && p.lon != null;
-  });
+  }) : [];
   actPts.forEach(function(p) {
     var color = p.type === 'local' ? '#3fb950' : '#58a6ff';
     var opacity;
@@ -1158,6 +1851,7 @@ function updateMap() {
                    (p.type==='local' ? ' &mdash; keyed' : ' &mdash; online') + '</small>' +
                    pinConnBtns);
       m.addTo(_map); _markers.push(m);
+      if (off === 0 && p.node) _actMarkerIndex['asl:' + p.node] = m;
     });
   });
 
@@ -1191,7 +1885,7 @@ async function refreshWeather() {
     else if (w.temp_f) temp = w.temp_f + '°F';
     else if (w.temp_c) temp = w.temp_c + '°C';
 
-    var html = '<span class="weather-location">&#127748; ' + esc(w.location) + '</span>';
+    var html = '<span class="weather-location"><svg class="icon"><use href="#icon-cloud-sun"></use></svg> ' + esc(w.location) + '</span>';
     if (w.stale) html += '<span class="weather-item" title="Weather service unreachable — showing last known data" style="color:var(--text2)">(stale)</span>';
     html += '<span class="weather-sep">|</span>';
     html += '<div class="weather-items">';
@@ -1201,6 +1895,49 @@ async function refreshWeather() {
     if (w.wind_mph) html += '<span class="weather-item">Wind: <strong>' + esc(w.wind_mph) + ' mph ' + esc(w.wind_dir||'') + '</strong></span>';
     html += '</div>';
     bar.innerHTML = html;
+  } catch(e) {}
+}
+
+/* ── NWS severe weather ticker ── */
+var NWS_SCROLL_PX_PER_SEC = 45;
+
+function _nwsSeverityClass(a) {
+  var ev = (a.event || '').toLowerCase();
+  if (ev.indexOf('warning') !== -1) return 'nws-sev-warning';
+  if (ev.indexOf('watch')   !== -1) return 'nws-sev-watch';
+  return 'nws-sev-advisory';
+}
+
+function _renderNwsAlertBar(alerts) {
+  var bar   = document.getElementById('nws-alert-bar');
+  var track = document.getElementById('nws-alert-track');
+  if (!bar || !track) return;
+  if (!alerts || !alerts.length) {
+    bar.style.display = 'none';
+    track.style.animation = 'none';
+    track.innerHTML = '';
+    return;
+  }
+  bar.style.display = 'flex';
+  var itemsHtml = alerts.map(function(a) {
+    return '<span class="nws-alert-item ' + _nwsSeverityClass(a) + '"><strong>' +
+      esc(a.event) + ':</strong> ' + esc(a.text) + '</span>';
+  }).join('');
+  // Two copies back-to-back so the loop-to-start at -50% is seamless.
+  track.style.animation = 'none';
+  track.innerHTML = itemsHtml + itemsHtml;
+  void track.offsetWidth; // force reflow before measuring/restarting the animation
+  var singleWidth = track.scrollWidth / 2;
+  var duration = Math.max(singleWidth / NWS_SCROLL_PX_PER_SEC, 8);
+  track.style.animation = 'nws-scroll ' + duration + 's linear infinite';
+}
+
+async function refreshNwsAlerts() {
+  try {
+    var r = await apiFetch('/api/status/nws-alerts');
+    if (!r.ok) return;
+    var d = await r.json();
+    _renderNwsAlertBar(d.enabled ? d.alerts : []);
   } catch(e) {}
 }
 
@@ -1338,7 +2075,7 @@ function updateWeatherNetBadge() {
   var localNode = (window._lastBoardNodes && window._lastBoardNodes[0])
                   ? window._lastBoardNodes[0].node : '';
   el.innerHTML = todays.map(function(x) {
-    var label = '&#128225; ' + esc(x.net.name) + ' <strong>' + esc(_formatNetTime(x.net.time)) + '</strong>';
+    var label = '<svg class="icon"><use href="#icon-radio-tower"></use></svg> ' + esc(x.net.name) + ' <strong>' + esc(_formatNetTime(x.net.time)) + '</strong>';
     if (x.net.node && localNode) {
       return '<button type="button" class="weather-item net-item-link" title="Connect to node ' +
         esc(x.net.node) + '" onclick="sbConnect(\'' + esc(localNode) + '\',\'' + esc(x.net.node) +
@@ -1573,7 +2310,7 @@ function renderAslResults(results, total) {
         '\',this,false,false)">Connect</button>'
       : '';
     var favBtn = '<button class="sb-btn fav" onclick="sbAddFavorite(\'' + esc(x.node) + '\',this,\'' +
-      esc(x.callsign) + '\')" title="Add ' + esc(x.callsign || x.node) + ' to your Favorites list">&#9733;</button>';
+      esc(x.callsign) + '\')" title="Add ' + esc(x.callsign || x.node) + ' to your Favorites list"><svg class="icon"><use href="#icon-star"></use></svg></button>';
     var detail = [x.desc, x.location].filter(Boolean).map(esc).join(' &middot; ');
     return '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:6px">' +
       '<div style="min-width:0;overflow:hidden">' +
@@ -1606,7 +2343,7 @@ function renderEchoLinkResults(results) {
         '\',this,false,false)">Connect</button>'
       : '';
     var favBtn = '<button class="sb-btn fav" onclick="sbAddFavorite(\'' + esc(encoded) + '\',this,\'' +
-      esc(x.call) + '\')" title="Add ' + esc(x.call) + ' to your Favorites list">&#9733;</button>';
+      esc(x.call) + '\')" title="Add ' + esc(x.call) + ' to your Favorites list"><svg class="icon"><use href="#icon-star"></use></svg></button>';
     return '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:6px">' +
       '<div style="min-width:0;overflow:hidden">' +
         '<div style="font-size:0.85rem;font-weight:600">' + esc(x.call) +
@@ -1621,12 +2358,42 @@ function renderEchoLinkResults(results) {
   }).join('');
 }
 
-/* ── Board data ── */
+/* ── Board data ──
+   The health dot/label used to be driven purely by what the last *successful*
+   /api/status/board response said — asterisk_active/ami_connected/stale, all
+   server-reported. That's fine while the server is actually answering, but
+   if the HenWen process itself dies (or the kiosk loses its route to it),
+   refreshBoard() just fails and silently does nothing (see the empty catch
+   below and the `if (!r.ok) return;`), so the dot stays frozen on whatever
+   it last rendered — green, typically — forever. A kiosk viewer has no way
+   to tell "node is fine" from "this page hasn't heard from the server in
+   ten minutes." markServerUnreachable() forces the dot/label to the same
+   red/OFFLINE state directly, client-side, on any fetch failure; the
+   watchdog below is a time-based backstop for the case a request never
+   resolves at all (hangs) rather than erroring out promptly. */
+var _lastBoardOk = Date.now();   /* seeded at load so the watchdog doesn't fire before the first fetch has even had a chance to land */
+var BOARD_STALE_MS = 8000;       /* ~4 missed 2s polls (see the refreshBoard interval below) before flagging the server unreachable */
+
+function markServerUnreachable() {
+  var dot = document.querySelector('.keyed-dot');
+  var label = document.querySelector('.keyed-label');
+  if (dot) { dot.classList.remove('healthy'); dot.classList.add('down'); }
+  if (label) {
+    label.classList.remove('healthy'); label.classList.add('down');
+    label.textContent = 'OFFLINE'; label.title = 'Lost contact with the HenWen server';
+  }
+}
+
+function boardWatchdog() {
+  if (Date.now() - _lastBoardOk > BOARD_STALE_MS) markServerUnreachable();
+}
+
 async function refreshBoard() {
   try {
     var r = await apiFetch('/api/status/board', {cache: 'no-store'});
-    if (!r.ok) return;
+    if (!r.ok) { markServerUnreachable(); return; }
     var data = await r.json();
+    _lastBoardOk = Date.now();
 
     /* Node card */
     var nodes = data.nodes || [];
@@ -1650,7 +2417,7 @@ async function refreshBoard() {
           '</div>' +
           '<div class="keyed-label ' + (healthy ? 'healthy' : 'down') + '">' + (healthy ? 'ONLINE' : 'OFFLINE') + '</div>' +
         '</div>' +
-        (n.locked ? '<div class="locked-badge" title="' + esc(n.locked_by ? 'Locked by ' + n.locked_by : 'Locked by the node owner') + '">&#128274; LOCKED</div>' : '');
+        (n.locked ? '<div class="locked-badge" title="' + esc(n.locked_by ? 'Locked by ' + n.locked_by : 'Locked by the node owner') + '"><svg class="icon"><use href="#icon-lock"></use></svg> LOCKED</div>' : '');
     }
 
     /* Update hosted-node star pins */
@@ -1714,7 +2481,7 @@ async function refreshBoard() {
           var squashX = isAdmin
             ? '<button class="idle-squash-btn" onclick="sbSquashIdle(\'' +
                 esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)" ' +
-                'title="Disable auto-disconnect for this connection — stays a normal, non-permanent link; won\'t auto-reconnect if the far end drops it">&#10005;</button>'
+                'title="Disable auto-disconnect for this connection — stays a normal, non-permanent link; won\'t auto-reconnect if the far end drops it"><svg class="icon"><use href="#icon-x"></use></svg></button>'
             : '';
           idleBadge = '<span class="idle-badge' + (warn ? ' warn' : '') + '">Idle: ' + ts + squashX + '</span>';
           if (isAdmin) {
@@ -1729,8 +2496,8 @@ async function refreshBoard() {
           var clockBtn = isAdmin2
             ? '<button class="idle-restore-btn" onclick="sbRestoreIdle(\'' +
                 esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)" ' +
-                'title="Enable the idle-timeout auto-disconnect for this connection">&#128339;</button>'
-            : '<span title="No timeout — idle-disconnect disabled">&#128339;</span>';
+                'title="Enable the idle-timeout auto-disconnect for this connection"><svg class="icon"><use href="#icon-clock"></use></svg></button>'
+            : '<span title="No timeout — idle-disconnect disabled"><svg class="icon"><use href="#icon-clock"></use></svg></span>';
           idleBadge = '<span class="idle-badge off">' + clockBtn + '</span>';
         } else if (c.permanent === true) {
           idleBadge = '<span class="idle-badge">Permanent</span>';
@@ -1741,11 +2508,11 @@ async function refreshBoard() {
         var dcBtn = (c.connector_managed && !isAdminRole)
           ? '<button class="sb-btn disconnect" data-label="X" disabled ' +
               'style="opacity:.4;cursor:not-allowed" ' +
-              'title="Managed by Smart Connector — only an admin or superuser can disconnect this">&#128274;</button>'
+              'title="Managed by Smart Connector — only an admin or superuser can disconnect this"><svg class="icon"><use href="#icon-lock"></use></svg></button>'
           : (window._kioskRestrictDisconnect && !isAdminRole)
           ? '<button class="sb-btn disconnect" data-label="X" disabled ' +
               'style="opacity:.4;cursor:not-allowed" ' +
-              'title="Your account isn\'t permitted to disconnect nodes">&#128274;</button>'
+              'title="Your account isn\'t permitted to disconnect nodes"><svg class="icon"><use href="#icon-lock"></use></svg></button>'
           : '<button class="sb-btn disconnect" title="Disconnect" data-label="X" onclick="sbDisconnect(\'' +
               esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)">X</button>';
         return '<div class="node-row">' +
@@ -1774,7 +2541,7 @@ async function refreshBoard() {
 
     /* Keep favorites sidebar in sync with connected state */
     renderFavorites();
-  } catch(e) {}
+  } catch(e) { markServerUnreachable(); }
 }
 
 /* ── Recent connection history (condensed, in the Node card) ── */
@@ -1847,13 +2614,33 @@ function toggleActiveUsersPanel(e) {
   refreshActiveUsersPanel();
 }
 
+/* "Logged in: N" is only clickable for superusers — everyone else (including
+   admins) just sees the plain count. Reads window._kioskRole, so it has to
+   be re-run any time that changes: on initial load (checkKioskSession()) and
+   also right after a client-side login/logout, or the toggle stays wired to
+   whatever role was active at page load until the next full reload. */
+function updateActiveUsersToggle() {
+  var auToggle = document.getElementById('f-active-users-toggle');
+  if (!auToggle) return;
+  if (window._kioskRole === 'superuser' || window._kioskRole === 'owner') {
+    auToggle.style.cursor = 'pointer';
+    auToggle.title = "Click to see who's logged in";
+    auToggle.onclick = toggleActiveUsersPanel;
+  } else {
+    auToggle.style.cursor = '';
+    auToggle.title = '';
+    auToggle.onclick = null;
+    hideActiveUsersPanel();
+  }
+}
+
 async function refreshHistory() {
   try {
     var r = await apiFetch('/api/status/history', {cache: 'no-store'});
     if (!r.ok) return;
     var data = await r.json();
     var rows = data.rows || [];
-    var hl = document.getElementById('node-history-list');
+    var hl = document.getElementById('history-list');
     if (!hl) return;
     if (!rows.length) {
       hl.innerHTML = '<div class="empty-msg" style="font-size:.75rem">No connections yet</div>';
@@ -1875,7 +2662,89 @@ async function refreshHistory() {
   } catch(e) {}
 }
 
-/* ── Activity feed + map ── */
+/* ── Activity feed + map ──
+   Two independent data sources feed the "Latest Activity" list: ASL keyed/
+   global activity (_lastActivityPoints, refreshed by refreshActivity() on
+   its normal short cadence) and APRS stations (_lastAprsPoints, refreshed
+   by fetchAprsStations()/renderAprsMarkers() on the much slower APRS_POLL_MS
+   cadence — see the APRS section above). Each source updates its own cache
+   independently and calls renderActivityList(), which re-merges both
+   caches, filtered by the ASL/APRS checkboxes, on every call — so flipping
+   either toggle updates the list immediately without waiting on either
+   poll cycle. */
+function aslActivityEnabled() {
+  var chk = document.getElementById('act-asl-chk');
+  return chk ? chk.checked : true;
+}
+
+function toggleAslActivity(on) {
+  localStorage.setItem('henwen-activity-asl', on ? '1' : '0');
+  updateMap();
+  renderActivityList();
+}
+
+function renderActivityList() {
+  var aslPts  = aslActivityEnabled()  ? _lastActivityPoints : [];
+  var aprsPts = aprsActivityEnabled() ? _lastAprsPoints     : [];
+  var combined = aslPts.concat(aprsPts);
+  combined.sort(function(a,b){ return b.ts - a.ts; });
+
+  var al = document.getElementById('activity-list');
+  var countParts = [];
+  if (aslPts.length) countParts.push(aslPts.length + (aslPts.length === 1 ? ' node' : ' nodes'));
+  if (aprsPts.length) countParts.push(aprsPts.length + (aprsPts.length === 1 ? ' APRS station' : ' APRS stations'));
+  document.getElementById('act-count').textContent = countParts.join(' · ');
+  if (!combined.length) {
+    al.innerHTML = '<div class="empty-msg">' +
+      (aslActivityEnabled() || aprsActivityEnabled() ? 'No activity data yet' : 'All activity layers are off') +
+      '</div>';
+    return;
+  }
+
+  var localNode = (window._lastBoardNodes && window._lastBoardNodes[0])
+                  ? window._lastBoardNodes[0].node : '';
+  al.innerHTML = combined.map(function(e) {
+    var rowClick = 'activityRowClick(event,' + (e.lat==null?'null':e.lat) + ',' +
+      (e.lon==null?'null':e.lon) + ',\'';
+    if (e.type === 'aprs') {
+      return '<div class="act-row" onclick="' + rowClick + 'aprs:' + esc(e.callsign) + '\')">' +
+        '<div class="act-body">' +
+          '<div class="act-top">' +
+            '<div class="act-dot aprs"></div>' +
+            callsignLink(e.callsign, 'act-call') +
+            '<span class="act-ts">' + (e.ts ? relTime(e.ts) : '') + '</span>' +
+          '</div>' +
+          '<div class="act-loc">' + esc(e.location||'') + '</div>' +
+        '</div>' +
+      '</div>';
+    }
+    var connBtn = localNode
+      ? '<div style="display:flex;flex-direction:column;gap:3px;align-items:stretch">' +
+          '<button class="sb-btn connect" onclick="sbConnect(\'' +
+            esc(localNode) + '\',\'' + esc(e.node) + '\',this,false,false)">Connect</button>' +
+          '<div style="display:flex;gap:3px">' +
+            '<button class="sb-btn fav" style="flex:0 0 auto" onclick="sbAddFavorite(\'' +
+              esc(e.node) + '\',this)" title="Add node to your Favorites list"><svg class="icon"><use href="#icon-star"></use></svg></button>' +
+            '<button class="sb-btn monitor" style="flex:1" onclick="sbConnect(\'' +
+              esc(localNode) + '\',\'' + esc(e.node) + '\',this,false,true)">Monitor</button>' +
+          '</div>' +
+        '</div>'
+      : '';
+    return '<div class="act-row" onclick="' + rowClick + 'asl:' + esc(e.node) + '\')">' +
+      '<div class="act-body">' +
+        '<div class="act-top">' +
+          (e.type === 'local' ? '<div class="act-dot local"></div>' : '') +
+          nodeLink(e.node, 'act-node') +
+          callsignLink(e.callsign, 'act-call') +
+          '<span class="act-ts">' + (e.ts ? relTime(e.ts) : '') + '</span>' +
+        '</div>' +
+        '<div class="act-loc">' + esc(e.location||'') + '</div>' +
+      '</div>' +
+      connBtn +
+    '</div>';
+  }).join('');
+}
+
 async function refreshActivity() {
   try {
     var r = await apiFetch('/api/status/activity', {cache: 'no-store'});
@@ -1907,44 +2776,9 @@ async function refreshActivity() {
     }));
     combined.sort(function(a,b){ return b.ts - a.ts; });
 
-    /* Activity list — no keyed/online badge, just source dot + node info + connect btn */
-    var al = document.getElementById('activity-list');
-    document.getElementById('act-count').textContent = combined.length ? combined.length + ' nodes' : '';
-    if (!combined.length) {
-      al.innerHTML = '<div class="empty-msg">No activity data yet</div>';
-    } else {
-      var localNode = (window._lastBoardNodes && window._lastBoardNodes[0])
-                      ? window._lastBoardNodes[0].node : '';
-      al.innerHTML = combined.map(function(e) {
-        var connBtn = localNode
-          ? '<div style="display:flex;flex-direction:column;gap:3px;align-items:stretch">' +
-              '<button class="sb-btn connect" onclick="sbConnect(\'' +
-                esc(localNode) + '\',\'' + esc(e.node) + '\',this,false,false)">Connect</button>' +
-              '<div style="display:flex;gap:3px">' +
-                '<button class="sb-btn fav" style="flex:0 0 auto" onclick="sbAddFavorite(\'' +
-                  esc(e.node) + '\',this)" title="Add node to your Favorites list">&#9733;</button>' +
-                '<button class="sb-btn monitor" style="flex:1" onclick="sbConnect(\'' +
-                  esc(localNode) + '\',\'' + esc(e.node) + '\',this,false,true)">Monitor</button>' +
-              '</div>' +
-            '</div>'
-          : '';
-        return '<div class="act-row">' +
-          '<div class="act-body">' +
-            '<div class="act-top">' +
-              (e.type === 'local' ? '<div class="act-dot local"></div>' : '') +
-              nodeLink(e.node, 'act-node') +
-              callsignLink(e.callsign, 'act-call') +
-              '<span class="act-ts">' + (e.ts ? relTime(e.ts) : '') + '</span>' +
-            '</div>' +
-            '<div class="act-loc">' + esc(e.location||'') + '</div>' +
-          '</div>' +
-          connBtn +
-        '</div>';
-      }).join('');
-    }
-
     _lastActivityPoints = combined;
     _globalWindowMin = data.global_window_min || 15;
+    renderActivityList();
     updateMap();
   } catch(e) {}
 }
@@ -2214,6 +3048,7 @@ async function kioskLogin() {
     if (pl) pl.style.display = (d.role === 'admin' || d.role === 'superuser' || d.role === 'owner') ? '' : 'none';
     _txUpdateBtn();
     _searchUpdateBtn();
+    updateActiveUsersToggle();
     loadFavorites();
     if (_pendingAction) {
       _pendingAction.fn.apply(null, _pendingAction.args);
@@ -2239,18 +3074,22 @@ async function kioskLogout() {
   if (_tx.armed) disarmTx();
   _txUpdateBtn();
   _searchUpdateBtn();
+  updateActiveUsersToggle();
   loadFavorites();
   sbToast('Logged out', true);
 }
 
 function updateKioskUserBar(username, role) {
-  var bar = document.getElementById('kiosk-user-bar');
-  var btn = document.getElementById('kiosk-login-btn');
+  var bar   = document.getElementById('kiosk-user-bar');
+  var btn   = document.getElementById('kiosk-login-btn');
+  var uname = document.getElementById('kiosk-username');
   if (username) {
-    document.getElementById('kiosk-username').textContent = username + ' (' + role + ')';
+    uname.textContent = username + ' (' + role + ')';
+    uname.style.display = '';
     bar.style.display = 'flex';
     btn.style.display = 'none';
   } else {
+    uname.style.display = 'none';
     bar.style.display = 'none';
     btn.style.display = '';
   }
@@ -2278,21 +3117,7 @@ async function checkKioskSession() {
   _txUpdateBtn();
   _searchUpdateBtn();
 
-  /* "Logged in: N" is only clickable for superusers — everyone else (including
-     admins) just sees the plain count, same as today. */
-  var auToggle = document.getElementById('f-active-users-toggle');
-  if (auToggle) {
-    if (window._kioskRole === 'superuser' || window._kioskRole === 'owner') {
-      auToggle.style.cursor = 'pointer';
-      auToggle.title = "Click to see who's logged in";
-      auToggle.onclick = toggleActiveUsersPanel;
-    } else {
-      auToggle.style.cursor = '';
-      auToggle.title = '';
-      auToggle.onclick = null;
-      hideActiveUsersPanel();
-    }
-  }
+  updateActiveUsersToggle();
 }
 
 /* ── Favorites sidebar ── */
@@ -2324,7 +3149,9 @@ function _updateFavSortDirBtn() {
   if (!btn) return;
   var isCustom = _favSort.field === 'custom';
   btn.disabled = isCustom;
-  btn.innerHTML = _favSort.dir === 'desc' ? '&#8595;' : '&#8593;';
+  btn.innerHTML = _favSort.dir === 'desc'
+    ? '<svg class="icon"><use href="#icon-arrow-down"></use></svg>'
+    : '<svg class="icon"><use href="#icon-arrow-up"></use></svg>';
   btn.title = isCustom ? 'Drag rows to reorder' :
     (_favSort.dir === 'desc' ? 'Descending (click for ascending)' : 'Ascending (click for descending)');
 }
@@ -2428,13 +3255,11 @@ async function favRowDrop(ev, targetNode) {
 
 function renderFavorites() {
   var fl  = document.getElementById('fav-list');
-  var fc  = document.getElementById('fav-count');
   var fw  = document.getElementById('fav-warn');
   if (!fl) return;
 
   if (!_favorites.length) {
     fl.innerHTML = '<div class="empty-msg" style="font-size:0.8rem">No favorites saved</div>';
-    fc.textContent = '';
     fw.style.display = 'none';
     return;
   }
@@ -2456,7 +3281,6 @@ function renderFavorites() {
   var isAdmin = (window._kioskRole === 'admin' || window._kioskRole === 'superuser' || window._kioskRole === 'owner');
   /* Warning banner only applies to kiosk users who are limited to one connection */
   fw.style.display = (anyConn && !isAdmin) ? '' : 'none';
-  fc.textContent   = _favorites.length + ' saved';
 
   var isCustomSort = _favSort.field === 'custom';
 
@@ -2465,7 +3289,7 @@ function renderFavorites() {
     var dot     = isConn ? '<span class="fav-conn-dot"></span>' : '';
     var name    = f.label || f.callsign || '';
     var loc     = f.location || '';
-    var handle  = isCustomSort ? '<span class="fav-drag-handle" title="Drag to reorder">&#9776;</span>' : '';
+    var handle  = isCustomSort ? '<span class="fav-drag-handle" title="Drag to reorder"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>' : '';
     var dragAttrs = isCustomSort ?
       ' draggable="true" ondragstart="favRowDragStart(event,\'' + esc(f.node) + '\')"' +
       ' ondragover="favRowDragOver(event)" ondragleave="favRowDragLeave(event)"' +
@@ -2758,7 +3582,7 @@ async function armTx() {
   if (!window._kioskRole) { openKioskLogin(armTx, []); return; }
   _tx.armed = true;
   document.getElementById('tx-bar').style.display = '';
-  _txSetBtn('&#127908; TX arming&hellip;', 'var(--text2)');
+  _txSetBtn('<svg class="icon"><use href="#icon-mic"></use></svg> TX arming&hellip;', 'var(--text2)');
   _txStatus('Arming…');
   try {
     var r = await apiFetch('/api/tx/config');
@@ -2766,7 +3590,7 @@ async function armTx() {
     var cfg = await r.json();
     if (!r.ok || !cfg.enabled) {
       _txStatus(cfg.error || 'Browser transmit is not configured on this server', 'var(--red)');
-      _txSetBtn('&#127908; TX', '');
+      _txSetBtn('<svg class="icon"><use href="#icon-mic"></use></svg> TX', '');
       _tx.armed = false;
       return;
     }
@@ -2821,7 +3645,7 @@ async function armTx() {
       s.on('confirmed', function() {
         muteInbound();
         _txStatus('Armed — hold PTT to transmit');
-        _txSetBtn('&#127908; TX armed', 'var(--green)');
+        _txSetBtn('<svg class="icon"><use href="#icon-mic"></use></svg> TX armed', 'var(--green)');
         document.getElementById('tx-ptt').disabled = false;
         /* Listen is the monitor path — make sure it's running */
         if (!_listenActive) _startListen();
@@ -2878,7 +3702,7 @@ function _txTeardown() {
   if (_tx.session) { try { _tx.session.terminate(); } catch (e) {} _tx.session = null; }
   if (_tx.ua)      { try { _tx.ua.stop(); }           catch (e) {} _tx.ua = null; }
   _txReleaseMic();
-  _txSetBtn('&#127908; TX', '');
+  _txSetBtn('<svg class="icon"><use href="#icon-mic"></use></svg> TX', '');
 }
 
 function disarmTx() {
@@ -3107,7 +3931,7 @@ function _startListen() {
     if (_listenActive) return;
     console.warn('[AUDIO] startup watchdog fired — no stream after ' + _LISTEN_START_MS + 'ms');
     _stopListen();
-    _listenSetBtn('&#9834; Listen', '', false);
+    _listenSetBtn('<svg class="icon"><use href="#icon-headphones"></use></svg> Listen', '', false);
     sbToast('Audio did not start — your network may be blocking the live stream. Try again, or use a different connection.', false);
   }, _LISTEN_START_MS);
 
@@ -3115,7 +3939,7 @@ function _startListen() {
     .then(function(r) {
       if (r.status === 401) {
         if (_listenStartTimer) { clearTimeout(_listenStartTimer); _listenStartTimer = null; }
-        _listenSetBtn('&#9834; Listen', '', false);
+        _listenSetBtn('<svg class="icon"><use href="#icon-headphones"></use></svg> Listen', '', false);
         openKioskLogin(_startListen, []);
         return null;
       }
@@ -3125,7 +3949,7 @@ function _startListen() {
       if (!d) return;   /* 401 already handled above */
       if (!d.ok) {
         if (_listenStartTimer) { clearTimeout(_listenStartTimer); _listenStartTimer = null; }
-        _listenSetBtn('&#9834; Listen', '', false);
+        _listenSetBtn('<svg class="icon"><use href="#icon-headphones"></use></svg> Listen', '', false);
         sbToast('Audio unavailable: ' + (d.issues || []).join('; '), false);
         return;
       }
@@ -3133,7 +3957,7 @@ function _startListen() {
     })
     .catch(function(e) {
       if (_listenStartTimer) { clearTimeout(_listenStartTimer); _listenStartTimer = null; }
-      _listenSetBtn('&#9834; Listen', '', false);
+      _listenSetBtn('<svg class="icon"><use href="#icon-headphones"></use></svg> Listen', '', false);
       sbToast('Check failed: ' + e.message, false);
     });
 }
@@ -3229,7 +4053,7 @@ function _doStartListenMSE(audio, node) {
 
     try { sb = ms.addSourceBuffer('audio/webm; codecs=opus'); }
     catch(e) {
-      _listenSetBtn('&#9834; Listen', '', false);
+      _listenSetBtn('<svg class="icon"><use href="#icon-headphones"></use></svg> Listen', '', false);
       sbToast('Codec not supported: ' + e.message, false);
       return;
     }
@@ -3341,7 +4165,7 @@ function _doStartListenMSE(audio, node) {
 
         _listenActive = true;
         if (_listenStartTimer) { clearTimeout(_listenStartTimer); _listenStartTimer = null; }
-        _listenSetBtn('&#9646;&#9646; Mute', 'var(--green)', false);
+        _listenSetBtn('<svg class="icon"><use href="#icon-pause"></use></svg> Mute', 'var(--green)', false);
         sbToast('Monitoring node ' + node + ' — audio plays when active', true);
         console.log('[AUDIO] MSE connected to node', node, new Date().toISOString());
 
@@ -3391,7 +4215,7 @@ function _doStartListenMSE(audio, node) {
     _audioClientLog(node, 'error', code + (msg ? ' — ' + msg : '') +
       ' networkState=' + audio.networkState + ' readyState=' + audio.readyState);
     _listenActive = false;
-    _listenSetBtn('&#9834; Listen', '', false);
+    _listenSetBtn('<svg class="icon"><use href="#icon-headphones"></use></svg> Listen', '', false);
     sbToast('Audio error: ' + code + (msg ? ' — ' + msg : ''), false);
   };
 
@@ -3487,7 +4311,7 @@ function _doStartListenMSE(audio, node) {
       if (ctrl.signal.aborted) return;
       console.error('[AUDIO] play() rejected:', e.name, e.message);
       _listenActive = false;
-      _listenSetBtn('&#9834; Listen', '', false);
+      _listenSetBtn('<svg class="icon"><use href="#icon-headphones"></use></svg> Listen', '', false);
       sbToast('Playback blocked: ' + e.message, false);
     });
   }, 50);
@@ -3507,7 +4331,7 @@ function _doStartListenFallback(audio, node) {
   audio.onloadstart = function() {
     _listenActive = true;
     if (_listenStartTimer) { clearTimeout(_listenStartTimer); _listenStartTimer = null; }
-    _listenSetBtn('&#9646;&#9646; Mute', 'var(--green)', false);
+    _listenSetBtn('<svg class="icon"><use href="#icon-pause"></use></svg> Mute', 'var(--green)', false);
     sbToast('Monitoring node ' + node + ' — audio plays when active', true);
     console.log('[AUDIO] fallback src connected to node', node);
   };
@@ -3515,19 +4339,19 @@ function _doStartListenFallback(audio, node) {
     var codes = {1:'ABORTED',2:'NETWORK',3:'DECODE',4:'FORMAT'};
     var code = audio.error ? (codes[audio.error.code]||'ERR_'+audio.error.code) : 'unknown';
     _listenActive = false;
-    _listenSetBtn('&#9834; Listen', '', false);
+    _listenSetBtn('<svg class="icon"><use href="#icon-headphones"></use></svg> Listen', '', false);
     sbToast('Audio error: ' + code, false);
   };
   audio.onended = function() {
     _listenActive = false;
-    _listenSetBtn('&#9834; Listen', '', false);
+    _listenSetBtn('<svg class="icon"><use href="#icon-headphones"></use></svg> Listen', '', false);
     sbToast('Stream ended — click Listen to reconnect', false);
   };
   audio.src = '/api/audio/stream/' + node;
   audio.load();
   audio.play().catch(function(e) {
     _listenActive = false;
-    _listenSetBtn('&#9834; Listen', '', false);
+    _listenSetBtn('<svg class="icon"><use href="#icon-headphones"></use></svg> Listen', '', false);
     sbToast('Playback blocked: ' + e.message, false);
     audio.src = '';
   });
@@ -3556,7 +4380,7 @@ function _stopListen() {
   audio.load();
   _listenActive = false;
   _listenNode   = '';
-  _listenSetBtn('&#9834; Listen', '', false);
+  _listenSetBtn('<svg class="icon"><use href="#icon-headphones"></use></svg> Listen', '', false);
   if (node) {
     apiFetch('/api/audio/stop', {
       method: 'POST',
@@ -3574,13 +4398,525 @@ window.addEventListener('resize', function() {
   clearTimeout(_mapResizeTimer);
   _mapResizeTimer = setTimeout(function() {
     if (_map) _map.invalidateSize();
+    dashApply();   /* re-apply a saved custom layout if the window crossed the mobile breakpoint live */
   }, 200);
 });
 
+/* ── Dashboard grid: resizable/movable/collapsible cards ──
+   .content-area is a 12-column x 24-row grid built from `fr` tracks (see the
+   CSS comment above .content-area) so the six cards below always fill it
+   exactly, no scrolling, matching the pre-existing "fits the viewport"
+   kiosk behavior. Desktop only — dashSupported() gates every entry point,
+   and the >860px breakpoint is exactly where the mobile media query swaps
+   .content-area to a stacked flex column anyway (where grid-column/row are
+   no-ops). Layout persists to localStorage per browser/device, same as the
+   existing map tile-style and Radar/APRS toggle prefs.
+
+   Design: the six cards live at the leaves of a binary split tree (think
+   tmux panes / a tiling window manager), not in six fixed slots. Each
+   internal node is {dir:'row'|'col', ratio, a, b} — 'row' stacks its two
+   children vertically, 'col' places them side by side, `ratio` is how much
+   of the space `a` gets. A tree with N leaves always has exactly N-1
+   internal nodes (regardless of shape) — 5 for these 6 cards — which is why
+   exactly 5 <div class="dash-divider"> elements in the HTML are enough no
+   matter how the tree is currently arranged — dashApply() just re-walks the
+   tree and reassigns each one's position/orientation/target node every
+   render. (If a 7th card is ever added, add one more .dash-divider element
+   and bump DASH_STORE_KEY — dashLoadSaved() rejects a saved tree that
+   doesn't contain every current id, so a stale tree just falls back to
+   DASH_DEFAULT_TREE rather than silently rendering incomplete.)
+
+   This is what makes "move a card under/beside a card in a different
+   column" possible: dragging a card's grip and dropping it near an EDGE of
+   another card removes the dragged leaf from wherever it was (promoting
+   its old sibling to take its place) and re-inserts it as a new sibling of
+   the drop target, splitting that target's space in two. Dropping on the
+   CENTER of a target instead just swaps the two leaves in place — the
+   cheap, common case where you don't want to restructure anything. See
+   dashMoveCard()/dashRemoveLeaf()/dashInsertNextTo().
+
+   Resize (dragging a divider) changes one split node's `ratio` — since
+   both regions on either side of a divider are computed from that same
+   node, they can never overlap or leave a gap by construction; no
+   collision search needed anywhere in this file.
+
+   Collapsing a card overrides just its own rendered row-span down to a
+   header-only height (_dashCollapsed) at render time, independent of the
+   tree; it doesn't reflow neighbors into the freed space — the user has
+   resize for that if they want to reclaim it by hand. */
+var DASH_COLS = 12, DASH_ROWS = 24;
+var DASH_GAP = 10;             /* must match .content-area's CSS `gap` */
+var DASH_MIN_CS = 2, DASH_MIN_RS = 3;
+var DASH_COLLAPSED_RS = 2;
+var DASH_CARD_IDS = ['node', 'history', 'connected', 'map', 'activity', 'favorites'];
+var DASH_CARD_TITLES = {node: 'Node', history: 'Recent Connections', connected: 'Connected Nodes',
+  map: 'Network Map', activity: 'Latest Activity', favorites: 'Favorites'};
+var DASH_STORE_KEY = 'henwen-dash-layout-v4';
+
+/* Ratios reproduce the original fixed 4-column layout's proportions, with
+   Recent Connections split off underneath Node — see dashWalk()'s doc
+   comment for how a {dir,ratio} node maps to grid lines. */
+var DASH_DEFAULT_TREE = {
+  type: 'split', dir: 'col', ratio: 0.25,
+  a: {type: 'split', dir: 'row', ratio: 2 / 3,
+    a: {type: 'leaf', id: 'node'},
+    b: {type: 'leaf', id: 'history'}
+  },
+  b: {type: 'split', dir: 'col', ratio: 2 / 3,
+    a: {type: 'split', dir: 'row', ratio: 13 / 24,
+      a: {type: 'leaf', id: 'connected'},
+      b: {type: 'split', dir: 'col', ratio: 0.5,
+        a: {type: 'leaf', id: 'map'},
+        b: {type: 'leaf', id: 'activity'}
+      }
+    },
+    b: {type: 'leaf', id: 'favorites'}
+  }
+};
+
+var _dashTree = null;   /* null = no customization yet; CSS stylesheet defaults apply untouched */
+var _dashCollapsed = {};
+var _dashHidden = {};
+var _dashHiddenMenuOpen = false;
+var _dashEditOn = false;
+var _dashDragId = null;
+var _dashDividerDrag = null;
+var _dashDividerNodes = [];   /* rebuilt by dashWalk() each render; index matches the DOM .dash-divider els (DASH_CARD_IDS.length - 1 of them) */
+
+function dashSupported() { return window.matchMedia('(min-width: 861px)').matches; }
+function dashClamp(n, lo, hi) { n = parseInt(n, 10); if (isNaN(n)) n = lo; return Math.max(lo, Math.min(hi, n)); }
+function dashCardEl(id) { return document.querySelector('.dash-card[data-dash-id="' + id + '"]'); }
+function dashDividerEl(idx) { return document.querySelector('.dash-divider[data-divider-idx="' + idx + '"]'); }
+
+/* ── Tree surgery (pure functions — each returns a new tree rather than
+   mutating its input, except ratio changes during a resize drag, which
+   mutate a captured node reference directly since nothing else needs the
+   old value). ── */
+function dashCloneTree(node) {
+  if (node.type === 'leaf') return {type: 'leaf', id: node.id};
+  return {type: 'split', dir: node.dir, ratio: node.ratio, a: dashCloneTree(node.a), b: dashCloneTree(node.b)};
+}
+
+function dashRemoveLeaf(node, id) {
+  if (node.type === 'leaf') return node.id === id ? null : node;
+  var a = dashRemoveLeaf(node.a, id);
+  var b = dashRemoveLeaf(node.b, id);
+  if (a === null) return b;   /* that side was (or collapsed down to) the removed leaf -> promote the other side */
+  if (b === null) return a;
+  return {type: 'split', dir: node.dir, ratio: node.ratio, a: a, b: b};
+}
+
+function dashInsertNextTo(node, targetId, newId, side) {
+  if (node.type === 'leaf') {
+    if (node.id !== targetId) return node;
+    var dir = (side === 'top' || side === 'bottom') ? 'row' : 'col';
+    var newLeaf = {type: 'leaf', id: newId};
+    var first = (side === 'top' || side === 'left') ? newLeaf : node;
+    var second = (side === 'top' || side === 'left') ? node : newLeaf;
+    return {type: 'split', dir: dir, ratio: 0.5, a: first, b: second};
+  }
+  return {type: 'split', dir: node.dir, ratio: node.ratio,
+    a: dashInsertNextTo(node.a, targetId, newId, side),
+    b: dashInsertNextTo(node.b, targetId, newId, side)};
+}
+
+function dashSwapLeaves(node, idA, idB) {
+  if (node.type === 'leaf') {
+    if (node.id === idA) return {type: 'leaf', id: idB};
+    if (node.id === idB) return {type: 'leaf', id: idA};
+    return node;
+  }
+  return {type: 'split', dir: node.dir, ratio: node.ratio,
+    a: dashSwapLeaves(node.a, idA, idB), b: dashSwapLeaves(node.b, idA, idB)};
+}
+
+function dashMoveCard(tree, sourceId, targetId, zone) {
+  if (zone === 'center') return dashSwapLeaves(tree, sourceId, targetId);
+  var without = dashRemoveLeaf(tree, sourceId);
+  return dashInsertNextTo(without, targetId, sourceId, zone);
+}
+
+function dashValidTree(node, seen) {
+  if (!node || typeof node !== 'object') return false;
+  if (node.type === 'leaf') {
+    if (DASH_CARD_IDS.indexOf(node.id) === -1 || seen[node.id]) return false;
+    seen[node.id] = true;
+    return true;
+  }
+  if (node.type !== 'split') return false;
+  if (node.dir !== 'row' && node.dir !== 'col') return false;
+  if (typeof node.ratio !== 'number' || !(node.ratio > 0 && node.ratio < 1)) return false;
+  return dashValidTree(node.a, seen) && dashValidTree(node.b, seen);
+}
+
+/* ── Render: walk the tree, assigning each leaf a {col,cs,row,rs} rect in
+   the 12x24 grid and collecting one descriptor per internal (split) node
+   for the divider overlay — see the module doc comment above for how a
+   {dir,ratio} node divides the [colStart,colEnd)x[rowStart,rowEnd) range
+   it's given. Always visits exactly DASH_CARD_IDS.length - 1 split nodes. ── */
+function dashWalk(node, colStart, colEnd, rowStart, rowEnd, rects, dividers) {
+  if (node.type === 'leaf') {
+    rects[node.id] = {col: colStart, cs: colEnd - colStart, row: rowStart, rs: rowEnd - rowStart};
+    return;
+  }
+  if (node.dir === 'col') {
+    var c = dashClamp(Math.round(colStart + (colEnd - colStart) * node.ratio), colStart + DASH_MIN_CS, colEnd - DASH_MIN_CS);
+    dividers.push({node: node, dir: 'v', colStart: c, colEnd: c, rowStart: rowStart, rowEnd: rowEnd, range: {colStart: colStart, colEnd: colEnd, rowStart: rowStart, rowEnd: rowEnd}});
+    dashWalk(node.a, colStart, c, rowStart, rowEnd, rects, dividers);
+    dashWalk(node.b, c, colEnd, rowStart, rowEnd, rects, dividers);
+  } else {
+    var r = dashClamp(Math.round(rowStart + (rowEnd - rowStart) * node.ratio), rowStart + DASH_MIN_RS, rowEnd - DASH_MIN_RS);
+    dividers.push({node: node, dir: 'h', colStart: colStart, colEnd: colEnd, rowStart: r, rowEnd: r, range: {colStart: colStart, colEnd: colEnd, rowStart: rowStart, rowEnd: rowEnd}});
+    dashWalk(node.a, colStart, colEnd, rowStart, r, rects, dividers);
+    dashWalk(node.b, colStart, colEnd, r, rowEnd, rects, dividers);
+  }
+}
+
+function dashLoadSaved() {
+  try {
+    var raw = localStorage.getItem(DASH_STORE_KEY);
+    if (!raw) return null;
+    var parsed = JSON.parse(raw);
+    var seen = {};
+    /* Every current card id must appear exactly once — not just "every leaf
+       present is a known id" — so a tree saved by an older/different set of
+       cards (e.g. before this one added 'history') gets rejected outright
+       rather than rendering some cards from the stale tree and others from
+       DASH_DEFAULT_TREE's positions, which could overlap. */
+    if (!dashValidTree(parsed.tree, seen)) return null;
+    if (Object.keys(seen).length !== DASH_CARD_IDS.length) return null;
+    var collapsed = {}, hidden = {};
+    DASH_CARD_IDS.forEach(function(id) {
+      collapsed[id] = !!(parsed.collapsed || {})[id];
+      hidden[id] = !!(parsed.hidden || {})[id];
+    });
+    /* Never let a saved state come back with every card hidden (e.g. the
+       set changed across a version bump) — same fail-safe spirit as
+       toggleDashHide()'s "keep at least one visible" guard. */
+    if (Object.keys(hidden).every(function(id) { return hidden[id]; })) hidden = {};
+    return {tree: parsed.tree, collapsed: collapsed, hidden: hidden};
+  } catch(e) { return null; }
+}
+
+function dashEnsureCustom() {
+  if (!_dashTree) _dashTree = dashCloneTree(DASH_DEFAULT_TREE);
+}
+
+function dashSave() {
+  try {
+    localStorage.setItem(DASH_STORE_KEY, JSON.stringify({tree: _dashTree || DASH_DEFAULT_TREE, collapsed: _dashCollapsed, hidden: _dashHidden}));
+  } catch(e) {}
+}
+
+function dashApply() {
+  if (!dashSupported()) return;
+  var rects = {}, dividers = [];
+  dashWalk(_dashTree || DASH_DEFAULT_TREE, 1, DASH_COLS + 1, 1, DASH_ROWS + 1, rects, dividers);
+  _dashDividerNodes = dividers;
+
+  if (_dashTree || Object.keys(_dashCollapsed).length) {
+    DASH_CARD_IDS.forEach(function(id) {
+      var el = dashCardEl(id); if (!el) return;
+      var r = rects[id]; if (!r) return;
+      var collapsed = !!_dashCollapsed[id];
+      if (collapsed) r = {col: r.col, cs: r.cs, row: r.row, rs: DASH_COLLAPSED_RS};
+      el.style.gridColumn = r.col + ' / span ' + r.cs;
+      el.style.gridRow = r.row + ' / span ' + r.rs;
+      el.classList.toggle('dash-collapsed', collapsed);
+    });
+  }
+  /* Hide leaves the split tree untouched — same "own rendered box only,
+     don't reflow neighbors" tradeoff as collapse above, just all the way to
+     display:none instead of header-only height. The card's grid rect is
+     still reserved (its neighbors' rects/dividers are unaffected), so the
+     freed area shows as blank space until the user drags the divider
+     bordering it by hand — there's no tree surgery to undo when unhidden,
+     it just reappears at its old spot. A CSS class + media-scoped rule
+     (like .dash-collapsed above), not a direct style.display write: toggling
+     this class is safe to leave set while the viewport crosses the mobile
+     breakpoint, since the rule that acts on it only exists at desktop
+     widths — an inline display:none here would otherwise stick past that
+     breakpoint with no way for the (desktop-only) unhide controls to clear
+     it again. */
+  DASH_CARD_IDS.forEach(function(id) {
+    var el = dashCardEl(id); if (!el) return;
+    el.classList.toggle('dash-fully-hidden', !!_dashHidden[id]);
+  });
+  dashPositionDividers();
+}
+
+function dashPositionDividers() {
+  var area = document.getElementById('content-area');
+  if (!area || !dashSupported()) return;
+  var cw = area.clientWidth, ch = area.clientHeight;
+  if (!cw || !ch) return;
+  var cellW = (cw - (DASH_COLS - 1) * DASH_GAP) / DASH_COLS;
+  var cellH = (ch - (DASH_ROWS - 1) * DASH_GAP) / DASH_ROWS;
+  var px = function(line) { return (line - 1) * (cellW + DASH_GAP) - DASH_GAP / 2; };
+  var py = function(line) { return (line - 1) * (cellH + DASH_GAP) - DASH_GAP / 2; };
+  var HW = 10;   /* divider hit-area thickness, px */
+
+  for (var i = 0; i < DASH_CARD_IDS.length - 1; i++) {
+    var el = dashDividerEl(i);
+    var dv = _dashDividerNodes[i];
+    if (!el) continue;
+    if (!dv) { el.style.display = 'none'; continue; }
+    el.style.display = '';
+    el.classList.toggle('dash-divider-v', dv.dir === 'v');
+    el.classList.toggle('dash-divider-h', dv.dir === 'h');
+    if (dv.dir === 'v') {
+      var top = py(dv.rowStart), bottom = py(dv.rowEnd);
+      el.style.cssText = 'left:' + (px(dv.colStart) - HW / 2) + 'px; top:' + top + 'px; width:' + HW + 'px; height:' + (bottom - top) + 'px';
+    } else {
+      var left = px(dv.colStart), right = px(dv.colEnd);
+      el.style.cssText = 'left:' + left + 'px; top:' + (py(dv.rowStart) - HW / 2) + 'px; width:' + (right - left) + 'px; height:' + HW + 'px';
+    }
+  }
+}
+
+function initDashLayout() {
+  var saved = dashLoadSaved();
+  if (saved) {
+    _dashTree = saved.tree;
+    _dashCollapsed = saved.collapsed;
+    _dashHidden = saved.hidden;
+  }
+  dashApply();   /* still walks DASH_DEFAULT_TREE to position dividers even with nothing saved */
+  updateDashHiddenBtn();
+}
+
+function toggleDashEditMode() {
+  if (!dashSupported()) return;
+  _dashEditOn = !_dashEditOn;
+  var area = document.getElementById('content-area');
+  if (area) area.classList.toggle('dash-edit', _dashEditOn);
+  var btn = document.getElementById('dash-edit-btn');
+  if (btn) btn.classList.toggle('active', _dashEditOn);
+}
+
+function toggleDashCollapse(id, ev) {
+  if (ev) ev.stopPropagation();
+  if (!dashSupported()) return;
+  _dashCollapsed[id] = !_dashCollapsed[id];
+  dashApply();
+  dashSave();
+  /* Leaflet caches #map's container size at creation time (see the resize
+     listener below) — collapsing/expanding the map card changes that size
+     without Leaflet knowing, leaving tiles misaligned until nudged. */
+  if (id === 'map') setTimeout(function() { if (_map) _map.invalidateSize(); }, 50);
+}
+
+/* ── Hide/unhide: unlike collapse, hide has no toggle left on the card
+   itself once it's gone (its whole header disappears too), so restoring it
+   goes through the "hidden panels" menu below instead. ── */
+function dashHiddenIds() { return DASH_CARD_IDS.filter(function(id) { return !!_dashHidden[id]; }); }
+
+function toggleDashHide(id, ev) {
+  if (ev) ev.stopPropagation();
+  if (!dashSupported()) return;
+  if (!_dashHidden[id] && dashHiddenIds().length >= DASH_CARD_IDS.length - 1) return;   /* always keep at least one panel visible */
+  _dashHidden[id] = !_dashHidden[id];
+  dashApply();
+  dashSave();
+  updateDashHiddenBtn();
+  if (id === 'map') setTimeout(function() { if (_map) _map.invalidateSize(); }, 50);
+}
+
+function dashUnhide(id, ev) {
+  if (ev) ev.stopPropagation();
+  _dashHidden[id] = false;
+  dashApply();
+  dashSave();
+  updateDashHiddenBtn();
+  if (id === 'map') setTimeout(function() { if (_map) _map.invalidateSize(); }, 50);
+}
+
+function updateDashHiddenBtn() {
+  var btn = document.getElementById('dash-hidden-btn');
+  if (!btn) return;
+  var hiddenIds = dashHiddenIds();
+  btn.style.display = hiddenIds.length ? '' : 'none';
+  if (_dashHiddenMenuOpen) renderDashHiddenMenu();   /* keep an already-open menu in sync as items are restored */
+}
+
+function renderDashHiddenMenu() {
+  var menu = document.getElementById('dash-hidden-menu');
+  if (!menu) return;
+  var hiddenIds = dashHiddenIds();
+  if (!hiddenIds.length) { hideDashHiddenMenu(); return; }
+  menu.innerHTML = hiddenIds.map(function(id) {
+    return '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:4px 6px">' +
+             '<span>' + esc(DASH_CARD_TITLES[id] || id) + '</span>' +
+             '<button class="btn-icon" onclick="dashUnhide(\'' + id + '\',event)" title="Show panel"><svg class="icon"><use href="#icon-eye"></use></svg></button>' +
+           '</div>';
+  }).join('');
+}
+
+function _dashHiddenOutsideClick(e) {
+  var wrap = document.getElementById('dash-hidden-wrap');
+  if (wrap && !wrap.contains(e.target)) hideDashHiddenMenu();
+}
+
+function hideDashHiddenMenu() {
+  var menu = document.getElementById('dash-hidden-menu');
+  if (menu) menu.style.display = 'none';
+  _dashHiddenMenuOpen = false;
+  document.removeEventListener('click', _dashHiddenOutsideClick);
+}
+
+function toggleDashHiddenMenu(ev) {
+  if (ev) ev.stopPropagation();
+  if (_dashHiddenMenuOpen) { hideDashHiddenMenu(); return; }
+  var menu = document.getElementById('dash-hidden-menu');
+  if (!menu) return;
+  renderDashHiddenMenu();
+  menu.style.display = 'block';
+  _dashHiddenMenuOpen = true;
+  document.addEventListener('click', _dashHiddenOutsideClick);
+}
+
+/* ── Move: drag a card's grip handle over another card. Where you drop
+   within the target decides what happens — see dashDropZone(). Mirrors
+   favRowDragStart/Over/Leave/Drop/End above for the native-DnD plumbing. */
+function dashDragStart(ev, id) {
+  if (!_dashEditOn) { ev.preventDefault(); return; }
+  dashEnsureCustom();
+  _dashDragId = id;
+  ev.dataTransfer.effectAllowed = 'move';
+  try { ev.dataTransfer.setData('text/plain', id); } catch(e) {}
+  var el = dashCardEl(id); if (el) el.classList.add('dash-dragging');
+}
+
+/* 'center' (middle ~44% of the target, both axes) swaps the two cards in
+   place. The outer ~28% strip on each edge docks the dragged card into a
+   new pane split off that edge instead. */
+function dashDropZone(ev, el) {
+  var r = el.getBoundingClientRect();
+  var x = (ev.clientX - r.left) / r.width, y = (ev.clientY - r.top) / r.height;
+  var EDGE = 0.28;
+  if (y < EDGE) return 'top';
+  if (y > 1 - EDGE) return 'bottom';
+  if (x < EDGE) return 'left';
+  if (x > 1 - EDGE) return 'right';
+  return 'center';
+}
+
+function dashUpdateDropIndicator(ev, targetEl) {
+  var ind = document.getElementById('dash-drop-indicator');
+  if (!ind) return;
+  var zone = dashDropZone(ev, targetEl);
+  var r = targetEl.getBoundingClientRect();
+  var rect = {left: r.left, top: r.top, width: r.width, height: r.height};
+  if (zone === 'top') rect.height = r.height / 2;
+  else if (zone === 'bottom') { rect.top = r.top + r.height / 2; rect.height = r.height / 2; }
+  else if (zone === 'left') rect.width = r.width / 2;
+  else if (zone === 'right') { rect.left = r.left + r.width / 2; rect.width = r.width / 2; }
+  ind.style.left = rect.left + 'px'; ind.style.top = rect.top + 'px';
+  ind.style.width = rect.width + 'px'; ind.style.height = rect.height + 'px';
+  ind.style.display = 'block';
+  return zone;
+}
+
+function dashHideDropIndicator() {
+  var ind = document.getElementById('dash-drop-indicator');
+  if (ind) ind.style.display = 'none';
+}
+
+function dashDragOver(ev) {
+  if (!_dashDragId) return;
+  ev.preventDefault();
+  var targetId = ev.currentTarget.getAttribute('data-dash-id');
+  if (targetId === _dashDragId) { dashHideDropIndicator(); return; }
+  dashUpdateDropIndicator(ev, ev.currentTarget);
+}
+
+function dashDragLeave(ev) {
+  if (ev.currentTarget.contains(ev.relatedTarget)) return;   /* still inside the same card, e.g. moved over a child element */
+  dashHideDropIndicator();
+}
+
+function dashDragEnd() {
+  document.querySelectorAll('.dash-card').forEach(function(el) { el.classList.remove('dash-dragging'); });
+  dashHideDropIndicator();
+  _dashDragId = null;
+}
+
+function dashDrop(ev, targetId) {
+  ev.preventDefault();
+  var zone = dashDropZone(ev, ev.currentTarget);
+  dashHideDropIndicator();
+  var sourceId = _dashDragId;
+  _dashDragId = null;
+  if (!sourceId || sourceId === targetId) return;
+  dashEnsureCustom();
+  _dashTree = dashMoveCard(_dashTree, sourceId, targetId, zone);
+  dashApply();
+  dashSave();
+  setTimeout(function() { if (_map) _map.invalidateSize(); }, 50);   /* map's pane may have changed size or moved */
+}
+
+/* ── Resize: drag a divider. Pointer Events (not native HTML5 DnD) since
+   this needs continuous pixel deltas. */
+function dashDividerStart(ev, idx) {
+  if (!_dashEditOn) return;
+  ev.preventDefault();
+  dashEnsureCustom();
+  /* dashEnsureCustom() may have just cloned _dashTree for the first time —
+     _dashDividerNodes from the last render still points at nodes in the old
+     (now-orphaned) tree, so re-walk before reading it or the drag would
+     mutate a ratio that's no longer what's on screen. */
+  dashApply();
+  var dv = _dashDividerNodes[idx]; if (!dv) return;
+  var area = document.getElementById('content-area');
+  var rect = area.getBoundingClientRect();
+  _dashDividerDrag = {
+    node: dv.node, dir: dv.dir, startX: ev.clientX, startY: ev.clientY, startRatio: dv.node.ratio,
+    rangeSize: dv.dir === 'v' ? (dv.range.colEnd - dv.range.colStart) : (dv.range.rowEnd - dv.range.rowStart),
+    cellW: (rect.width  - (DASH_COLS - 1) * DASH_GAP) / DASH_COLS + DASH_GAP,
+    cellH: (rect.height - (DASH_ROWS - 1) * DASH_GAP) / DASH_ROWS + DASH_GAP
+  };
+  try { ev.currentTarget.setPointerCapture(ev.pointerId); } catch(e) {}
+  ev.currentTarget.classList.add('dash-divider-active');
+  document.addEventListener('pointermove', dashDividerMove);
+  document.addEventListener('pointerup', dashDividerEnd);
+}
+
+function dashDividerMove(ev) {
+  var dr = _dashDividerDrag; if (!dr) return;
+  var deltaCells = dr.dir === 'v'
+    ? (ev.clientX - dr.startX) / dr.cellW
+    : (ev.clientY - dr.startY) / dr.cellH;
+  var ratio = dr.startRatio + deltaCells / dr.rangeSize;
+  dr.node.ratio = Math.max(0.05, Math.min(0.95, ratio));   /* dashWalk()'s own per-render clamp enforces the real min-size floor */
+  dashApply();
+}
+
+function dashDividerEnd() {
+  document.removeEventListener('pointermove', dashDividerMove);
+  document.removeEventListener('pointerup', dashDividerEnd);
+  var el = document.querySelector('.dash-divider-active');
+  if (el) el.classList.remove('dash-divider-active');
+  var wasDragging = !!_dashDividerDrag;
+  _dashDividerDrag = null;
+  if (wasDragging) dashSave();
+  setTimeout(function() { if (_map) _map.invalidateSize(); }, 50);   /* any divider can change the map's box */
+}
+
 /* ── Boot ── */
+/* initDashLayout() before initMap(): if the viewer has a saved custom
+   dashboard layout, it changes .map-card's size via inline grid-column/
+   grid-row before Leaflet ever measures its container — otherwise Leaflet
+   would initialize against the pre-customization (CSS-default) size, and
+   since nothing then calls invalidateSize() for that particular transition,
+   it would stay wrong: panning/zooming and the tile grid math (which is
+   exactly what makes the 3 world copies line up into a continuous-looking
+   wrap, per the comment in initMap()) all depend on Leaflet's cached
+   container size actually matching reality. */
+initDashLayout();
 initMap();
 refreshBoard();
 refreshWeather();
+refreshNwsAlerts();
 refreshActivity();
 refreshHistory();
 initFavSort();
@@ -3592,9 +4928,15 @@ setInterval(refreshBoard,    2000);    /* node status every 2s — board endpoin
                                           cheap (system-info calls are TTL-cached,
                                           geocoding is non-blocking), so this snappier
                                           keyed/connected refresh adds negligible load */
+setInterval(boardWatchdog,   2000);    /* catches a refreshBoard() request that hangs
+                                          instead of erroring out promptly — see the
+                                          comment above markServerUnreachable() */
 setInterval(refreshActivity, 15000);   /* activity every 15s */
 setInterval(refreshHistory,  30000);   /* connection history every 30s */
 setInterval(refreshWeather,  600000);  /* weather every 10min */
+setInterval(refreshNwsAlerts, 60000);  /* NWS alert ticker every 60s — well under the
+                                          poller's own 120s cadence, just catches up
+                                          promptly after a config change */
 setInterval(fetchNets,       60000);   /* net schedule list every 60s — the weather-bar
                                           badge/highlight itself re-derives every second
                                           from tickClock(), this just catches edits made

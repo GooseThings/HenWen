@@ -1,5 +1,18 @@
 # Changelog
 
+## v2026.07.22
+
+- **Added: fully customizable kiosk dashboard layout.** The Status Board's six panels (Node, Recent Connections, Connected Nodes, Network Map, Latest Activity, Favorites) can now be dragged into any arrangement, resized against each other, collapsed to just their header, or hidden entirely — via a new layout-edit toggle in the Node panel's toolbar. Hidden panels can be brought back from a "hidden panels" menu that appears next to the same toggle whenever anything's hidden; at least one panel always stays visible. Layout, collapse, and hidden state all persist per-browser (localStorage). Desktop-only — mobile keeps the existing fixed stacked layout untouched.
+- **Added: APRS-IS live station layer on the kiosk Network Map.** An optional "APRS" toggle next to Radar overlays nearby APRS station positions (received via `aprslib`, receive-only — this app never transmits) within a configurable radius (1–200mi, default 25mi). Requires a licensed amateur's own callsign saved in Manager → Kiosk Settings; the layer stays off with no callsign saved or without the `aprslib` package installed.
+- **Added: Weather Alerts can now watch a whole state, or several zones at once**, not just one detected county/zone — choose "Statewide" coverage, or comma-separate multiple UGC codes (e.g. `MIZ056,MIZ057`) to cover a larger region.
+- **Added: Weather Alerts can scroll on the kiosk Status Board.** A new "Show on Kiosk Board" toggle, independent of the existing on-repeater audio announcements, drives a scrolling ticker bar that appears above the dashboard whenever a matching alert is active.
+- **Added: drag-to-reorder Favorites**, on both the kiosk Status Board and Manager dashboard, alongside the existing sort-by-field options.
+- **Changed: kiosk header logo is 30% smaller.**
+- **Hardened: secret-key and port rotation** now fall back to root-owned sudo helper scripts (`rotate_secret_key.sh`, `update_service_ports.sh`) when the unprivileged service account can't write the unit file directly, instead of just failing with manual-edit instructions. Both scripts read their input from stdin only (never argv) and validate it strictly before touching the root-owned file.
+- **Fixed: AMI module loading.** Uses the dedicated `ModuleLoad` action instead of `Command: module load` (blacklisted by Asterisk's Command action) to load `app_mixmonitor.so` on demand — fixes the Listen button and AMI diagnostics failing to load the module themselves.
+- **Fixed: Listen button failing to find a channel for simplex-only (Local/pseudo-style) nodes** whose node number never appears in `core show channels` output — now falls back to matching via the node's configured `rxchannel`.
+- **Fixed: a node's keyed-history map pin now clears immediately on disconnect** instead of lingering for the rest of the configured pin duration.
+
 ## v2026.07.20
 
 - **Fixed: creating a TTS announcement, or uploading an FCC ID sound, could fail with a confusing "Unexpected token '<'" browser error instead of a real message.** `/usr/share/asterisk/sounds` is root-owned, so the `asterisk` user HenWen runs as couldn't create the `henwen/` subdirectory under it the first time an announcement or ID-sound route needed it — the resulting `PermissionError` ran before that route's own error handling, so Flask served its default HTML error page instead of JSON, and the Manager UI showed a raw JS parse error rather than the actual problem. All four affected routes (announcement upload, TTS create, TTS preview, ID sound upload) now return a proper JSON error, and `install.sh` pre-creates the directory with the right ownership so new installs never hit this in the first place.
