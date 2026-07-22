@@ -37,7 +37,6 @@ import json
 import sqlite3
 import threading
 import tempfile
-import fcntl
 import math
 import sys
 import pwd
@@ -3087,25 +3086,6 @@ def parse_stanza_settings(content, stanza_name):
     log("DEBUG", f"[CONF] [{stanza_name}] effective settings: {len(effective)} total ({len(own)} own overrides)")
 
     return effective
-
-
-def parse_node_settings(content):
-    """
-    Legacy flat parser — kept for the /api/conf general_settings field.
-    Parses the entire file as a flat dict (last value for any key wins).
-    Use parse_stanza_settings() for per-stanza accurate parsing.
-    """
-    settings = {}
-    for line in content.splitlines():
-        stripped  = line.strip()
-        commented = stripped.startswith(";")
-        if commented:
-            stripped = stripped[1:].strip()
-        m = re.match(r'^([a-zA-Z0-9_][a-zA-Z0-9_]*)\s*=\s*([^;]*?)(?:\s*;.*)?$', stripped)
-        if m:
-            k, v = m.group(1).strip(), m.group(2).strip()
-            settings[k] = {"value": v, "commented": commented, "raw_line": line}
-    return settings
 
 
 def _section_header_match(s):

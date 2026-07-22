@@ -105,12 +105,6 @@ def test_parse_stanza_settings_unknown_stanza_returns_empty():
     assert app.parse_stanza_settings(SAMPLE_CONF, "99999") == {}
 
 
-def test_parse_node_settings_last_value_wins():
-    content = "[a]\nfoo = 1\n[b]\nfoo = 2\n"
-    settings = app.parse_node_settings(content)
-    assert settings["foo"]["value"] == "2"
-
-
 def test_section_header_match_recognizes_commented_header():
     assert app._section_header_match(";[daq-cham-1]") is not None
     assert app._section_header_match("not a header") is None
