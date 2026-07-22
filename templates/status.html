@@ -885,7 +885,11 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <span class="dash-header-grip" draggable="true" title="Drag to move"
               ondragstart="dashDragStart(event,'node')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
         <span class="card-title">Node</span>
-        <button class="dash-hide-btn" onclick="toggleDashHide('node',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
+        <!-- No hide button here, unlike the other five cards: this card's header is the only place
+             the layout-edit toggle and "hidden panels" restore menu live (see node-actions-right
+             below) — hiding it would hide those controls along with it and lock the user out of
+             both edit mode and the only way to unhide anything. toggleDashHide() also refuses
+             'node' server-side (client-side, really) as a second line of defense. -->
         <button class="dash-collapse-btn" onclick="toggleDashCollapse('node',event)" title="Collapse"><svg class="icon"><use href="#icon-chevron-down"></use></svg></button>
       </div>
       <div id="node-info">
@@ -4594,6 +4598,13 @@ function dashLoadSaved() {
        set changed across a version bump) — same fail-safe spirit as
        toggleDashHide()'s "keep at least one visible" guard. */
     if (Object.keys(hidden).every(function(id) { return hidden[id]; })) hidden = {};
+    /* 'node' must never load as hidden, full stop — it's the only card
+       whose header carries the layout-edit toggle and the hidden-panels
+       menu, so a saved state with it hidden (from before toggleDashHide()
+       started refusing that, or hand-edited localStorage) would otherwise
+       leave a returning visitor with no way to undo it. Self-heals on next
+       load instead of requiring a manual localStorage clear. */
+    hidden.node = false;
     return {tree: parsed.tree, collapsed: collapsed, hidden: hidden};
   } catch(e) { return null; }
 }
@@ -4714,6 +4725,11 @@ function dashHiddenIds() { return DASH_CARD_IDS.filter(function(id) { return !!_
 function toggleDashHide(id, ev) {
   if (ev) ev.stopPropagation();
   if (!dashSupported()) return;
+  /* 'node' hosts the layout-edit toggle and the "hidden panels" menu itself
+     (see the HTML comment on its card header) — hiding it would take both
+     controls down with it, locking the user out of edit mode with no way
+     back except clearing localStorage by hand. Never allow it. */
+  if (id === 'node') return;
   if (!_dashHidden[id] && dashHiddenIds().length >= DASH_CARD_IDS.length - 1) return;   /* always keep at least one panel visible */
   _dashHidden[id] = !_dashHidden[id];
   dashApply();
