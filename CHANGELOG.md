@@ -1,5 +1,9 @@
 # Changelog
 
+## v2026.07.22.2
+
+- **Fixed: hiding the Node panel in the new kiosk dashboard layout could permanently lock a viewer out of layout-edit mode.** The layout-edit toggle and the "hidden panels" restore menu both live only in the Node card's header, so hiding that card (allowed like any other panel) took both controls down with it — with the hidden state persisted to localStorage, reloading the page didn't help either. Hiding the Node panel is no longer allowed, and anyone already stuck with it saved hidden self-heals automatically on next load.
+
 ## v2026.07.22
 
 - **Added: fully customizable kiosk dashboard layout.** The Status Board's six panels (Node, Recent Connections, Connected Nodes, Network Map, Latest Activity, Favorites) can now be dragged into any arrangement, resized against each other, collapsed to just their header, or hidden entirely — via a new layout-edit toggle in the Node panel's toolbar. Hidden panels can be brought back from a "hidden panels" menu that appears next to the same toggle whenever anything's hidden; at least one panel always stays visible. Layout, collapse, and hidden state all persist per-browser (localStorage). Desktop-only — mobile keeps the existing fixed stacked layout untouched.
