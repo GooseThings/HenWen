@@ -4207,7 +4207,8 @@ def api_status_history():
     Condensed recent connection history for the Status Board (kiosk).
     Scoped to this server's own hosted node(s) only, completed
     connections only (still-live ones belong in the Connected Nodes
-    panel, not here), last 5. The full searchable/paginated history
+    panel, not here). Row count is caller-selectable (5/10/25/50,
+    default 5) via ?limit=. The full searchable/paginated history
     (any node, live or not, clear button) lives in the Manager's
     Conn. History tab via /api/connection-history.
     """
@@ -4216,13 +4217,20 @@ def api_status_history():
     if not nodes:
         return jsonify({"rows": []})
 
+    try:
+        limit = int(request.args.get("limit", 5))
+    except (TypeError, ValueError):
+        limit = 5
+    if limit not in (5, 10, 25, 50):
+        limit = 5
+
     db     = get_db()
     marks  = ",".join("?" * len(nodes))
     rows   = db.execute(
         f"SELECT peer_node, peer_callsign, peer_location, direction, "
         f"connected_at, disconnected_at, duration_seconds FROM connection_history "
         f"WHERE local_node IN ({marks}) AND disconnected_at IS NOT NULL "
-        f"ORDER BY connected_at DESC LIMIT 5",
+        f"ORDER BY connected_at DESC LIMIT {limit}",
         [str(n) for n in nodes]
     ).fetchall()
     resp = jsonify({"rows": [dict(r) for r in rows]})

@@ -894,6 +894,12 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <span class="dash-header-grip" draggable="true" title="Drag to move"
               ondragstart="dashDragStart(event,'history')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
         <span class="card-title">Recent Connections</span>
+        <select id="hist-limit-sel" class="fav-sort-select" style="margin-left:auto" onchange="onHistLimitChange()" title="How many recent connections to show">
+          <option value="5">5</option>
+          <option value="10">10</option>
+          <option value="25">25</option>
+          <option value="50">50</option>
+        </select>
         <button class="dash-hide-btn" onclick="toggleDashHide('history',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
       </div>
       <div class="history-list" id="history-list">
@@ -2603,9 +2609,27 @@ function updateActiveUsersToggle() {
   }
 }
 
+var _histLimit = 5;
+
+function initHistLimit() {
+  try {
+    var saved = parseInt(localStorage.getItem('henwen_hist_limit'), 10);
+    if ([5, 10, 25, 50].indexOf(saved) !== -1) _histLimit = saved;
+  } catch(e) {}
+  var sel = document.getElementById('hist-limit-sel');
+  if (sel) sel.value = String(_histLimit);
+}
+
+function onHistLimitChange() {
+  var sel = document.getElementById('hist-limit-sel');
+  _histLimit = sel ? parseInt(sel.value, 10) : 5;
+  try { localStorage.setItem('henwen_hist_limit', String(_histLimit)); } catch(e) {}
+  refreshHistory();
+}
+
 async function refreshHistory() {
   try {
-    var r = await apiFetch('/api/status/history', {cache: 'no-store'});
+    var r = await apiFetch('/api/status/history?limit=' + _histLimit, {cache: 'no-store'});
     if (!r.ok) return;
     var data = await r.json();
     var rows = data.rows || [];
@@ -4864,6 +4888,7 @@ refreshBoard();
 refreshWeather();
 refreshNwsAlerts();
 refreshActivity();
+initHistLimit();
 refreshHistory();
 initFavSort();
 loadFavorites();
