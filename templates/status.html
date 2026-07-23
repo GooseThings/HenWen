@@ -998,8 +998,11 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
           <span id="map-iss-passes-wrap" style="display:none;align-items:center;gap:4px">
             <select class="map-ctl-sel" id="map-iss-passes" onchange="onIssPassCountChange(this.value)">
               <option value="1">1 pass</option>
+              <option value="2">2 passes</option>
+              <option value="3">3 passes</option>
               <option value="4">4 passes</option>
-              <option value="10">10 passes</option>
+              <option value="5">5 passes</option>
+              <option value="6">6 passes</option>
             </select>
             <span id="map-iss-status" style="font-size:0.68rem;color:var(--text2);white-space:nowrap"></span>
           </span>
@@ -1350,6 +1353,13 @@ var _map            = null;
 var _markers        = [];
 var _currentTile    = null;
 
+/* Mirrors the grayline's world-copy wrap (maxBounds spans -400° to 400°,
+   see initMap()) so every map layer — pins, the ISS marker, its pass
+   tracks — still shows up on the repeated map copies Leaflet renders at
+   low zoom / while panning, instead of only appearing once at its true
+   longitude. */
+var MAP_WORLD_OFFSETS = [-360, 0, 360];
+
 /* Maps 'asl:<node>' / 'aprs:<callsign>' -> the single marker (world-copy
    offset 0, the true-longitude one) representing that entry, so clicking a
    row in the "Latest Activity" list can fly the map to it and reopen its
@@ -1444,7 +1454,7 @@ function initMap() {
     zoomControl: true, attributionControl: false,
     center: [20, 0], zoom: 2, minZoom: 1,
     /* Clamp panning to the range covered by the 3 world copies pins are
-       drawn at (WORLD_OFFSETS in updateMap, -360° to +360°), plus a little
+       drawn at (MAP_WORLD_OFFSETS, -360° to +360°), plus a little
        slack past the edge copy. */
     maxBounds: [[-90, -400], [90, 400]],
     maxBoundsViscosity: 1.0,
@@ -1788,8 +1798,8 @@ var _issSatrec          = null;
 var _issTleTimer        = null;
 var _issPositionTimer   = null;
 var _issPassTimer       = null;
-var _issMarker          = null;
-var _issPassLayers      = [];   /* polylines + rise markers currently drawn */
+var _issMarkers         = [];   /* one per MAP_WORLD_OFFSETS entry, kept in sync so the marker still shows on repeated map copies */
+var _issPassLayers      = [];   /* polylines + rise markers currently drawn (also one set per world offset) */
 var _issPasses          = [];   /* last computed pass list */
 var _issObserverReady   = false;
 
@@ -1801,7 +1811,7 @@ function issEnabled() {
 function issPassCount() {
   var sel = document.getElementById('map-iss-passes');
   var v = sel ? parseInt(sel.value, 10) : 1;
-  return [1, 4, 10].indexOf(v) !== -1 ? v : 1;
+  return (v >= 1 && v <= 6) ? v : 1;
 }
 
 function issIconSize() {
@@ -1972,27 +1982,35 @@ function issRenderPasses() {
   if (!_map || !issEnabled()) return;
   _issPasses.forEach(function(pass, idx) {
     var style = issPassStyle(idx, _issPasses.length);
-    issSplitTrackSegments(pass.track).forEach(function(seg) {
-      if (seg.length < 2) return;
-      var line = L.polyline(seg, {
-        color: ISS_PASS_COLOR, opacity: style.opacity, weight: 2,
-        dashArray: idx === 0 ? null : '4,4',
-      }).addTo(_map);
-      _issPassLayers.push(line);
+    var segments = issSplitTrackSegments(pass.track);
+    var popupHtml =
+      '<strong>ISS pass ' + (idx + 1) + ' of ' + _issPasses.length + '</strong><br>' +
+      'Rise: ' + issFmtTime(pass.rise) + '<br>' +
+      'Max elevation: ' + pass.maxElevDeg.toFixed(0) + '&deg; at ' + issFmtTime(pass.maxElevTime) + '<br>' +
+      'Set: ' + issFmtTime(pass.set) + '<br>' +
+      'Duration: ' + Math.round(pass.durationSec / 60) + ' min';
+
+    /* Drawn once per MAP_WORLD_OFFSETS entry (see that constant's comment)
+       so the path stays visible while panning across a repeated copy of
+       the map instead of only existing at its true longitude. */
+    MAP_WORLD_OFFSETS.forEach(function(off) {
+      segments.forEach(function(seg) {
+        if (seg.length < 2) return;
+        var offSeg = seg.map(function(pt) { return [pt[0], pt[1] + off]; });
+        var line = L.polyline(offSeg, {
+          color: ISS_PASS_COLOR, opacity: style.opacity, weight: 2,
+          dashArray: idx === 0 ? null : '4,4',
+        }).addTo(_map);
+        _issPassLayers.push(line);
+      });
+      if (pass.track.length) {
+        var m = L.circleMarker([pass.track[0][0], pass.track[0][1] + off], {
+          radius: 4, color: ISS_PASS_COLOR, fillColor: ISS_PASS_COLOR,
+          fillOpacity: style.opacity, opacity: style.opacity, weight: 1,
+        }).bindPopup(popupHtml).addTo(_map);
+        _issPassLayers.push(m);
+      }
     });
-    if (pass.track.length) {
-      var m = L.circleMarker(pass.track[0], {
-        radius: 4, color: ISS_PASS_COLOR, fillColor: ISS_PASS_COLOR,
-        fillOpacity: style.opacity, opacity: style.opacity, weight: 1,
-      }).bindPopup(
-        '<strong>ISS pass ' + (idx + 1) + ' of ' + _issPasses.length + '</strong><br>' +
-        'Rise: ' + issFmtTime(pass.rise) + '<br>' +
-        'Max elevation: ' + pass.maxElevDeg.toFixed(0) + '&deg; at ' + issFmtTime(pass.maxElevTime) + '<br>' +
-        'Set: ' + issFmtTime(pass.set) + '<br>' +
-        'Duration: ' + Math.round(pass.durationSec / 60) + ' min'
-      ).addTo(_map);
-      _issPassLayers.push(m);
-    }
   });
 }
 
@@ -2011,19 +2029,22 @@ function issUpdatePosition() {
   var gd = satellite.eciToGeodetic(pv.position, gmst);
   var lat = gd.latitude * 180 / Math.PI;
   var lon = _issNormLon(gd.longitude * 180 / Math.PI);
-
-  if (!_issMarker) {
-    _issMarker = L.marker([lat, lon], { icon: makeIssIcon(), zIndexOffset: 500 }).addTo(_map);
-  } else {
-    _issMarker.setIcon(makeIssIcon());
-    _issMarker.setLatLng([lat, lon]);
-  }
-  _issMarker.bindPopup(
+  var popupHtml =
     '<strong>ISS (ZARYA)</strong><br>' +
     'Altitude: ' + gd.height.toFixed(0) + ' km<br>' +
     'Lat/Lon: ' + lat.toFixed(2) + '&deg;, ' + lon.toFixed(2) + '&deg;' +
-    (_issPasses.length ? '<br>Next pass: ' + issFmtTime(_issPasses[0].rise) : '')
-  );
+    (_issPasses.length ? '<br>Next pass: ' + issFmtTime(_issPasses[0].rise) : '');
+
+  if (!_issMarkers.length) {
+    MAP_WORLD_OFFSETS.forEach(function() {
+      _issMarkers.push(L.marker([lat, lon], { icon: makeIssIcon(), zIndexOffset: 500 }).addTo(_map));
+    });
+  }
+  _issMarkers.forEach(function(m, i) {
+    m.setIcon(makeIssIcon());
+    m.setLatLng([lat, lon + MAP_WORLD_OFFSETS[i]]);
+    m.bindPopup(popupHtml);
+  });
 }
 
 function toggleIss(on) {
@@ -2048,7 +2069,8 @@ function issDisable() {
   if (_issTleTimer) { clearInterval(_issTleTimer); _issTleTimer = null; }
   if (_issPositionTimer) { clearInterval(_issPositionTimer); _issPositionTimer = null; }
   if (_issPassTimer) { clearInterval(_issPassTimer); _issPassTimer = null; }
-  if (_issMarker) { _map.removeLayer(_issMarker); _issMarker = null; }
+  _issMarkers.forEach(function(m) { _map.removeLayer(m); });
+  _issMarkers = [];
   _issPassLayers.forEach(function(l) { _map.removeLayer(l); });
   _issPassLayers = [];
   _issPasses = [];
@@ -2099,16 +2121,12 @@ function updateMap() {
   });
 
   var allPinned = [];
-  /* Mirrors the grayline's world-copy wrap so pins still show up on the
-     repeated map copies Leaflet renders at low zoom, instead of only
-     appearing once at their true longitude. */
-  var WORLD_OFFSETS = [-360, 0, 360];
 
   /* 1. Hosted-node gold stars */
   _hostedNodes.forEach(function(n) {
     if (n.lat == null || n.lon == null) return;
     allPinned.push(n);
-    WORLD_OFFSETS.forEach(function(off) {
+    MAP_WORLD_OFFSETS.forEach(function(off) {
       var m = L.marker([n.lat, n.lon + off], {icon:makeStarIcon('#ffd700'), zIndexOffset:1000})
         .bindPopup('<b><svg class="icon"><use href="#icon-star"></use></svg> ' + (n.callsign ? callsignLink(n.callsign, 'popup-node-link') : esc(n.node)) + '</b><br>' +
                    esc(n.location||'') + '<br><small>Node ' + nodeLink(n.node, 'popup-node-link') + ' &mdash; this server</small>');
@@ -2120,7 +2138,7 @@ function updateMap() {
   _connectedNodes.forEach(function(c) {
     if (c.lat == null || c.lon == null) return;
     allPinned.push(c);
-    WORLD_OFFSETS.forEach(function(off) {
+    MAP_WORLD_OFFSETS.forEach(function(off) {
       var m = L.marker([c.lat, c.lon + off], {icon:makeIcon('#e74c3c'), zIndexOffset:500})
         .bindPopup('<b>' + (c.callsign ? callsignLink(c.callsign, 'popup-node-link') : esc(c.node)) + '</b><br>' +
                    esc(c.location||'') + '<br><small>Node ' + nodeLink(c.node, 'popup-node-link') + ' &mdash; connected</small>');
@@ -2152,7 +2170,7 @@ function updateMap() {
             esc(localNode) + '\',\'' + esc(p.node) + '\',this,false,true)">Monitor</button>' +
         '</div>'
       : '';
-    WORLD_OFFSETS.forEach(function(off) {
+    MAP_WORLD_OFFSETS.forEach(function(off) {
       var m = L.marker([p.lat, p.lon + off], {icon:makeIcon(color, opacity)})
         .bindPopup('<b>' + (p.callsign ? callsignLink(p.callsign, 'popup-node-link') : esc(p.node)) + '</b><br>' +
                    esc(p.location||'') + '<br><small>Node ' + nodeLink(p.node, 'popup-node-link') +
