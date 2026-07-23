@@ -384,6 +384,17 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .nr-meta strong { color: var(--text); }
 .node-row > .sb-btn.disconnect { flex: 0 0 auto; }
 
+/* Keyed-activity timeline: a fixed-width strip of per-bucket bars, newest on
+   the right. Bars spike full-height red when that bucket saw any keyup,
+   otherwise sit at a low gray baseline (seen but quiet) or render invisible
+   (no data yet for that slice — e.g. right after the connection appeared or
+   right after page load, before history has had time to fill the window). */
+.nr-timeline { flex: 0 0 auto; display: flex; align-items: flex-end; gap: 1px;
+  height: 24px; padding: 0 2px; }
+.nr-tl-bar { flex: 0 0 auto; width: 2px; height: 15%; border-radius: 1px; background: #3a3a3a; }
+.nr-tl-bar.on { height: 100%; background: var(--danger); box-shadow: 0 0 3px rgba(224,68,68,.7); }
+.nr-tl-bar.empty { background: transparent; }
+
 /* ── Activity panel: sits under Connected Nodes, right of the map, matching the map's height ── */
 .activity-card {
   grid-column: 7 / span 3; grid-row: 14 / span 11;
@@ -638,6 +649,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   .nr-call  { font-size: 0.85rem; }
   .nr-line  { gap: 6px; }
   .node-row > .sb-btn.disconnect { padding-left: 6px; padding-right: 6px; }
+  /* No room for a 60-bar strip beside nr-main on a phone-width single column. */
+  .nr-timeline { display: none; }
 
   /* Activity rows: let the optional Fav/Monitor button pair drop to their
      own line under the entry instead of squeezing beside it. With a single
@@ -2333,6 +2346,61 @@ function renderEchoLinkResults(results) {
   }).join('');
 }
 
+/* ── Keyed-activity timeline ──
+   Purely client-side, sampled once per refreshBoard() poll (2s) — there's no
+   server-side keyup log to read back (connection_history only tracks
+   connect/disconnect, not individual keyups), so this only covers activity
+   since the page was loaded and resets on refresh. That's an acceptable
+   tradeoff for a live kiosk display that's normally left open for hours.
+   History is keyed by "localNode|remoteNode" so a disconnect/reconnect of
+   the same node starts a fresh strip rather than splicing unrelated
+   sessions together. */
+var KEYED_HISTORY_WINDOW_MS = 5 * 60 * 1000;  /* 5 minutes of history... */
+var KEYED_HISTORY_BUCKET_MS = 5 * 1000;       /* ...in 5s buckets */
+var KEYED_HISTORY_BUCKETS = KEYED_HISTORY_WINDOW_MS / KEYED_HISTORY_BUCKET_MS;
+var _keyedHistory = {};   /* "local|remote" -> [{t, keyed}, ...] ascending, trimmed to the window */
+
+function _keyedHistoryKey(localNode, node) { return localNode + '|' + node; }
+
+function recordKeyedHistory(allLinked) {
+  var now = Date.now();
+  var cutoff = now - KEYED_HISTORY_WINDOW_MS;
+  var liveKeys = {};
+  allLinked.forEach(function(c) {
+    var key = _keyedHistoryKey(c.local_node, c.node);
+    liveKeys[key] = true;
+    var isConn = (c.connect_state || 'ESTABLISHED') === 'ESTABLISHED';
+    var buf = _keyedHistory[key] || (_keyedHistory[key] = []);
+    buf.push({ t: now, keyed: isConn && !!c.keyed });
+    while (buf.length && buf[0].t < cutoff) buf.shift();
+  });
+  /* Drop history for connections that dropped off the board entirely, so a
+     disconnected node's strip doesn't silently reappear on a later reconnect. */
+  Object.keys(_keyedHistory).forEach(function(key) {
+    if (!liveKeys[key]) delete _keyedHistory[key];
+  });
+}
+
+function renderKeyedTimeline(localNode, node) {
+  var buf = _keyedHistory[_keyedHistoryKey(localNode, node)] || [];
+  var now = Date.now();
+  var bars = '';
+  for (var i = KEYED_HISTORY_BUCKETS - 1; i >= 0; i--) {
+    var bucketEnd = now - i * KEYED_HISTORY_BUCKET_MS;
+    var bucketStart = bucketEnd - KEYED_HISTORY_BUCKET_MS;
+    var seen = false, on = false;
+    for (var j = 0; j < buf.length; j++) {
+      var t = buf[j].t;
+      if (t >= bucketStart && t < bucketEnd) {
+        seen = true;
+        if (buf[j].keyed) { on = true; break; }
+      }
+    }
+    bars += '<span class="nr-tl-bar' + (on ? ' on' : (seen ? '' : ' empty')) + '"></span>';
+  }
+  return '<div class="nr-timeline" title="Keyed activity, last 5 minutes (~5s per bar)">' + bars + '</div>';
+}
+
 /* ── Board data ──
    The health dot/label used to be driven purely by what the last *successful*
    /api/status/board response said — asterisk_active/ami_connected/stale, all
@@ -2433,6 +2501,7 @@ async function refreshBoard() {
         warnBar.style.display = 'none';
       }
     }
+    recordKeyedHistory(allLinked);
     if (!allLinked.length) {
       nl.innerHTML = '<div class="empty-msg">No nodes linked</div>';
     } else {
@@ -2501,6 +2570,7 @@ async function refreshBoard() {
             (meta.length ? '<div class="nr-meta"><span>' + meta.join('</span><span>') + '</span>' + badges + '</div>' : (badges ? '<div class="nr-meta">' + badges + '</div>' : '')) +
             (!isConn ? '<div class="nr-meta" style="color:var(--warn)">Connecting…</div>' : '') +
           '</div>' +
+          renderKeyedTimeline(c.local_node, c.node) +
           dcBtn +
         '</div>';
       }).join('');
