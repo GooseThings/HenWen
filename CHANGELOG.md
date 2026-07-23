@@ -1,5 +1,10 @@
 # Changelog
 
+## v2026.07.23
+
+- **Added: row-count selector on the kiosk Recent Connections panel.** A new dropdown (5/10/25/50, default 5) controls how many rows `/api/status/history` returns, instead of a fixed 5.
+- **Changed: removed the per-card collapse toggle on the kiosk dashboard.** Collapse was redundant now that every card can already be resized or fully hidden. The Node card's utility row (search, net-schedule, kiosk login, hidden-panels menu, layout-edit toggle, fullscreen, manager link) moves into the top header bar instead — this also removes the special case that kept the Node panel from being hidden like the other five, so it now hides and restores the same as any other panel.
+
 ## v2026.07.22.2
 
 - **Fixed: hiding the Node panel in the new kiosk dashboard layout could permanently lock a viewer out of layout-edit mode.** The layout-edit toggle and the "hidden panels" restore menu both live only in the Node card's header, so hiding that card (allowed like any other panel) took both controls down with it — with the hidden state persisted to localStorage, reloading the page didn't help either. Hiding the Node panel is no longer allowed, and anyone already stuck with it saved hidden self-heals automatically on next load.
