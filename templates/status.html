@@ -992,6 +992,17 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
                    onchange="onAprsRadiusChange(this.value)">
             <span id="map-aprs-radius-val" style="font-size:0.7rem;color:var(--text2);width:3.4em;flex-shrink:0">25 mi</span>
           </span>
+          <label class="map-ctl-radar" title="Overlay the ISS's current position and next upcoming visible passes over this node">
+            <input type="checkbox" id="map-iss-chk" onchange="toggleIss(this.checked)"> ISS
+          </label>
+          <span id="map-iss-passes-wrap" style="display:none;align-items:center;gap:4px">
+            <select class="map-ctl-sel" id="map-iss-passes" onchange="onIssPassCountChange(this.value)">
+              <option value="1">1 pass</option>
+              <option value="4">4 passes</option>
+              <option value="10">10 passes</option>
+            </select>
+            <span id="map-iss-status" style="font-size:0.68rem;color:var(--text2);white-space:nowrap"></span>
+          </span>
           <select class="map-ctl-sel" id="map-tile-sel" onchange="changeTiles(this.value)">
             <option value="dark">OSM Dark</option>
             <option value="carto-dk">Dark (CartoDB)</option>
@@ -1162,6 +1173,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
 <div id="sb-toast"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/satellite.js@5/dist/satellite.min.js"></script>
 <script>
 /* ── Helpers ── */
 function esc(s) {
@@ -1468,6 +1480,16 @@ function initMap() {
   if (aprsChk) aprsChk.checked = aprsOn;
   if (aprsOn) _aprsEnable(false);
 
+  /* Load saved ISS pref (checkbox + pass count) */
+  var issPassSel = document.getElementById('map-iss-passes');
+  if (issPassSel) issPassSel.value = localStorage.getItem('henwen-iss-passes') || '1';
+  var issChk = document.getElementById('map-iss-chk');
+  var issOn = localStorage.getItem('henwen-iss') === '1';
+  var issPassesWrap = document.getElementById('map-iss-passes-wrap');
+  if (issPassesWrap) issPassesWrap.style.display = issOn ? 'inline-flex' : 'none';
+  if (issChk) issChk.checked = issOn;
+  if (issOn) issEnable();
+
   _map.on('zoomend', function() { updateMap(); });
 
   /* While a pin popup is open, updateMap() defers instead of rendering —
@@ -1738,6 +1760,304 @@ function _aprsUpdateRadiusCircle() {
       radius: meters, color: 'var(--danger)', weight: 1, fill: false, interactive: false,
     }).addTo(_map);
   }
+}
+
+/* ── ISS tracking (optional map layer, toggled from the map controls) ──
+   The server only fetches/caches the ISS's TLE (see /api/iss/tle,
+   refreshed there roughly every 6h from Celestrak — orbital elements don't
+   move fast enough to need more) — everything else (current position,
+   upcoming visible-pass prediction, ground-track path) is computed here in
+   the browser via satellite.js's SGP4 propagator, using the observer
+   coordinates already on hand from the board refresh (_hostedNodes[0]),
+   the same node location APRS/NWS use. A "pass" means a stretch where the
+   station rises above ISS_MIN_ELEV_DEG in the local sky — the same
+   definition trackers like Heavens-Above use — found by a coarse forward
+   time-scan for elevation-threshold crossings, refined by bisection, then
+   resampled at a finer step to draw that pass's ground track. */
+var ISS_TLE_POLL_MS         = 3600000;   /* re-check the cached TLE hourly (poll cost is trivial; the cache itself only changes ~6h) */
+var ISS_POSITION_MS         = 5000;      /* redraw current position every 5s */
+var ISS_PASS_RECOMPUTE_MS   = 300000;    /* re-derive "next N passes from now" every 5 min, dropping ones that already happened */
+var ISS_MIN_ELEV_DEG        = 10;        /* minimum elevation above the horizon to count as a visible pass */
+var ISS_PASS_SCAN_DAYS      = 10;        /* give up looking for more passes after this many days out */
+var ISS_PASS_COARSE_STEP_SEC = 30;       /* elevation-crossing search resolution */
+var ISS_PASS_FINE_STEP_SEC   = 10;       /* ground-track sampling resolution within a found pass */
+var ISS_PASS_COLOR           = '#ffcc00';
+
+var _issTleLines        = { line1: null, line2: null };
+var _issSatrec          = null;
+var _issTleTimer        = null;
+var _issPositionTimer   = null;
+var _issPassTimer       = null;
+var _issMarker          = null;
+var _issPassLayers      = [];   /* polylines + rise markers currently drawn */
+var _issPasses          = [];   /* last computed pass list */
+var _issObserverReady   = false;
+
+function issEnabled() {
+  var chk = document.getElementById('map-iss-chk');
+  return chk ? chk.checked : false;
+}
+
+function issPassCount() {
+  var sel = document.getElementById('map-iss-passes');
+  var v = sel ? parseInt(sel.value, 10) : 1;
+  return [1, 4, 10].indexOf(v) !== -1 ? v : 1;
+}
+
+function issIconSize() {
+  if (!_map) return [20, 20];
+  var z = _map.getZoom();
+  if (z <= 2)  return [14, 14];
+  if (z <= 4)  return [18, 18];
+  if (z <= 6)  return [22, 22];
+  if (z <= 8)  return [26, 26];
+  return [30, 30];
+}
+
+/* Deliberately not the ASL teardrop, hosted-node star, or APRS circle — a
+   simple satellite glyph (body + solar panels) so it reads as its own kind
+   of thing at a glance. */
+function makeIssIcon() {
+  var d = issIconSize()[0];
+  var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + d + '" height="' + d +
+    '" viewBox="0 0 24 24" fill="none" stroke="' + ISS_PASS_COLOR + '" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' +
+    '<rect x="9" y="9" width="6" height="6" fill="' + ISS_PASS_COLOR + '" stroke="none"/>' +
+    '<path d="M9 12H4M20 12h-5M4 8v8M20 8v8M9 9V4M9 20V15M15 9V4M15 20V15"/>' +
+    '</svg>';
+  return L.divIcon({ html: svg, iconSize: [d, d], iconAnchor: [d / 2, d / 2], popupAnchor: [0, -d / 2], className: '' });
+}
+
+function _issNormLon(lon) {
+  while (lon > 180) lon -= 360;
+  while (lon < -180) lon += 360;
+  return lon;
+}
+
+async function fetchIssTle() {
+  try {
+    var r = await fetch('/api/iss/tle');
+    if (!r.ok) return;
+    var d = await r.json();
+    if (!d.line1 || !d.line2) return;   /* server hasn't completed its first poll yet */
+    if (d.line1 === _issTleLines.line1 && d.line2 === _issTleLines.line2) return;   /* unchanged */
+    _issTleLines = { line1: d.line1, line2: d.line2 };
+    _issSatrec = satellite.twoline2satrec(d.line1, d.line2);
+    issRecomputePasses();
+  } catch (e) { /* keep the previous satrec (if any); next timer tick retries */ }
+}
+
+function issObserverGd() {
+  var n = (_hostedNodes && _hostedNodes[0]) || null;
+  if (!n || n.lat == null || n.lon == null) return null;
+  return {
+    latitude: n.lat * Math.PI / 180,
+    longitude: n.lon * Math.PI / 180,
+    height: 0.1,   /* km — ground-level approximation; per-node elevation isn't tracked, and it's negligible next to the ISS's ~400km altitude */
+  };
+}
+
+function issLookAngle(observerGd, date) {
+  var pv = satellite.propagate(_issSatrec, date);
+  if (!pv || !pv.position) return null;
+  var gmst = satellite.gstime(date);
+  var ecf = satellite.eciToEcf(pv.position, gmst);
+  return satellite.ecfToLookAngles(observerGd, ecf);
+}
+
+function issElevAt(observerGd, ms) {
+  var look = issLookAngle(observerGd, new Date(ms));
+  return look ? look.elevation : -Math.PI / 2;   /* treat a propagation failure as "straight down" so it never looks like a crossing */
+}
+
+/* Standard bisection root-find on elevation-minus-threshold — works for
+   both rise (crossing upward) and set (crossing downward) without needing
+   to know which direction it's looking for. */
+function issBisectCrossing(observerGd, tLo, tHi, thresholdRad) {
+  var signLo = issElevAt(observerGd, tLo) - thresholdRad < 0;
+  for (var i = 0; i < 20; i++) {
+    var mid = (tLo + tHi) / 2;
+    var signMid = issElevAt(observerGd, mid) - thresholdRad < 0;
+    if (signMid === signLo) tLo = mid; else tHi = mid;
+  }
+  return Math.round((tLo + tHi) / 2);
+}
+
+function issSplitTrackSegments(track) {
+  /* Ground track longitudes are each independently normalized to
+     [-180,180], so a track crossing the antimeridian jumps straight across
+     the map unless split into separate polyline segments there. */
+  var segments = [];
+  var current = [];
+  for (var i = 0; i < track.length; i++) {
+    if (current.length && Math.abs(track[i][1] - current[current.length - 1][1]) > 180) {
+      segments.push(current);
+      current = [];
+    }
+    current.push(track[i]);
+  }
+  if (current.length) segments.push(current);
+  return segments;
+}
+
+function issBuildPass(observerGd, riseMs, setMs) {
+  var track = [];
+  var maxElevDeg = -90, maxElevMs = riseMs;
+  var stepMs = ISS_PASS_FINE_STEP_SEC * 1000;
+  for (var t = riseMs; t <= setMs; t += stepMs) {
+    var date = new Date(t);
+    var pv = satellite.propagate(_issSatrec, date);
+    if (!pv || !pv.position) continue;
+    var gmst = satellite.gstime(date);
+    var gd = satellite.eciToGeodetic(pv.position, gmst);
+    track.push([gd.latitude * 180 / Math.PI, _issNormLon(gd.longitude * 180 / Math.PI)]);
+    var look = satellite.ecfToLookAngles(observerGd, satellite.eciToEcf(pv.position, gmst));
+    var elevDeg = look.elevation * 180 / Math.PI;
+    if (elevDeg > maxElevDeg) { maxElevDeg = elevDeg; maxElevMs = t; }
+  }
+  return { rise: riseMs, set: setMs, maxElevTime: maxElevMs, maxElevDeg: maxElevDeg,
+            durationSec: Math.round((setMs - riseMs) / 1000), track: track };
+}
+
+/* Coarse forward scan for elevation-threshold crossings, refined by
+   bisection once a crossing is bracketed. Stops as soon as `count` passes
+   are found or the scan window runs out. */
+function issFindPasses(count) {
+  var observerGd = issObserverGd();
+  if (!observerGd || !_issSatrec) return [];
+
+  var minElevRad = ISS_MIN_ELEV_DEG * Math.PI / 180;
+  var stepMs = ISS_PASS_COARSE_STEP_SEC * 1000;
+  var start = Date.now();
+  var end = start + ISS_PASS_SCAN_DAYS * 86400000;
+
+  var passes = [];
+  var prevElev = null, prevT = null, riseT = null;
+  for (var t = start; t < end && passes.length < count; t += stepMs) {
+    var elev = issElevAt(observerGd, t);
+    if (prevElev != null) {
+      if (prevElev < minElevRad && elev >= minElevRad) {
+        riseT = issBisectCrossing(observerGd, prevT, t, minElevRad);
+      } else if (riseT != null && prevElev >= minElevRad && elev < minElevRad) {
+        var setT = issBisectCrossing(observerGd, prevT, t, minElevRad);
+        passes.push(issBuildPass(observerGd, riseT, setT));
+        riseT = null;
+      }
+    }
+    prevElev = elev; prevT = t;
+  }
+  return passes;
+}
+
+function issPassStyle(idx, total) {
+  var frac = total > 1 ? idx / (total - 1) : 0;
+  return { opacity: Math.max(0.25, 0.85 - 0.55 * frac) };
+}
+
+function issFmtTime(ms) {
+  return new Date(ms).toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+}
+
+function issUpdateStatusLabel() {
+  var el = document.getElementById('map-iss-status');
+  if (!el) return;
+  if (!_issPasses.length) { el.textContent = _issSatrec ? 'no pass found' : ''; return; }
+  var p = _issPasses[0];
+  el.textContent = 'Next: ' + issFmtTime(p.rise) + ' (' + p.maxElevDeg.toFixed(0) + '°)';
+}
+
+function issRenderPasses() {
+  _issPassLayers.forEach(function(l) { _map.removeLayer(l); });
+  _issPassLayers = [];
+  issUpdateStatusLabel();
+  if (!_map || !issEnabled()) return;
+  _issPasses.forEach(function(pass, idx) {
+    var style = issPassStyle(idx, _issPasses.length);
+    issSplitTrackSegments(pass.track).forEach(function(seg) {
+      if (seg.length < 2) return;
+      var line = L.polyline(seg, {
+        color: ISS_PASS_COLOR, opacity: style.opacity, weight: 2,
+        dashArray: idx === 0 ? null : '4,4',
+      }).addTo(_map);
+      _issPassLayers.push(line);
+    });
+    if (pass.track.length) {
+      var m = L.circleMarker(pass.track[0], {
+        radius: 4, color: ISS_PASS_COLOR, fillColor: ISS_PASS_COLOR,
+        fillOpacity: style.opacity, opacity: style.opacity, weight: 1,
+      }).bindPopup(
+        '<strong>ISS pass ' + (idx + 1) + ' of ' + _issPasses.length + '</strong><br>' +
+        'Rise: ' + issFmtTime(pass.rise) + '<br>' +
+        'Max elevation: ' + pass.maxElevDeg.toFixed(0) + '&deg; at ' + issFmtTime(pass.maxElevTime) + '<br>' +
+        'Set: ' + issFmtTime(pass.set) + '<br>' +
+        'Duration: ' + Math.round(pass.durationSec / 60) + ' min'
+      ).addTo(_map);
+      _issPassLayers.push(m);
+    }
+  });
+}
+
+function issRecomputePasses() {
+  if (!issEnabled() || !_issSatrec) return;
+  _issPasses = issFindPasses(issPassCount());
+  issRenderPasses();
+}
+
+function issUpdatePosition() {
+  if (!_issSatrec || !_map) return;
+  var now = new Date();
+  var pv = satellite.propagate(_issSatrec, now);
+  if (!pv || !pv.position) return;
+  var gmst = satellite.gstime(now);
+  var gd = satellite.eciToGeodetic(pv.position, gmst);
+  var lat = gd.latitude * 180 / Math.PI;
+  var lon = _issNormLon(gd.longitude * 180 / Math.PI);
+
+  if (!_issMarker) {
+    _issMarker = L.marker([lat, lon], { icon: makeIssIcon(), zIndexOffset: 500 }).addTo(_map);
+  } else {
+    _issMarker.setIcon(makeIssIcon());
+    _issMarker.setLatLng([lat, lon]);
+  }
+  _issMarker.bindPopup(
+    '<strong>ISS (ZARYA)</strong><br>' +
+    'Altitude: ' + gd.height.toFixed(0) + ' km<br>' +
+    'Lat/Lon: ' + lat.toFixed(2) + '&deg;, ' + lon.toFixed(2) + '&deg;' +
+    (_issPasses.length ? '<br>Next pass: ' + issFmtTime(_issPasses[0].rise) : '')
+  );
+}
+
+function toggleIss(on) {
+  localStorage.setItem('henwen-iss', on ? '1' : '0');
+  var wrap = document.getElementById('map-iss-passes-wrap');
+  if (wrap) wrap.style.display = on ? 'inline-flex' : 'none';
+  if (on) issEnable(); else issDisable();
+}
+
+function issEnable() {
+  if (!_issTleTimer) {
+    fetchIssTle();
+    _issTleTimer = setInterval(fetchIssTle, ISS_TLE_POLL_MS);
+  }
+  if (!_issPositionTimer) _issPositionTimer = setInterval(issUpdatePosition, ISS_POSITION_MS);
+  if (!_issPassTimer) _issPassTimer = setInterval(issRecomputePasses, ISS_PASS_RECOMPUTE_MS);
+  issUpdatePosition();
+  if (_issSatrec) issRecomputePasses(); else issRenderPasses();
+}
+
+function issDisable() {
+  if (_issTleTimer) { clearInterval(_issTleTimer); _issTleTimer = null; }
+  if (_issPositionTimer) { clearInterval(_issPositionTimer); _issPositionTimer = null; }
+  if (_issPassTimer) { clearInterval(_issPassTimer); _issPassTimer = null; }
+  if (_issMarker) { _map.removeLayer(_issMarker); _issMarker = null; }
+  _issPassLayers.forEach(function(l) { _map.removeLayer(l); });
+  _issPassLayers = [];
+  _issPasses = [];
+  issUpdateStatusLabel();
+}
+
+function onIssPassCountChange(v) {
+  localStorage.setItem('henwen-iss-passes', v);
+  issRecomputePasses();
 }
 
 /* Clicking the background of a "Latest Activity" row flies the map to that
@@ -2466,6 +2786,16 @@ async function refreshBoard() {
     /* Update hosted-node star pins */
     _hostedNodes = nodes.filter(function(n){ return n.lat != null && n.lon != null; })
       .map(function(n){ return {node:n.node, callsign:n.callsign, location:n.location, lat:n.lat, lon:n.lon}; });
+
+    /* The ISS pass search needs an observer location, which may not be
+       resolved yet on the very first board refresh(es) if the layer was
+       already enabled (saved pref) before geocoding finished — catch up
+       once, here, rather than repeating the expensive scan on every
+       refresh. Later recomputes are driven by ISS_PASS_RECOMPUTE_MS instead. */
+    if (!_issObserverReady && _hostedNodes.length && issEnabled() && _issSatrec) {
+      _issObserverReady = true;
+      issRecomputePasses();
+    }
 
     /* Connected nodes with lat/lon for red map pins */
     _connectedNodes = [];

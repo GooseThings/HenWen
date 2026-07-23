@@ -707,7 +707,7 @@ def check_auth():
                         'status_board', 'status_board_redirect',
                         'api_status_board', 'api_status_weather', 'api_status_activity',
                         'api_status_history', 'api_status_nws_alerts',
-                        'api_aprs_stations',
+                        'api_aprs_stations', 'api_iss_tle',
                         'api_login', 'api_session', 'api_csrf_token',
                         'api_favorites', 'api_favorites_status',
                         'api_kiosk_settings_get',
@@ -2565,6 +2565,60 @@ def _aprs_poll_loop():
 def start_aprs_poller():
     t = threading.Thread(target=_aprs_poll_loop, name="aprs-poller", daemon=True)
     t.start()
+
+
+# ── ISS tracking — optional kiosk map layer ──────────────────────────────────
+# Celestrak's GP endpoint publishes the ISS's current TLE (two-line element
+# set) — the compact orbital-state format an SGP4 propagator consumes.
+# HenWen only fetches and caches that TLE server-side; all propagation
+# (current position, ground track, upcoming visible-pass prediction) happens
+# client-side via satellite.js, using each kiosk viewer's own browser rather
+# than the server's. Unlike APRS/global-activity there's no per-viewer
+# filtering of a shared result to do here, so there's nothing to gain from
+# computing passes once server-side — it's a few thousand SGP4 propagations
+# per pass search, fine for one browser tab, not something to repeat for N
+# kiosk viewers on the server's single gunicorn worker.
+ISS_TLE_URL       = "https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=TLE"
+ISS_TLE_POLL_SEC  = 6 * 3600   # TLEs are typically refreshed ~1-2x/day upstream
+ISS_TLE_RETRY_SEC = 1800       # retry sooner after a transient failure
+
+_iss_tle_cache = {"line1": None, "line2": None, "fetched_at": None}
+_iss_tle_lock  = threading.Lock()
+
+
+def _fetch_iss_tle():
+    try:
+        req = urlreq.Request(ISS_TLE_URL, headers={"User-Agent": "HenWen/1.0 (ham radio node manager)"})
+        with urlreq.urlopen(req, timeout=10) as resp:
+            text = resp.read().decode()
+        # Celestrak's TLE format is 3 lines (name, line 1, line 2) — take the
+        # last two regardless of how many name/header lines precede them.
+        lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+        if len(lines) >= 2 and lines[-2].startswith("1 ") and lines[-1].startswith("2 "):
+            return {"line1": lines[-2], "line2": lines[-1]}
+        log("WARN", "[ISS-POLL] Unexpected TLE response format")
+    except Exception as e:
+        log("WARN", f"[ISS-POLL] TLE fetch failed: {e}")
+    return None
+
+
+def _iss_tle_poll_loop():
+    while True:
+        result = _fetch_iss_tle()
+        if result:
+            with _iss_tle_lock:
+                _iss_tle_cache.update(result)
+                _iss_tle_cache["fetched_at"] = time.time()
+            log("INFO", "[ISS-POLL] Updated ISS TLE")
+            time.sleep(ISS_TLE_POLL_SEC)
+        else:
+            time.sleep(ISS_TLE_RETRY_SEC)
+
+
+def start_iss_poller():
+    t = threading.Thread(target=_iss_tle_poll_loop, name="iss-poller", daemon=True)
+    t.start()
+    log("INFO", "[ISS-POLL] Poller thread launched")
 
 
 # ── EchoLink directory cache ─────────────────────────────────────────────────
@@ -5060,6 +5114,15 @@ def api_aprs_stations():
         "center":   {"lat": center_lat, "lon": center_lon},
         "radius":   radius,
     })
+
+
+@app.route("/api/iss/tle")
+def api_iss_tle():
+    """Public, unauthenticated — same accessibility as the rest of the Status
+    Board's map data. Returns the cached ISS TLE (see _iss_tle_poll_loop);
+    line1/line2 are null until the first successful poll completes."""
+    with _iss_tle_lock:
+        return jsonify(dict(_iss_tle_cache))
 
 
 @app.route("/api/status/board")
@@ -9787,6 +9850,7 @@ if not os.environ.get("HENWEN_SKIP_STARTUP"):
     start_nws_alert_poller()
     start_release_poller()
     start_aprs_poller()
+    start_iss_poller()
 
 if __name__ == "__main__":
     log("INFO", "Starting in direct-run mode (not via gunicorn)")
