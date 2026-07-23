@@ -2568,8 +2568,17 @@ def start_aprs_poller():
 
 
 # ── ISS tracking — optional kiosk map layer ──────────────────────────────────
-# Celestrak's GP endpoint publishes the ISS's current TLE (two-line element
-# set) — the compact orbital-state format an SGP4 propagator consumes.
+# SatNOGS DB (db.satnogs.org, the community-run satellite-tracking database
+# behind the SatNOGS open ground-station network — sourced here from
+# Space-Track.org) publishes the ISS's current TLE (two-line element set) —
+# the compact orbital-state format an SGP4 propagator consumes. Celestrak is
+# the more commonly cited TLE source and was tried first, but this server's
+# network can't reach it at all (TCP connect times out even though other
+# external services like api.github.com/api.weather.gov work fine) —
+# plausibly Celestrak blackholing this host's hosting-provider IP range, a
+# documented thing they've done to abusive ASNs in the past. SatNOGS DB is
+# reachable and, being a public JSON API scoped to one NORAD ID, is also
+# simpler to parse than Celestrak's plain-text 3-line format.
 # HenWen only fetches and caches that TLE server-side; all propagation
 # (current position, ground track, upcoming visible-pass prediction) happens
 # client-side via satellite.js, using each kiosk viewer's own browser rather
@@ -2578,7 +2587,7 @@ def start_aprs_poller():
 # computing passes once server-side — it's a few thousand SGP4 propagations
 # per pass search, fine for one browser tab, not something to repeat for N
 # kiosk viewers on the server's single gunicorn worker.
-ISS_TLE_URL       = "https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=TLE"
+ISS_TLE_URL       = "https://db.satnogs.org/api/tle/?norad_cat_id=25544&format=json"
 ISS_TLE_POLL_SEC  = 6 * 3600   # TLEs are typically refreshed ~1-2x/day upstream
 ISS_TLE_RETRY_SEC = 1800       # retry sooner after a transient failure
 
@@ -2590,12 +2599,12 @@ def _fetch_iss_tle():
     try:
         req = urlreq.Request(ISS_TLE_URL, headers={"User-Agent": "HenWen/1.0 (ham radio node manager)"})
         with urlreq.urlopen(req, timeout=10) as resp:
-            text = resp.read().decode()
-        # Celestrak's TLE format is 3 lines (name, line 1, line 2) — take the
-        # last two regardless of how many name/header lines precede them.
-        lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
-        if len(lines) >= 2 and lines[-2].startswith("1 ") and lines[-1].startswith("2 "):
-            return {"line1": lines[-2], "line2": lines[-1]}
+            data = json.loads(resp.read().decode())
+        if isinstance(data, list) and data:
+            line1 = (data[0].get("tle1") or "").strip()
+            line2 = (data[0].get("tle2") or "").strip()
+            if line1.startswith("1 ") and line2.startswith("2 "):
+                return {"line1": line1, "line2": line2}
         log("WARN", "[ISS-POLL] Unexpected TLE response format")
     except Exception as e:
         log("WARN", f"[ISS-POLL] TLE fetch failed: {e}")
