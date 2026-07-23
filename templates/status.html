@@ -1852,6 +1852,11 @@ async function fetchIssTle() {
     if (d.line1 === _issTleLines.line1 && d.line2 === _issTleLines.line2) return;   /* unchanged */
     _issTleLines = { line1: d.line1, line2: d.line2 };
     _issSatrec = satellite.twoline2satrec(d.line1, d.line2);
+    /* issEnable()'s own immediate issUpdatePosition() call ran before this
+       TLE fetch resolved (async), so it bailed out on a still-null
+       _issSatrec — without this, the marker wouldn't appear until the next
+       ISS_POSITION_MS timer tick, up to 5s of the layer looking broken. */
+    issUpdatePosition();
     issRecomputePasses();
   } catch (e) { /* keep the previous satrec (if any); next timer tick retries */ }
 }
