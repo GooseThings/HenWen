@@ -1545,13 +1545,14 @@ function aprsIconSize() {
 }
 
 function starSize() {
-  if (!_map) return [24, 24];
+  /* 30% smaller than the original table (was 14/18/24/30/36 — per a later request). */
+  if (!_map) return [16.8, 16.8];
   var z = _map.getZoom();
-  if (z <= 2)  return [14, 14];
-  if (z <= 4)  return [18, 18];
-  if (z <= 6)  return [24, 24];
-  if (z <= 8)  return [30, 30];
-  return [36, 36];
+  if (z <= 2)  return [9.8, 9.8];
+  if (z <= 4)  return [12.6, 12.6];
+  if (z <= 6)  return [16.8, 16.8];
+  if (z <= 8)  return [21, 21];
+  return [25.2, 25.2];
 }
 
 function makeIcon(color, opacity) {
