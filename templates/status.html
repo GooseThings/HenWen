@@ -1774,24 +1774,40 @@ function _aprsUpdateRadiusCircle() {
 
 /* ── ISS tracking (optional map layer, toggled from the map controls) ──
    The server only fetches/caches the ISS's TLE (see /api/iss/tle,
-   refreshed there roughly every 6h from Celestrak — orbital elements don't
-   move fast enough to need more) — everything else (current position,
-   upcoming visible-pass prediction, ground-track path) is computed here in
-   the browser via satellite.js's SGP4 propagator, using the observer
-   coordinates already on hand from the board refresh (_hostedNodes[0]),
-   the same node location APRS/NWS use. A "pass" means a stretch where the
-   station rises above ISS_MIN_ELEV_DEG in the local sky — the same
-   definition trackers like Heavens-Above use — found by a coarse forward
-   time-scan for elevation-threshold crossings, refined by bisection, then
-   resampled at a finer step to draw that pass's ground track. */
+   refreshed there roughly every 6h from SatNOGS DB — orbital elements
+   don't move fast enough to need more) — everything else (current
+   position, upcoming visible-pass prediction, ground-track path) is
+   computed here in the browser via satellite.js's SGP4 propagator, using
+   the observer coordinates already on hand from the board refresh
+   (_hostedNodes[0]), the same node location APRS/NWS use. A "pass" means
+   a stretch where the station rises above ISS_MIN_ELEV_DEG in the local
+   sky — the same definition trackers like Heavens-Above use — found by a
+   coarse forward time-scan for elevation-threshold crossings, refined by
+   bisection.
+
+   The map shows the *entire* ground track continuously from the ISS's
+   current position through the end of the last selected pass, not just
+   each pass's own visible arc in isolation — that coarse scan already
+   walks the whole span looking for crossings, so it doubles as the
+   continuous "transit" track (_issTransitTrack) for free. Each found
+   pass's own arc is then resampled at a finer step (ISS_PASS_FINE_STEP_SEC)
+   and drawn on top in the bright pass color, so the portions actually in
+   line-of-sight stand out against the dimmer transit line rather than the
+   path just stopping at the horizon. Both layers share one Canvas
+   renderer (_issRenderer) instead of individual SVG paths — the
+   continuous track can run to several thousand points over a multi-day
+   span, which is one Canvas repaint but would be that many separate DOM
+   nodes under Leaflet's default SVG renderer. */
 var ISS_TLE_POLL_MS         = 3600000;   /* re-check the cached TLE hourly (poll cost is trivial; the cache itself only changes ~6h) */
 var ISS_POSITION_MS         = 5000;      /* redraw current position every 5s */
 var ISS_PASS_RECOMPUTE_MS   = 300000;    /* re-derive "next N passes from now" every 5 min, dropping ones that already happened */
 var ISS_MIN_ELEV_DEG        = 10;        /* minimum elevation above the horizon to count as a visible pass */
 var ISS_PASS_SCAN_DAYS      = 10;        /* give up looking for more passes after this many days out */
-var ISS_PASS_COARSE_STEP_SEC = 30;       /* elevation-crossing search resolution */
+var ISS_PASS_COARSE_STEP_SEC = 30;       /* elevation-crossing search resolution, and the continuous transit track's sampling resolution */
 var ISS_PASS_FINE_STEP_SEC   = 10;       /* ground-track sampling resolution within a found pass */
 var ISS_PASS_COLOR           = '#ffcc00';
+var ISS_TRANSIT_COLOR        = '#8b93a1';   /* muted gray-blue — the ground track outside any pass's line-of-sight window */
+var ISS_TRANSIT_OPACITY      = 0.45;
 
 var _issTleLines        = { line1: null, line2: null };
 var _issSatrec          = null;
@@ -1799,9 +1815,16 @@ var _issTleTimer        = null;
 var _issPositionTimer   = null;
 var _issPassTimer       = null;
 var _issMarkers         = [];   /* one per MAP_WORLD_OFFSETS entry, kept in sync so the marker still shows on repeated map copies */
-var _issPassLayers      = [];   /* polylines + rise markers currently drawn (also one set per world offset) */
+var _issPassLayers      = [];   /* transit + per-pass polylines/rise markers currently drawn (one set per world offset) */
 var _issPasses          = [];   /* last computed pass list */
+var _issTransitTrack    = [];   /* last computed continuous ground track, now -> end of the last selected pass */
+var _issRenderer        = null; /* shared L.canvas() renderer for all ISS layers */
 var _issObserverReady   = false;
+
+function issRenderer() {
+  if (!_issRenderer) _issRenderer = L.canvas({ padding: 0.5 });
+  return _issRenderer;
+}
 
 function issEnabled() {
   var chk = document.getElementById('map-iss-chk');
@@ -1935,10 +1958,14 @@ function issBuildPass(observerGd, riseMs, setMs) {
 
 /* Coarse forward scan for elevation-threshold crossings, refined by
    bisection once a crossing is bracketed. Stops as soon as `count` passes
-   are found or the scan window runs out. */
+   are found or the scan window runs out. Also collects a ground-track
+   point at every coarse step regardless of elevation — that's the
+   continuous "transit" track covering the whole scanned span, trimmed
+   below to end exactly at the last found pass's set time so it doesn't
+   run past what was actually asked for. */
 function issFindPasses(count) {
   var observerGd = issObserverGd();
-  if (!observerGd || !_issSatrec) return [];
+  if (!observerGd || !_issSatrec) return { passes: [], transitTrack: [] };
 
   var minElevRad = ISS_MIN_ELEV_DEG * Math.PI / 180;
   var stepMs = ISS_PASS_COARSE_STEP_SEC * 1000;
@@ -1946,9 +1973,18 @@ function issFindPasses(count) {
   var end = start + ISS_PASS_SCAN_DAYS * 86400000;
 
   var passes = [];
+  var transitTrack = [];   /* [lat, lon, t] until trimmed below */
   var prevElev = null, prevT = null, riseT = null;
   for (var t = start; t < end && passes.length < count; t += stepMs) {
-    var elev = issElevAt(observerGd, t);
+    var date = new Date(t);
+    var elev = -Math.PI / 2;
+    var pv = satellite.propagate(_issSatrec, date);
+    if (pv && pv.position) {
+      var gmst = satellite.gstime(date);
+      var gd = satellite.eciToGeodetic(pv.position, gmst);
+      transitTrack.push([gd.latitude * 180 / Math.PI, _issNormLon(gd.longitude * 180 / Math.PI), t]);
+      elev = satellite.ecfToLookAngles(observerGd, satellite.eciToEcf(pv.position, gmst)).elevation;
+    }
     if (prevElev != null) {
       if (prevElev < minElevRad && elev >= minElevRad) {
         riseT = issBisectCrossing(observerGd, prevT, t, minElevRad);
@@ -1960,7 +1996,16 @@ function issFindPasses(count) {
     }
     prevElev = elev; prevT = t;
   }
-  return passes;
+
+  /* No pass found at all in the scan window (possible near-polar edge
+     case) — fall back to just showing one day of transit track rather
+     than the full multi-day scan span. */
+  var endMs = passes.length ? passes[passes.length - 1].set : Math.min(start + 86400000, end);
+  transitTrack = transitTrack
+    .filter(function(pt) { return pt[2] <= endMs; })
+    .map(function(pt) { return [pt[0], pt[1]]; });
+
+  return { passes: passes, transitTrack: transitTrack };
 }
 
 function issPassStyle(idx, total) {
@@ -1985,6 +2030,26 @@ function issRenderPasses() {
   _issPassLayers = [];
   issUpdateStatusLabel();
   if (!_map || !issEnabled()) return;
+
+  var renderer = issRenderer();
+
+  /* Continuous transit track first (dim), so each pass's bright overlay
+     below is drawn on top of it during that pass's own window instead of
+     underneath it. Drawn once per MAP_WORLD_OFFSETS entry (see that
+     constant's comment) so it stays visible while panning across a
+     repeated copy of the map instead of only existing at its true
+     longitude — same treatment every other map layer already gets. */
+  issSplitTrackSegments(_issTransitTrack).forEach(function(seg) {
+    if (seg.length < 2) return;
+    MAP_WORLD_OFFSETS.forEach(function(off) {
+      var offSeg = seg.map(function(pt) { return [pt[0], pt[1] + off]; });
+      var line = L.polyline(offSeg, {
+        renderer: renderer, color: ISS_TRANSIT_COLOR, opacity: ISS_TRANSIT_OPACITY, weight: 1.5,
+      }).addTo(_map);
+      _issPassLayers.push(line);
+    });
+  });
+
   _issPasses.forEach(function(pass, idx) {
     var style = issPassStyle(idx, _issPasses.length);
     var segments = issSplitTrackSegments(pass.track);
@@ -1995,22 +2060,19 @@ function issRenderPasses() {
       'Set: ' + issFmtTime(pass.set) + '<br>' +
       'Duration: ' + Math.round(pass.durationSec / 60) + ' min';
 
-    /* Drawn once per MAP_WORLD_OFFSETS entry (see that constant's comment)
-       so the path stays visible while panning across a repeated copy of
-       the map instead of only existing at its true longitude. */
     MAP_WORLD_OFFSETS.forEach(function(off) {
       segments.forEach(function(seg) {
         if (seg.length < 2) return;
         var offSeg = seg.map(function(pt) { return [pt[0], pt[1] + off]; });
         var line = L.polyline(offSeg, {
-          color: ISS_PASS_COLOR, opacity: style.opacity, weight: 2,
+          renderer: renderer, color: ISS_PASS_COLOR, opacity: style.opacity, weight: 2.5,
           dashArray: idx === 0 ? null : '4,4',
         }).addTo(_map);
         _issPassLayers.push(line);
       });
       if (pass.track.length) {
         var m = L.circleMarker([pass.track[0][0], pass.track[0][1] + off], {
-          radius: 4, color: ISS_PASS_COLOR, fillColor: ISS_PASS_COLOR,
+          renderer: renderer, radius: 4, color: ISS_PASS_COLOR, fillColor: ISS_PASS_COLOR,
           fillOpacity: style.opacity, opacity: style.opacity, weight: 1,
         }).bindPopup(popupHtml).addTo(_map);
         _issPassLayers.push(m);
@@ -2021,7 +2083,9 @@ function issRenderPasses() {
 
 function issRecomputePasses() {
   if (!issEnabled() || !_issSatrec) return;
-  _issPasses = issFindPasses(issPassCount());
+  var result = issFindPasses(issPassCount());
+  _issPasses = result.passes;
+  _issTransitTrack = result.transitTrack;
   issRenderPasses();
 }
 
@@ -2079,6 +2143,7 @@ function issDisable() {
   _issPassLayers.forEach(function(l) { _map.removeLayer(l); });
   _issPassLayers = [];
   _issPasses = [];
+  _issTransitTrack = [];
   issUpdateStatusLabel();
 }
 
