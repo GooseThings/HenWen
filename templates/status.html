@@ -2267,6 +2267,13 @@ function updateMap() {
 }
 
 /* ── Weather bar ── */
+/* wttr.in's astronomy fields use these 8 fixed phase-name strings — see
+   _fetch_weather() in app.py. */
+var MOON_PHASE_EMOJI = {
+  'New Moon': '🌑', 'Waxing Crescent': '🌒', 'First Quarter': '🌓', 'Waxing Gibbous': '🌔',
+  'Full Moon': '🌕', 'Waning Gibbous': '🌖', 'Last Quarter': '🌗', 'Waning Crescent': '🌘',
+};
+
 async function refreshWeather() {
   try {
     var r = await apiFetch('/api/status/weather');
@@ -2290,6 +2297,12 @@ async function refreshWeather() {
     if (temp)       html += '<span class="weather-item">Temp: <strong>' + esc(temp) + '</strong></span>';
     if (w.humidity) html += '<span class="weather-item">Humidity: <strong>' + esc(w.humidity) + '%</strong></span>';
     if (w.wind_mph) html += '<span class="weather-item">Wind: <strong>' + esc(w.wind_mph) + ' mph ' + esc(w.wind_dir||'') + '</strong></span>';
+    if (w.sunrise && w.sunset)
+      html += '<span class="weather-item" title="Local sunrise/sunset — the grayline propagation window brackets these times">Grayline: <strong>' +
+        esc(w.sunrise) + ' &ndash; ' + esc(w.sunset) + '</strong></span>';
+    if (w.moon_phase)
+      html += '<span class="weather-item">' + (MOON_PHASE_EMOJI[w.moon_phase] || '🌙') + ' <strong>' + esc(w.moon_phase) + '</strong>' +
+        (w.moon_illumination ? ' (' + esc(w.moon_illumination) + '%)' : '') + '</span>';
     html += '</div>';
     bar.innerHTML = html;
   } catch(e) {}

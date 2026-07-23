@@ -2768,7 +2768,12 @@ def _fetch_weather(location: str) -> dict:
         req = urlreq.Request(url, headers={"User-Agent": "HenWen/1.0"})
         with urlreq.urlopen(req, timeout=12) as resp:
             raw = json.loads(resp.read())
-        cc   = (raw.get("current_condition") or [{}])[0]
+        cc    = (raw.get("current_condition") or [{}])[0]
+        # wttr.in's j1 format already bundles today's sunrise/sunset and moon
+        # phase alongside the forecast it returns anyway (today's astronomy
+        # is under weather[0], not current_condition) — no separate fetch or
+        # astronomy calculation needed for the grayline times / moon phase.
+        astro = ((raw.get("weather") or [{}])[0].get("astronomy") or [{}])[0]
         data = {
             "location": loc,
             "temp_f":   cc.get("temp_F", ""),
@@ -2777,6 +2782,10 @@ def _fetch_weather(location: str) -> dict:
             "humidity": cc.get("humidity", ""),
             "wind_mph": cc.get("windspeedMiles", ""),
             "wind_dir": cc.get("winddir16Point", ""),
+            "sunrise":  astro.get("sunrise", ""),
+            "sunset":   astro.get("sunset", ""),
+            "moon_phase":        astro.get("moon_phase", ""),
+            "moon_illumination": astro.get("moon_illumination", ""),
             "error":    None,
             "stale":    False,
         }
