@@ -2774,6 +2774,17 @@ def _fetch_weather(location: str) -> dict:
         # is under weather[0], not current_condition) — no separate fetch or
         # astronomy calculation needed for the grayline times / moon phase.
         astro = ((raw.get("weather") or [{}])[0].get("astronomy") or [{}])[0]
+        # During polar day/night wttr.in doesn't return an empty/error string —
+        # it returns the literal placeholder "12:00 AM" for *both* sunrise and
+        # sunset (verified live against Utqiagvik, AK), which is a valid-looking
+        # clock time that would otherwise render as a nonsensical "Grayline:
+        # 12:00 AM – 12:00 AM". A real sunrise and sunset are never equal to
+        # the minute, so treat equal values as "no meaningful grayline today"
+        # and blank both — the frontend's `if (sunrise && sunset)` guard then
+        # hides the line entirely instead of showing the placeholder.
+        _sr, _ss = astro.get("sunrise", ""), astro.get("sunset", "")
+        if _sr and _ss and _sr == _ss:
+            _sr = _ss = ""
         data = {
             "location": loc,
             "temp_f":   cc.get("temp_F", ""),
@@ -2782,8 +2793,8 @@ def _fetch_weather(location: str) -> dict:
             "humidity": cc.get("humidity", ""),
             "wind_mph": cc.get("windspeedMiles", ""),
             "wind_dir": cc.get("winddir16Point", ""),
-            "sunrise":  astro.get("sunrise", ""),
-            "sunset":   astro.get("sunset", ""),
+            "sunrise":  _sr,
+            "sunset":   _ss,
             "moon_phase":        astro.get("moon_phase", ""),
             "moon_illumination": astro.get("moon_illumination", ""),
             "error":    None,

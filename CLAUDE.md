@@ -72,6 +72,7 @@ Daemon threads launch when gunicorn imports the module:
 - `start_nws_alert_poller()` — polls api.weather.gov for active severe weather alerts (~120s interval, exponential backoff) and manages the lifecycle of auto-created NWS announcement rows; never triggers playback itself, that's still `start_announcer()`'s job
 - `start_release_poller()` — checks GitHub for the latest published HenWen release once a day into an in-process cache (`get_latest_release()`); `/api/update-check` reads that cache instead of hitting GitHub live, and the Manager dashboard surfaces it as a dismissible bar to superusers only (checked once per login/page-load, via `checkForUpdate()` in `henwen-manager.html`)
 - `start_aprs_poller()` — optional; maintains one persistent APRS-IS connection (via the `aprslib` pip package) filtered to `APRS_MAX_RADIUS_MI` around the node's own geocoded location, caching station positions in-process (`_aprs_cache`); no-ops with a log line until an admin saves a login callsign in Manager > Kiosk Settings, or if `aprslib` isn't installed. See "APRS-IS map layer" below.
+- `start_iss_poller()` — fetches the ISS's TLE from SatNOGS DB every `ISS_TLE_POLL_SEC` (6h) into `_iss_tle_cache`, exposed via public `GET /api/iss/tle`; all position/pass propagation happens client-side. See "ISS tracking (map layer)" below.
 
 Because gunicorn runs `--workers 1 --threads 8`, all threads share a single process and in-process cache. Do not increase worker count without rethinking the AMI connection pool.
 

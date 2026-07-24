@@ -370,7 +370,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   box-shadow: 0 0 5px rgba(224,68,68,.7); }
 .nr-dot.connecting { background: #d9a520; border-color: #d9a520;
   box-shadow: 0 0 5px rgba(217,165,32,.6); }
-.nr-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.nr-main { flex: 0 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .nr-line { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; min-width: 0; }
 .nr-num  { flex: 0 0 auto;
   font-size: 1.05rem; font-weight: 700; font-family: var(--mono); color: var(--accent); text-decoration: none; }
@@ -384,14 +384,17 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .nr-meta strong { color: var(--text); }
 .node-row > .sb-btn.disconnect { flex: 0 0 auto; }
 
-/* Keyed-activity timeline: a fixed-width strip of per-bucket bars, newest on
-   the right. Bars spike full-height red when that bucket saw any keyup,
-   otherwise sit at a low gray baseline (seen but quiet) or render invisible
-   (no data yet for that slice — e.g. right after the connection appeared or
-   right after page load, before history has had time to fill the window). */
-.nr-timeline { flex: 0 0 auto; display: flex; align-items: flex-end; gap: 1px;
+/* Keyed-activity timeline: a strip of per-bucket bars, newest on the right,
+   that grows to fill whatever space nr-main isn't using (nr-main only takes
+   the width its own content needs, so the timeline gets the rest and rescales
+   with the window instead of sitting at a fixed pixel width). Bars spike
+   full-height red when that bucket saw any keyup, otherwise sit at a low gray
+   baseline (seen but quiet) or render invisible (no data yet for that slice —
+   e.g. right after the connection appeared or right after page load, before
+   history has had time to fill the window). */
+.nr-timeline { flex: 1 1 0; min-width: 60px; display: flex; align-items: flex-end; gap: 1px;
   height: 24px; padding: 0 2px; }
-.nr-tl-bar { flex: 0 0 auto; width: 2px; height: 15%; border-radius: 1px; background: #3a3a3a; }
+.nr-tl-bar { flex: 1 1 0; min-width: 1px; height: 15%; border-radius: 1px; background: #3a3a3a; }
 .nr-tl-bar.on { height: 100%; background: var(--danger); box-shadow: 0 0 3px rgba(224,68,68,.7); }
 .nr-tl-bar.empty { background: transparent; }
 
@@ -649,8 +652,12 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   .nr-call  { font-size: 0.85rem; }
   .nr-line  { gap: 6px; }
   .node-row > .sb-btn.disconnect { padding-left: 6px; padding-right: 6px; }
-  /* No room for a 60-bar strip beside nr-main on a phone-width single column. */
+  /* No room for a 60-bar strip beside nr-main on a phone-width single column.
+     nr-main reverts to flex:1 1 auto here since nr-timeline isn't present to
+     absorb the row's leftover width — without this the disconnect button no
+     longer sits flush right. */
   .nr-timeline { display: none; }
+  .nr-main { flex: 1 1 auto; }
 
   /* Activity rows: let the optional Fav/Monitor button pair drop to their
      own line under the entry instead of squeezing beside it. With a single
@@ -1544,15 +1551,17 @@ function aprsIconSize() {
   return [13, 13];
 }
 
+var STAR_SIZE_BASE  = [14, 18, 24, 30, 36];
+var STAR_SIZE_SCALE = 0.7;   /* 30% smaller than the original table — per a later request */
+
 function starSize() {
-  /* 30% smaller than the original table (was 14/18/24/30/36 — per a later request). */
-  if (!_map) return [16.8, 16.8];
-  var z = _map.getZoom();
-  if (z <= 2)  return [9.8, 9.8];
-  if (z <= 4)  return [12.6, 12.6];
-  if (z <= 6)  return [16.8, 16.8];
-  if (z <= 8)  return [21, 21];
-  return [25.2, 25.2];
+  var idx = 2;   /* fallback: same bucket as the default zoom range (z<=6) */
+  if (_map) {
+    var z = _map.getZoom();
+    idx = z <= 2 ? 0 : z <= 4 ? 1 : z <= 6 ? 2 : z <= 8 ? 3 : 4;
+  }
+  var s = STAR_SIZE_BASE[idx] * STAR_SIZE_SCALE;
+  return [s, s];
 }
 
 function makeIcon(color, opacity) {
@@ -1800,6 +1809,7 @@ function _aprsUpdateRadiusCircle() {
    span, which is one Canvas repaint but would be that many separate DOM
    nodes under Leaflet's default SVG renderer. */
 var ISS_TLE_POLL_MS         = 3600000;   /* re-check the cached TLE hourly (poll cost is trivial; the cache itself only changes ~6h) */
+var ISS_TLE_RETRY_MS        = 30000;     /* while we don't have a TLE yet, retry this often instead of waiting for the hourly timer — covers enabling the layer before start_iss_poller()'s first fetch has landed server-side */
 var ISS_POSITION_MS         = 5000;      /* redraw current position every 5s */
 var ISS_PASS_RECOMPUTE_MS   = 300000;    /* re-derive "next N passes from now" every 5 min, dropping ones that already happened */
 var ISS_MIN_ELEV_DEG        = 10;        /* minimum elevation above the horizon to count as a visible pass */
@@ -1813,6 +1823,7 @@ var ISS_TRANSIT_OPACITY      = 0.45;
 var _issTleLines        = { line1: null, line2: null };
 var _issSatrec          = null;
 var _issTleTimer        = null;
+var _issTleRetryTimer   = null;
 var _issPositionTimer   = null;
 var _issPassTimer       = null;
 var _issMarkers         = [];   /* one per MAP_WORLD_OFFSETS entry, kept in sync so the marker still shows on repeated map copies */
@@ -1870,19 +1881,30 @@ function _issNormLon(lon) {
 async function fetchIssTle() {
   try {
     var r = await fetch('/api/iss/tle');
-    if (!r.ok) return;
+    if (!r.ok) { issScheduleTleRetry(); return; }
     var d = await r.json();
-    if (!d.line1 || !d.line2) return;   /* server hasn't completed its first poll yet */
+    if (!d.line1 || !d.line2) { issScheduleTleRetry(); return; }   /* server hasn't completed its first poll yet */
     if (d.line1 === _issTleLines.line1 && d.line2 === _issTleLines.line2) return;   /* unchanged */
     _issTleLines = { line1: d.line1, line2: d.line2 };
     _issSatrec = satellite.twoline2satrec(d.line1, d.line2);
+    if (_issTleRetryTimer) { clearTimeout(_issTleRetryTimer); _issTleRetryTimer = null; }
     /* issEnable()'s own immediate issUpdatePosition() call ran before this
        TLE fetch resolved (async), so it bailed out on a still-null
        _issSatrec — without this, the marker wouldn't appear until the next
        ISS_POSITION_MS timer tick, up to 5s of the layer looking broken. */
     issUpdatePosition();
     issRecomputePasses();
-  } catch (e) { /* keep the previous satrec (if any); next timer tick retries */ }
+  } catch (e) { issScheduleTleRetry(); }
+}
+
+/* Fires only until we have a first satrec — once _issSatrec is set the
+   hourly ISS_TLE_POLL_MS timer is a fine cadence again. */
+function issScheduleTleRetry() {
+  if (_issSatrec || _issTleRetryTimer || !issEnabled()) return;
+  _issTleRetryTimer = setTimeout(function() {
+    _issTleRetryTimer = null;
+    fetchIssTle();
+  }, ISS_TLE_RETRY_MS);
 }
 
 function issObserverGd() {
@@ -1968,6 +1990,13 @@ function issFindPasses(count) {
   var observerGd = issObserverGd();
   if (!observerGd || !_issSatrec) return { passes: [], transitTrack: [] };
 
+  /* No point in this observer's latitude ever exceeding the ISS's orbital
+     inclination (~51.6°) is ever overflown, so no pass is ever possible —
+     skip the scan entirely rather than burning ~28,800 SGP4 calls (and
+     repeating that every ISS_PASS_RECOMPUTE_MS) to discover nothing. */
+  var latDeg = observerGd.latitude * 180 / Math.PI;
+  if (Math.abs(latDeg) > 51.6) return { passes: [], transitTrack: [] };
+
   var minElevRad = ISS_MIN_ELEV_DEG * Math.PI / 180;
   var stepMs = ISS_PASS_COARSE_STEP_SEC * 1000;
   var start = Date.now();
@@ -1986,7 +2015,12 @@ function issFindPasses(count) {
       transitTrack.push([gd.latitude * 180 / Math.PI, _issNormLon(gd.longitude * 180 / Math.PI), t]);
       elev = satellite.ecfToLookAngles(observerGd, satellite.eciToEcf(pv.position, gmst)).elevation;
     }
-    if (prevElev != null) {
+    if (prevElev == null) {
+      /* Already above the threshold at scan start — a pass already in
+         progress. Treat "now" as its rise rather than discarding it for
+         lacking a rise-crossing within the scan window. */
+      if (elev >= minElevRad) riseT = t;
+    } else {
       if (prevElev < minElevRad && elev >= minElevRad) {
         riseT = issBisectCrossing(observerGd, prevT, t, minElevRad);
       } else if (riseT != null && prevElev >= minElevRad && elev < minElevRad) {
@@ -2026,6 +2060,24 @@ function issUpdateStatusLabel() {
   el.textContent = 'Next: ' + issFmtTime(p.rise) + ' (' + p.maxElevDeg.toFixed(0) + '°)';
 }
 
+/* Draws one track (already antimeridian-split into segments) as a polyline
+   repeated across every MAP_WORLD_OFFSETS copy, pushing each into
+   _issPassLayers so issRenderPasses() can clear them all on its next redraw.
+   Shared by the transit-track and per-pass drawing below — they differ only
+   in color/opacity/weight/dashArray, so this is the one place that actually
+   knows how to draw an ISS track across world copies. */
+function issDrawTrackAcrossWorlds(segments, renderer, polylineOpts) {
+  segments.forEach(function(seg) {
+    if (seg.length < 2) return;
+    MAP_WORLD_OFFSETS.forEach(function(off) {
+      var offSeg = seg.map(function(pt) { return [pt[0], pt[1] + off]; });
+      var opts = Object.assign({ renderer: renderer }, polylineOpts);
+      var line = L.polyline(offSeg, opts).addTo(_map);
+      _issPassLayers.push(line);
+    });
+  });
+}
+
 function issRenderPasses() {
   _issPassLayers.forEach(function(l) { _map.removeLayer(l); });
   _issPassLayers = [];
@@ -2040,20 +2092,11 @@ function issRenderPasses() {
      constant's comment) so it stays visible while panning across a
      repeated copy of the map instead of only existing at its true
      longitude — same treatment every other map layer already gets. */
-  issSplitTrackSegments(_issTransitTrack).forEach(function(seg) {
-    if (seg.length < 2) return;
-    MAP_WORLD_OFFSETS.forEach(function(off) {
-      var offSeg = seg.map(function(pt) { return [pt[0], pt[1] + off]; });
-      var line = L.polyline(offSeg, {
-        renderer: renderer, color: ISS_TRANSIT_COLOR, opacity: ISS_TRANSIT_OPACITY, weight: 1.5,
-      }).addTo(_map);
-      _issPassLayers.push(line);
-    });
-  });
+  issDrawTrackAcrossWorlds(issSplitTrackSegments(_issTransitTrack), renderer,
+    { color: ISS_TRANSIT_COLOR, opacity: ISS_TRANSIT_OPACITY, weight: 1.5 });
 
   _issPasses.forEach(function(pass, idx) {
     var style = issPassStyle(idx, _issPasses.length);
-    var segments = issSplitTrackSegments(pass.track);
     var popupHtml =
       '<strong>ISS pass ' + (idx + 1) + ' of ' + _issPasses.length + '</strong><br>' +
       'Rise: ' + issFmtTime(pass.rise) + '<br>' +
@@ -2061,24 +2104,18 @@ function issRenderPasses() {
       'Set: ' + issFmtTime(pass.set) + '<br>' +
       'Duration: ' + Math.round(pass.durationSec / 60) + ' min';
 
-    MAP_WORLD_OFFSETS.forEach(function(off) {
-      segments.forEach(function(seg) {
-        if (seg.length < 2) return;
-        var offSeg = seg.map(function(pt) { return [pt[0], pt[1] + off]; });
-        var line = L.polyline(offSeg, {
-          renderer: renderer, color: ISS_PASS_COLOR, opacity: style.opacity, weight: 2.5,
-          dashArray: idx === 0 ? null : '4,4',
-        }).addTo(_map);
-        _issPassLayers.push(line);
-      });
-      if (pass.track.length) {
+    issDrawTrackAcrossWorlds(issSplitTrackSegments(pass.track), renderer,
+      { color: ISS_PASS_COLOR, opacity: style.opacity, weight: 2.5, dashArray: idx === 0 ? null : '4,4' });
+
+    if (pass.track.length) {
+      MAP_WORLD_OFFSETS.forEach(function(off) {
         var m = L.circleMarker([pass.track[0][0], pass.track[0][1] + off], {
           renderer: renderer, radius: 4, color: ISS_PASS_COLOR, fillColor: ISS_PASS_COLOR,
           fillOpacity: style.opacity, opacity: style.opacity, weight: 1,
         }).bindPopup(popupHtml).addTo(_map);
         _issPassLayers.push(m);
-      }
-    });
+      });
+    }
   });
 }
 
@@ -2091,7 +2128,7 @@ function issRecomputePasses() {
 }
 
 function issUpdatePosition() {
-  if (!_issSatrec || !_map) return;
+  if (!_issSatrec || !_map || !issEnabled()) return;
   var now = new Date();
   var pv = satellite.propagate(_issSatrec, now);
   if (!pv || !pv.position) return;
@@ -2137,6 +2174,7 @@ function issEnable() {
 
 function issDisable() {
   if (_issTleTimer) { clearInterval(_issTleTimer); _issTleTimer = null; }
+  if (_issTleRetryTimer) { clearTimeout(_issTleRetryTimer); _issTleRetryTimer = null; }
   if (_issPositionTimer) { clearInterval(_issPositionTimer); _issPositionTimer = null; }
   if (_issPassTimer) { clearInterval(_issPassTimer); _issPassTimer = null; }
   _issMarkers.forEach(function(m) { _map.removeLayer(m); });
