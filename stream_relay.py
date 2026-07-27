@@ -138,7 +138,10 @@ class Relay:
     def __init__(self, targets: dict, log_fn=None):
         self._log = log_fn or (lambda msg: None)
         self._decode_proc = subprocess.Popen(
+            # See the matching comment in recording.py's Recorder.__init__ --
+            # same fast-start rationale, same fix.
             ["ffmpeg", "-hide_banner", "-loglevel", "warning",
+             "-probesize", "32768", "-analyzeduration", "0",
              "-f", "webm", "-i", "pipe:0",
              "-f", "s16le", "-ar", "8000", "-ac", "1", "pipe:1"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

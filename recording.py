@@ -167,9 +167,20 @@ class Recorder:
         self._tts_fn = tts_fn
         self._tts_interval_sec = tts_interval_sec
         self._last_tts_sec = 0.0
+        self._feed_calls = 0
+        self._feed_bytes = 0
 
         self._decode_proc = subprocess.Popen(
+            # -probesize/-analyzeduration: without these, ffmpeg's default
+            # WebM probing (5MB / 5s) can sit waiting for far more data than
+            # a low-bitrate live Opus pipe delivers in any reasonable time
+            # before it starts flushing decoded PCM -- the same startup-
+            # latency problem _start_broadcast()'s own ffmpeg avoids on its
+            # (raw-PCM) input. The WebM init segment already fully declares
+            # codec/rate/channels, so there's nothing extra to gain by
+            # waiting for more.
             ["ffmpeg", "-hide_banner", "-loglevel", "warning",
+             "-probesize", "32768", "-analyzeduration", "0",
              "-f", "webm", "-i", "pipe:0",
              "-f", "s16le", "-ar", "8000", "-ac", "1", "pipe:1"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -204,10 +215,21 @@ class Recorder:
     def feed(self, chunk: bytes):
         """Called by the owning route's request thread with each WebM
         chunk received from the node's broadcast client queue."""
+        t0 = time.monotonic()
         try:
             self._decode_proc.stdin.write(chunk)
         except (BrokenPipeError, ValueError, OSError):
-            pass
+            return
+        finally:
+            self._feed_calls += 1
+            self._feed_bytes += len(chunk)
+        blocked = time.monotonic() - t0
+        if blocked > 0.5:
+            # Real backpressure signal (decode ffmpeg not draining its
+            # stdin fast enough) -- rare in healthy operation, worth
+            # keeping permanently rather than as one-off debug chatter.
+            self._log(f"[RECORDING] node={self.node} feed() blocked {blocked:.2f}s on "
+                       f"decode stdin write (call #{self._feed_calls}, {len(chunk)}b)")
 
     def _maybe_splice_tts(self):
         """Called from the pump thread only. Wall-clock-timed (not

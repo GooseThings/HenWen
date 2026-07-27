@@ -6717,12 +6717,22 @@ def api_recording_start():
     def generate():
         yield json.dumps({'recording_id': recording_id}) + '\n'
         last_heartbeat = time.monotonic()
+        gets_empty = 0
         try:
             while True:
                 try:
                     chunk = client_q.get(timeout=1.0)
+                    gets_empty = 0
                 except _queue_mod.Empty:
                     chunk = False
+                    gets_empty += 1
+                    if gets_empty in (30, 60) or gets_empty % 120 == 0:
+                        # Real signal (no chunks arriving from the
+                        # broadcast at all) -- low-frequency by design,
+                        # worth keeping permanently rather than one-off
+                        # debug chatter.
+                        log('WARN', f'[RECORDING] #{recording_id} no chunks from node {node}\'s '
+                                    f'broadcast in {gets_empty}s')
                 if chunk is None:
                     # The underlying broadcast itself shut down (e.g. the
                     # node went offline) — nothing left to feed.
