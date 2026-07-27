@@ -233,7 +233,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .hist-call { font-size: 0.72rem; font-weight: 600; color: var(--text); text-decoration: none; }
 .hist-call:hover { text-decoration: underline; }
 .hist-meta { display: flex; justify-content: space-between; gap: 6px; font-size: 0.68rem; color: var(--text2); margin-top: 1px; }
-.node-label { font-size: 0.68rem; letter-spacing: 0.12em; color: var(--text2); text-transform: uppercase; }
 .node-number { font-size: 2.4rem; font-weight: 700; line-height: 1; color: var(--accent); text-decoration: none; }
 .el-badge { display: inline-block; font-size: 0.6rem; font-weight: 700; letter-spacing: .02em;
   padding: 1px 4px; border-radius: 3px; background: rgba(88,166,255,.15); color: var(--accent);
@@ -905,7 +904,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <button class="dash-hide-btn" onclick="toggleDashHide('node',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
       </div>
       <div id="node-info">
-        <div class="node-label">NODE</div>
         <div style="color:var(--text2);font-size:.9rem">Loading&hellip;</div>
       </div>
     </div>
@@ -2907,14 +2905,13 @@ async function refreshBoard() {
     window._lastBoardNodes = nodes;
     var nc = document.getElementById('node-info');
     if (!nodes.length) {
-      nc.innerHTML = '<div class="node-label">NODE</div><div style="color:var(--text2)">No nodes configured</div>';
+      nc.innerHTML = '<div style="color:var(--text2)">No nodes configured</div>';
     } else {
       var n = nodes[0];
       /* Health circle: green pulse only when Asterisk is running, AMI is
          connected, and this node's AMI data isn't stale. Any one down = solid red. */
       var healthy = !!data.asterisk_active && !!data.ami_connected && !n.stale;
       nc.innerHTML =
-        '<div class="node-label">NODE</div>' +
         nodeLink(n.node, 'node-number') +
         callsignLink(n.callsign, 'node-callsign') +
         (n.location ? '<div class="node-location">' + esc(n.location) + '</div>' : '') +
