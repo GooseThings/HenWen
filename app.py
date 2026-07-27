@@ -6685,8 +6685,7 @@ def api_recording_start():
         try:
             _ensure_voice_model_cached(tts_voice)
             def tts_fn(_voice=tts_voice):
-                text = f"The time is {_format_clock_time(datetime.now())}"
-                return _synthesize_timestamp_pcm(text, _voice)
+                return _synthesize_timestamp_pcm(_format_clock_time(datetime.now()), _voice)
         except Exception as e:
             log('WARN', f"[RECORDING] voice '{tts_voice}' unavailable, timestamps "
                         f"disabled for this recording: {e}")
@@ -8020,8 +8019,15 @@ def _synthesize_timestamp_pcm(text: str, voice_id: str):
     os.close(fd)
     try:
         _synthesize_tts(text, voice_id, tmp_wav)
+        # Piper's raw output is normalized much hotter/denser than typical
+        # radio audio (which has natural headroom and pauses) -- without
+        # attenuation the timestamp reads as noticeably louder than the
+        # surrounding stream even at matched peak level, since it has far
+        # less dynamic range. -10dB was tuned by ear against a real
+        # recording; adjust here if it still doesn't match.
         result = subprocess.run(
-            ["ffmpeg", "-y", "-i", tmp_wav, "-f", "s16le", "-ar", "8000", "-ac", "1", "pipe:1"],
+            ["ffmpeg", "-y", "-i", tmp_wav, "-af", "volume=-10dB",
+             "-f", "s16le", "-ar", "8000", "-ac", "1", "pipe:1"],
             capture_output=True, timeout=30,
         )
         if result.returncode != 0:
