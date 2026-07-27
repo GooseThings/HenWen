@@ -563,6 +563,43 @@ def get_db():
     if 'state' not in _nws_cfg_cols:
         conn.execute("ALTER TABLE nws_alert_config ADD COLUMN state TEXT NOT NULL DEFAULT ''")
     conn.commit()
+    # Singleton config for the in-browser recording feature (recording.py) —
+    # caps/retention/silence/TTS-timestamp settings, owner-only. Entirely
+    # separate from stream_relay_config below: the two features share only
+    # the live audio source, never a config row or a running pipeline.
+    conn.execute("""CREATE TABLE IF NOT EXISTS recording_config (
+        id                 INTEGER PRIMARY KEY CHECK (id = 1),
+        retention_days     INTEGER NOT NULL DEFAULT 30,
+        max_recording_min  INTEGER NOT NULL DEFAULT 120,
+        global_cap_gb      REAL    NOT NULL DEFAULT 20.0,
+        per_user_cap_gb    REAL    NOT NULL DEFAULT 5.0,
+        silence_rms_thresh INTEGER NOT NULL DEFAULT 300,
+        silence_min_gap_ms INTEGER NOT NULL DEFAULT 2000,
+        tts_interval_min   INTEGER NOT NULL DEFAULT 10,
+        tts_voice          TEXT    NOT NULL DEFAULT 'en_US-lessac-medium',
+        tts_enabled        INTEGER NOT NULL DEFAULT 1,
+        output_format      TEXT    NOT NULL DEFAULT 'opus'
+    )""")
+    conn.commit()
+    # Singleton config for the persistent live stream relay (stream_relay.py)
+    # — Broadcastify (Icecast) / YouTube Live (RTMP) targets, owner-only.
+    # Deliberately its own table, not a shared row with recording_config:
+    # the relay is a continuous background service unrelated to any single
+    # recording session — see stream_relay.py for the poller that reads it.
+    conn.execute("""CREATE TABLE IF NOT EXISTS stream_relay_config (
+        id                   INTEGER PRIMARY KEY CHECK (id = 1),
+        target_node          TEXT    NOT NULL DEFAULT '',
+        broadcastify_enabled INTEGER NOT NULL DEFAULT 0,
+        broadcastify_host    TEXT    NOT NULL DEFAULT '',
+        broadcastify_port    INTEGER NOT NULL DEFAULT 0,
+        broadcastify_mount   TEXT    NOT NULL DEFAULT '',
+        broadcastify_user    TEXT    NOT NULL DEFAULT '',
+        broadcastify_pass    TEXT    NOT NULL DEFAULT '',
+        youtube_enabled      INTEGER NOT NULL DEFAULT 0,
+        youtube_rtmp_url     TEXT    NOT NULL DEFAULT '',
+        youtube_stream_key   TEXT    NOT NULL DEFAULT ''
+    )""")
+    conn.commit()
     # Per-node lockout: presence of a row means that node is locked by its
     # Owner. Only one lockout state per node, so `node` is the primary key
     # rather than an autoincrement id.
@@ -570,6 +607,23 @@ def get_db():
         node       TEXT PRIMARY KEY,
         locked_by  TEXT NOT NULL DEFAULT '',
         locked_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    )""")
+    conn.commit()
+    # One row per in-browser recording session (recording.py). No equivalent
+    # table exists for the stream relay — that's a continuous service, not a
+    # set of discrete sessions; see stream_relay_config above.
+    conn.execute("""CREATE TABLE IF NOT EXISTS recordings (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        node         TEXT    NOT NULL,
+        user_id      INTEGER NOT NULL,
+        username     TEXT    NOT NULL,
+        filename     TEXT    NOT NULL,
+        started_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+        ended_at     TEXT,
+        duration_sec REAL,
+        size_bytes   INTEGER,
+        status       TEXT    NOT NULL DEFAULT 'recording',
+        stop_reason  TEXT    NOT NULL DEFAULT ''
     )""")
     conn.commit()
     # Kiosk-editable scheduled-net reminders — shared across all visitors (not
@@ -637,6 +691,15 @@ def get_db():
     # node — 0 (default) preserves today's behavior for every existing account.
     try:
         conn.execute("ALTER TABLE users ADD COLUMN restrict_disconnect INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass  # column already exists
+    # Recording approval (User Management → "Can record") — 0 (default) means
+    # the account can't start a recording, regardless of role. Unlike
+    # restrict_disconnect this is checked for every role including owner: the
+    # owner grants recording access explicitly, even to themselves.
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN can_record INTEGER NOT NULL DEFAULT 0")
         conn.commit()
     except Exception:
         pass  # column already exists
@@ -721,7 +784,7 @@ def check_auth():
                       'api_audio_client_log',
                       'api_nets_create', 'api_nets_update', 'api_nets_delete',
                       'api_echolink_search', 'api_asl_search',
-                      'api_tx_config'}
+                      'api_tx_config', 'api_recording_permission'}
 
     endpoint  = request.endpoint
     is_public = endpoint in _PUBLIC
@@ -4390,7 +4453,7 @@ def api_alerts_test():
 @app.route("/api/users")
 def api_users_list():
     rows = get_db().execute(
-        "SELECT id, username, role, created_at, session_idle_timeout, restrict_disconnect "
+        "SELECT id, username, role, created_at, session_idle_timeout, restrict_disconnect, can_record "
         "FROM users ORDER BY role DESC, username"
     ).fetchall()
     return jsonify({"users": [dict(r) for r in rows]})
@@ -4406,6 +4469,9 @@ def api_users_create():
     # disconnect gate entirely, so the flag is simply ignored for them.
     restrict_disconnect = bool(data.get("restrict_disconnect", False)) and role == "user"
     caller_role = session.get('role', '')
+    if "can_record" in data and caller_role != "owner":
+        return jsonify({"error": "Only the owner can grant recording access"}), 403
+    can_record = bool(data.get("can_record", False))
     if not re.match(r'^[A-Za-z0-9_.-]{2,32}$', username):
         return jsonify({"error": "Username must be 2-32 chars: letters, digits, _ . -"}), 400
     if len(password) < 8:
@@ -4422,12 +4488,12 @@ def api_users_create():
     db = get_db()
     try:
         cur = db.execute(
-            "INSERT INTO users (username, password_hash, role, restrict_disconnect) VALUES (?,?,?,?)",
-            (username, generate_password_hash(password), role, int(restrict_disconnect)))
+            "INSERT INTO users (username, password_hash, role, restrict_disconnect, can_record) VALUES (?,?,?,?,?)",
+            (username, generate_password_hash(password), role, int(restrict_disconnect), int(can_record)))
         db.commit()
         _seed_default_favorites(cur.lastrowid)
         log("INFO", f"[USERS] Created user '{username}' role={role} "
-                    f"restrict_disconnect={restrict_disconnect} by {caller_role}")
+                    f"restrict_disconnect={restrict_disconnect} can_record={can_record} by {caller_role}")
         return jsonify({"ok": True})
     except sqlite3.IntegrityError:
         return jsonify({"error": f"Username '{username}' already exists."}), 409
@@ -4487,6 +4553,12 @@ def api_users_update(uid):
         # gate entirely regardless of this flag.
         restrict_disconnect = bool(data["restrict_disconnect"]) and new_role == "user"
         updates.append("restrict_disconnect=?"); params.append(int(restrict_disconnect))
+    if "can_record" in data:
+        # Unlike restrict_disconnect, meaningful for every role — the owner
+        # grants recording access explicitly, even to their own account.
+        if caller_role != "owner":
+            return jsonify({"error": "Only the owner can grant recording access"}), 403
+        updates.append("can_record=?"); params.append(int(bool(data["can_record"])))
     if not updates:
         return jsonify({"ok": True, "note": "Nothing to update"})
     params.append(uid)
@@ -8570,6 +8642,177 @@ def api_nws_alerts_save_config():
     )
     db.commit()
     log("INFO", "[NWS] Alert config saved")
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# Recording config (recording.py) and stream relay config (stream_relay.py)
+# ---------------------------------------------------------------------------
+RECORDING_CONFIG_DEFAULTS = {
+    "retention_days": 30, "max_recording_min": 120,
+    "global_cap_gb": 20.0, "per_user_cap_gb": 5.0,
+    "silence_rms_thresh": 300, "silence_min_gap_ms": 2000,
+    "tts_interval_min": 10, "tts_voice": DEFAULT_TTS_VOICE,
+    "tts_enabled": True, "output_format": "opus",
+}
+
+STREAM_RELAY_CONFIG_DEFAULTS = {
+    "target_node": "",
+    "broadcastify_enabled": False, "broadcastify_host": "", "broadcastify_port": 0,
+    "broadcastify_mount": "", "broadcastify_user": "", "broadcastify_pass": "",
+    "youtube_enabled": False, "youtube_rtmp_url": "", "youtube_stream_key": "",
+}
+
+
+def _get_recording_config():
+    row = get_db().execute("SELECT * FROM recording_config WHERE id=1").fetchone()
+    return dict(row) if row else None
+
+
+def _get_stream_relay_config():
+    row = get_db().execute("SELECT * FROM stream_relay_config WHERE id=1").fetchone()
+    return dict(row) if row else None
+
+
+@app.route("/api/recording/config")
+def api_recording_config_get():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can view recording settings"}), 403
+    cfg = _get_recording_config()
+    return jsonify(dict(cfg) if cfg else RECORDING_CONFIG_DEFAULTS)
+
+
+@app.route("/api/recording/config", methods=["POST", "PUT"])
+def api_recording_config_save():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can change recording settings"}), 403
+    data = request.json or {}
+
+    def _positive_int(key, default, min_val=1):
+        try:
+            v = int(data.get(key, default))
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} must be a whole number")
+        if v < min_val:
+            raise ValueError(f"{key} must be at least {min_val}")
+        return v
+
+    def _positive_float(key, default, min_val=0.1):
+        try:
+            v = float(data.get(key, default))
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} must be a number")
+        if v < min_val:
+            raise ValueError(f"{key} must be at least {min_val}")
+        return v
+
+    try:
+        retention_days      = _positive_int("retention_days", 30)
+        max_recording_min   = _positive_int("max_recording_min", 120)
+        global_cap_gb        = _positive_float("global_cap_gb", 20.0)
+        per_user_cap_gb      = _positive_float("per_user_cap_gb", 5.0)
+        silence_rms_thresh   = _positive_int("silence_rms_thresh", 300, min_val=0)
+        silence_min_gap_ms   = _positive_int("silence_min_gap_ms", 2000, min_val=0)
+        tts_interval_min     = _positive_int("tts_interval_min", 10)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    tts_voice = str(data.get("tts_voice", DEFAULT_TTS_VOICE))
+    if tts_voice not in TTS_VOICES:
+        return jsonify({"error": f"Unknown voice: {tts_voice}"}), 400
+
+    output_format = str(data.get("output_format", "opus")).strip().lower()
+    if output_format not in ("opus", "mp3"):
+        return jsonify({"error": "output_format must be 'opus' or 'mp3'"}), 400
+
+    tts_enabled = bool(data.get("tts_enabled", True))
+    if tts_enabled:
+        try:
+            _ensure_voice_model_cached(tts_voice)
+        except Exception as e:
+            return jsonify({"error": f"Could not download voice '{tts_voice}': {e}"}), 500
+
+    db = get_db()
+    db.execute(
+        """INSERT OR REPLACE INTO recording_config
+           (id, retention_days, max_recording_min, global_cap_gb, per_user_cap_gb,
+            silence_rms_thresh, silence_min_gap_ms, tts_interval_min, tts_voice,
+            tts_enabled, output_format)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (retention_days, max_recording_min, global_cap_gb, per_user_cap_gb,
+         silence_rms_thresh, silence_min_gap_ms, tts_interval_min, tts_voice,
+         int(tts_enabled), output_format)
+    )
+    db.commit()
+    log("INFO", f"[RECORDING] Config saved by {session.get('username', '')}")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/recording/permission")
+def api_recording_permission():
+    """Any logged-in role — lets the frontend decide whether to render the
+    Record button. Re-checked fresh from the DB, never trusted from the
+    session, since the owner can revoke it at any time."""
+    username = session.get('username', '')
+    row = get_db().execute("SELECT can_record FROM users WHERE username=?", (username,)).fetchone()
+    return jsonify({"can_record": bool(row["can_record"]) if row else False})
+
+
+@app.route("/api/stream-relay/config")
+def api_stream_relay_config_get():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can view stream relay settings"}), 403
+    cfg = _get_stream_relay_config()
+    return jsonify(dict(cfg) if cfg else STREAM_RELAY_CONFIG_DEFAULTS)
+
+
+@app.route("/api/stream-relay/config", methods=["POST", "PUT"])
+def api_stream_relay_config_save():
+    """Owner-only. Deliberately independent of /api/recording/config — the
+    relay is a separate always-on service (see stream_relay.py), not tied to
+    any recording session. Broadcastify/YouTube credentials are stored
+    plaintext, matching the existing alert_config.pushover_token precedent;
+    this app has no secrets-encryption layer to plug into."""
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can change stream relay settings"}), 403
+    data = request.json or {}
+
+    target_node = str(data.get("target_node", "")).strip()
+
+    broadcastify_enabled = bool(data.get("broadcastify_enabled", False))
+    broadcastify_host    = str(data.get("broadcastify_host", "")).strip()
+    broadcastify_mount   = str(data.get("broadcastify_mount", "")).strip()
+    broadcastify_user    = str(data.get("broadcastify_user", "")).strip()
+    broadcastify_pass    = str(data.get("broadcastify_pass", ""))
+    try:
+        broadcastify_port = int(data.get("broadcastify_port", 0) or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "broadcastify_port must be a number"}), 400
+    if broadcastify_enabled and not (broadcastify_host and broadcastify_port and broadcastify_mount):
+        return jsonify({"error": "Broadcastify host, port, and mount are required when enabled"}), 400
+
+    youtube_enabled    = bool(data.get("youtube_enabled", False))
+    youtube_rtmp_url   = str(data.get("youtube_rtmp_url", "")).strip()
+    youtube_stream_key = str(data.get("youtube_stream_key", "")).strip()
+    if youtube_enabled and not (youtube_rtmp_url and youtube_stream_key):
+        return jsonify({"error": "YouTube RTMP URL and stream key are required when enabled"}), 400
+
+    if (broadcastify_enabled or youtube_enabled) and not re.match(r'^\d{4,7}$', target_node):
+        return jsonify({"error": "A valid target node number is required to enable relay"}), 400
+
+    db = get_db()
+    db.execute(
+        """INSERT OR REPLACE INTO stream_relay_config
+           (id, target_node, broadcastify_enabled, broadcastify_host, broadcastify_port,
+            broadcastify_mount, broadcastify_user, broadcastify_pass,
+            youtube_enabled, youtube_rtmp_url, youtube_stream_key)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (target_node, int(broadcastify_enabled), broadcastify_host, broadcastify_port,
+         broadcastify_mount, broadcastify_user, broadcastify_pass,
+         int(youtube_enabled), youtube_rtmp_url, youtube_stream_key)
+    )
+    db.commit()
+    log("INFO", f"[STREAM-RELAY] Config saved by {session.get('username', '')}")
     return jsonify({"ok": True})
 
 

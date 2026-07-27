@@ -565,6 +565,8 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     <button class="nav-item" onclick="showPage('kiosk-settings')">Kiosk Settings</button>
     <button class="nav-item" onclick="showPage('settings')">Settings</button>
     <button class="nav-item" onclick="showPage('user-mgmt')">User Management</button>
+    <button class="nav-item" id="nav-recording-settings" onclick="showPage('recording-settings')">Recording Settings</button>
+    <button class="nav-item" id="nav-stream-relay" onclick="showPage('stream-relay')">Stream Relay</button>
   </nav>
   <div class="sidebar-footer">
     <div class="sidebar-footer-row">
@@ -1221,6 +1223,143 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
       </div>
     </div>
 
+  </section>
+
+  <!-- Recording Settings (owner only) -->
+  <section class="page" id="page-recording-settings">
+    <div class="page-title">Recording Settings</div>
+    <div class="page-sub">Owner-only. Controls the in-browser Record feature — who sees the button is set per-user in User Management; these are the shared limits and TTS timestamp settings for every recording.</div>
+    <div class="card" style="max-width:620px">
+      <div class="card-body">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px 18px">
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Retention (days)</label>
+            <input type="number" id="rec-retention-days" class="val-input" min="1" style="width:100%">
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Max single recording (minutes)</label>
+            <input type="number" id="rec-max-min" class="val-input" min="1" style="width:100%">
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Global storage cap (GB)</label>
+            <input type="number" id="rec-global-cap" class="val-input" min="0.1" step="0.1" style="width:100%">
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Per-user storage cap (GB)</label>
+            <input type="number" id="rec-user-cap" class="val-input" min="0.1" step="0.1" style="width:100%">
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Output format</label>
+            <select id="rec-output-format" class="val-input" style="width:100%">
+              <option value="opus">Opus (.ogg) — smaller, matches live stream codec</option>
+              <option value="mp3">MP3 — wider playback compatibility</option>
+            </select>
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Silence threshold (RMS, 0-32767)</label>
+            <input type="number" id="rec-silence-thresh" class="val-input" min="0" style="width:100%">
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Silence gap to trim (ms)</label>
+            <input type="number" id="rec-silence-gap" class="val-input" min="0" style="width:100%">
+          </div>
+        </div>
+
+        <div class="toggle-row" style="margin-top:16px">
+          <div class="toggle-info">
+            <div class="toggle-key">Spoken Timestamps</div>
+            <div class="toggle-desc">Periodically mixes a spoken "the time is..." clip into the recording itself</div>
+          </div>
+          <label class="switch"><input type="checkbox" id="rec-tts-enabled"><span class="slider"></span></label>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px 18px;margin-top:10px">
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Timestamp interval (minutes)</label>
+            <input type="number" id="rec-tts-interval" class="val-input" min="1" style="width:100%">
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Voice</label>
+            <select id="rec-tts-voice" class="val-input" style="width:100%"></select>
+          </div>
+        </div>
+
+        <button class="btn btn-primary" onclick="recSave()" style="margin-top:16px">Save</button>
+        <div id="rec-status" style="margin-top:8px;font-size:0.82rem"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Stream Relay (owner only) -->
+  <section class="page" id="page-stream-relay">
+    <div class="page-title">Stream Relay</div>
+    <div class="page-sub">Owner-only. A persistent live relay of this node's audio to Broadcastify and/or YouTube Live — independent of the in-browser Recording feature above and of any listeners. Runs continuously once enabled, reconnecting on its own.</div>
+    <div class="card" style="max-width:620px">
+      <div class="card-body">
+        <div>
+          <label class="toggle-label" style="display:block;margin-bottom:3px">Node to relay</label>
+          <select id="relay-node" class="val-input" style="width:100%;max-width:220px"></select>
+          <div style="font-size:0.75rem;color:var(--text2);margin-top:3px">Only one node can be relayed at a time.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="max-width:620px">
+      <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+        <h2>Broadcastify</h2>
+        <label class="switch"><input type="checkbox" id="relay-bc-enabled"><span class="slider"></span></label>
+      </div>
+      <div class="card-body">
+        <div style="display:grid;grid-template-columns:2fr 1fr;gap:14px 18px">
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Icecast host</label>
+            <input type="text" id="relay-bc-host" class="val-input" placeholder="audio.broadcastify.com" style="width:100%">
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Port</label>
+            <input type="number" id="relay-bc-port" class="val-input" min="1" max="65535" style="width:100%">
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Mount point</label>
+            <input type="text" id="relay-bc-mount" class="val-input" placeholder="/mymount" style="width:100%">
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Source username</label>
+            <input type="text" id="relay-bc-user" class="val-input" style="width:100%">
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Source password</label>
+            <input type="password" id="relay-bc-pass" class="val-input" style="width:100%">
+          </div>
+        </div>
+        <div id="relay-bc-status" class="muted" style="font-size:0.78rem;margin-top:8px"></div>
+      </div>
+    </div>
+
+    <div class="card" style="max-width:620px">
+      <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+        <h2>YouTube Live</h2>
+        <label class="switch"><input type="checkbox" id="relay-yt-enabled"><span class="slider"></span></label>
+      </div>
+      <div class="card-body">
+        <div style="display:grid;grid-template-columns:1fr;gap:14px">
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">RTMP server URL</label>
+            <input type="text" id="relay-yt-url" class="val-input" placeholder="rtmp://a.rtmp.youtube.com/live2" style="width:100%">
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Stream key</label>
+            <input type="password" id="relay-yt-key" class="val-input" placeholder="From YouTube Studio → Go Live" style="width:100%">
+          </div>
+        </div>
+        <div style="font-size:0.75rem;color:var(--text2);margin-top:8px">
+          Get both from YouTube Studio → Go Live → Stream. No Google sign-in is required here — this is a plain RTMP push, the same mechanism OBS uses.
+        </div>
+        <div id="relay-yt-status" class="muted" style="font-size:0.78rem;margin-top:8px"></div>
+      </div>
+    </div>
+
+    <button class="btn btn-primary" onclick="relaySave()">Save</button>
+    <div id="relay-status" style="margin-top:8px;font-size:0.82rem"></div>
   </section>
 
   <!-- AMI Diagnostics -->
@@ -2164,6 +2303,14 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
             </label>
           </div>
         </div>
+        <div class="form-row" id="uf-can-record-row" style="margin-bottom:14px;display:none">
+          <div>
+            <label style="display:inline-flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:0.86rem">
+              <input type="checkbox" id="uf-can-record" style="width:auto;margin-top:3px">
+              <span>Can record — shows a Record button next to Listen on the Status Board for this account</span>
+            </label>
+          </div>
+        </div>
         <div style="display:flex;gap:8px">
           <button class="btn btn-primary" onclick="saveUser()">Save</button>
           <button class="btn" onclick="hideUserForm()">Cancel</button>
@@ -2379,6 +2526,8 @@ function showPage(id) {
   else if (id === 'ast-console')  astFetchLog();
   else if (id === 'settings')       { loadSecretKeyStatus(); loadPortsStatus(); syncThemePicker(); }
   else if (id === 'user-mgmt')      loadUsers();
+  else if (id === 'recording-settings') recLoad();
+  else if (id === 'stream-relay')       relayLoad();
   else if (id === 'dtmf')             { populateDtmfNodeSelect(); }
   else if (id === 'node-id')          { loadIdConfigs(); populateIdNodeSelect(); }
   else if (id === 'announcements')    { loadAnnouncements(); populateAnnNodeSelect(); loadTtsVoices(); }
@@ -4966,6 +5115,115 @@ async function ksSave() {
   setTimeout(function(){ st.textContent = ''; }, 3000);
 }
 
+/* ── Recording Settings (owner only) ───────────────────────────────────────── */
+async function recLoad() {
+  if (!_ttsVoices.length) await loadTtsVoices();
+  var voiceSel = document.getElementById('rec-tts-voice');
+  if (voiceSel) {
+    voiceSel.innerHTML = _ttsVoices.map(function(v) {
+      return '<option value="' + esc(v.id) + '">' + esc(v.label) + (v.cached ? '' : ' (not downloaded)') + '</option>';
+    }).join('');
+  }
+  var r = await api('/api/recording/config');
+  var d = r.ok ? r.data : {};
+  document.getElementById('rec-retention-days').value  = d.retention_days != null ? d.retention_days : 30;
+  document.getElementById('rec-max-min').value          = d.max_recording_min != null ? d.max_recording_min : 120;
+  document.getElementById('rec-global-cap').value       = d.global_cap_gb != null ? d.global_cap_gb : 20;
+  document.getElementById('rec-user-cap').value          = d.per_user_cap_gb != null ? d.per_user_cap_gb : 5;
+  document.getElementById('rec-output-format').value    = d.output_format || 'opus';
+  document.getElementById('rec-silence-thresh').value   = d.silence_rms_thresh != null ? d.silence_rms_thresh : 300;
+  document.getElementById('rec-silence-gap').value       = d.silence_min_gap_ms != null ? d.silence_min_gap_ms : 2000;
+  document.getElementById('rec-tts-enabled').checked    = d.tts_enabled !== false;
+  document.getElementById('rec-tts-interval').value      = d.tts_interval_min != null ? d.tts_interval_min : 10;
+  if (voiceSel && d.tts_voice) voiceSel.value = d.tts_voice;
+}
+
+async function recSave() {
+  var st = document.getElementById('rec-status');
+  var payload = {
+    retention_days:      parseInt(document.getElementById('rec-retention-days').value, 10),
+    max_recording_min:   parseInt(document.getElementById('rec-max-min').value, 10),
+    global_cap_gb:       parseFloat(document.getElementById('rec-global-cap').value),
+    per_user_cap_gb:     parseFloat(document.getElementById('rec-user-cap').value),
+    output_format:       document.getElementById('rec-output-format').value,
+    silence_rms_thresh:  parseInt(document.getElementById('rec-silence-thresh').value, 10),
+    silence_min_gap_ms:  parseInt(document.getElementById('rec-silence-gap').value, 10),
+    tts_enabled:         document.getElementById('rec-tts-enabled').checked,
+    tts_interval_min:    parseInt(document.getElementById('rec-tts-interval').value, 10),
+    tts_voice:           document.getElementById('rec-tts-voice').value,
+  };
+  var r = await api('/api/recording/config', {
+    method:  'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body:    JSON.stringify(payload),
+  });
+  if (r.ok) { st.textContent = 'Saved.'; st.style.color = 'var(--success)'; }
+  else       { st.textContent = (r.data && r.data.error) || 'Error'; st.style.color = 'var(--danger)'; }
+  setTimeout(function(){ st.textContent = ''; }, 3000);
+}
+
+/* ── Stream Relay (owner only) ─────────────────────────────────────────────── */
+function populateRelayNodeSelect() {
+  var sel = document.getElementById('relay-node');
+  if (!sel) return;
+  var nodes = [];
+  document.querySelectorAll('[id^="page-node-"]').forEach(function(el) {
+    var m = el.id.match(/^page-node-(\d+)$/);
+    if (m) nodes.push(m[1]);
+  });
+  var current = sel.value;
+  sel.innerHTML = '';
+  nodes.forEach(function(n) {
+    var o = document.createElement('option'); o.value = n; o.textContent = n; sel.appendChild(o);
+  });
+  if (!nodes.length) {
+    var o = document.createElement('option'); o.value = ''; o.textContent = '(no nodes found)'; sel.appendChild(o);
+  }
+  if (current) sel.value = current;
+}
+
+async function relayLoad() {
+  populateRelayNodeSelect();
+  var r = await api('/api/stream-relay/config');
+  var d = r.ok ? r.data : {};
+  var nodeSel = document.getElementById('relay-node');
+  if (nodeSel && d.target_node) nodeSel.value = d.target_node;
+  document.getElementById('relay-bc-enabled').checked = !!d.broadcastify_enabled;
+  document.getElementById('relay-bc-host').value  = d.broadcastify_host || '';
+  document.getElementById('relay-bc-port').value  = d.broadcastify_port || '';
+  document.getElementById('relay-bc-mount').value = d.broadcastify_mount || '';
+  document.getElementById('relay-bc-user').value  = d.broadcastify_user || '';
+  document.getElementById('relay-bc-pass').value  = d.broadcastify_pass || '';
+  document.getElementById('relay-yt-enabled').checked = !!d.youtube_enabled;
+  document.getElementById('relay-yt-url').value = d.youtube_rtmp_url || '';
+  document.getElementById('relay-yt-key').value = d.youtube_stream_key || '';
+}
+
+async function relaySave() {
+  var st = document.getElementById('relay-status');
+  var portVal = document.getElementById('relay-bc-port').value.trim();
+  var payload = {
+    target_node:            document.getElementById('relay-node').value,
+    broadcastify_enabled:   document.getElementById('relay-bc-enabled').checked,
+    broadcastify_host:      document.getElementById('relay-bc-host').value.trim(),
+    broadcastify_port:      portVal ? parseInt(portVal, 10) : 0,
+    broadcastify_mount:     document.getElementById('relay-bc-mount').value.trim(),
+    broadcastify_user:      document.getElementById('relay-bc-user').value.trim(),
+    broadcastify_pass:      document.getElementById('relay-bc-pass').value,
+    youtube_enabled:        document.getElementById('relay-yt-enabled').checked,
+    youtube_rtmp_url:       document.getElementById('relay-yt-url').value.trim(),
+    youtube_stream_key:     document.getElementById('relay-yt-key').value.trim(),
+  };
+  var r = await api('/api/stream-relay/config', {
+    method:  'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body:    JSON.stringify(payload),
+  });
+  if (r.ok) { st.textContent = 'Saved.'; st.style.color = 'var(--success)'; }
+  else       { st.textContent = (r.data && r.data.error) || 'Error'; st.style.color = 'var(--danger)'; }
+  setTimeout(function(){ st.textContent = ''; }, 3000);
+}
+
 /* ── Role-based nav visibility ─────────────────────────────────────────────── */
 window._henwenRole = '';
 async function applyRoleNav() {
@@ -4995,6 +5253,13 @@ async function applyRoleNav() {
      without shell access to fix it back. */
   var portsCard = document.getElementById('ports-settings-card');
   if (portsCard) portsCard.style.display = isSuper ? '' : 'none';
+  /* Recording Settings and Stream Relay are owner-only — matches the
+     backend's explicit role==='owner' check on both config routes. */
+  var isOwnerRole = (role === 'owner');
+  var recNavBtn = document.getElementById('nav-recording-settings');
+  if (recNavBtn) recNavBtn.style.display = isOwnerRole ? '' : 'none';
+  var relayNavBtn = document.getElementById('nav-stream-relay');
+  if (relayNavBtn) relayNavBtn.style.display = isOwnerRole ? '' : 'none';
   /* Only superuser/owner sees the higher-risk COP quick actions (node-wide link
      outage, disabling the transmit time-limit safety mechanism) — matching
      the same allowlist enforced server-side in /api/dtmf/cop. */
@@ -6262,6 +6527,10 @@ async function loadUsers() {
         'border-radius:3px;font-size:0.72rem;font-weight:600" title="Can listen, TX, and make the first ' +
         'connection, but cannot disconnect a node">no-disconnect</span>';
     }
+    if (u.can_record) {
+      roleBadge += ' <span style="background:rgba(63,185,80,.15);color:var(--green);padding:1px 7px;' +
+        'border-radius:3px;font-size:0.72rem;font-weight:600" title="Can start recordings from the Status Board">can-record</span>';
+    }
     var created = u.created_at ? new Date(u.created_at + 'Z').toLocaleDateString() : '—';
     var timeoutDisplay = u.session_idle_timeout === null || u.session_idle_timeout === undefined
       ? '<span style="color:var(--text2);font-size:0.82rem">30 min (default)</span>'
@@ -6274,7 +6543,7 @@ async function loadUsers() {
       + '<td>' + timeoutDisplay + '</td>'
       + '<td style="color:var(--text2);font-size:0.82rem">' + created + '</td>'
       + '<td><div class="btn-row">'
-      + '<button class="btn btn-sm" onclick="editUser(' + u.id + ',\'' + esc(u.username) + '\',\'' + esc(u.role) + '\',' + (u.session_idle_timeout === null || u.session_idle_timeout === undefined ? 'null' : u.session_idle_timeout) + ',' + (u.restrict_disconnect ? 'true' : 'false') + ')">Edit</button>'
+      + '<button class="btn btn-sm" onclick="editUser(' + u.id + ',\'' + esc(u.username) + '\',\'' + esc(u.role) + '\',' + (u.session_idle_timeout === null || u.session_idle_timeout === undefined ? 'null' : u.session_idle_timeout) + ',' + (u.restrict_disconnect ? 'true' : 'false') + ',' + (u.can_record ? 'true' : 'false') + ')">Edit</button>'
       + '<button class="btn btn-warn btn-sm" onclick="deleteUser(' + u.id + ',\'' + esc(u.username) + '\')">Delete</button>'
       + '</div></td>'
       + '</tr>';
@@ -6312,13 +6581,15 @@ function showCreateUserForm() {
   document.getElementById('uf-password2').value     = '';
   document.getElementById('uf-idle-timeout').value  = '';
   document.getElementById('uf-restrict-disconnect').checked = false;
+  document.getElementById('uf-can-record').checked = false;
+  document.getElementById('uf-can-record-row').style.display = (window._henwenRole === 'owner') ? '' : 'none';
   document.getElementById('uf-pw-label').textContent = 'Password';
   document.getElementById('uf-status').textContent  = '';
   onUfRoleChange();
   document.getElementById('user-form-card').scrollIntoView({behavior:'smooth'});
 }
 
-function editUser(id, username, role, idleTimeoutSecs, restrictDisconnect) {
+function editUser(id, username, role, idleTimeoutSecs, restrictDisconnect, canRecord) {
   document.getElementById('user-form-card').style.display = '';
   document.getElementById('user-form-title').textContent = 'Edit: ' + username;
   document.getElementById('uf-id').value            = id;
@@ -6331,6 +6602,8 @@ function editUser(id, username, role, idleTimeoutSecs, restrictDisconnect) {
   document.getElementById('uf-pw-label').textContent = 'New Password (leave blank to keep current)';
   document.getElementById('uf-status').textContent  = '';
   document.getElementById('uf-restrict-disconnect').checked = !!restrictDisconnect;
+  document.getElementById('uf-can-record').checked = !!canRecord;
+  document.getElementById('uf-can-record-row').style.display = (window._henwenRole === 'owner') ? '' : 'none';
   onUfRoleChange();
   /* Convert stored seconds → minutes for the input; blank = global default */
   var inp = document.getElementById('uf-idle-timeout');
@@ -6361,6 +6634,7 @@ async function saveUser() {
   if (pw && pw.length < 8) { st.style.color='var(--red)'; st.textContent='Password must be at least 8 characters.'; return; }
 
   var payload = {role: role, restrict_disconnect: document.getElementById('uf-restrict-disconnect').checked};
+  if (window._henwenRole === 'owner') payload.can_record = document.getElementById('uf-can-record').checked;
   if (!id) payload.username = uname;
   if (pw) payload.password = pw;
 
