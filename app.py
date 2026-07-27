@@ -62,6 +62,12 @@ except ImportError:
 
 from collections import deque
 
+# recording.py (in-browser recording) is a standalone module with no
+# import-time dependency on this file — see its module docstring for why.
+# app.py drives it entirely through the Recorder class and the pure
+# retention/cap-sweep functions below.
+import recording
+
 # aprslib is optional — shelled-out-style guard so a checkout that hasn't
 # picked up the dependency yet (or an admin who edited requirements.txt)
 # fails cleanly at APRS-poller-start time instead of crashing the whole app
@@ -98,6 +104,9 @@ SOUNDS_DIR      = os.environ.get("SOUNDS_DIR",       f"/usr/share/asterisk/sound
 # directory is root:root and the service runs as User=asterisk, so it can't
 # write there. /var/lib/asterisk is already asterisk:asterisk.
 TTS_VOICES_DIR  = os.environ.get("TTS_VOICES_DIR",   "/var/lib/asterisk/henwen_tts_voices")
+# In-browser recordings (recording.py) — same "not under /opt/HenWen, which
+# is root:root and unwritable by the asterisk user" reasoning as TTS_VOICES_DIR.
+RECORDINGS_DIR  = os.environ.get("RECORDINGS_DIR",   "/var/lib/asterisk/henwen_recordings")
 # Resolved via the running interpreter's own directory, not PATH lookup —
 # under systemd, venv/bin isn't on PATH the way it is in an interactive
 # shell, so a bare "piper" subprocess call would fail with FileNotFoundError.
@@ -784,7 +793,8 @@ def check_auth():
                       'api_audio_client_log',
                       'api_nets_create', 'api_nets_update', 'api_nets_delete',
                       'api_echolink_search', 'api_asl_search',
-                      'api_tx_config', 'api_recording_permission'}
+                      'api_tx_config', 'api_recording_permission',
+                      'api_recording_start', 'api_recordings_list', 'api_recording_download'}
 
     endpoint  = request.endpoint
     is_public = endpoint in _PUBLIC
@@ -5873,6 +5883,15 @@ _audio_active = {}   # node -> _AudioBroadcast
 
 _AUDIO_RELAY_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'audio_relay.py')
 
+# In-browser recordings (recording.py) in progress right now, keyed by their
+# `recordings` table row id -> recording.Recorder. Separate from
+# _audio_active/_audio_lock on purpose: a Recorder attaches to a node's
+# _AudioBroadcast as just another add_client() consumer, so its own
+# lifecycle is tracked independently here rather than folded into the
+# broadcast bookkeeping above.
+_recordings_lock     = threading.Lock()
+_active_recordings   = {}   # recording db id -> recording.Recorder
+
 
 def _node_rxchannel(node):
     """The node's effective `rxchannel` setting from rpt.conf, resolving
@@ -6545,6 +6564,297 @@ def api_audio_check(node):
         'channel': channel,
         'node':    node,
     })
+
+
+# ---------------------------------------------------------------------------
+# In-browser recording (recording.py) — Phase 2/3 of the audio recording
+# feature. Deliberately not sharing any code path with the stream relay
+# (Phase 4, stream_relay.py) beyond the audio source itself: a Recorder
+# attaches to the node's _AudioBroadcast as just another add_client()
+# consumer, same as a browser listener, and never touches audio_relay.py
+# or the raw-PCM FIFO plumbing.
+# ---------------------------------------------------------------------------
+def _recording_cfg():
+    return _get_recording_config() or RECORDING_CONFIG_DEFAULTS
+
+
+@app.route('/api/recording/start', methods=['POST'])
+@limiter.limit("10 per minute")
+def api_recording_start():
+    """
+    Starts a recording for `node` and holds the HTTP connection open for
+    the recording's whole duration — the browser tab that opened this
+    connection *is* the recording's lifecycle, mirroring how
+    /api/audio/stream/<node> already ties a listener's presence to an open
+    connection. Closing the tab (or any network drop) triggers Python's
+    GeneratorExit in generate() below exactly the way it does for a
+    listener, which stops the recorder and finalizes its DB row — there is
+    intentionally no "resume a recording after the tab closed" path.
+    """
+    data = request.json or {}
+    node = str(data.get('node', '')).strip()
+    if not re.match(r'^\d{4,7}$', node):
+        return jsonify({'error': 'invalid node'}), 400
+
+    username = session.get('username', '')
+    db = get_db()
+    user_row = db.execute("SELECT id, can_record FROM users WHERE username=?", (username,)).fetchone()
+    if not user_row or not user_row['can_record']:
+        return jsonify({'error': 'You are not approved to record. Ask the node owner to enable it '
+                                  'for your account in User Management.'}), 403
+
+    cfg = _recording_cfg()
+    global_cap_bytes = float(cfg['global_cap_gb']) * 1e9
+    user_cap_bytes   = float(cfg['per_user_cap_gb']) * 1e9
+
+    total_bytes = db.execute(
+        "SELECT COALESCE(SUM(size_bytes),0) FROM recordings WHERE status='finished'"
+    ).fetchone()[0]
+    if total_bytes >= global_cap_bytes:
+        return jsonify({'error': 'The global recording storage cap has been reached. '
+                                  'An admin needs to delete old recordings or raise the cap.'}), 400
+    user_bytes = db.execute(
+        "SELECT COALESCE(SUM(size_bytes),0) FROM recordings WHERE status='finished' AND user_id=?",
+        (user_row['id'],)
+    ).fetchone()[0]
+    if user_bytes >= user_cap_bytes:
+        return jsonify({'error': 'Your personal recording storage cap has been reached. '
+                                  'Delete an old recording or ask the owner to raise your cap.'}), 400
+
+    remote = request.remote_addr or '?'
+    client_label = f'recorder:{username}'
+    try:
+        with _audio_lock:
+            broadcast = _audio_active.get(node)
+            if broadcast is None or broadcast._dead:
+                broadcast = _start_broadcast(node)
+                _audio_active[node] = broadcast
+            client_q = broadcast.add_client(client_label)
+    except Exception as e:
+        log('ERROR', f'[RECORDING] failed to attach to broadcast for node {node}: {e}')
+        return jsonify({'error': str(e)}), 500
+
+    os.makedirs(RECORDINGS_DIR, exist_ok=True)
+    output_format = cfg['output_format']
+    ext = 'mp3' if output_format == 'mp3' else 'ogg'
+    ts = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+    filename = f"{node}_{ts}_{secrets.token_hex(4)}.{ext}"
+    dest_path = os.path.join(RECORDINGS_DIR, filename)
+
+    cur = db.execute(
+        "INSERT INTO recordings (node, user_id, username, filename, status) VALUES (?,?,?,?,'recording')",
+        (node, user_row['id'], username, filename)
+    )
+    db.commit()
+    recording_id = cur.lastrowid
+
+    def _finalize(reason, elapsed_sec):
+        try:
+            size = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
+        except Exception:
+            size = 0
+        try:
+            fdb = get_db()
+            fdb.execute(
+                "UPDATE recordings SET ended_at=datetime('now'), duration_sec=?, size_bytes=?, "
+                "status='finished', stop_reason=? WHERE id=?",
+                (elapsed_sec, size, reason, recording_id)
+            )
+            fdb.commit()
+        except Exception as e:
+            log('ERROR', f'[RECORDING] #{recording_id} failed to finalize DB row: {e}')
+        log('INFO', f'[RECORDING] #{recording_id} finished node={node} user={username} '
+                    f'reason={reason} size={size}b duration={elapsed_sec:.1f}s')
+        with _recordings_lock:
+            _active_recordings.pop(recording_id, None)
+
+    try:
+        recorder = recording.Recorder(
+            node=node, dest_path=dest_path, output_format=output_format,
+            silence_rms_thresh=int(cfg['silence_rms_thresh']),
+            silence_min_gap_ms=int(cfg['silence_min_gap_ms']),
+            max_duration_sec=int(cfg['max_recording_min']) * 60,
+            on_stop=_finalize,
+            log_fn=lambda msg: log('WARN', msg),
+        )
+    except Exception as e:
+        broadcast.remove_client(client_q, client_label)
+        db.execute("UPDATE recordings SET status='error', stop_reason=? WHERE id=?", (str(e), recording_id))
+        db.commit()
+        log('ERROR', f'[RECORDING] #{recording_id} failed to start pipeline: {e}')
+        return jsonify({'error': f'Could not start recording: {e}'}), 500
+
+    with _recordings_lock:
+        _active_recordings[recording_id] = recorder
+    log('INFO', f'[RECORDING] #{recording_id} started node={node} user={username} '
+                f'format={output_format} dest={dest_path}')
+
+    def generate():
+        yield json.dumps({'recording_id': recording_id}) + '\n'
+        last_heartbeat = time.monotonic()
+        try:
+            while True:
+                try:
+                    chunk = client_q.get(timeout=1.0)
+                except _queue_mod.Empty:
+                    chunk = False
+                if chunk is None:
+                    # The underlying broadcast itself shut down (e.g. the
+                    # node went offline) — nothing left to feed.
+                    break
+                if chunk is not False:
+                    recorder.feed(chunk)
+                if recorder.stop_reason:
+                    # Hit its own limit (max_recording_min) — tell the
+                    # browser why before the connection closes.
+                    yield json.dumps({'stopped': True, 'reason': recorder.stop_reason}) + '\n'
+                    break
+                now = time.monotonic()
+                if now - last_heartbeat >= 5.0:
+                    last_heartbeat = now
+                    yield json.dumps({'elapsed_sec': round(recorder.elapsed_sec)}) + '\n'
+        except GeneratorExit:
+            raise
+        finally:
+            broadcast.remove_client(client_q, client_label)
+            recorder.stop(recorder.stop_reason or 'manual')
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='application/x-ndjson',
+        headers={
+            'Cache-Control':     'no-cache, no-store',
+            'X-Accel-Buffering': 'no',
+        },
+    )
+
+
+@app.route('/api/recordings')
+def api_recordings_list():
+    """Any logged-in role — a plain 'user' account only ever sees their own
+    recordings (matches how favorites are scoped per-user elsewhere in the
+    app); admin/superuser/owner see everything, since they're the ones who
+    manage storage and delete old recordings."""
+    role = session.get('role', '')
+    username = session.get('username', '')
+    db = get_db()
+    if role in ('admin', 'superuser', 'owner'):
+        rows = db.execute(
+            "SELECT id, node, username, started_at, ended_at, duration_sec, size_bytes, status, stop_reason "
+            "FROM recordings ORDER BY started_at DESC LIMIT 200"
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT id, node, username, started_at, ended_at, duration_sec, size_bytes, status, stop_reason "
+            "FROM recordings WHERE username=? ORDER BY started_at DESC LIMIT 200",
+            (username,)
+        ).fetchall()
+    return jsonify({'recordings': [dict(r) for r in rows]})
+
+
+@app.route('/api/recording/<int:rid>/download')
+def api_recording_download(rid):
+    role = session.get('role', '')
+    username = session.get('username', '')
+    row = get_db().execute("SELECT * FROM recordings WHERE id=?", (rid,)).fetchone()
+    if not row:
+        return jsonify({'error': 'Recording not found'}), 404
+    if row['username'] != username and role not in ('admin', 'superuser', 'owner'):
+        return jsonify({'error': 'Not your recording'}), 403
+    if row['status'] != 'finished':
+        return jsonify({'error': f"Recording is not finished (status={row['status']})"}), 400
+    path = os.path.join(RECORDINGS_DIR, row['filename'])
+    if not os.path.exists(path):
+        return jsonify({'error': 'Recording file is missing on disk'}), 404
+    return send_file(path, as_attachment=True, download_name=row['filename'])
+
+
+@app.route('/api/recordings/<int:rid>', methods=['DELETE'])
+def api_recordings_delete(rid):
+    """Admin/superuser/owner only (the default check_auth() gate already
+    enforces this — this route is deliberately not in _USER_OR_ABOVE).
+    A regular approved recordist can create recordings but not manage the
+    shared archive, matching the requirements' silence on self-service
+    deletion."""
+    db = get_db()
+    row = db.execute("SELECT * FROM recordings WHERE id=?", (rid,)).fetchone()
+    if not row:
+        return jsonify({'error': 'Recording not found'}), 404
+    if row['status'] == 'recording':
+        return jsonify({'error': 'Cannot delete a recording still in progress'}), 400
+    path = os.path.join(RECORDINGS_DIR, row['filename'])
+    try:
+        if os.path.exists(path):
+            os.unlink(path)
+    except Exception as e:
+        log('WARN', f'[RECORDING] failed to delete file for #{rid}: {e}')
+    db.execute("DELETE FROM recordings WHERE id=?", (rid,))
+    db.commit()
+    log('INFO', f"[RECORDING] #{rid} deleted by {session.get('username', '')}")
+    return jsonify({'ok': True})
+
+
+def _recording_janitor_loop():
+    """Periodic retention/cap sweep — mirrors _nws_prune_expired_locally()'s
+    age-based local prune, plus the genuinely new global/per-user GB-cap
+    sweeps (no prior art for those in this app). The actual delete-set
+    logic lives in recording.py as pure functions so it's unit-testable
+    without a DB or filesystem."""
+    while True:
+        time.sleep(300)
+        try:
+            cfg = _recording_cfg()
+            db = get_db()
+            rows = db.execute(
+                "SELECT id, user_id, size_bytes, started_at FROM recordings WHERE status='finished'"
+            ).fetchall()
+
+            def _epoch(started_at):
+                try:
+                    return datetime.strptime(started_at, '%Y-%m-%d %H:%M:%S').timestamp()
+                except Exception:
+                    return time.time()  # never old enough to purge on a parse failure
+
+            age_rows = [{'id': r['id'], 'started_at': _epoch(r['started_at'])} for r in rows]
+            to_delete = set(recording.select_purge_by_age(
+                age_rows, time.time(), float(cfg['retention_days'])))
+
+            remaining = [r for r in rows if r['id'] not in to_delete]
+            cap_rows = [{'id': r['id'], 'size_bytes': r['size_bytes'] or 0,
+                        'started_at': _epoch(r['started_at'])} for r in remaining]
+            to_delete.update(recording.select_purge_by_cap(
+                cap_rows, float(cfg['global_cap_gb']) * 1e9))
+
+            remaining2 = [r for r in remaining if r['id'] not in to_delete]
+            user_cap_rows = [{'id': r['id'], 'user_id': r['user_id'], 'size_bytes': r['size_bytes'] or 0,
+                              'started_at': _epoch(r['started_at'])} for r in remaining2]
+            to_delete.update(recording.select_purge_by_user_cap(
+                user_cap_rows, float(cfg['per_user_cap_gb']) * 1e9))
+
+            if not to_delete:
+                continue
+            by_id = {r['id']: r for r in rows}
+            for rid in to_delete:
+                r = by_id.get(rid)
+                if not r:
+                    continue
+                path = os.path.join(RECORDINGS_DIR, db.execute(
+                    "SELECT filename FROM recordings WHERE id=?", (rid,)).fetchone()['filename'])
+                try:
+                    if os.path.exists(path):
+                        os.unlink(path)
+                except Exception as e:
+                    log('WARN', f'[RECORDING] janitor failed to delete file for #{rid}: {e}')
+                db.execute("DELETE FROM recordings WHERE id=?", (rid,))
+            db.commit()
+            log('INFO', f'[RECORDING] janitor purged {len(to_delete)} recording(s)')
+        except Exception as e:
+            log('ERROR', f'[RECORDING] janitor loop error: {e}\n{traceback.format_exc()}')
+
+
+def start_recording_janitor():
+    t = threading.Thread(target=_recording_janitor_loop, name="recording-janitor", daemon=True)
+    t.start()
 
 
 @app.route('/api/audio/client-log', methods=['POST'])
@@ -10123,6 +10433,7 @@ if not os.environ.get("HENWEN_SKIP_STARTUP"):
     start_release_poller()
     start_aprs_poller()
     start_iss_poller()
+    start_recording_janitor()
 
 if __name__ == "__main__":
     log("INFO", "Starting in direct-run mode (not via gunicorn)")

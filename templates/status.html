@@ -744,6 +744,9 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
     <rect x="9" y="2" width="6" height="13" rx="3" />
   </symbol>
+  <symbol id="icon-circle" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="10" />
+  </symbol>
   <symbol id="icon-headphones" viewBox="0 0 24 24">
     <path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a9 9 0 0 1 18 0v7a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3" />
   </symbol>
@@ -943,6 +946,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
             <input type="range" id="listen-volume" min="0" max="100" value="100" disabled title="Listen volume — separate from your device's system volume">
           </span>
           <button class="btn-icon" id="listen-btn" onclick="toggleListen()" title="Stream live audio from this node — expect ~1 second delay"><svg class="icon"><use href="#icon-headphones"></use></svg> Listen</button>
+          <button class="btn-icon" id="record-btn" onclick="toggleRecord()" style="display:none" title="Record this node's audio to a file"><svg class="icon" style="color:var(--red,#f85149)"><use href="#icon-circle"></use></svg> Record</button>
           <button class="dash-hide-btn" onclick="toggleDashHide('connected',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
         </span>
       </div>
@@ -3649,6 +3653,7 @@ async function checkKioskSession() {
      any account that exists at all has already been vetted to transmit. */
   _txUpdateBtn();
   _searchUpdateBtn();
+  _recordUpdateBtn();
 
   updateActiveUsersToggle();
 }
@@ -4081,6 +4086,162 @@ async function _txUpdateBtn() {
     var r = await apiFetch('/api/tx/config?probe=1');
     btn.style.display = r.ok ? '' : 'none';
   } catch (e) { btn.style.display = 'none'; }
+}
+
+/* ── Recording ──────────────────────────────────────────────────────────
+   Lifecycle is tied to this fetch's connection, mirroring the Listen
+   stream: aborting it (explicit Stop, or leaving/reloading the page) is
+   what tells the server to stop the recording and finalize the file —
+   see /api/recording/start in app.py. Only rendered for accounts the
+   owner has flagged can_record (checked fresh from the DB on every
+   permission check, never cached). */
+var _recordActive       = false;
+var _recordCtrl         = null;
+var _recordCurrentId    = null;
+var _recordStartTs      = 0;
+var _recordElapsedTimer = null;
+var _RECORD_ICON = '<svg class="icon" style="color:var(--red,#f85149)"><use href="#icon-circle"></use></svg>';
+
+async function _recordUpdateBtn() {
+  var btn = document.getElementById('record-btn');
+  if (!btn) return;
+  if (!window._kioskRole) { btn.style.display = 'none'; return; }
+  try {
+    var r = await apiFetch('/api/recording/permission');
+    var d = await r.json();
+    btn.style.display = (r.ok && d.can_record) ? '' : 'none';
+  } catch (e) { btn.style.display = 'none'; }
+}
+
+function _recordSetBtn(html, color, disabled) {
+  var btn = document.getElementById('record-btn');
+  if (!btn) return;
+  btn.innerHTML = html;
+  btn.style.color = color || '';
+  btn.disabled = !!disabled;
+}
+
+function toggleRecord() {
+  if (_recordActive) { _stopRecord(false); return; }
+  _startRecord();
+}
+
+function _recordFormatElapsed() {
+  var s  = Math.floor((Date.now() - _recordStartTs) / 1000);
+  var mm = Math.floor(s / 60), ss = s % 60;
+  return mm + ':' + (ss < 10 ? '0' : '') + ss;
+}
+
+function _startRecord() {
+  if (!window._kioskRole) { openKioskLogin(_startRecord, []); return; }
+  var node = (window._lastBoardNodes && window._lastBoardNodes[0]) ? window._lastBoardNodes[0].node : '';
+  if (!node) { sbToast('No local node found', false); return; }
+
+  _recordSetBtn('... Starting', 'var(--text2)', true);
+  var ctrl = new AbortController();
+  _recordCtrl = ctrl;
+
+  apiFetch('/api/recording/start', {
+    method:  'POST',
+    signal:  ctrl.signal,
+    headers: {'Content-Type': 'application/json'},
+    body:    JSON.stringify({node: node}),
+  }).then(function(r) {
+    if (r.status === 401) {
+      _recordSetBtn(_RECORD_ICON + ' Record', '', false);
+      openKioskLogin(_startRecord, []);
+      return null;
+    }
+    if (!r.ok) {
+      return r.json().catch(function() { return {}; }).then(function(d) {
+        throw new Error(d.error || ('HTTP ' + r.status));
+      });
+    }
+    _recordActive  = true;
+    _recordStartTs = Date.now();
+    _recordSetBtn(_RECORD_ICON + ' Stop (0:00)', 'var(--red,#f85149)', false);
+    sbToast('Recording node ' + node, true);
+    if (_recordElapsedTimer) clearInterval(_recordElapsedTimer);
+    _recordElapsedTimer = setInterval(function() {
+      _recordSetBtn(_RECORD_ICON + ' Stop (' + _recordFormatElapsed() + ')', 'var(--red,#f85149)', false);
+    }, 1000);
+
+    var reader  = r.body.getReader();
+    var decoder = new TextDecoder();
+    var buf     = '';
+    function pump() {
+      reader.read().then(function(result) {
+        if (result.done) return;
+        buf += decoder.decode(result.value, {stream: true});
+        var lines = buf.split('\n');
+        buf = lines.pop();
+        lines.forEach(function(line) {
+          if (!line.trim()) return;
+          try {
+            var msg = JSON.parse(line);
+            if (msg.recording_id) _recordCurrentId = msg.recording_id;
+            if (msg.stopped) {
+              sbToast('Recording stopped: ' + msg.reason, msg.reason !== 'error');
+              _stopRecord(true);
+              return;
+            }
+          } catch (e) {}
+        });
+        pump();
+      }).catch(function(e) {
+        if (e.name === 'AbortError') return;
+        if (_recordActive) { _recordActive = false; sbToast('Recording connection lost', false); }
+      });
+    }
+    pump();
+    return null;
+  }).catch(function(e) {
+    if (e.name === 'AbortError') return;
+    _recordActive = false;
+    _recordCtrl   = null;
+    _recordSetBtn(_RECORD_ICON + ' Record', '', false);
+    sbToast('Could not start recording: ' + e.message, false);
+  });
+}
+
+/* auto=true when the server itself ended the recording (e.g. hit
+   max_recording_min) rather than the user pressing Stop. */
+function _stopRecord(auto) {
+  if (_recordElapsedTimer) { clearInterval(_recordElapsedTimer); _recordElapsedTimer = null; }
+  if (_recordCtrl) { _recordCtrl.abort(); _recordCtrl = null; }
+  _recordActive = false;
+  _recordSetBtn(_RECORD_ICON + ' Record', '', false);
+
+  var rid = _recordCurrentId;
+  _recordCurrentId = null;
+  if (!rid) return;
+  if (!auto) sbToast('Stopping recording...', true);
+
+  /* The file isn't finalized (and the DB row isn't status='finished')
+     until the server side has torn down its ffmpeg processes after
+     seeing this connection close — poll briefly rather than guessing a
+     fixed delay before triggering the download. */
+  var attempts = 0;
+  function poll() {
+    attempts++;
+    apiFetch('/api/recordings').then(function(r) { return r.json(); }).then(function(d) {
+      var rec = (d.recordings || []).filter(function(x) { return x.id === rid; })[0];
+      if (rec && rec.status === 'finished') {
+        var a = document.createElement('a');
+        a.href = '/api/recording/' + rid + '/download';
+        a.download = '';
+        document.body.appendChild(a); a.click(); a.remove();
+        sbToast('Recording saved (' + Math.round(rec.duration_sec || 0) + 's)', true);
+      } else if (rec && rec.status === 'error') {
+        sbToast('Recording failed: ' + (rec.stop_reason || 'unknown error'), false);
+      } else if (attempts < 30) {
+        setTimeout(poll, 500);
+      } else {
+        sbToast('Recording saved, but took too long to confirm — check it under Recordings in Manager', false);
+      }
+    }).catch(function() { if (attempts < 30) setTimeout(poll, 500); });
+  }
+  poll();
 }
 
 /* Node search (AllStar + EchoLink): gated to any logged-in role, no

@@ -565,6 +565,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     <button class="nav-item" onclick="showPage('kiosk-settings')">Kiosk Settings</button>
     <button class="nav-item" onclick="showPage('settings')">Settings</button>
     <button class="nav-item" onclick="showPage('user-mgmt')">User Management</button>
+    <button class="nav-item" onclick="showPage('recordings')">Recordings</button>
     <button class="nav-item" id="nav-recording-settings" onclick="showPage('recording-settings')">Recording Settings</button>
     <button class="nav-item" id="nav-stream-relay" onclick="showPage('stream-relay')">Stream Relay</button>
   </nav>
@@ -1223,6 +1224,24 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
       </div>
     </div>
 
+  </section>
+
+  <!-- Recordings -->
+  <section class="page" id="page-recordings">
+    <div class="page-title">Recordings</div>
+    <div class="page-sub">In-browser recordings started from the Status Board's Record button. Auto-purged per the retention/storage settings on the Recording Settings page.</div>
+    <div class="card">
+      <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+        <h2>All Recordings</h2>
+        <button class="btn btn-sm" onclick="recordingsLoad()">Refresh</button>
+      </div>
+      <div class="card-body" style="padding:0">
+        <table class="tbl" id="recordings-table">
+          <thead><tr><th>Node</th><th>User</th><th>Started</th><th>Duration</th><th>Size</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody id="recordings-tbody"><tr><td colspan="7" class="muted" style="padding:14px">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
   </section>
 
   <!-- Recording Settings (owner only) -->
@@ -2526,6 +2545,7 @@ function showPage(id) {
   else if (id === 'ast-console')  astFetchLog();
   else if (id === 'settings')       { loadSecretKeyStatus(); loadPortsStatus(); syncThemePicker(); }
   else if (id === 'user-mgmt')      loadUsers();
+  else if (id === 'recordings')         recordingsLoad();
   else if (id === 'recording-settings') recLoad();
   else if (id === 'stream-relay')       relayLoad();
   else if (id === 'dtmf')             { populateDtmfNodeSelect(); }
@@ -5113,6 +5133,59 @@ async function ksSave() {
   if (r.ok) { st.textContent = 'Saved.'; st.style.color = 'var(--success)'; }
   else       { st.textContent = r.data.error || 'Error'; st.style.color = 'var(--danger)'; }
   setTimeout(function(){ st.textContent = ''; }, 3000);
+}
+
+/* ── Recordings list ────────────────────────────────────────────────────── */
+function _formatBytes(n) {
+  if (!n) return '0 B';
+  var units = ['B', 'KB', 'MB', 'GB'];
+  var i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return n.toFixed(i === 0 ? 0 : 1) + ' ' + units[i];
+}
+
+function _formatDuration(sec) {
+  if (!sec) return '—';
+  sec = Math.round(sec);
+  var mm = Math.floor(sec / 60), ss = sec % 60;
+  return mm + ':' + (ss < 10 ? '0' : '') + ss;
+}
+
+async function recordingsLoad() {
+  var tbody = document.getElementById('recordings-tbody');
+  var r = await api('/api/recordings');
+  if (!r.ok) { tbody.innerHTML = '<tr><td colspan="7" class="muted" style="padding:14px">Error loading recordings.</td></tr>'; return; }
+  var rows = r.data.recordings || [];
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="muted" style="padding:14px">No recordings yet.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(function(rec) {
+    var statusColor = rec.status === 'finished' ? 'var(--green)' : rec.status === 'recording' ? 'var(--accent)' : 'var(--red)';
+    var actions = '';
+    if (rec.status === 'finished') {
+      actions += '<a class="btn btn-sm" href="/api/recording/' + rec.id + '/download" style="text-decoration:none">Download</a> ';
+    }
+    if (rec.status !== 'recording') {
+      actions += '<button class="btn btn-warn btn-sm" onclick="recordingDelete(' + rec.id + ')">Delete</button>';
+    }
+    return '<tr>'
+      + '<td>' + esc(rec.node) + '</td>'
+      + '<td>' + esc(rec.username) + '</td>'
+      + '<td style="color:var(--text2);font-size:0.82rem">' + esc(rec.started_at || '') + '</td>'
+      + '<td>' + _formatDuration(rec.duration_sec) + '</td>'
+      + '<td>' + _formatBytes(rec.size_bytes) + '</td>'
+      + '<td><span style="color:' + statusColor + '">' + esc(rec.status) + (rec.status !== 'recording' && rec.stop_reason ? ' (' + esc(rec.stop_reason) + ')' : '') + '</span></td>'
+      + '<td><div class="btn-row">' + actions + '</div></td>'
+      + '</tr>';
+  }).join('');
+}
+
+async function recordingDelete(id) {
+  if (!confirm('Delete this recording? This cannot be undone.')) return;
+  var r = await api('/api/recordings/' + id, {method: 'DELETE'});
+  if (r.ok) recordingsLoad();
+  else alert((r.data && r.data.error) || 'Error deleting recording');
 }
 
 /* ── Recording Settings (owner only) ───────────────────────────────────────── */
