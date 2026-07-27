@@ -2523,6 +2523,7 @@ function showPage(id) {
   stopFavStatusPolling();
   astStopAutoRefresh();
   stopDiagPolling();
+  stopRelayStatusPolling();
 
   var page = document.getElementById('page-' + id);
   if (page) page.classList.add('active');
@@ -5270,6 +5271,41 @@ async function relayLoad() {
   document.getElementById('relay-yt-enabled').checked = !!d.youtube_enabled;
   document.getElementById('relay-yt-url').value = d.youtube_rtmp_url || '';
   document.getElementById('relay-yt-key').value = d.youtube_stream_key || '';
+  relayLoadStatus();
+}
+
+var _relayStatusTimer = null;
+
+async function relayLoadStatus() {
+  var bcEl = document.getElementById('relay-bc-status');
+  var ytEl = document.getElementById('relay-yt-status');
+  var r = await api('/api/stream-relay/status');
+  if (!r.ok) return;
+  var d = r.data;
+  var targets = d.targets || {};
+  function renderTarget(el, key, enabledCheckboxId) {
+    if (!el) return;
+    var enabled = document.getElementById(enabledCheckboxId).checked;
+    if (!enabled) { el.textContent = ''; return; }
+    if (!d.active) { el.innerHTML = '<span style="color:var(--text2)">Not connected — waiting for the relay to (re)connect</span>'; return; }
+    var t = targets[key];
+    if (t && t.connected) el.innerHTML = '<span style="color:var(--green)">&#9679; Live</span>';
+    else el.innerHTML = '<span style="color:var(--red)">&#9679; Disconnected</span>';
+  }
+  renderTarget(bcEl, 'broadcastify', 'relay-bc-enabled');
+  renderTarget(ytEl, 'youtube', 'relay-yt-enabled');
+
+  /* Poll while the Stream Relay page is open so status reflects
+     reconnects without requiring a manual refresh; stopped in showPage()
+     when navigating away (see stopRelayStatusPolling()). */
+  if (_relayStatusTimer) clearTimeout(_relayStatusTimer);
+  if (document.getElementById('page-stream-relay').classList.contains('active')) {
+    _relayStatusTimer = setTimeout(relayLoadStatus, 10000);
+  }
+}
+
+function stopRelayStatusPolling() {
+  if (_relayStatusTimer) { clearTimeout(_relayStatusTimer); _relayStatusTimer = null; }
 }
 
 async function relaySave() {

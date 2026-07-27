@@ -67,6 +67,10 @@ from collections import deque
 # app.py drives it entirely through the Recorder class and the pure
 # retention/cap-sweep functions below.
 import recording
+# stream_relay.py (persistent Broadcastify/YouTube relay) — same
+# independence story as recording.py, and independent of recording.py
+# itself too. Driven entirely through the Relay class below.
+import stream_relay
 
 # aprslib is optional — shelled-out-style guard so a checkout that hasn't
 # picked up the dependency yet (or an admin who edited requirements.txt)
@@ -9202,6 +9206,118 @@ def api_stream_relay_config_save():
     return jsonify({"ok": True})
 
 
+# ---------------------------------------------------------------------------
+# Stream relay poller (stream_relay.py) — persistent, config-driven,
+# self-reconnecting, mirroring start_aprs_poller()'s shape: re-reads
+# stream_relay_config at the top of every reconnect cycle so a saved
+# settings change (or a toggle-off) takes effect on the next natural
+# reconnect without a HenWen restart, and no-ops cleanly until the owner
+# has enabled at least one target. Entirely independent of recording.py —
+# the only thing shared with it is the audio source (_AudioBroadcast).
+# ---------------------------------------------------------------------------
+_relay_lock          = threading.Lock()
+_relay_instance       = None   # stream_relay.Relay currently running, or None
+_relay_status_cache   = {}     # last known relay.status(), read by the API route
+
+
+def _build_relay_targets(cfg):
+    """cfg -> {target_name: ffmpeg_output_args}, only for enabled targets.
+    Returns {} if cfg is falsy or nothing is enabled."""
+    if not cfg:
+        return {}
+    targets = {}
+    if cfg.get('broadcastify_enabled'):
+        targets['broadcastify'] = stream_relay.build_broadcastify_output_args(
+            host=cfg['broadcastify_host'], port=int(cfg['broadcastify_port']),
+            mount=cfg['broadcastify_mount'], user=cfg['broadcastify_user'],
+            password=cfg['broadcastify_pass'])
+    if cfg.get('youtube_enabled'):
+        targets['youtube'] = stream_relay.build_youtube_output_args(
+            rtmp_url=cfg['youtube_rtmp_url'], stream_key=cfg['youtube_stream_key'])
+    return targets
+
+
+def _stream_relay_loop():
+    global _relay_instance, _relay_status_cache
+    while True:
+        cfg = _get_stream_relay_config()
+        node = (cfg or {}).get('target_node', '')
+        targets_wanted = _build_relay_targets(cfg)
+        if not targets_wanted or not re.match(r'^\d{4,7}$', node or ''):
+            with _relay_lock:
+                _relay_status_cache = {}
+            time.sleep(15)
+            continue
+
+        client_label = 'stream-relay'
+        try:
+            with _audio_lock:
+                broadcast = _audio_active.get(node)
+                if broadcast is None or broadcast._dead:
+                    broadcast = _start_broadcast(node)
+                    _audio_active[node] = broadcast
+                client_q = broadcast.add_client(client_label)
+        except Exception as e:
+            log('WARN', f'[STREAM-RELAY] could not attach to node {node}: {e}')
+            time.sleep(15)
+            continue
+
+        relay = stream_relay.Relay(targets=targets_wanted, log_fn=lambda msg: log('WARN', msg))
+        with _relay_lock:
+            _relay_instance = relay
+        log('INFO', f'[STREAM-RELAY] started for node {node}, targets={list(targets_wanted)}')
+        try:
+            last_cfg_check = time.monotonic()
+            while True:
+                try:
+                    chunk = client_q.get(timeout=1.0)
+                except _queue_mod.Empty:
+                    chunk = False
+                if chunk is None:
+                    log('INFO', f'[STREAM-RELAY] broadcast for node {node} ended, reconnecting')
+                    break
+                if chunk is not False:
+                    relay.feed(chunk)
+                with _relay_lock:
+                    _relay_status_cache = relay.status()
+                if time.monotonic() - last_cfg_check > 30:
+                    last_cfg_check = time.monotonic()
+                    new_cfg = _get_stream_relay_config()
+                    if (_build_relay_targets(new_cfg) != targets_wanted
+                            or (new_cfg or {}).get('target_node') != node):
+                        log('INFO', '[STREAM-RELAY] config changed, reconnecting')
+                        break
+        except Exception as e:
+            log('ERROR', f'[STREAM-RELAY] loop error: {e}\n{traceback.format_exc()}')
+        finally:
+            broadcast.remove_client(client_q, client_label)
+            relay.stop()
+            with _relay_lock:
+                _relay_instance = None
+                _relay_status_cache = {}
+        time.sleep(5)
+
+
+def start_stream_relay():
+    t = threading.Thread(target=_stream_relay_loop, name="stream-relay", daemon=True)
+    t.start()
+
+
+@app.route('/api/stream-relay/status')
+def api_stream_relay_status():
+    if session.get('role') != 'owner':
+        return jsonify({'error': 'Only the owner can view stream relay status'}), 403
+    with _relay_lock:
+        active = _relay_instance is not None
+        targets_status = dict(_relay_status_cache)
+    cfg = _get_stream_relay_config()
+    return jsonify({
+        'active':      active,
+        'target_node': (cfg or {}).get('target_node', ''),
+        'targets':     targets_status,
+    })
+
+
 def _nws_location_is_bare_state(location: str):
     """True if the node's location string is *just* a US state/territory
     name or postal abbreviation, with no city/county to narrow it down —
@@ -10510,6 +10626,7 @@ if not os.environ.get("HENWEN_SKIP_STARTUP"):
     start_aprs_poller()
     start_iss_poller()
     start_recording_janitor()
+    start_stream_relay()
 
 if __name__ == "__main__":
     log("INFO", "Starting in direct-run mode (not via gunicorn)")

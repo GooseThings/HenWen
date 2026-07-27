@@ -126,6 +126,21 @@ class TestStreamRelayConfigGating:
         assert body["target_node"] == ""
 
 
+class TestStreamRelayStatus:
+    def test_admin_cannot_view_status(self, client, create_user):
+        create_user("owner1", role="owner")
+        create_user("admin1", password="password12345", role="admin")
+        _login(client, "admin1")
+        assert client.get("/api/stream-relay/status").status_code == 403
+
+    def test_owner_sees_inactive_status_when_nothing_configured(self, client, create_user):
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        body = client.get("/api/stream-relay/status").get_json()
+        assert body["active"] is False
+        assert body["targets"] == {}
+
+
 class TestStreamRelayConfigValidation:
     def test_enabling_broadcastify_requires_host_port_mount(self, client, create_user):
         create_user("owner1", role="owner")
