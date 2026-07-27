@@ -6668,6 +6668,25 @@ def api_recording_start():
         with _recordings_lock:
             _active_recordings.pop(recording_id, None)
 
+    # Spoken timestamps: resolved once at start time (not re-checked mid
+    # -recording) so a config change or a voice-download failure never
+    # interrupts an already-running recording — worst case it just plays
+    # this session's recording without timestamps, per _ensure_voice_model
+    # _cached() being fail-soft here rather than blocking the start.
+    tts_fn = None
+    tts_interval_sec = None
+    if bool(cfg.get('tts_enabled')):
+        tts_voice = cfg['tts_voice']
+        tts_interval_sec = int(cfg['tts_interval_min']) * 60
+        try:
+            _ensure_voice_model_cached(tts_voice)
+            def tts_fn(_voice=tts_voice):
+                text = f"The time is {_format_clock_time(datetime.now())}"
+                return _synthesize_timestamp_pcm(text, _voice)
+        except Exception as e:
+            log('WARN', f"[RECORDING] voice '{tts_voice}' unavailable, timestamps "
+                        f"disabled for this recording: {e}")
+
     try:
         recorder = recording.Recorder(
             node=node, dest_path=dest_path, output_format=output_format,
@@ -6676,6 +6695,8 @@ def api_recording_start():
             max_duration_sec=int(cfg['max_recording_min']) * 60,
             on_stop=_finalize,
             log_fn=lambda msg: log('WARN', msg),
+            tts_interval_sec=tts_interval_sec,
+            tts_fn=tts_fn,
         )
     except Exception as e:
         broadcast.remove_client(client_q, client_label)
@@ -7949,6 +7970,61 @@ def _tts_to_ulaw(text: str, voice_id: str, dest_ulaw: str) -> None:
             os.unlink(tmp_wav)
         except OSError:
             pass
+
+
+# In-memory cache for recording.py's periodic spoken-timestamp splice —
+# keyed on (voice_id, text). The text already encodes the target minute
+# ("the time is 3:45 PM"), so a plain dict is a correct per-minute cache
+# without any TTL logic: a given key is only ever asked for again within
+# the same minute, and the process's own memory growth is bounded by
+# swapping in a fresh dict once a minute (see _recording_tts_pcm_cache_key).
+# Shared across every simultaneous Recorder so N concurrent recordings in
+# the same minute only ever shell out to Piper once between them.
+_recording_tts_cache = {}
+_recording_tts_cache_lock = threading.Lock()
+_recording_tts_cache_minute = None
+
+
+def _synthesize_timestamp_pcm(text: str, voice_id: str):
+    """Synthesize `text` to raw PCM in recording.py's working format (8kHz
+    mono s16le) via the same Piper call _synthesize_tts() already uses for
+    announcements, then an ffmpeg one-shot to convert the WAV to raw PCM
+    instead of ULAW. Returns None (never raises) on any failure — a TTS
+    hiccup must never take down the recording it's annotating; the caller
+    (recording.Recorder) just skips that interval's splice and logs it."""
+    global _recording_tts_cache_minute
+    minute_key = datetime.now().strftime("%Y%m%d%H%M")
+    with _recording_tts_cache_lock:
+        if minute_key != _recording_tts_cache_minute:
+            _recording_tts_cache.clear()
+            _recording_tts_cache_minute = minute_key
+        cached = _recording_tts_cache.get((voice_id, text))
+        if cached is not None:
+            return cached
+
+    fd, tmp_wav = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    try:
+        _synthesize_tts(text, voice_id, tmp_wav)
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", tmp_wav, "-f", "s16le", "-ar", "8000", "-ac", "1", "pipe:1"],
+            capture_output=True, timeout=30,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed: {result.stderr.decode(errors='replace')[-500:]}")
+        pcm = result.stdout
+    except Exception as e:
+        log("WARN", f"[RECORDING] timestamp TTS synthesis failed (voice={voice_id}): {e}")
+        return None
+    finally:
+        try:
+            os.unlink(tmp_wav)
+        except OSError:
+            pass
+
+    with _recording_tts_cache_lock:
+        _recording_tts_cache[(voice_id, text)] = pcm
+    return pcm
 
 
 def _ann_slug(name: str) -> str:

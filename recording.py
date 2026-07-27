@@ -17,7 +17,7 @@ attached the same way a browser listener is, via add_client(), so
 audio_relay.py and the raw-PCM FIFO plumbing are never touched:
 
     WebM/Opus chunks -> decode ffmpeg -> raw PCM -> SilenceGate
-        (-> Phase 3 TTS splice, see recording_config.tts_* fields)
+        -> periodic TTS timestamp splice (tts_fn, see Recorder.__init__)
         -> encode ffmpeg -> file on disk
 
 Runs as plain daemon threads, not a separate OS process the way
@@ -104,6 +104,16 @@ def select_purge_by_user_cap(rows, cap_bytes: float):
     return ids
 
 
+def next_tts_due(elapsed_sec: float, interval_sec: float, last_tts_sec: float) -> bool:
+    """True if a TTS timestamp splice is due: at least interval_sec has
+    passed since the last one (or since recording start, if none yet).
+    Pure function -- no synthesis, no I/O -- so the *timing* policy is
+    testable independent of Piper actually being installed."""
+    if interval_sec is None or interval_sec <= 0:
+        return False
+    return elapsed_sec - last_tts_sec >= interval_sec
+
+
 def _drain_stderr(proc, tag, log_fn):
     try:
         for raw_line in proc.stderr:
@@ -131,7 +141,19 @@ class Recorder:
     """
 
     def __init__(self, node, dest_path, output_format, silence_rms_thresh,
-                 silence_min_gap_ms, max_duration_sec, on_stop=None, log_fn=None):
+                 silence_min_gap_ms, max_duration_sec, on_stop=None, log_fn=None,
+                 tts_interval_sec=None, tts_fn=None):
+        """
+        tts_fn, if given, is a zero-argument callable returning raw PCM
+        bytes (8kHz mono s16le, matching this pipeline's working format)
+        for "the current spoken timestamp", or None if synthesis isn't
+        available right now -- this class has no idea what voice, text
+        template, or TTS engine is behind it (see app.py's
+        _synthesize_timestamp_pcm() for the actual implementation it's
+        given in practice). Called at most once per tts_interval_sec of
+        wall-clock recording time, from the pump thread, and spliced
+        (inserted, not mixed) directly into the encoder's input stream.
+        """
         self.node = node
         self.dest_path = dest_path
         self.max_duration_sec = max_duration_sec
@@ -142,6 +164,9 @@ class Recorder:
         self._started_at = time.monotonic()
         self._lock = threading.Lock()
         self._stopped = False
+        self._tts_fn = tts_fn
+        self._tts_interval_sec = tts_interval_sec
+        self._last_tts_sec = 0.0
 
         self._decode_proc = subprocess.Popen(
             ["ffmpeg", "-hide_banner", "-loglevel", "warning",
@@ -184,6 +209,28 @@ class Recorder:
         except (BrokenPipeError, ValueError, OSError):
             pass
 
+    def _maybe_splice_tts(self):
+        """Called from the pump thread only. Wall-clock-timed (not
+        audio-content-timed), deliberately independent of how much the
+        silence gate has trimmed -- so a long silent stretch still gets a
+        timestamp on either side instead of the file just reading as an
+        unmarked edit. A synthesis failure (or tts_fn not configured) is
+        silent-skip-and-retry-next-interval, never fatal to the recording."""
+        if not self._tts_fn or not next_tts_due(self.elapsed_sec, self._tts_interval_sec, self._last_tts_sec):
+            return
+        self._last_tts_sec = self.elapsed_sec
+        try:
+            pcm = self._tts_fn()
+        except Exception as e:
+            self._log(f"[RECORDING] TTS timestamp synthesis failed for node {self.node}: {e}")
+            return
+        if not pcm:
+            return
+        try:
+            self._encode_proc.stdin.write(pcm)
+        except (BrokenPipeError, ValueError, OSError):
+            pass
+
     def _pump_loop(self):
         buf = b""
         try:
@@ -194,6 +241,7 @@ class Recorder:
                 buf += chunk
                 while len(buf) >= FRAME_BYTES:
                     frame, buf = buf[:FRAME_BYTES], buf[FRAME_BYTES:]
+                    self._maybe_splice_tts()
                     if self._gate.should_pass(frame):
                         try:
                             self._encode_proc.stdin.write(frame)

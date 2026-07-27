@@ -71,6 +71,24 @@ class TestSilenceGate:
         assert gate.should_pass(_make_frame(0)) is False
 
 
+class TestNextTtsDue:
+    def test_not_due_before_interval_elapses(self):
+        assert recording.next_tts_due(elapsed_sec=10, interval_sec=60, last_tts_sec=0) is False
+
+    def test_due_once_interval_elapses(self):
+        assert recording.next_tts_due(elapsed_sec=60, interval_sec=60, last_tts_sec=0) is True
+
+    def test_due_measured_from_last_splice_not_from_zero(self):
+        # A splice already happened at 60s; the next one isn't due until 120s.
+        assert recording.next_tts_due(elapsed_sec=90, interval_sec=60, last_tts_sec=60) is False
+        assert recording.next_tts_due(elapsed_sec=120, interval_sec=60, last_tts_sec=60) is True
+
+    def test_disabled_when_interval_is_none_or_non_positive(self):
+        assert recording.next_tts_due(elapsed_sec=1000, interval_sec=None, last_tts_sec=0) is False
+        assert recording.next_tts_due(elapsed_sec=1000, interval_sec=0, last_tts_sec=0) is False
+        assert recording.next_tts_due(elapsed_sec=1000, interval_sec=-5, last_tts_sec=0) is False
+
+
 class TestSelectPurgeByAge:
     def test_old_recordings_are_selected(self):
         now = 1_000_000.0
@@ -204,6 +222,46 @@ class TestRecorderPipeline:
         # 200ms gap budget on each edge -- verified empirically at ~4.2s.
         assert duration < 5.0
         assert duration > 3.5  # the two 2s tones must still be fully present
+
+    def test_tts_splice_inserts_extra_audio(self, synthetic_webm, tmp_path):
+        """Uses a fake tts_fn (no real Piper/network dependency) to verify
+        the splice mechanism itself: periodic extra PCM actually reaches
+        the encoded file, on top of whatever the source contributed. Real
+        Piper synthesis via _synthesize_timestamp_pcm() is exercised
+        manually against app.py's live TTS_VOICES_DIR/PIPER_BIN instead of
+        here, matching this repo's general policy of not depending on
+        Piper/network access from the automated suite."""
+        dest = tmp_path / "out_tts.ogg"
+        result = {}
+
+        def on_stop(reason, elapsed):
+            result["reason"] = reason
+
+        splice_calls = []
+
+        def fake_tts_fn():
+            splice_calls.append(1)
+            return b"\x00\x01" * 4000  # ~0.5s of fake PCM @ 8kHz mono s16le
+
+        rec = recording.Recorder(
+            node="546054", dest_path=str(dest), output_format="opus",
+            silence_rms_thresh=50, silence_min_gap_ms=999_999,
+            max_duration_sec=300, on_stop=on_stop,
+            tts_interval_sec=0.3, tts_fn=fake_tts_fn,
+        )
+        with open(synthetic_webm, "rb") as f:
+            data = f.read()
+        chunk_size = 1024
+        for i in range(0, len(data), chunk_size):
+            rec.feed(data[i:i + chunk_size])
+            time.sleep(0.05)  # let wall-clock elapse past the splice interval
+        time.sleep(0.5)
+        rec.stop("manual")
+
+        assert result.get("reason") == "manual"
+        assert len(splice_calls) >= 1, "expected at least one TTS splice to fire"
+        duration = self._duration(dest)
+        assert duration > 7.0  # source alone is ~7s; splices must add more on top
 
     def test_max_duration_auto_stops(self, synthetic_webm, tmp_path):
         dest = tmp_path / "out_capped.ogg"
