@@ -50,19 +50,23 @@ def build_broadcastify_output_args(host, port, mount, user, password):
 
 def build_youtube_output_args(rtmp_url, stream_key):
     """YouTube Live RTMP push args. Plain RTMP, no OAuth/Data API --
-    the same mechanism OBS uses for "Go Live". Includes a static 1x1
-    black color source as the video track: audio-only RTMP is not a
-    safe assumption for YouTube's ingest validation (untested against a
-    real YouTube account in this environment), so a minimal dummy video
-    track is included by default rather than gambling on audio-only
-    being accepted. Verified interactively via an ffmpeg-as-RTMP-server
-    loopback (no real YouTube account needed to confirm the command
-    itself produces a valid FLV with synced audio+video)."""
+    the same mechanism OBS uses for "Go Live". HenWen has no camera, so
+    the video track is a live waveform generated directly from the
+    relayed audio itself (ffmpeg's showwaves filter) rather than a
+    blank placeholder frame -- gives viewers something that actually
+    reflects on-air activity, and also sidesteps the open question of
+    whether YouTube's RTMP ingest accepts a truly audio-only stream
+    (untested against a real account in this environment) by always
+    having a genuine, non-trivial video track. Verified interactively
+    via an ffmpeg-as-RTMP-server loopback: valid FLV with synced H.264
+    video (visibly non-blank frames) + AAC audio."""
     url = rtmp_url.rstrip("/") + "/" + stream_key
     return [
-        "-f", "lavfi", "-i", "color=size=320x240:rate=1:color=black",
-        "-map", "0:a", "-map", "1:v",
-        "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage", "-pix_fmt", "yuv420p",
+        "-filter_complex",
+        "[0:a]aformat=channel_layouts=mono,"
+        "showwaves=s=1280x720:mode=cline:rate=25:colors=0x00cc66[v]",
+        "-map", "[v]", "-map", "0:a",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "64k",
         "-f", "flv", url,
     ]

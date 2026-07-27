@@ -41,15 +41,17 @@ class TestBuildYoutubeOutputArgs:
             rtmp_url="rtmp://a.rtmp.youtube.com/live2/", stream_key="abcd-1234")
         assert args[-1] == "rtmp://a.rtmp.youtube.com/live2/abcd-1234"
 
-    def test_includes_a_dummy_video_track(self):
+    def test_includes_a_live_waveform_video_track(self):
         # YouTube Live's RTMP ingest is not reliably known to accept
-        # audio-only input (untested against a real account) -- a static
-        # color source is included by default rather than gambling.
+        # audio-only input (untested against a real account), and HenWen
+        # has no camera -- the video track is a waveform generated from
+        # the relayed audio itself via showwaves, rather than a blank
+        # placeholder or gambling on audio-only being accepted.
         args = stream_relay.build_youtube_output_args(
             rtmp_url="rtmp://host/live", stream_key="key")
-        assert any("color=" in a for a in args)
+        assert any("showwaves" in a for a in args)
+        assert "[0:a]" in args[args.index("-filter_complex") + 1]
+        assert "-map" in args and "[v]" in args
         assert "-c:v" in args
-        # Output muxer is the last "-f flv" (there's an earlier "-f lavfi"
-        # for the dummy video input) -- confirmed by its position right
-        # before the destination URL.
+        # Output muxer is the last "-f flv", right before the destination URL.
         assert args[-3:-1] == ["-f", "flv"]
