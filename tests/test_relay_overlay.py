@@ -69,14 +69,14 @@ class TestWriteRelayClockFile:
 
 class TestBuildRelayTickerText:
     @pytest.fixture(autouse=True)
-    def _no_connected_or_nets_by_default(self, monkeypatch):
+    def _no_connected_or_connectors_by_default(self, monkeypatch):
         # Most tests in this class only care about weather/alerts -- stub
         # the two newer segments to "nothing" so they don't have to know
-        # about AMI status or net_schedules at all. Scoped to this class
-        # only: TestRelayConnectedNodesText/TestRelayNetsTodayText test
-        # these exact functions directly and must see the real ones.
+        # about AMI status or the connectors table at all. Scoped to this
+        # class only: TestRelayConnectedNodesText/TestRelayConnectorsTodayText
+        # test these exact functions directly and must see the real ones.
         monkeypatch.setattr(app, "_relay_connected_nodes_text", lambda node: "")
-        monkeypatch.setattr(app, "_relay_nets_today_text", lambda: "")
+        monkeypatch.setattr(app, "_relay_connectors_today_text", lambda: "")
 
     def test_combines_weather_and_alerts_with_separator(self, monkeypatch):
         monkeypatch.setattr(app, "lookup_node", lambda node: {"location": "Kenosha, WI"})
@@ -133,14 +133,14 @@ class TestBuildRelayTickerText:
         text = app._build_relay_ticker_text("546054")
         assert text == "Still works   //   "
 
-    def test_connected_nodes_and_nets_appended_after_weather_and_alerts(self, monkeypatch):
+    def test_connected_nodes_and_connectors_appended_after_weather_and_alerts(self, monkeypatch):
         monkeypatch.setattr(app, "lookup_node", lambda node: {"location": ""})
         monkeypatch.setattr(app, "_fetch_weather", lambda loc: {"error": "No location configured"})
         monkeypatch.setattr(app, "get_nws_display_alerts", lambda: [])
         monkeypatch.setattr(app, "_relay_connected_nodes_text", lambda node: "Connected: N8GMZ (546054)")
-        monkeypatch.setattr(app, "_relay_nets_today_text", lambda: "Today's Nets: Weekly Net 20:00")
+        monkeypatch.setattr(app, "_relay_connectors_today_text", lambda: "Smart Connector: Evening Net → 546054 20:00Z")
         text = app._build_relay_ticker_text("643931")
-        assert text == "Connected: N8GMZ (546054)   //   Today's Nets: Weekly Net 20:00   //   "
+        assert text == "Connected: N8GMZ (546054)   //   Smart Connector: Evening Net → 546054 20:00Z   //   "
 
 
 class TestRelayConnectedNodesText:
@@ -166,65 +166,58 @@ class TestRelayConnectedNodesText:
         assert app._relay_connected_nodes_text("643931") == ""
 
 
-class TestNetsScheduledToday:
+class TestConnectorsScheduledToday:
     def _row(self, **kw):
-        base = {"id": 1, "name": "Weekly Net", "node": "643931", "recurrence": "weekly",
-                "weekday": 0, "net_date": None, "time": "20:00", "end_time": None, "notes": ""}
+        base = {"id": 1, "name": "Evening Net", "local_node": "643931", "target_node": "546054",
+                "enabled": 1, "connect_time": "20:00", "schedule_type": "daily",
+                "schedule_days": ""}
         base.update(kw)
         return base
 
-    def test_weekly_net_matches_todays_weekday(self, monkeypatch):
-        # 2026-07-27 is a Monday -- weekday()==0.
-        fixed_now = app.datetime(2026, 7, 27, 12, 0, tzinfo=app.timezone.utc)
-
+    @staticmethod
+    def _patch_now(monkeypatch, fixed_now):
         class _FixedDatetime(app.datetime):
             @classmethod
             def now(cls, tz=None):
                 return fixed_now if tz else fixed_now.replace(tzinfo=None)
-
         monkeypatch.setattr(app, "datetime", _FixedDatetime)
         monkeypatch.setattr(app, "get_setting", lambda k, d=None: "UTC")
-        rows = [self._row(weekday=0), self._row(id=2, name="Other Day", weekday=1)]
+
+    def test_daily_connector_still_upcoming_is_included(self, monkeypatch):
+        self._patch_now(monkeypatch, app.datetime(2026, 7, 27, 12, 0, tzinfo=app.timezone.utc))
+        rows = [self._row(connect_time="20:00")]
         monkeypatch.setattr(app, "get_db", lambda: _FakeDb(rows))
 
-        todays = app._nets_scheduled_today()
-        assert [r["name"] for r in todays] == ["Weekly Net"]
+        todays = app._connectors_scheduled_today()
+        assert [r["name"] for r in todays] == ["Evening Net"]
         assert todays[0]["utc_time"] == "20:00Z"
 
-    def test_once_net_matches_todays_date_only(self, monkeypatch):
-        fixed_now = app.datetime(2026, 7, 27, 12, 0, tzinfo=app.timezone.utc)
-
-        class _FixedDatetime(app.datetime):
-            @classmethod
-            def now(cls, tz=None):
-                return fixed_now if tz else fixed_now.replace(tzinfo=None)
-
-        monkeypatch.setattr(app, "datetime", _FixedDatetime)
-        monkeypatch.setattr(app, "get_setting", lambda k, d=None: "UTC")
-        rows = [
-            self._row(id=2, name="Special Net", recurrence="once", net_date="2026-07-27", weekday=None),
-            self._row(id=3, name="Wrong Day", recurrence="once", net_date="2026-07-28", weekday=None),
-        ]
+    def test_a_connector_whose_time_already_passed_today_is_excluded(self, monkeypatch):
+        # "upcoming connections for the day" -- one that already fired
+        # (or would have) earlier today shouldn't clutter the ticker.
+        self._patch_now(monkeypatch, app.datetime(2026, 7, 27, 21, 0, tzinfo=app.timezone.utc))
+        rows = [self._row(connect_time="20:00")]
         monkeypatch.setattr(app, "get_db", lambda: _FakeDb(rows))
 
-        todays = app._nets_scheduled_today()
-        assert [r["name"] for r in todays] == ["Special Net"]
+        assert app._connectors_scheduled_today() == []
 
-    def test_results_sorted_by_time(self, monkeypatch):
-        fixed_now = app.datetime(2026, 7, 27, 12, 0, tzinfo=app.timezone.utc)
-
-        class _FixedDatetime(app.datetime):
-            @classmethod
-            def now(cls, tz=None):
-                return fixed_now if tz else fixed_now.replace(tzinfo=None)
-
-        monkeypatch.setattr(app, "datetime", _FixedDatetime)
-        monkeypatch.setattr(app, "get_setting", lambda k, d=None: "UTC")
-        rows = [self._row(id=1, name="Late", weekday=0, time="21:00"),
-                self._row(id=2, name="Early", weekday=0, time="18:00")]
+    def test_weekly_connector_matches_todays_weekday(self, monkeypatch):
+        # 2026-07-27 is a Monday -- weekday()==0.
+        self._patch_now(monkeypatch, app.datetime(2026, 7, 27, 12, 0, tzinfo=app.timezone.utc))
+        rows = [self._row(schedule_type="weekly", schedule_days="0"),
+                self._row(id=2, name="Other Day", schedule_type="weekly", schedule_days="1")]
         monkeypatch.setattr(app, "get_db", lambda: _FakeDb(rows))
 
-        todays = app._nets_scheduled_today()
+        todays = app._connectors_scheduled_today()
+        assert [r["name"] for r in todays] == ["Evening Net"]
+
+    def test_results_sorted_by_connect_time(self, monkeypatch):
+        self._patch_now(monkeypatch, app.datetime(2026, 7, 27, 0, 0, tzinfo=app.timezone.utc))
+        rows = [self._row(id=1, name="Late", connect_time="21:00"),
+                self._row(id=2, name="Early", connect_time="18:00")]
+        monkeypatch.setattr(app, "get_db", lambda: _FakeDb(rows))
+
+        todays = app._connectors_scheduled_today()
         assert [r["name"] for r in todays] == ["Early", "Late"]
 
 
@@ -239,54 +232,54 @@ class _FakeDb:
         return [dict(r) for r in self._rows]
 
 
-class TestRelayNetsTodayText:
+class TestRelayConnectorsTodayText:
     def test_empty_when_none_scheduled(self, monkeypatch):
-        monkeypatch.setattr(app, "_nets_scheduled_today", lambda: [])
-        assert app._relay_nets_today_text() == ""
+        monkeypatch.setattr(app, "_connectors_scheduled_today", lambda: [])
+        assert app._relay_connectors_today_text() == ""
 
-    def test_formats_name_and_utc_time(self, monkeypatch):
-        # Confirms the ticker uses utc_time (Zulu), not the raw kiosk-local
-        # 'time' field -- showing kiosk-local net times next to the
-        # overlay's own Zulu clock was reported as confusing.
-        monkeypatch.setattr(app, "_nets_scheduled_today", lambda: [
-            {"name": "Weekly Net", "time": "16:00", "utc_time": "20:00Z"},
-            {"name": "Emergency Net", "time": "17:30", "utc_time": "21:30Z"},
+    def test_formats_name_target_and_utc_time(self, monkeypatch):
+        monkeypatch.setattr(app, "_connectors_scheduled_today", lambda: [
+            {"name": "Evening Net", "target_node": "546054", "utc_time": "20:00Z"},
+            {"name": "Backup Link", "target_node": "27339", "utc_time": "21:30Z"},
         ])
-        assert app._relay_nets_today_text() == "Today's Nets: Weekly Net 20:00Z, Emergency Net 21:30Z"
+        assert app._relay_connectors_today_text() == (
+            "Smart Connector: Evening Net → 546054 20:00Z, Backup Link → 27339 21:30Z"
+        )
 
-    def test_a_net_with_no_convertible_time_is_skipped(self, monkeypatch):
-        monkeypatch.setattr(app, "_nets_scheduled_today", lambda: [
-            {"name": "Broken Net", "time": "bad", "utc_time": None},
-            {"name": "Good Net", "time": "20:00", "utc_time": "20:00Z"},
+    def test_a_connector_with_no_convertible_time_is_skipped(self, monkeypatch):
+        monkeypatch.setattr(app, "_connectors_scheduled_today", lambda: [
+            {"name": "Broken", "target_node": "546054", "utc_time": None},
+            {"name": "Good", "target_node": "27339", "utc_time": "20:00Z"},
         ])
-        assert app._relay_nets_today_text() == "Today's Nets: Good Net 20:00Z"
+        assert app._relay_connectors_today_text() == "Smart Connector: Good → 27339 20:00Z"
 
     def test_lookup_raising_does_not_crash(self, monkeypatch):
         def _boom():
             raise RuntimeError("boom")
-        monkeypatch.setattr(app, "_nets_scheduled_today", _boom)
-        assert app._relay_nets_today_text() == ""
+        monkeypatch.setattr(app, "_connectors_scheduled_today", _boom)
+        assert app._relay_connectors_today_text() == ""
 
 
-class TestNetLocalTimeToUtc:
+class TestLocalTimeToUtc:
     def test_utc_zone_is_a_no_op_besides_the_z_suffix(self):
         import zoneinfo
-        result = app._net_local_time_to_utc("2026-07-27", "20:00", zoneinfo.ZoneInfo("UTC"))
+        result = app._local_time_to_utc("2026-07-27", "20:00", zoneinfo.ZoneInfo("UTC"))
         assert result == "20:00Z"
 
     def test_converts_us_eastern_to_utc_including_the_day_roll(self):
-        # This is the exact bug reported: net_schedules stores kiosk-local
-        # wall-clock time with no timezone, so a naive display next to a
-        # Zulu clock silently mixed zones. 2026-07-27 is during EDT
-        # (UTC-4), so 20:00 Eastern is 00:00Z the *next* day.
+        # This is the exact bug reported: connect_time/net times are
+        # stored as kiosk-local wall-clock with no timezone attached, so
+        # a naive display next to a Zulu clock silently mixed zones.
+        # 2026-07-27 is during EDT (UTC-4), so 20:00 Eastern is 00:00Z
+        # the *next* day.
         import zoneinfo
-        result = app._net_local_time_to_utc("2026-07-27", "20:00", zoneinfo.ZoneInfo("America/New_York"))
+        result = app._local_time_to_utc("2026-07-27", "20:00", zoneinfo.ZoneInfo("America/New_York"))
         assert result == "00:00Z"
 
     def test_unparseable_date_returns_none_not_raise(self):
         import zoneinfo
-        assert app._net_local_time_to_utc("", "20:00", zoneinfo.ZoneInfo("UTC")) is None
+        assert app._local_time_to_utc("", "20:00", zoneinfo.ZoneInfo("UTC")) is None
 
     def test_unparseable_time_returns_none_not_raise(self):
         import zoneinfo
-        assert app._net_local_time_to_utc("2026-07-27", "not-a-time", zoneinfo.ZoneInfo("UTC")) is None
+        assert app._local_time_to_utc("2026-07-27", "not-a-time", zoneinfo.ZoneInfo("UTC")) is None

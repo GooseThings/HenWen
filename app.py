@@ -9397,12 +9397,12 @@ def _relay_connected_nodes_text(node):
     return 'Connected: ' + ', '.join(labels)
 
 
-def _net_local_time_to_utc(date_str, time_str, tz):
-    """Combine a net's stored kiosk-local date + HH:MM (net_schedules
-    stores plain wall-clock time, no timezone, same as the board's own
-    net list) into a tz-aware datetime and convert to UTC -- the relay
-    overlay's clock is Zulu (ham radio convention), so a net time shown
-    alongside it must be Zulu too, not silently mismatched. Returns
+def _local_time_to_utc(date_str, time_str, tz):
+    """Combine a plain kiosk-local date + HH:MM (no timezone attached,
+    the storage convention both net_schedules and connectors.connect_time
+    use) into a tz-aware datetime and convert to UTC -- the relay
+    overlay's clock is Zulu (ham radio convention), so any other time
+    shown alongside it must be Zulu too, not silently mismatched. Returns
     'HH:MMZ', or None if the date/time can't be parsed."""
     try:
         y, m, d = (int(x) for x in date_str.split('-'))
@@ -9413,18 +9413,16 @@ def _net_local_time_to_utc(date_str, time_str, tz):
         return None
 
 
-def _nets_scheduled_today(tz_name=None):
-    """net_schedules rows landing on 'today' in the given (or configured
-    kiosk_timezone) zone, each with a 'utc_time' key added (see
-    _net_local_time_to_utc). Mirrors status.html's netTodayMinutes()/
-    _kioskWeekdayToday() client-side "is this today" logic, server-side --
-    that JS only runs in a kiosk browser tab, which the relay overlay has
-    none of. "Today" itself is still decided in kiosk-local terms (the
-    club's own operational day), only the displayed time is converted --
-    Python's datetime.weekday() is already 0=Monday..6=Sunday, the same
-    convention net_schedules.weekday is stored in, so unlike the JS side
-    (which converts from JS Date's 0=Sunday) no remapping is needed
-    there."""
+def _connectors_scheduled_today(tz_name=None):
+    """Enabled Smart Connectors whose schedule lands on 'today' (00:00 to
+    23:59, the given or configured kiosk_timezone zone) with a connect
+    time still ahead of now, each with a 'utc_time' key added (see
+    _local_time_to_utc). connect_time is plain wall-clock with no
+    timezone attached, evaluated by the scheduler itself
+    (_run_connectors) against naive datetime.now() -- kiosk_timezone is
+    the closest configured stand-in for "the timezone the node is set
+    to" the overlay needs, same convention used for the net-schedule
+    display this replaced."""
     import zoneinfo
     tz_name = tz_name or get_setting('kiosk_timezone', 'UTC')
     try:
@@ -9433,47 +9431,45 @@ def _nets_scheduled_today(tz_name=None):
         tz = timezone.utc
     now = datetime.now(tz)
     today_date = now.strftime('%Y-%m-%d')
-    today_wd = now.weekday()
-    rows = get_db().execute("SELECT * FROM net_schedules").fetchall()
+    now_hm = now.strftime('%H:%M')
+    rows = get_db().execute("SELECT * FROM connectors WHERE enabled=1").fetchall()
     todays = []
     for row in rows:
+        if not row['connect_time'] or row['connect_time'] < now_hm:
+            continue
+        if not _connector_date_matches(row, now):
+            continue
         r = dict(row)
-        if r.get('recurrence') == 'once':
-            if r.get('net_date') != today_date:
-                continue
-            net_date = r.get('net_date')
-        else:
-            if r.get('weekday') != today_wd:
-                continue
-            net_date = today_date
-        r['utc_time'] = _net_local_time_to_utc(net_date, r.get('time'), tz)
+        r['utc_time'] = _local_time_to_utc(today_date, r['connect_time'], tz)
         todays.append(r)
-    todays.sort(key=lambda r: r.get('time') or '')
+    todays.sort(key=lambda r: r.get('connect_time') or '')
     return todays
 
 
-def _relay_nets_today_text():
-    """'Today's Nets: Name HH:MMZ, Name2 HH:MMZ' for nets scheduled today
-    (kiosk-local day, Zulu time), or '' when none -- times are converted
-    to UTC so they match the overlay's own Zulu clock instead of silently
-    mixing zones."""
+def _relay_connectors_today_text():
+    """'Smart Connector: Name → Target HH:MMZ, ...' for today's still-
+    upcoming Smart Connector connections (kiosk-local day, Zulu time), or
+    '' when none."""
     try:
-        todays = _nets_scheduled_today()
+        todays = _connectors_scheduled_today()
     except Exception as e:
-        log('WARN', f'[STREAM-RELAY] scheduled-nets lookup for ticker failed: {e}')
+        log('WARN', f'[STREAM-RELAY] scheduled-connectors lookup for ticker failed: {e}')
         return ''
-    bits = [f"{r['name']} {r['utc_time']}" for r in todays if r.get('name') and r.get('utc_time')]
+    bits = [f"{r['name']} → {r['target_node']} {r['utc_time']}"
+            for r in todays if r.get('name') and r.get('utc_time')]
     if not bits:
         return ''
-    return "Today's Nets: " + ', '.join(bits)
+    return 'Smart Connector: ' + ', '.join(bits)
 
 
 def _build_relay_ticker_text(node):
     """Weather, active NWS alerts, currently-connected peers, and today's
-    scheduled nets for the relayed node -- reusing the exact same
-    _fetch_weather()/get_nws_display_alerts()/get_cached_status()/
-    net_schedules data the kiosk board's own widgets already draw from,
-    just reformatted as one scrolling line instead of separate widgets."""
+    still-upcoming Smart Connector connections for the relayed node --
+    reusing the exact same _fetch_weather()/get_nws_display_alerts()/
+    get_cached_status()/connectors data the kiosk board's own widgets
+    already draw from, just reformatted as one scrolling line instead of
+    separate widgets. Deliberately does not include net_schedules
+    (calendar) entries -- explicitly requested off the overlay."""
     parts = []
     try:
         location = lookup_node(node).get('location', '')
@@ -9493,9 +9489,9 @@ def _build_relay_ticker_text(node):
     connected_bit = _relay_connected_nodes_text(node)
     if connected_bit:
         parts.append(connected_bit)
-    nets_bit = _relay_nets_today_text()
-    if nets_bit:
-        parts.append(nets_bit)
+    connectors_bit = _relay_connectors_today_text()
+    if connectors_bit:
+        parts.append(connectors_bit)
     if not parts:
         return ''
     return '   //   '.join(parts) + '   //   '
@@ -9951,12 +9947,13 @@ def _connector_link_present(local: str, target: str) -> bool:
     return target in cached.get("connected", [])
 
 
-def _connector_should_fire(row, now):
-    """Return True if this connector's schedule says it should trigger right now."""
-    if not row["connect_time"]:
-        return False
-    if now.strftime("%H:%M") != row["connect_time"]:
-        return False
+def _connector_date_matches(row, now):
+    """Does this connector's schedule pattern (schedule_type/schedule_days)
+    land on `now`'s calendar date, independent of connect_time's exact
+    minute? Split out of _connector_should_fire so schedule *display* (the
+    relay overlay's "today's Smart Connectors" ticker) can ask "is this
+    scheduled today" without also requiring the trigger minute to have
+    already arrived."""
     stype = row["schedule_type"] or "daily"
     sdays = row["schedule_days"] or ""
 
@@ -10013,6 +10010,15 @@ def _connector_should_fire(row, now):
         except (ValueError, AttributeError):
             return False
     return False
+
+
+def _connector_should_fire(row, now):
+    """Return True if this connector's schedule says it should trigger right now."""
+    if not row["connect_time"]:
+        return False
+    if now.strftime("%H:%M") != row["connect_time"]:
+        return False
+    return _connector_date_matches(row, now)
 
 
 def _connector_upcoming_disconnect_all():
