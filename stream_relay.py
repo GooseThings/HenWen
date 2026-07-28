@@ -86,6 +86,13 @@ def build_youtube_output_args(rtmp_url, stream_key):
     each half only ever has to fill its own correctly-sized 640px region
     rather than one attempt spanning the full width.
 
+    The *right* copy (wb) is the one that gets hflip'd, with the
+    unflipped copy (wa) placed on the left -- flipping the left copy
+    instead (as an earlier version did) made both halves scroll from
+    the outer edges inward; swapping which side is flipped reverses
+    that so motion originates at the center and moves outward instead,
+    per feedback after watching it live.
+
     Verified interactively via an ffmpeg-as-RTMP-server loopback: valid
     FLV with synced H.264 video (visibly non-blank frames, confirmed via
     frame extraction) + AAC audio."""
@@ -94,8 +101,8 @@ def build_youtube_output_args(rtmp_url, stream_key):
         "[0:a]aformat=channel_layouts=mono,"
         f"showwaves=s=640x720:mode=cline:rate={YOUTUBE_VIDEO_FPS}:colors=0x00cc66,"
         "scale=640:720,split=2[wa][wb];"
-        "[wa]hflip[wf];"
-        "[wf][wb]hstack=inputs=2[v]"
+        "[wb]hflip[wf];"
+        "[wa][wf]hstack=inputs=2[v]"
     )
     return [
         "-filter_complex", filter_complex,
