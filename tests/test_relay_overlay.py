@@ -1,0 +1,65 @@
+"""Tests for the YouTube relay's text overlay content-building logic in
+app.py (_build_relay_ticker_text). The actual rendering (drawtext filter
+syntax, textfile=...:reload=1 mechanism) lives in stream_relay.py and is
+covered there; this only covers how app.py assembles the ticker string
+from weather + NWS alert data, with those data sources stubbed out so
+the test doesn't depend on network access or real NWS poller state.
+"""
+import app
+
+
+class TestBuildRelayTickerText:
+    def test_combines_weather_and_alerts_with_separator(self, monkeypatch):
+        monkeypatch.setattr(app, "lookup_node", lambda node: {"location": "Kenosha, WI"})
+        monkeypatch.setattr(app, "_fetch_weather", lambda loc: {
+            "temp_f": "72", "desc": "Partly Cloudy", "error": None,
+        })
+        monkeypatch.setattr(app, "get_nws_display_alerts", lambda: [
+            {"text": "Severe Thunderstorm Warning until 5 PM for Kenosha"},
+        ])
+        text = app._build_relay_ticker_text("546054")
+        assert text == "72°F Partly Cloudy   //   Severe Thunderstorm Warning until 5 PM for Kenosha   //   "
+
+    def test_weather_only_when_no_alerts(self, monkeypatch):
+        monkeypatch.setattr(app, "lookup_node", lambda node: {"location": "Kenosha, WI"})
+        monkeypatch.setattr(app, "_fetch_weather", lambda loc: {
+            "temp_f": "72", "desc": "Partly Cloudy", "error": None,
+        })
+        monkeypatch.setattr(app, "get_nws_display_alerts", lambda: [])
+        text = app._build_relay_ticker_text("546054")
+        assert text == "72°F Partly Cloudy   //   "
+
+    def test_alerts_only_when_weather_unavailable(self, monkeypatch):
+        monkeypatch.setattr(app, "lookup_node", lambda node: {"location": "Kenosha, WI"})
+        monkeypatch.setattr(app, "_fetch_weather", lambda loc: {"error": "Weather unavailable"})
+        monkeypatch.setattr(app, "get_nws_display_alerts", lambda: [
+            {"text": "Tornado Watch until 9 PM"},
+        ])
+        text = app._build_relay_ticker_text("546054")
+        assert text == "Tornado Watch until 9 PM   //   "
+
+    def test_empty_when_nothing_available(self, monkeypatch):
+        monkeypatch.setattr(app, "lookup_node", lambda node: {"location": ""})
+        monkeypatch.setattr(app, "_fetch_weather", lambda loc: {"error": "No location configured"})
+        monkeypatch.setattr(app, "get_nws_display_alerts", lambda: [])
+        assert app._build_relay_ticker_text("546054") == ""
+
+    def test_multiple_alerts_all_included(self, monkeypatch):
+        monkeypatch.setattr(app, "lookup_node", lambda node: {"location": ""})
+        monkeypatch.setattr(app, "_fetch_weather", lambda loc: {"error": "No location configured"})
+        monkeypatch.setattr(app, "get_nws_display_alerts", lambda: [
+            {"text": "Alert One"}, {"text": "Alert Two"},
+        ])
+        text = app._build_relay_ticker_text("546054")
+        assert text == "Alert One   //   Alert Two   //   "
+
+    def test_a_data_source_raising_does_not_crash_the_ticker(self, monkeypatch):
+        # Weather/NWS lookups reach out to caches and (indirectly) the
+        # network -- a transient failure in either must not take down the
+        # relay's overlay, just degrade to whatever the other source has.
+        def _boom(*a, **k):
+            raise RuntimeError("boom")
+        monkeypatch.setattr(app, "lookup_node", _boom)
+        monkeypatch.setattr(app, "get_nws_display_alerts", lambda: [{"text": "Still works"}])
+        text = app._build_relay_ticker_text("546054")
+        assert text == "Still works   //   "

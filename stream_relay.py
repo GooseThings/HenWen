@@ -28,8 +28,39 @@ Pipeline:
            process dying or reconnecting never touches the other or the
            decode stage.
 """
+import os
 import subprocess
 import threading
+
+# Overlay text is read by ffmpeg from small files (drawtext's
+# textfile=...:reload=1) rather than embedded inline in the filter
+# graph -- avoids ffmpeg's notoriously fragile escaping for
+# dynamic/user-provided text (a callsign, URL, or NWS alert headline
+# containing a colon or quote would need careful escaping across two
+# separate parser layers), and lets app.py update the content (clock
+# every ~1s, weather/NWS every ~60s) without restarting the relay.
+# Fixed paths rather than per-session names: only one relay runs at a
+# time (see stream_relay_config's single-target-node design), so
+# there's nothing to disambiguate.
+STATION_OVERLAY_FILE = "/tmp/henwen_relay_overlay_station.txt"
+CLOCK_OVERLAY_FILE   = "/tmp/henwen_relay_overlay_clock.txt"
+WEBSITE_OVERLAY_FILE = "/tmp/henwen_relay_overlay_website.txt"
+TICKER_OVERLAY_FILE  = "/tmp/henwen_relay_overlay_ticker.txt"
+
+_OVERLAY_FONT_CANDIDATES = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+]
+
+
+def _overlay_font():
+    """First available font from the candidate list, or None. Checked at
+    Relay-build time rather than assumed, so a system missing both falls
+    back to no text overlay instead of failing the whole relay."""
+    for path in _OVERLAY_FONT_CANDIDATES:
+        if os.path.exists(path):
+            return path
+    return None
 
 
 def build_broadcastify_output_args(host, port, mount, user, password):
@@ -93,20 +124,49 @@ def build_youtube_output_args(rtmp_url, stream_key):
     that so motion originates at the center and moves outward instead,
     per feedback after watching it live.
 
+    Text overlay: station callsign/node (top-left), a live clock
+    (top-right), a configured website line (bottom-left), and a
+    scrolling weather/NWS-alert ticker (bottom), each read from one of
+    the OVERLAY_FILE constants above -- app.py is responsible for
+    creating those files (even if empty) before this target's ffmpeg
+    process starts, and keeping the clock/ticker ones refreshed while
+    it runs. Falls back to no overlay at all, just the plain waveform,
+    if no usable font is found on this system (_overlay_font()) rather
+    than failing the whole relay.
+
     Verified interactively via an ffmpeg-as-RTMP-server loopback: valid
     FLV with synced H.264 video (visibly non-blank frames, confirmed via
-    frame extraction) + AAC audio."""
+    frame extraction) + AAC audio, and separately confirmed each text
+    layer renders and the clock/ticker actually update via reload=1."""
     url = rtmp_url.rstrip("/") + "/" + stream_key
-    filter_complex = (
+    base_filter = (
         "[0:a]aformat=channel_layouts=mono,"
         f"showwaves=s=640x720:mode=cline:rate={YOUTUBE_VIDEO_FPS}:colors=0x00cc66,"
         "scale=640:720,split=2[wa][wb];"
         "[wb]hflip[wf];"
-        "[wa][wf]hstack=inputs=2[v]"
+        "[wa][wf]hstack=inputs=2[v0]"
     )
+    font = _overlay_font()
+    if font:
+        filter_complex = (
+            base_filter + ";"
+            f"[v0]drawtext=fontfile={font}:textfile={STATION_OVERLAY_FILE}:"
+            "fontsize=28:fontcolor=white:x=20:y=20:box=1:boxcolor=black@0.5:boxborderw=8[v1];"
+            f"[v1]drawtext=fontfile={font}:textfile={CLOCK_OVERLAY_FILE}:reload=1:"
+            "fontsize=28:fontcolor=white:x=w-tw-20:y=20:box=1:boxcolor=black@0.5:boxborderw=8[v2];"
+            f"[v2]drawtext=fontfile={font}:textfile={WEBSITE_OVERLAY_FILE}:reload=1:"
+            "fontsize=20:fontcolor=white:x=20:y=h-th-70:box=1:boxcolor=black@0.5:boxborderw=6[v3];"
+            f"[v3]drawtext=fontfile={font}:textfile={TICKER_OVERLAY_FILE}:reload=1:"
+            "fontsize=22:fontcolor=yellow:x=w-mod(t*80\\,w+tw):y=h-th-20:"
+            "box=1:boxcolor=black@0.6:boxborderw=6[vout]"
+        )
+        video_label = "[vout]"
+    else:
+        filter_complex = base_filter
+        video_label = "[v0]"
     return [
         "-filter_complex", filter_complex,
-        "-map", "[v]", "-map", "0:a",
+        "-map", video_label, "-map", "0:a",
         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
         "-g", str(YOUTUBE_GOP_FRAMES), "-keyint_min", str(YOUTUBE_GOP_FRAMES),
         "-sc_threshold", "0",

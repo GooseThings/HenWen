@@ -1377,6 +1377,19 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
       </div>
     </div>
 
+    <div class="card" style="max-width:620px">
+      <div class="card-header"><h2>YouTube Video Overlay</h2></div>
+      <div class="card-body">
+        <div style="font-size:0.75rem;color:var(--text2);margin-bottom:10px">
+          The YouTube feed's waveform video always shows the node's callsign/number and a live clock automatically, plus a scrolling weather &amp; active weather-alert ticker. The line below is the only part you configure.
+        </div>
+        <div>
+          <label class="toggle-label" style="display:block;margin-bottom:3px">Website (shown on the overlay)</label>
+          <input type="text" id="relay-overlay-website" class="val-input" placeholder="www.example.org" style="width:100%">
+        </div>
+      </div>
+    </div>
+
     <button class="btn btn-primary" onclick="relaySave()">Save</button>
     <div id="relay-status" style="margin-top:8px;font-size:0.82rem"></div>
   </section>
@@ -5271,6 +5284,7 @@ async function relayLoad() {
   document.getElementById('relay-yt-enabled').checked = !!d.youtube_enabled;
   document.getElementById('relay-yt-url').value = d.youtube_rtmp_url || '';
   document.getElementById('relay-yt-key').value = d.youtube_stream_key || '';
+  document.getElementById('relay-overlay-website').value = d.overlay_website || '';
   relayLoadStatus();
 }
 
@@ -5322,6 +5336,7 @@ async function relaySave() {
     youtube_enabled:        document.getElementById('relay-yt-enabled').checked,
     youtube_rtmp_url:       document.getElementById('relay-yt-url').value.trim(),
     youtube_stream_key:     document.getElementById('relay-yt-key').value.trim(),
+    overlay_website:        document.getElementById('relay-overlay-website').value.trim(),
   };
   var r = await api('/api/stream-relay/config', {
     method:  'PUT',

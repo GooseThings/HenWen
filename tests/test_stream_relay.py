@@ -60,7 +60,30 @@ class TestBuildYoutubeOutputArgs:
             rtmp_url="rtmp://host/live", stream_key="key")
         assert any("showwaves" in a for a in args)
         assert "[0:a]" in args[args.index("-filter_complex") + 1]
-        assert "-map" in args and "[v]" in args
+        video_label = args[args.index("-map") + 1]
+        assert video_label in ("[v0]", "[vout]")
+
+    def test_text_overlay_included_when_a_font_is_available(self, monkeypatch):
+        monkeypatch.setattr(stream_relay, "_overlay_font", lambda: "/fake/font.ttf")
+        args = stream_relay.build_youtube_output_args(
+            rtmp_url="rtmp://host/live", stream_key="key")
+        fc = args[args.index("-filter_complex") + 1]
+        assert "drawtext" in fc
+        assert stream_relay.STATION_OVERLAY_FILE in fc
+        assert stream_relay.CLOCK_OVERLAY_FILE in fc
+        assert stream_relay.WEBSITE_OVERLAY_FILE in fc
+        assert stream_relay.TICKER_OVERLAY_FILE in fc
+        assert args[args.index("-map") + 1] == "[vout]"
+
+    def test_falls_back_to_plain_waveform_when_no_font_available(self, monkeypatch):
+        # A system missing every candidate font must not fail the whole
+        # relay -- just skip the text overlay.
+        monkeypatch.setattr(stream_relay, "_overlay_font", lambda: None)
+        args = stream_relay.build_youtube_output_args(
+            rtmp_url="rtmp://host/live", stream_key="key")
+        fc = args[args.index("-filter_complex") + 1]
+        assert "drawtext" not in fc
+        assert args[args.index("-map") + 1] == "[v0]"
         assert "-c:v" in args
         # Output muxer is the last "-f flv", right before the destination URL.
         assert args[-3:-1] == ["-f", "flv"]

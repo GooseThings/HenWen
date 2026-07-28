@@ -610,8 +610,16 @@ def get_db():
         broadcastify_pass    TEXT    NOT NULL DEFAULT '',
         youtube_enabled      INTEGER NOT NULL DEFAULT 0,
         youtube_rtmp_url     TEXT    NOT NULL DEFAULT '',
-        youtube_stream_key   TEXT    NOT NULL DEFAULT ''
+        youtube_stream_key   TEXT    NOT NULL DEFAULT '',
+        overlay_website      TEXT    NOT NULL DEFAULT ''
     )""")
+    _relay_cfg_cols = {r[1] for r in conn.execute("PRAGMA table_info(stream_relay_config)").fetchall()}
+    if 'overlay_website' not in _relay_cfg_cols:
+        # Shown as a static line on the YouTube video overlay, alongside
+        # the node's callsign/number and a live clock -- see
+        # build_youtube_output_args() in stream_relay.py. Not hardcoded
+        # to any one club's URL since other installs use this too.
+        conn.execute("ALTER TABLE stream_relay_config ADD COLUMN overlay_website TEXT NOT NULL DEFAULT ''")
     conn.commit()
     # Per-node lockout: presence of a row means that node is locked by its
     # Owner. Only one lockout state per node, so `node` is the primary key
@@ -9081,6 +9089,7 @@ STREAM_RELAY_CONFIG_DEFAULTS = {
     "broadcastify_enabled": False, "broadcastify_host": "", "broadcastify_port": 0,
     "broadcastify_mount": "", "broadcastify_user": "", "broadcastify_pass": "",
     "youtube_enabled": False, "youtube_rtmp_url": "", "youtube_stream_key": "",
+    "overlay_website": "",
 }
 
 
@@ -9225,16 +9234,21 @@ def api_stream_relay_config_save():
     if (broadcastify_enabled or youtube_enabled) and not re.match(r'^\d{4,7}$', target_node):
         return jsonify({"error": "A valid target node number is required to enable relay"}), 400
 
+    # Shown as a static line on the YouTube video overlay -- see
+    # build_youtube_output_args(). Free text, not validated as a URL:
+    # it's just displayed, never fetched or linked.
+    overlay_website = str(data.get("overlay_website", "")).strip()
+
     db = get_db()
     db.execute(
         """INSERT OR REPLACE INTO stream_relay_config
            (id, target_node, broadcastify_enabled, broadcastify_host, broadcastify_port,
             broadcastify_mount, broadcastify_user, broadcastify_pass,
-            youtube_enabled, youtube_rtmp_url, youtube_stream_key)
-           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            youtube_enabled, youtube_rtmp_url, youtube_stream_key, overlay_website)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (target_node, int(broadcastify_enabled), broadcastify_host, broadcastify_port,
          broadcastify_mount, broadcastify_user, broadcastify_pass,
-         int(youtube_enabled), youtube_rtmp_url, youtube_stream_key)
+         int(youtube_enabled), youtube_rtmp_url, youtube_stream_key, overlay_website)
     )
     db.commit()
     log("INFO", f"[STREAM-RELAY] Config saved by {session.get('username', '')}")
@@ -9272,6 +9286,70 @@ def _build_relay_targets(cfg):
     return targets
 
 
+def _write_relay_overlay_static_files(node, cfg):
+    """Station callsign/number and the configured website line don't
+    change while a relay session runs -- written once at session start.
+    Also seeds the clock/ticker files with real content immediately
+    rather than leaving them at whatever stale value (or nonexistent
+    file) a previous session left behind, since ffmpeg's drawtext reads
+    them once at filter-graph setup before reload=1 ever kicks in."""
+    try:
+        info = lookup_node(node)
+        callsign = (info.get('callsign') or '').strip()
+        station_text = f"{callsign} — Node {node}" if callsign else f"Node {node}"
+        with open(stream_relay.STATION_OVERLAY_FILE, 'w') as f:
+            f.write(station_text)
+        with open(stream_relay.WEBSITE_OVERLAY_FILE, 'w') as f:
+            f.write((cfg.get('overlay_website') or '').strip())
+    except Exception as e:
+        log('WARN', f'[STREAM-RELAY] could not write overlay station/website files: {e}')
+    _write_relay_clock_file()
+    _write_relay_ticker_file(node)
+
+
+def _write_relay_clock_file():
+    try:
+        with open(stream_relay.CLOCK_OVERLAY_FILE, 'w') as f:
+            f.write(datetime.now().strftime('%I:%M:%S %p'))
+    except Exception:
+        pass
+
+
+def _build_relay_ticker_text(node):
+    """Weather + active NWS alerts for the relayed node's own location,
+    reusing the exact same _fetch_weather()/get_nws_display_alerts() the
+    kiosk board's weather bar and alert ticker already call -- same data,
+    same 10-minute weather cache, same NWS poller-maintained alert list,
+    just reformatted as one scrolling line instead of separate widgets."""
+    parts = []
+    try:
+        location = lookup_node(node).get('location', '')
+        weather = _fetch_weather(location) if location else {}
+        if weather and not weather.get('error'):
+            temp = weather.get('temp_f', '')
+            desc = weather.get('desc', '')
+            bit = f"{temp}°F {desc}".strip() if (temp or desc) else ''
+            if bit:
+                parts.append(bit)
+    except Exception as e:
+        log('WARN', f'[STREAM-RELAY] weather lookup for ticker failed: {e}')
+    try:
+        parts.extend(a['text'] for a in get_nws_display_alerts() if a.get('text'))
+    except Exception as e:
+        log('WARN', f'[STREAM-RELAY] NWS alert lookup for ticker failed: {e}')
+    if not parts:
+        return ''
+    return '   //   '.join(parts) + '   //   '
+
+
+def _write_relay_ticker_file(node):
+    try:
+        with open(stream_relay.TICKER_OVERLAY_FILE, 'w') as f:
+            f.write(_build_relay_ticker_text(node))
+    except Exception as e:
+        log('WARN', f'[STREAM-RELAY] could not write ticker file: {e}')
+
+
 def _stream_relay_loop():
     global _relay_instance, _relay_status_cache
     while True:
@@ -9297,12 +9375,19 @@ def _stream_relay_loop():
             time.sleep(15)
             continue
 
+        # Overlay files must exist before Relay spawns the YouTube ffmpeg
+        # process below -- drawtext's textfile= fails filter-graph setup
+        # against a missing file, and reload=1 only takes over from there.
+        if 'youtube' in targets_wanted:
+            _write_relay_overlay_static_files(node, cfg)
+
         relay = stream_relay.Relay(targets=targets_wanted, log_fn=lambda msg: log('WARN', msg))
         with _relay_lock:
             _relay_instance = relay
         log('INFO', f'[STREAM-RELAY] started for node {node}, targets={list(targets_wanted)}')
         try:
             last_cfg_check = time.monotonic()
+            last_ticker_update = time.monotonic()
             while True:
                 try:
                     chunk = client_q.get(timeout=1.0)
@@ -9315,6 +9400,14 @@ def _stream_relay_loop():
                     relay.feed(chunk)
                 with _relay_lock:
                     _relay_status_cache = relay.status()
+                if 'youtube' in targets_wanted:
+                    # Cheap -- one small file write -- so just do it every
+                    # loop tick (~1s, per the queue.get timeout above)
+                    # rather than tracking yet another timestamp.
+                    _write_relay_clock_file()
+                    if time.monotonic() - last_ticker_update > 60:
+                        last_ticker_update = time.monotonic()
+                        _write_relay_ticker_file(node)
                 if time.monotonic() - last_cfg_check > 30:
                     last_cfg_check = time.monotonic()
                     new_cfg = _get_stream_relay_config()
