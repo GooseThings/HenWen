@@ -189,6 +189,7 @@ class TestNetsScheduledToday:
 
         todays = app._nets_scheduled_today()
         assert [r["name"] for r in todays] == ["Weekly Net"]
+        assert todays[0]["utc_time"] == "20:00Z"
 
     def test_once_net_matches_todays_date_only(self, monkeypatch):
         fixed_now = app.datetime(2026, 7, 27, 12, 0, tzinfo=app.timezone.utc)
@@ -243,15 +244,49 @@ class TestRelayNetsTodayText:
         monkeypatch.setattr(app, "_nets_scheduled_today", lambda: [])
         assert app._relay_nets_today_text() == ""
 
-    def test_formats_name_and_time(self, monkeypatch):
+    def test_formats_name_and_utc_time(self, monkeypatch):
+        # Confirms the ticker uses utc_time (Zulu), not the raw kiosk-local
+        # 'time' field -- showing kiosk-local net times next to the
+        # overlay's own Zulu clock was reported as confusing.
         monkeypatch.setattr(app, "_nets_scheduled_today", lambda: [
-            {"name": "Weekly Net", "time": "20:00"},
-            {"name": "Emergency Net", "time": "21:30"},
+            {"name": "Weekly Net", "time": "16:00", "utc_time": "20:00Z"},
+            {"name": "Emergency Net", "time": "17:30", "utc_time": "21:30Z"},
         ])
-        assert app._relay_nets_today_text() == "Today's Nets: Weekly Net 20:00, Emergency Net 21:30"
+        assert app._relay_nets_today_text() == "Today's Nets: Weekly Net 20:00Z, Emergency Net 21:30Z"
+
+    def test_a_net_with_no_convertible_time_is_skipped(self, monkeypatch):
+        monkeypatch.setattr(app, "_nets_scheduled_today", lambda: [
+            {"name": "Broken Net", "time": "bad", "utc_time": None},
+            {"name": "Good Net", "time": "20:00", "utc_time": "20:00Z"},
+        ])
+        assert app._relay_nets_today_text() == "Today's Nets: Good Net 20:00Z"
 
     def test_lookup_raising_does_not_crash(self, monkeypatch):
         def _boom():
             raise RuntimeError("boom")
         monkeypatch.setattr(app, "_nets_scheduled_today", _boom)
         assert app._relay_nets_today_text() == ""
+
+
+class TestNetLocalTimeToUtc:
+    def test_utc_zone_is_a_no_op_besides_the_z_suffix(self):
+        import zoneinfo
+        result = app._net_local_time_to_utc("2026-07-27", "20:00", zoneinfo.ZoneInfo("UTC"))
+        assert result == "20:00Z"
+
+    def test_converts_us_eastern_to_utc_including_the_day_roll(self):
+        # This is the exact bug reported: net_schedules stores kiosk-local
+        # wall-clock time with no timezone, so a naive display next to a
+        # Zulu clock silently mixed zones. 2026-07-27 is during EDT
+        # (UTC-4), so 20:00 Eastern is 00:00Z the *next* day.
+        import zoneinfo
+        result = app._net_local_time_to_utc("2026-07-27", "20:00", zoneinfo.ZoneInfo("America/New_York"))
+        assert result == "00:00Z"
+
+    def test_unparseable_date_returns_none_not_raise(self):
+        import zoneinfo
+        assert app._net_local_time_to_utc("", "20:00", zoneinfo.ZoneInfo("UTC")) is None
+
+    def test_unparseable_time_returns_none_not_raise(self):
+        import zoneinfo
+        assert app._net_local_time_to_utc("2026-07-27", "not-a-time", zoneinfo.ZoneInfo("UTC")) is None

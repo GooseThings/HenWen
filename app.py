@@ -9397,21 +9397,41 @@ def _relay_connected_nodes_text(node):
     return 'Connected: ' + ', '.join(labels)
 
 
+def _net_local_time_to_utc(date_str, time_str, tz):
+    """Combine a net's stored kiosk-local date + HH:MM (net_schedules
+    stores plain wall-clock time, no timezone, same as the board's own
+    net list) into a tz-aware datetime and convert to UTC -- the relay
+    overlay's clock is Zulu (ham radio convention), so a net time shown
+    alongside it must be Zulu too, not silently mismatched. Returns
+    'HH:MMZ', or None if the date/time can't be parsed."""
+    try:
+        y, m, d = (int(x) for x in date_str.split('-'))
+        hh, mm = (int(x) for x in (time_str or '0:0').split(':'))
+        local_dt = datetime(y, m, d, hh, mm, tzinfo=tz)
+        return local_dt.astimezone(timezone.utc).strftime('%H:%MZ')
+    except Exception:
+        return None
+
+
 def _nets_scheduled_today(tz_name=None):
     """net_schedules rows landing on 'today' in the given (or configured
-    kiosk_timezone) zone. Mirrors status.html's netTodayMinutes()/
+    kiosk_timezone) zone, each with a 'utc_time' key added (see
+    _net_local_time_to_utc). Mirrors status.html's netTodayMinutes()/
     _kioskWeekdayToday() client-side "is this today" logic, server-side --
     that JS only runs in a kiosk browser tab, which the relay overlay has
-    none of. Python's datetime.weekday() is already 0=Monday..6=Sunday,
-    the same convention net_schedules.weekday is stored in, so unlike the
-    JS side (which converts from JS Date's 0=Sunday) no remapping is
-    needed here."""
+    none of. "Today" itself is still decided in kiosk-local terms (the
+    club's own operational day), only the displayed time is converted --
+    Python's datetime.weekday() is already 0=Monday..6=Sunday, the same
+    convention net_schedules.weekday is stored in, so unlike the JS side
+    (which converts from JS Date's 0=Sunday) no remapping is needed
+    there."""
     import zoneinfo
     tz_name = tz_name or get_setting('kiosk_timezone', 'UTC')
     try:
-        now = datetime.now(zoneinfo.ZoneInfo(tz_name))
+        tz = zoneinfo.ZoneInfo(tz_name)
     except Exception:
-        now = datetime.now(timezone.utc)
+        tz = timezone.utc
+    now = datetime.now(tz)
     today_date = now.strftime('%Y-%m-%d')
     today_wd = now.weekday()
     rows = get_db().execute("SELECT * FROM net_schedules").fetchall()
@@ -9421,24 +9441,28 @@ def _nets_scheduled_today(tz_name=None):
         if r.get('recurrence') == 'once':
             if r.get('net_date') != today_date:
                 continue
-        elif r.get('weekday') != today_wd:
-            continue
+            net_date = r.get('net_date')
+        else:
+            if r.get('weekday') != today_wd:
+                continue
+            net_date = today_date
+        r['utc_time'] = _net_local_time_to_utc(net_date, r.get('time'), tz)
         todays.append(r)
     todays.sort(key=lambda r: r.get('time') or '')
     return todays
 
 
 def _relay_nets_today_text():
-    """'Today's Nets: Name HH:MM, Name2 HH:MM' for nets scheduled today
-    (kiosk-local), or '' when none -- times are shown as stored (kiosk
-    wall-clock, no timezone conversion), same as the board's own nets
-    list."""
+    """'Today's Nets: Name HH:MMZ, Name2 HH:MMZ' for nets scheduled today
+    (kiosk-local day, Zulu time), or '' when none -- times are converted
+    to UTC so they match the overlay's own Zulu clock instead of silently
+    mixing zones."""
     try:
         todays = _nets_scheduled_today()
     except Exception as e:
         log('WARN', f'[STREAM-RELAY] scheduled-nets lookup for ticker failed: {e}')
         return ''
-    bits = [f"{r['name']} {r['time']}" for r in todays if r.get('name') and r.get('time')]
+    bits = [f"{r['name']} {r['utc_time']}" for r in todays if r.get('name') and r.get('utc_time')]
     if not bits:
         return ''
     return "Today's Nets: " + ', '.join(bits)
