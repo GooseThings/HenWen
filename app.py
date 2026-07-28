@@ -8858,10 +8858,19 @@ def _format_clock_time(dt: datetime) -> str:
     return dt.strftime("%-I %p") if dt.minute == 0 else dt.strftime("%-I:%M %p")
 
 
-def _nws_alert_spoken_text(alert: dict) -> str:
+def _nws_alert_spoken_text(alert: dict, fallback_area: str = "") -> str:
     """Build the spoken announcement string — templated, not the verbatim
     NWS headline, which includes wordy issue-time phrasing meant for text
-    display, not repeated speech."""
+    display, not repeated speech.
+
+    fallback_area (typically the configured zone/state's own area name,
+    e.g. "Michigan") is used only when the alert's own per-county
+    areaDesc comes back empty -- some NWS CAP products (particularly
+    broader watches) don't break area down into a semicolon-separated
+    county list the way most warnings do. Falling back to "your area"
+    in that case said nothing useful to a listener/viewer; naming the
+    configured region is a real improvement even though it's coarser
+    than per-county detail."""
     expires_str = ""
     if alert.get("expires"):
         try:
@@ -8871,7 +8880,7 @@ def _nws_alert_spoken_text(alert: dict) -> str:
     raw_area = alert.get("areaDesc", "") or ""
     event    = alert.get("event", "") or "Severe Weather Alert"
     counties = _join_with_and(_strip_state_names(raw_area).split(";"))
-    area_phrase = f"the following counties: {counties}" if counties else "your area"
+    area_phrase = f"the following counties: {counties}" if counties else (fallback_area or "your area")
     if expires_str:
         return f"{NWS_ALERT_SPOKEN_PREFIX}{event}. In effect for {area_phrase}, until {expires_str}."
     return f"{NWS_ALERT_SPOKEN_PREFIX}{event}. In effect for {area_phrase}."
@@ -8883,7 +8892,7 @@ def _nws_sync_alert(alert: dict, cfg: dict):
     exactly one code path for 'turn an alert dict into an announcement
     row' — the poller and manual test can't drift out of sync."""
     db     = get_db()
-    spoken = _nws_alert_spoken_text(alert)
+    spoken = _nws_alert_spoken_text(alert, fallback_area=cfg.get("zone_area_name", ""))
     row    = db.execute(
         "SELECT * FROM announcements WHERE source_type='nws_alert' AND external_id=?",
         (alert["vtec_key"],)
@@ -9308,9 +9317,12 @@ def _write_relay_overlay_static_files(node, cfg):
 
 
 def _write_relay_clock_file():
+    """UTC/Zulu, not server-local time -- the standard convention for
+    amateur radio net scheduling and logging, per feedback after seeing
+    the overlay live."""
     try:
         with open(stream_relay.CLOCK_OVERLAY_FILE, 'w') as f:
-            f.write(datetime.now().strftime('%I:%M:%S %p'))
+            f.write(datetime.utcnow().strftime('%H:%M:%SZ'))
     except Exception:
         pass
 
@@ -9653,7 +9665,7 @@ def _nws_alert_poll_loop():
                         _nws_display_cache[:] = [
                             {
                                 "event":    a["event"],
-                                "text":     _nws_alert_spoken_text(a),
+                                "text":     _nws_alert_spoken_text(a, fallback_area=cfg.get("zone_area_name", "")),
                                 "severity": a.get("severity", ""),
                                 "expires":  a.get("expires", ""),
                                 "vtec_key": a["vtec_key"],

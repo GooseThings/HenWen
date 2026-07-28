@@ -100,6 +100,21 @@ class TestNwsAlertSpokenText:
         text = app._nws_alert_spoken_text(alert)
         assert "In effect for your area." in text
 
+    def test_missing_area_desc_uses_configured_fallback_area_when_given(self):
+        # Some NWS CAP products (broader watches especially) don't break
+        # area down into a per-county list the way most warnings do --
+        # "your area" said nothing useful in that case; naming the
+        # configured zone/state is a real improvement.
+        alert = {"event": "Severe Thunderstorm Watch", "areaDesc": ""}
+        text = app._nws_alert_spoken_text(alert, fallback_area="Michigan")
+        assert "In effect for Michigan." in text
+
+    def test_real_county_list_takes_priority_over_fallback_area(self):
+        alert = {"event": "Tornado Warning", "areaDesc": "Kenosha, WI"}
+        text = app._nws_alert_spoken_text(alert, fallback_area="Wisconsin")
+        assert "In effect for the following counties: Kenosha." in text
+        assert "Wisconsin" not in text
+
     def test_missing_event_falls_back_to_generic_label(self):
         alert = {"areaDesc": "Kenosha, WI"}
         text = app._nws_alert_spoken_text(alert)

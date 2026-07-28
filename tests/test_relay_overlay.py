@@ -1,11 +1,28 @@
 """Tests for the YouTube relay's text overlay content-building logic in
-app.py (_build_relay_ticker_text). The actual rendering (drawtext filter
-syntax, textfile=...:reload=1 mechanism) lives in stream_relay.py and is
-covered there; this only covers how app.py assembles the ticker string
-from weather + NWS alert data, with those data sources stubbed out so
-the test doesn't depend on network access or real NWS poller state.
+app.py (_build_relay_ticker_text, _write_relay_clock_file). The actual
+rendering (drawtext filter syntax, textfile=...:reload=1 mechanism)
+lives in stream_relay.py and is covered there; this only covers how
+app.py assembles the ticker string from weather + NWS alert data, with
+those data sources stubbed out so the test doesn't depend on network
+access or real NWS poller state.
 """
+import re
+
+import stream_relay
+
 import app
+
+
+class TestWriteRelayClockFile:
+    def test_writes_utc_not_server_local_time(self, tmp_path, monkeypatch):
+        # Zulu/UTC is the standard convention for amateur radio net
+        # scheduling and logging -- confirmed via feedback after seeing
+        # server-local time on the overlay live.
+        clock_file = tmp_path / "clock.txt"
+        monkeypatch.setattr(stream_relay, "CLOCK_OVERLAY_FILE", str(clock_file))
+        app._write_relay_clock_file()
+        content = clock_file.read_text()
+        assert re.fullmatch(r"\d{2}:\d{2}:\d{2}Z", content), content
 
 
 class TestBuildRelayTickerText:
