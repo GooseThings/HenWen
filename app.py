@@ -9554,107 +9554,123 @@ def _write_relay_ticker_file(node):
 def _stream_relay_loop():
     global _relay_instance, _relay_status_cache
     while True:
-        cfg = _get_stream_relay_config()
-        node = (cfg or {}).get('target_node', '')
-        targets_wanted = _build_relay_targets(cfg)
-        if not targets_wanted or not re.match(r'^\d{4,7}$', node or ''):
-            with _relay_lock:
-                _relay_status_cache = {}
-            time.sleep(15)
-            continue
-
-        client_label = 'stream-relay'
+        # Every other background poller in this codebase (the AMI loop,
+        # connector scheduler, favstats, NWS, APRS) wraps its entire
+        # per-tick body in a top-level try/except that logs and continues
+        # -- this one didn't, and config-read/broadcast-attach/relay-
+        # construction below can all raise (a DB error, a bad broadcast
+        # state, ...). Without this, any of those would kill the whole
+        # daemon thread permanently: not a brief reconnect blip like the
+        # dead-target/dead-relay cases below already handle, but the
+        # entire relay going silent forever with nothing to restart it
+        # short of a full service restart.
         try:
-            with _audio_lock:
-                broadcast = _audio_active.get(node)
-                if broadcast is None or broadcast._dead:
-                    broadcast = _start_broadcast(node)
-                    _audio_active[node] = broadcast
-                client_q = broadcast.add_client(client_label)
-        except Exception as e:
-            log('WARN', f'[STREAM-RELAY] could not attach to node {node}: {e}')
-            time.sleep(15)
-            continue
-
-        # Overlay files must exist before Relay spawns the YouTube ffmpeg
-        # process below -- drawtext's textfile= fails filter-graph setup
-        # against a missing file, and reload=1 only takes over from there.
-        if 'youtube' in targets_wanted:
-            _write_relay_overlay_static_files(node, cfg)
-
-        relay = stream_relay.Relay(targets=targets_wanted, log_fn=lambda msg: log('WARN', msg))
-        with _relay_lock:
-            _relay_instance = relay
-        log('INFO', f'[STREAM-RELAY] started for node {node}, targets={list(targets_wanted)}')
-        try:
-            last_cfg_check = time.monotonic()
-            last_ticker_update = time.monotonic()
-            while True:
-                try:
-                    chunk = client_q.get(timeout=1.0)
-                except _queue_mod.Empty:
-                    chunk = False
-                if chunk is None:
-                    log('INFO', f'[STREAM-RELAY] broadcast for node {node} ended, reconnecting')
-                    break
-                if chunk is not False:
-                    relay.feed(chunk)
-                if not relay.alive:
-                    # relay's internal decode ffmpeg exited (crashed, or
-                    # rejected malformed input) -- confirmed live: without
-                    # this check the loop kept calling relay.feed() on a
-                    # dead relay forever (feed() swallows the resulting
-                    # BrokenPipeError), leaving both targets silently dark
-                    # until a full service restart, since nothing else in
-                    # this loop would ever notice.
-                    log('WARN', f'[STREAM-RELAY] relay for node {node} died unexpectedly, reconnecting')
-                    break
-                status = relay.status()
-                dead_targets = [name for name, s in status.items() if not s.get('connected')]
-                if dead_targets:
-                    # A single target's own ffmpeg process can die (crash,
-                    # or its outbound RTMP/Icecast connection failing hard
-                    # after a network blip) while the shared decode process
-                    # and every other target stay perfectly healthy --
-                    # relay.alive above only catches the *shared* pipeline
-                    # dying, not this. Without this check a target lost to
-                    # a transient internet drop would stay dark for the
-                    # rest of this relay session with nothing to notice or
-                    # restart it. Reconnecting the whole relay (not just
-                    # the dead target) is the simplest fix that reuses the
-                    # existing, already-tested reconnect path below --
-                    # costs the still-healthy target(s) a brief reconnect
-                    # blip too, which is a small price for closing this
-                    # gap.
-                    log('WARN', f'[STREAM-RELAY] target(s) {dead_targets} for node {node} disconnected '
-                                 f'(crash or network loss) -- reconnecting all targets')
-                    break
+            cfg = _get_stream_relay_config()
+            node = (cfg or {}).get('target_node', '')
+            targets_wanted = _build_relay_targets(cfg)
+            if not targets_wanted or not re.match(r'^\d{4,7}$', node or ''):
                 with _relay_lock:
-                    _relay_status_cache = status
-                if 'youtube' in targets_wanted:
-                    # Cheap -- one small file write -- so just do it every
-                    # loop tick (~1s, per the queue.get timeout above)
-                    # rather than tracking yet another timestamp.
-                    _write_relay_clock_file()
-                    if time.monotonic() - last_ticker_update > 60:
-                        last_ticker_update = time.monotonic()
-                        _write_relay_ticker_file(node)
-                if time.monotonic() - last_cfg_check > 30:
-                    last_cfg_check = time.monotonic()
-                    new_cfg = _get_stream_relay_config()
-                    if (_build_relay_targets(new_cfg) != targets_wanted
-                            or (new_cfg or {}).get('target_node') != node):
-                        log('INFO', '[STREAM-RELAY] config changed, reconnecting')
-                        break
-        except Exception as e:
-            log('ERROR', f'[STREAM-RELAY] loop error: {e}\n{traceback.format_exc()}')
-        finally:
-            broadcast.remove_client(client_q, client_label)
-            relay.stop()
+                    _relay_status_cache = {}
+                time.sleep(15)
+                continue
+
+            client_label = 'stream-relay'
+            try:
+                with _audio_lock:
+                    broadcast = _audio_active.get(node)
+                    if broadcast is None or broadcast._dead:
+                        broadcast = _start_broadcast(node)
+                        _audio_active[node] = broadcast
+                    client_q = broadcast.add_client(client_label)
+            except Exception as e:
+                log('WARN', f'[STREAM-RELAY] could not attach to node {node}: {e}')
+                time.sleep(15)
+                continue
+
+            # Overlay files must exist before Relay spawns the YouTube ffmpeg
+            # process below -- drawtext's textfile= fails filter-graph setup
+            # against a missing file, and reload=1 only takes over from there.
+            if 'youtube' in targets_wanted:
+                _write_relay_overlay_static_files(node, cfg)
+
+            relay = stream_relay.Relay(targets=targets_wanted, log_fn=lambda msg: log('WARN', msg))
             with _relay_lock:
-                _relay_instance = None
+                _relay_instance = relay
+            log('INFO', f'[STREAM-RELAY] started for node {node}, targets={list(targets_wanted)}')
+            try:
+                last_cfg_check = time.monotonic()
+                last_ticker_update = time.monotonic()
+                while True:
+                    try:
+                        chunk = client_q.get(timeout=1.0)
+                    except _queue_mod.Empty:
+                        chunk = False
+                    if chunk is None:
+                        log('INFO', f'[STREAM-RELAY] broadcast for node {node} ended, reconnecting')
+                        break
+                    if chunk is not False:
+                        relay.feed(chunk)
+                    if not relay.alive:
+                        # relay's internal decode ffmpeg exited (crashed, or
+                        # rejected malformed input) -- confirmed live: without
+                        # this check the loop kept calling relay.feed() on a
+                        # dead relay forever (feed() swallows the resulting
+                        # BrokenPipeError), leaving both targets silently dark
+                        # until a full service restart, since nothing else in
+                        # this loop would ever notice.
+                        log('WARN', f'[STREAM-RELAY] relay for node {node} died unexpectedly, reconnecting')
+                        break
+                    status = relay.status()
+                    dead_targets = [name for name, s in status.items() if not s.get('connected')]
+                    if dead_targets:
+                        # A single target's own ffmpeg process can die (crash,
+                        # or its outbound RTMP/Icecast connection failing hard
+                        # after a network blip) while the shared decode process
+                        # and every other target stay perfectly healthy --
+                        # relay.alive above only catches the *shared* pipeline
+                        # dying, not this. Without this check a target lost to
+                        # a transient internet drop would stay dark for the
+                        # rest of this relay session with nothing to notice or
+                        # restart it. Reconnecting the whole relay (not just
+                        # the dead target) is the simplest fix that reuses the
+                        # existing, already-tested reconnect path below --
+                        # costs the still-healthy target(s) a brief reconnect
+                        # blip too, which is a small price for closing this
+                        # gap.
+                        log('WARN', f'[STREAM-RELAY] target(s) {dead_targets} for node {node} disconnected '
+                                     f'(crash or network loss) -- reconnecting all targets')
+                        break
+                    with _relay_lock:
+                        _relay_status_cache = status
+                    if 'youtube' in targets_wanted:
+                        # Cheap -- one small file write -- so just do it every
+                        # loop tick (~1s, per the queue.get timeout above)
+                        # rather than tracking yet another timestamp.
+                        _write_relay_clock_file()
+                        if time.monotonic() - last_ticker_update > 60:
+                            last_ticker_update = time.monotonic()
+                            _write_relay_ticker_file(node)
+                    if time.monotonic() - last_cfg_check > 30:
+                        last_cfg_check = time.monotonic()
+                        new_cfg = _get_stream_relay_config()
+                        if (_build_relay_targets(new_cfg) != targets_wanted
+                                or (new_cfg or {}).get('target_node') != node):
+                            log('INFO', '[STREAM-RELAY] config changed, reconnecting')
+                            break
+            except Exception as e:
+                log('ERROR', f'[STREAM-RELAY] loop error: {e}\n{traceback.format_exc()}')
+            finally:
+                broadcast.remove_client(client_q, client_label)
+                relay.stop()
+                with _relay_lock:
+                    _relay_instance = None
+                    _relay_status_cache = {}
+            time.sleep(5)
+        except Exception as outer:
+            log('ERROR', f'[STREAM-RELAY] unexpected outer error: {outer}\n{traceback.format_exc()}')
+            with _relay_lock:
                 _relay_status_cache = {}
-        time.sleep(5)
+            time.sleep(15)
 
 
 def start_stream_relay():
