@@ -526,6 +526,21 @@ def get_db():
         disconnected_at   REAL,
         duration_seconds  REAL
     )""")
+    # _db_conn_open()/_db_conn_close() (called from the 1s AMI poll loop, on
+    # every connect/disconnect) both filter on (local_node, peer_node,
+    # disconnected_at) -- unlike permanent_links/kiosk_temp_conns, which use
+    # a natural composite PRIMARY KEY, this table needs its own row per
+    # historical connection (the same pair connects/disconnects repeatedly
+    # over time), so nothing indexed those lookup columns until now. Without
+    # an index those queries are a full table scan on every single
+    # connect/disconnect event, and the table only grows over the life of
+    # the install -- a slow, worsening-over-time cost that's especially
+    # rough on a Pi's SD card, not just a one-off inefficiency.
+    conn.execute("""CREATE INDEX IF NOT EXISTS idx_connhist_lookup
+        ON connection_history(local_node, peer_node, disconnected_at)""")
+    # /api/connection-history's paginated view ORDER BYs this column too.
+    conn.execute("""CREATE INDEX IF NOT EXISTS idx_connhist_connected_at
+        ON connection_history(connected_at DESC)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS alert_config (
         id                 INTEGER PRIMARY KEY CHECK (id = 1),
         enabled            INTEGER NOT NULL DEFAULT 0,
@@ -2959,11 +2974,37 @@ def ami_send_command(subcmd_fn) -> dict:
 # ---------------------------------------------------------------------------
 # rpt.conf file helpers
 # ---------------------------------------------------------------------------
+# read_conf_file(RPT_CONF_PATH) is called from ~20 places across the app,
+# including two hot paths: the 1s AMI poll loop and /api/status/board (hit
+# every 1.5-2s by every open kiosk tab) -- meaning a full disk read + line
+# scan of rpt.conf was happening multiple times a second regardless of
+# whether the file had actually changed, which only happens when an admin
+# saves an edit. Cached below, keyed by mtime: a cheap stat() call replaces
+# the read+return on every call where the file hasn't changed since last
+# read. write_conf_file() always changes the file's mtime (it writes a new
+# temp file and renames it into place), so this self-invalidates on every
+# real edit with no separate cache-busting needed anywhere else.
+_conf_file_cache      = {}   # {path: (mtime, content)}
+_conf_file_cache_lock = threading.Lock()
+
+
 def read_conf_file(path):
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = None   # fall through to open() below for the real error/logging
+    if mtime is not None:
+        with _conf_file_cache_lock:
+            cached = _conf_file_cache.get(path)
+        if cached and cached[0] == mtime:
+            return cached[1]
     try:
         with open(path) as f:
             content = f.read()
         log("DEBUG", f"[CONF] Read {len(content)} bytes from {path}")
+        if mtime is not None:
+            with _conf_file_cache_lock:
+                _conf_file_cache[path] = (mtime, content)
         return content
     except FileNotFoundError:
         log("ERROR", f"[CONF] File not found: {path}")
@@ -5298,6 +5339,13 @@ def api_status_board():
         "SELECT COUNT(*) FROM connectors WHERE enabled=1 AND schedule_type != 'manual' AND connect_time IS NOT NULL"
     ).fetchone()[0]
 
+    # Same value for every locally-hosted node in this request -- was
+    # re-fetched (a fresh get_db()/sqlite3.connect() each time) once per
+    # node inside the loop below, needlessly multiplying DB connections on
+    # multi-node installs for a setting that can't differ between nodes
+    # in a single request.
+    idle_timeout = int(get_setting('kiosk_idle_timeout_sec', '600') or 600)
+
     node_data = []
     for node in nodes:
         info     = lookup_node(node)
@@ -5307,7 +5355,6 @@ def api_status_board():
         with _link_stats_lock:
             ls_snapshot = dict(_link_stats)
         node_str_local = str(node)
-        idle_timeout   = int(get_setting('kiosk_idle_timeout_sec', '600') or 600)
         for cn in cached.get("connected", []):
             cn_info    = lookup_node(cn)
             cn_loc     = cn_info.get("location", "")
