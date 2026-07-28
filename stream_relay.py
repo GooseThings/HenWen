@@ -100,6 +100,27 @@ YOUTUBE_GOP_FRAMES = YOUTUBE_VIDEO_FPS * 2
 # build_youtube_output_args) rather than swinging with scene content.
 YOUTUBE_VIDEO_BITRATE = "2000k"
 
+# Ambient animated background behind the waveform (see build_youtube_output_args).
+# Rendered at this small size then upscaled -- ffmpeg's generative video
+# filters (life, gradients, mandelbrot, ...) cost roughly one unit of CPU
+# per output pixel, so rendering at full 1280x720 directly was measured
+# locally to run *below* real-time (confirmed both for "life" and
+# "gradients") -- nowhere near "not too CPU intensive". Rendering small and
+# letting a cheap bilinear upscale blow it up keeps the per-pixel cost tied
+# to this small canvas instead, at the expense of a slightly soft/blurred
+# look -- which if anything suits an unobtrusive background better than a
+# crisp one would.
+YOUTUBE_BG_SMALL_SIZE = "320x180"
+# Dark teal -- reads as both "blue" and "green" without matching (and so
+# competing with) the waveform's own bright 0x00cc66 green.
+YOUTUBE_BG_LIFE_COLOR = "0x1f5c52"
+YOUTUBE_BG_MOLD_COLOR = "0x0d2e28"   # darker fading trail color for cells that just died
+YOUTUBE_BG_FILL_RATIO = "0.12"       # sparse initial fill -- calm, not busy
+YOUTUBE_BG_MOLD_SPEED = "12"         # how many frames a dead cell takes to fade to black
+# Multiplies each color channel post-upscale -- keeps the background
+# unmistakably in the background, not competing with the waveform or text.
+YOUTUBE_BG_DIM = "0.4"
+
 
 def build_youtube_output_args(rtmp_url, stream_key):
     """YouTube Live RTMP push args. Plain RTMP, no OAuth/Data API --
@@ -140,17 +161,37 @@ def build_youtube_output_args(rtmp_url, stream_key):
     if no usable font is found on this system (_overlay_font()) rather
     than failing the whole relay.
 
+    Background: an ambient "life" (Conway's Game of Life) animation sits
+    behind the waveform so the frame isn't flat black -- rendered small
+    and upscaled, then dimmed (YOUTUBE_BG_DIM) and composited via a
+    `screen` blend rather than a chroma-key/alpha overlay. `screen`
+    treats black as a no-op (screen(x, 0) == x), which is exactly what's
+    needed here since the waveform's own canvas is black outside the
+    green line -- and it's meaningfully cheaper than colorkey+overlay,
+    which was measured locally to run *below* real-time on this
+    pipeline (colorkey's per-pixel similarity/threshold math is
+    expensive at 1280x720). `screen` was measured to hold ~1.5-1.65x
+    real-time here, comfortably above the 1x floor a live relay needs
+    with headroom to spare, versus colorkey+overlay's ~0.7x.
+
     Verified interactively via an ffmpeg-as-RTMP-server loopback: valid
     FLV with synced H.264 video (visibly non-blank frames, confirmed via
     frame extraction) + AAC audio, and separately confirmed each text
     layer renders and the clock/ticker actually update via reload=1."""
     url = rtmp_url.rstrip("/") + "/" + stream_key
     base_filter = (
+        f"life=s={YOUTUBE_BG_SMALL_SIZE}:rate={YOUTUBE_VIDEO_FPS}:"
+        f"mold={YOUTUBE_BG_MOLD_SPEED}:life_color={YOUTUBE_BG_LIFE_COLOR}:"
+        f"mold_color={YOUTUBE_BG_MOLD_COLOR}:death_color=0x000000:"
+        f"ratio={YOUTUBE_BG_FILL_RATIO}[bgsmall];"
+        "[bgsmall]scale=1280:720:flags=bilinear,"
+        f"colorchannelmixer=rr={YOUTUBE_BG_DIM}:gg={YOUTUBE_BG_DIM}:bb={YOUTUBE_BG_DIM}[bgdim];"
         "[0:a]aformat=channel_layouts=mono,"
         f"showwaves=s=640x720:mode=cline:rate={YOUTUBE_VIDEO_FPS}:colors=0x00cc66,"
         "scale=640:720,split=2[wa][wb];"
         "[wb]hflip[wf];"
-        "[wa][wf]hstack=inputs=2[v0]"
+        "[wa][wf]hstack=inputs=2[wave];"
+        "[bgdim][wave]blend=all_mode=screen[v0]"
     )
     font = _overlay_font()
     if font:

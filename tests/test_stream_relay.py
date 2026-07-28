@@ -101,6 +101,23 @@ class TestBuildYoutubeOutputArgs:
         assert "hflip" in fc
         assert "hstack" in fc
 
+    def test_ambient_background_is_composited_behind_the_waveform(self):
+        # Rendered small (YOUTUBE_BG_SMALL_SIZE) and upscaled rather than
+        # generated at full 1280x720 directly -- a full-res "life" or
+        # "gradients" render was measured locally to run *below*
+        # real-time on this pipeline, nowhere near "not too CPU
+        # intensive". Composited via a cheap `screen` blend (colorkey+
+        # overlay was measured ~2x slower) so it never has to be
+        # perfectly keyed, and dimmed afterwards so it can't compete
+        # with the waveform.
+        args = stream_relay.build_youtube_output_args(
+            rtmp_url="rtmp://host/live", stream_key="key")
+        fc = args[args.index("-filter_complex") + 1]
+        assert f"life=s={stream_relay.YOUTUBE_BG_SMALL_SIZE}" in fc
+        assert "scale=1280:720" in fc
+        assert "blend=all_mode=screen" in fc
+        assert "colorchannelmixer" in fc
+
     def test_keyframe_interval_is_set_explicitly(self):
         # Without -g, libx264 defaults to a 250-frame GOP -- at this
         # module's declared waveform framerate that's a 10s keyframe
