@@ -120,3 +120,22 @@ class TestBuildYoutubeOutputArgs:
             rtmp_url="rtmp://host/live", stream_key="key")
         assert args[args.index("-b:a") + 1] == "128k"
         assert args[args.index("-ar") + 1] == "48000"
+
+    def test_video_bitrate_is_true_cbr_not_just_a_target(self):
+        # An unconstrained encode (or -b:v alone, without matching
+        # -minrate/-bufsize and nal-hrd=cbr padding) swings with scene
+        # content -- confirmed live and reproduced locally: 7-8+ Mbps
+        # during active audio, ~14 Kbps of video during a quiet/idle
+        # period, each tripping one of YouTube's two opposite bitrate
+        # warnings. minrate == maxrate == b:v == bufsize plus
+        # nal-hrd=cbr:force-cfr=1 forces libx264 to pad output and hold
+        # a steady rate regardless of content.
+        args = stream_relay.build_youtube_output_args(
+            rtmp_url="rtmp://host/live", stream_key="key")
+        target = stream_relay.YOUTUBE_VIDEO_BITRATE
+        assert args[args.index("-b:v") + 1] == target
+        assert args[args.index("-minrate") + 1] == target
+        assert args[args.index("-maxrate") + 1] == target
+        assert args[args.index("-bufsize") + 1] == target
+        assert "nal-hrd=cbr" in args[args.index("-x264-params") + 1]
+        assert "force-cfr=1" in args[args.index("-x264-params") + 1]

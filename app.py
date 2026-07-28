@@ -2338,20 +2338,42 @@ def _check_asterisk_dns_health():
 
 # ── Nominatim geocoding cache ─────────────────────────────────────────────────
 NOMINATIM_URL   = "https://nominatim.openstreetmap.org/search?q={}&format=json&limit=1"
-_geocode_cache  = {}         # {location_str: {"lat": float, "lon": float} | None}
+# {location_str: (result, expires_at)} where result is {"lat":.., "lon":..} or None
+# and expires_at is None (cache forever) for a successful lookup, or a unix
+# timestamp for a failed one. A failure (network error, timeout, Nominatim
+# rate-limit) must NOT be cached forever like a success -- confirmed live: a
+# single transient 429 during a startup geocode burst permanently "poisoned"
+# the node's own location, silently breaking APRS/ISS until the next restart
+# since every retry just re-read the same cached None instead of trying again.
+_geocode_cache    = {}
+_GEOCODE_FAIL_TTL = 300      # retry a failed lookup after 5 min, not never
 _geocode_lock   = threading.Lock()
 _geocode_last   = [0.0]      # time of last Nominatim request (rate-limit: 1 req/s)
 _geocode_rlock  = threading.Lock()
 
 
+def _geocode_cache_get(loc):
+    """Return (hit, result) -- hit is False for a miss or an expired failure."""
+    cached = _geocode_cache.get(loc)
+    if cached is None:
+        return False, None
+    result, expires_at = cached
+    if expires_at is not None and time.time() >= expires_at:
+        return False, None
+    return True, result
+
+
 def _geocode(location: str):
-    """Return {"lat": float, "lon": float} for a location string, or None. Cached forever."""
+    """Return {"lat": float, "lon": float} for a location string, or None.
+    Successful lookups are cached forever; failures expire after
+    _GEOCODE_FAIL_TTL so a transient error gets retried instead of sticking."""
     if not location or not location.strip():
         return None
     loc = location.strip()
     with _geocode_lock:
-        if loc in _geocode_cache:
-            return _geocode_cache[loc]
+        hit, cached_result = _geocode_cache_get(loc)
+        if hit:
+            return cached_result
 
     # Nominatim: at most 1 request per 1.1 seconds
     with _geocode_rlock:
@@ -2370,7 +2392,8 @@ def _geocode(location: str):
             result = None
 
     with _geocode_lock:
-        _geocode_cache[loc] = result
+        expires_at = None if result is not None else time.time() + _GEOCODE_FAIL_TTL
+        _geocode_cache[loc] = (result, expires_at)
     return result
 
 
@@ -2390,8 +2413,9 @@ def _geocode_nonblocking(location: str):
         return None
     loc = location.strip()
     with _geocode_lock:
-        if loc in _geocode_cache:
-            return _geocode_cache[loc]
+        hit, cached_result = _geocode_cache_get(loc)
+        if hit:
+            return cached_result
     with _geocode_queue_lock:
         if loc not in _geocode_queue_seen:
             _geocode_queue_seen.add(loc)

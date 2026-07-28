@@ -94,6 +94,12 @@ YOUTUBE_VIDEO_FPS = 25
 # exactly "10.0 seconds" before this was added).
 YOUTUBE_GOP_FRAMES = YOUTUBE_VIDEO_FPS * 2
 
+# Target video bitrate for the true-CBR encode below -- ~2 Mbps video plus
+# 128k audio lands comfortably under YouTube's 2500 Kbps recommendation for
+# this resolution/framerate while still holding steady (see
+# build_youtube_output_args) rather than swinging with scene content.
+YOUTUBE_VIDEO_BITRATE = "2000k"
+
 
 def build_youtube_output_args(rtmp_url, stream_key):
     """YouTube Live RTMP push args. Plain RTMP, no OAuth/Data API --
@@ -170,6 +176,18 @@ def build_youtube_output_args(rtmp_url, stream_key):
         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
         "-g", str(YOUTUBE_GOP_FRAMES), "-keyint_min", str(YOUTUBE_GOP_FRAMES),
         "-sc_threshold", "0",
+        # Explicit CBR, not just a -b:v target: without -minrate/-bufsize
+        # tightly matching -b:v plus nal-hrd=cbr (which makes libx264 pad
+        # output to hit the target every second instead of just capping
+        # peaks), bitrate swings wildly with scene content -- confirmed
+        # live and reproduced locally: an unconstrained encode of this
+        # waveform hit 7-8+ Mbps during active audio, then dropped to
+        # ~14 Kbps of video during a quiet/idle period (silence -> a
+        # near-static frame), each triggering one of YouTube's two
+        # opposite bitrate warnings. True CBR held ~2 Mbps in both cases.
+        "-b:v", str(YOUTUBE_VIDEO_BITRATE), "-minrate", str(YOUTUBE_VIDEO_BITRATE),
+        "-maxrate", str(YOUTUBE_VIDEO_BITRATE), "-bufsize", str(YOUTUBE_VIDEO_BITRATE),
+        "-x264-params", "nal-hrd=cbr:force-cfr=1",
         "-c:a", "aac", "-ar", "48000", "-b:a", "128k",
         "-f", "flv", url,
     ]
