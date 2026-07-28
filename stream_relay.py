@@ -303,6 +303,7 @@ class Relay:
 
     def __init__(self, targets: dict, log_fn=None):
         self._log = log_fn or (lambda msg: None)
+        self._dead = False
         self._decode_proc = subprocess.Popen(
             # See the matching comment in recording.py's Recorder.__init__ --
             # same fast-start rationale, same fix.
@@ -329,9 +330,18 @@ class Relay:
         try:
             self._decode_proc.stdin.write(chunk)
         except (BrokenPipeError, ValueError, OSError):
-            pass
+            self._dead = True
 
     def _pump_loop(self):
+        # If decode ffmpeg exits for any reason (crashed, rejected malformed
+        # input, killed) stdout.read() returns b'' and this loop ends --
+        # that's the authoritative signal this Relay is finished. Without
+        # `_dead` here, a decode failure right after Relay was constructed
+        # (confirmed live: a transient "EBML header parsing failed" on the
+        # very first chunk) left the relay silently feeding a dead process
+        # forever -- feed()/status() never raised, so the owning poller in
+        # app.py had no way to notice and never reconnected, leaving
+        # Broadcastify/YouTube both dark until a full service restart.
         try:
             while True:
                 chunk = self._decode_proc.stdout.read(4096)
@@ -341,6 +351,12 @@ class Relay:
                     target.feed(chunk)
         except Exception as e:
             self._log(f"[STREAM-RELAY] pump loop error: {e}")
+        finally:
+            self._dead = True
+
+    @property
+    def alive(self) -> bool:
+        return not self._dead
 
     def status(self) -> dict:
         return {name: {"connected": t.connected} for name, t in self._targets.items()}

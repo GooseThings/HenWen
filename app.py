@@ -9552,6 +9552,16 @@ def _stream_relay_loop():
                     break
                 if chunk is not False:
                     relay.feed(chunk)
+                if not relay.alive:
+                    # relay's internal decode ffmpeg exited (crashed, or
+                    # rejected malformed input) -- confirmed live: without
+                    # this check the loop kept calling relay.feed() on a
+                    # dead relay forever (feed() swallows the resulting
+                    # BrokenPipeError), leaving both targets silently dark
+                    # until a full service restart, since nothing else in
+                    # this loop would ever notice.
+                    log('WARN', f'[STREAM-RELAY] relay for node {node} died unexpectedly, reconnecting')
+                    break
                 with _relay_lock:
                     _relay_status_cache = relay.status()
                 if 'youtube' in targets_wanted:

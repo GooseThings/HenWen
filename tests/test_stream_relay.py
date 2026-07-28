@@ -5,7 +5,17 @@ and an ffmpeg-as-RTMP-server loopback during development (see the
 plan's Phase 4 verification notes) rather than in the automated suite,
 matching this repo's policy of not depending on external services or
 long-lived local servers from pytest.
+
+TestRelayDeadDetection is the one exception: it mocks subprocess.Popen
+entirely (no real ffmpeg spawned) to cover Relay's dead/alive bookkeeping,
+which is pure Python control flow around a process's lifetime rather than
+anything that needs real ffmpeg behavior to verify.
 """
+import io
+import threading
+import time
+from unittest.mock import MagicMock, patch
+
 import stream_relay
 
 
@@ -156,3 +166,102 @@ class TestBuildYoutubeOutputArgs:
         assert args[args.index("-bufsize") + 1] == target
         assert "nal-hrd=cbr" in args[args.index("-x264-params") + 1]
         assert "force-cfr=1" in args[args.index("-x264-params") + 1]
+
+
+class _FakeProc:
+    """Stands in for subprocess.Popen's return value -- stdout is whatever
+    bytes-like object the test supplies, so tests can control exactly when
+    (or whether) the fake decode process "exits" from Relay's point of view."""
+
+    def __init__(self, stdout):
+        self.stdin = MagicMock()
+        self.stdout = stdout
+        self.stderr = io.BytesIO(b"")
+        self.returncode = None
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def kill(self):
+        self.returncode = -9
+
+
+class _BlockingStdout:
+    """A stdout whose .read() blocks until the test releases it -- lets a
+    test observe Relay while its (fake) decode process is still "running",
+    deterministically, instead of racing a real process's exit timing."""
+
+    def __init__(self):
+        self._event = threading.Event()
+
+    def read(self, n):
+        self._event.wait(timeout=5)
+        return b""
+
+    def release(self):
+        self._event.set()
+
+
+class TestRelayDeadDetection:
+    # Confirmed live: a Relay whose internal decode ffmpeg exits right after
+    # construction (a transient "EBML header parsing failed" on the very
+    # first chunk, in the incident that prompted this) used to leave the
+    # relay silently feeding a dead process forever -- feed() swallows the
+    # resulting BrokenPipeError, so nothing in app.py's poller loop ever
+    # noticed and reconnected. Both Broadcastify and YouTube stayed dark
+    # until a full service restart. These tests cover the fix: Relay now
+    # tracks whether its decode process has exited, via .alive.
+
+    def _wait_until(self, predicate, timeout=2.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.01)
+        return False
+
+    def test_relay_marks_itself_dead_when_decode_process_exits_immediately(self):
+        with patch.object(stream_relay.subprocess, "Popen",
+                           side_effect=lambda *a, **k: _FakeProc(io.BytesIO(b""))):
+            relay = stream_relay.Relay(targets={}, log_fn=lambda msg: None)
+            try:
+                assert self._wait_until(lambda: not relay.alive), (
+                    "Relay never noticed its decode process had exited"
+                )
+            finally:
+                relay.stop()
+
+    def test_relay_stays_alive_while_decode_process_is_still_running(self):
+        blocking_stdout = _BlockingStdout()
+        with patch.object(stream_relay.subprocess, "Popen",
+                           side_effect=lambda *a, **k: _FakeProc(blocking_stdout)):
+            relay = stream_relay.Relay(targets={}, log_fn=lambda msg: None)
+            try:
+                # Give the pump thread a moment to start and block on read();
+                # it must NOT have flipped to dead just because it hasn't
+                # produced output yet.
+                time.sleep(0.1)
+                assert relay.alive
+            finally:
+                blocking_stdout.release()
+                relay.stop()
+
+    def test_feed_marks_relay_dead_on_a_broken_pipe(self):
+        proc = _FakeProc(_BlockingStdout())
+
+        def _raise_broken_pipe(data):
+            raise BrokenPipeError()
+        proc.stdin.write.side_effect = _raise_broken_pipe
+
+        with patch.object(stream_relay.subprocess, "Popen",
+                           side_effect=lambda *a, **k: proc):
+            relay = stream_relay.Relay(targets={}, log_fn=lambda msg: None)
+            try:
+                relay.feed(b"some webm bytes")
+                assert not relay.alive
+            finally:
+                proc.stdout.release()
+                relay.stop()
