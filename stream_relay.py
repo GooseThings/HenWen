@@ -109,13 +109,31 @@ YOUTUBE_VIDEO_BITRATE = "2000k"
 # letting a cheap bilinear upscale blow it up keeps the per-pixel cost tied
 # to this small canvas instead, at the expense of a slightly soft/blurred
 # look -- which if anything suits an unobtrusive background better than a
-# crisp one would.
-YOUTUBE_BG_SMALL_SIZE = "320x180"
+# crisp one would. Smaller than the size originally shipped with (320x180)
+# specifically to buy back some of the margin B2/S below spends -- this
+# server has exactly one CPU core, confirmed live, so headroom here is
+# genuinely scarce, not just a general "keep it modest" preference.
+YOUTUBE_BG_SMALL_SIZE = "160x90"
+# Conway's classic rule (B3/S23, the "life" filter's own default) reliably
+# settles into an almost-static pattern within about a minute of simulated
+# time regardless of starting density -- confirmed live ("doesn't seem to
+# be moving much") and reproduced locally (measured motion magnitude
+# roughly halves over the first simulated minute and keeps declining).
+# "Seeds" (B2/S) has no survival rule at all -- every live cell dies every
+# generation -- so it structurally cannot reach a static equilibrium;
+# measured to hold constant (if anything, slightly rising) motion over a
+# full simulated minute instead of decaying. It's a chattier, more
+# CPU-costly pattern than Conway's rule -- mainly because a fully static
+# frame is exactly what gives libx264 the cheapest possible encode
+# (skip-macroblocks), and Seeds structurally never offers that -- which is
+# the whole reason for the smaller render size above.
+YOUTUBE_BG_RULE = "B2/S"
 # Dark teal -- reads as both "blue" and "green" without matching (and so
 # competing with) the waveform's own bright 0x00cc66 green.
 YOUTUBE_BG_LIFE_COLOR = "0x1f5c52"
 YOUTUBE_BG_MOLD_COLOR = "0x0d2e28"   # darker fading trail color for cells that just died
-YOUTUBE_BG_FILL_RATIO = "0.12"       # sparse initial fill -- calm, not busy
+YOUTUBE_BG_FILL_RATIO = "0.05"       # Seeds is explosive/growing -- a Conway-level
+                                      # density here would quickly overwhelm the frame
 YOUTUBE_BG_MOLD_SPEED = "12"         # how many frames a dead cell takes to fade to black
 # Multiplies each color channel post-upscale -- keeps the background
 # unmistakably in the background, not competing with the waveform or text.
@@ -161,18 +179,16 @@ def build_youtube_output_args(rtmp_url, stream_key):
     if no usable font is found on this system (_overlay_font()) rather
     than failing the whole relay.
 
-    Background: an ambient "life" (Conway's Game of Life) animation sits
-    behind the waveform so the frame isn't flat black -- rendered small
-    and upscaled, then dimmed (YOUTUBE_BG_DIM) and composited via a
-    `screen` blend rather than a chroma-key/alpha overlay. `screen`
-    treats black as a no-op (screen(x, 0) == x), which is exactly what's
-    needed here since the waveform's own canvas is black outside the
-    green line -- and it's meaningfully cheaper than colorkey+overlay,
-    which was measured locally to run *below* real-time on this
-    pipeline (colorkey's per-pixel similarity/threshold math is
-    expensive at 1280x720). `screen` was measured to hold ~1.5-1.65x
-    real-time here, comfortably above the 1x floor a live relay needs
-    with headroom to spare, versus colorkey+overlay's ~0.7x.
+    Background: an ambient "life" (a cellular automaton, see YOUTUBE_BG_RULE)
+    animation sits behind the waveform so the frame isn't flat black --
+    rendered small and upscaled, then dimmed (YOUTUBE_BG_DIM) and
+    composited via a `screen` blend rather than a chroma-key/alpha
+    overlay. `screen` treats black as a no-op (screen(x, 0) == x), which
+    is exactly what's needed here since the waveform's own canvas is
+    black outside the green line -- and it's meaningfully cheaper than
+    colorkey+overlay, which was measured locally to run *below* real-time
+    on this pipeline (colorkey's per-pixel similarity/threshold math is
+    expensive at 1280x720).
 
     Verified interactively via an ffmpeg-as-RTMP-server loopback: valid
     FLV with synced H.264 video (visibly non-blank frames, confirmed via
@@ -180,7 +196,7 @@ def build_youtube_output_args(rtmp_url, stream_key):
     layer renders and the clock/ticker actually update via reload=1."""
     url = rtmp_url.rstrip("/") + "/" + stream_key
     base_filter = (
-        f"life=s={YOUTUBE_BG_SMALL_SIZE}:rate={YOUTUBE_VIDEO_FPS}:"
+        f"life=s={YOUTUBE_BG_SMALL_SIZE}:rate={YOUTUBE_VIDEO_FPS}:rule={YOUTUBE_BG_RULE}:"
         f"mold={YOUTUBE_BG_MOLD_SPEED}:life_color={YOUTUBE_BG_LIFE_COLOR}:"
         f"mold_color={YOUTUBE_BG_MOLD_COLOR}:death_color=0x000000:"
         f"ratio={YOUTUBE_BG_FILL_RATIO}[bgsmall];"

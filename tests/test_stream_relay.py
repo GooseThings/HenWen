@@ -125,6 +125,22 @@ class TestBuildYoutubeOutputArgs:
         fc = args[args.index("-filter_complex") + 1]
         assert f"life=s={stream_relay.YOUTUBE_BG_SMALL_SIZE}" in fc
         assert "scale=1280:720" in fc
+
+    def test_background_uses_a_rule_that_cannot_go_static(self):
+        # Conway's classic rule (the "life" filter's own default) reliably
+        # settles into an almost-static pattern within about a minute of
+        # simulated time regardless of starting density -- confirmed live
+        # ("doesn't seem to be moving much") and reproduced locally
+        # (measured motion magnitude roughly halves over the first
+        # simulated minute and keeps declining). "Seeds" (B2/S) has no
+        # survival rule at all, so it structurally cannot reach a static
+        # equilibrium -- measured to hold steady (not decaying) motion
+        # over a full simulated minute.
+        args = stream_relay.build_youtube_output_args(
+            rtmp_url="rtmp://host/live", stream_key="key")
+        fc = args[args.index("-filter_complex") + 1]
+        assert f"rule={stream_relay.YOUTUBE_BG_RULE}" in fc
+        assert stream_relay.YOUTUBE_BG_RULE == "B2/S"
         assert "blend=all_mode=screen" in fc
         assert "colorchannelmixer" in fc
 
