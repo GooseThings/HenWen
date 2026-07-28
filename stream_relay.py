@@ -128,6 +128,17 @@ YOUTUBE_BG_SMALL_SIZE = "160x90"
 # (skip-macroblocks), and Seeds structurally never offers that -- which is
 # the whole reason for the smaller render size above.
 YOUTUBE_BG_RULE = "B2/S"
+# Seeds evolves a full new generation *every* frame if left at the
+# video's own 25fps -- reported live as "too fast and just looks like
+# blurry static" once actually seen running, and confirmed in preview
+# renders: at 25 generations/sec the frame is a wash of undifferentiated
+# noise, but stepping the automaton at this much slower rate (and letting
+# the cheap `fps` filter duplicate each generation up to 25fps for the
+# rest of the pipeline) leaves clearly separated, individually
+# recognizable clusters on screen instead. Also trims CPU cost further,
+# a second benefit on this single-core box (fewer generations computed
+# per second).
+YOUTUBE_BG_GEN_RATE = "2"
 # Dark teal -- reads as both "blue" and "green" without matching (and so
 # competing with) the waveform's own bright 0x00cc66 green.
 YOUTUBE_BG_LIFE_COLOR = "0x1f5c52"
@@ -196,10 +207,10 @@ def build_youtube_output_args(rtmp_url, stream_key):
     layer renders and the clock/ticker actually update via reload=1."""
     url = rtmp_url.rstrip("/") + "/" + stream_key
     base_filter = (
-        f"life=s={YOUTUBE_BG_SMALL_SIZE}:rate={YOUTUBE_VIDEO_FPS}:rule={YOUTUBE_BG_RULE}:"
+        f"life=s={YOUTUBE_BG_SMALL_SIZE}:rate={YOUTUBE_BG_GEN_RATE}:rule={YOUTUBE_BG_RULE}:"
         f"mold={YOUTUBE_BG_MOLD_SPEED}:life_color={YOUTUBE_BG_LIFE_COLOR}:"
         f"mold_color={YOUTUBE_BG_MOLD_COLOR}:death_color=0x000000:"
-        f"ratio={YOUTUBE_BG_FILL_RATIO}[bgsmall];"
+        f"ratio={YOUTUBE_BG_FILL_RATIO},fps={YOUTUBE_VIDEO_FPS}[bgsmall];"
         "[bgsmall]scale=1280:720:flags=bilinear,"
         f"colorchannelmixer=rr={YOUTUBE_BG_DIM}:gg={YOUTUBE_BG_DIM}:bb={YOUTUBE_BG_DIM}[bgdim];"
         "[0:a]aformat=channel_layouts=mono,"

@@ -144,6 +144,22 @@ class TestBuildYoutubeOutputArgs:
         assert "blend=all_mode=screen" in fc
         assert "colorchannelmixer" in fc
 
+    def test_background_generation_rate_is_decoupled_from_video_fps(self):
+        # Reported live: at the video's full 25fps, Seeds evolves a whole
+        # new generation every single frame -- confirmed in preview
+        # renders to look like undifferentiated noise rather than
+        # anything resembling moving shapes ("too fast and just looks
+        # like blurry static"). Stepping the automaton at a much slower
+        # rate and letting `fps` duplicate frames up to the video's real
+        # 25fps keeps individual generations on screen long enough to
+        # actually read as shapes.
+        args = stream_relay.build_youtube_output_args(
+            rtmp_url="rtmp://host/live", stream_key="key")
+        fc = args[args.index("-filter_complex") + 1]
+        assert f"life=s={stream_relay.YOUTUBE_BG_SMALL_SIZE}:rate={stream_relay.YOUTUBE_BG_GEN_RATE}:" in fc
+        assert int(stream_relay.YOUTUBE_BG_GEN_RATE) < stream_relay.YOUTUBE_VIDEO_FPS
+        assert f"fps={stream_relay.YOUTUBE_VIDEO_FPS}" in fc
+
     def test_keyframe_interval_is_set_explicitly(self):
         # Without -g, libx264 defaults to a 250-frame GOP -- at this
         # module's declared waveform framerate that's a 10s keyframe
