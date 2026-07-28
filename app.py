@@ -9562,8 +9562,28 @@ def _stream_relay_loop():
                     # this loop would ever notice.
                     log('WARN', f'[STREAM-RELAY] relay for node {node} died unexpectedly, reconnecting')
                     break
+                status = relay.status()
+                dead_targets = [name for name, s in status.items() if not s.get('connected')]
+                if dead_targets:
+                    # A single target's own ffmpeg process can die (crash,
+                    # or its outbound RTMP/Icecast connection failing hard
+                    # after a network blip) while the shared decode process
+                    # and every other target stay perfectly healthy --
+                    # relay.alive above only catches the *shared* pipeline
+                    # dying, not this. Without this check a target lost to
+                    # a transient internet drop would stay dark for the
+                    # rest of this relay session with nothing to notice or
+                    # restart it. Reconnecting the whole relay (not just
+                    # the dead target) is the simplest fix that reuses the
+                    # existing, already-tested reconnect path below --
+                    # costs the still-healthy target(s) a brief reconnect
+                    # blip too, which is a small price for closing this
+                    # gap.
+                    log('WARN', f'[STREAM-RELAY] target(s) {dead_targets} for node {node} disconnected '
+                                 f'(crash or network loss) -- reconnecting all targets')
+                    break
                 with _relay_lock:
-                    _relay_status_cache = relay.status()
+                    _relay_status_cache = status
                 if 'youtube' in targets_wanted:
                     # Cheap -- one small file write -- so just do it every
                     # loop tick (~1s, per the queue.get timeout above)

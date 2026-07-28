@@ -9,6 +9,12 @@ HenWen is a browser-based AllStarLink 3 node manager and kiosk display. It runs 
 - **Author callsign:** N8GMZ
 - **Club callsign:** WE8CHZ (do not use for author attribution)
 
+## Hardware target
+
+**Minimum supported hardware is a Raspberry Pi Zero 2 W** (quad-core Cortex-A53 @ 1GHz, has NEON). All new code — especially anything CPU-heavy like ffmpeg pipelines, background threads, or per-request work — must be written with that ceiling in mind, not just whatever the current dev/deploy box happens to be. When adding or changing something with real CPU cost, flag explicitly whether it's likely to run acceptably on a Pi Zero 2 W, the same way you'd flag a breaking API change. The *original* Pi Zero/Zero W (single-core ARM11, no NEON) is not a target — its lack of NEON makes real-time libx264 encoding infeasible regardless of tuning, so there's no reasonable amount of optimization that reaches it.
+
+Known risk area: the stream relay's YouTube video encode (waveform + background + text overlay, libx264 `ultrafast` CBR at 1280x720@25fps) was tuned and benchmarked against a desktop-class x86 core (Intel i5-8500T), not a Pi Zero 2 W. Rough estimate (Cortex-A53 vs. that core's published single-thread benchmarks, not measured on real Pi hardware): the video encode alone could need on the order of 400%+ of a single A53 core, i.e. most of the chip's 4 cores just for that one ffmpeg process, competing with Asterisk, gunicorn, the AMI poller, and Broadcastify's own (much cheaper, audio-only) encode. This has not been validated on real Pi Zero 2 W hardware and may need real settings changes (lower resolution/bitrate/fps, or dropping the background) if this ever needs to run on one.
+
 ## Running and Deploying
 
 There is no build step. The app runs directly via gunicorn.
