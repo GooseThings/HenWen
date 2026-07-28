@@ -52,6 +52,25 @@ _OVERLAY_FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
 ]
 
+# Maximum time (microseconds) to wait for any single network read/write to
+# complete before ffmpeg gives up and exits -- without this, a connection
+# that dies silently mid-stream (the internet drops, the far end stops
+# reading) can sit blocked on a write for minutes before the OS's own TCP
+# keepalive/retransmit timeouts eventually notice, during which app.py's
+# per-target dead-connection check (relay.status()) has nothing to detect:
+# the ffmpeg process is still technically running, just stuck. rw_timeout
+# is a generic AVIOContext-level option (not protocol-specific -- it
+# doesn't appear in `ffmpeg -h protocol=rtmp`/`icecast`'s own option
+# lists, which only show protocol-specific AVOptions), confirmed to be
+# accepted and actually enforced against both icecast:// and rtmp://
+# targets in this exact ffmpeg build (verified against a black-holed
+# address: connection attempts were bounded to the configured timeout
+# instead of hanging). 15s is long enough to tolerate normal network
+# jitter/congestion without false-triggering a reconnect, short enough
+# that "loss of internet" is caught in well under a minute instead of
+# whatever the OS's own default TCP timeout happens to be.
+RELAY_RW_TIMEOUT_USEC = 15_000_000
+
 
 def _overlay_font():
     """First available font from the candidate list, or None. Checked at
@@ -83,6 +102,7 @@ def build_broadcastify_output_args(host, port, mount, user, password):
         "-c:a", "libmp3lame", "-b:a", "64k",
         "-content_type", "audio/mpeg",
         "-legacy_icecast", "1",
+        "-rw_timeout", str(RELAY_RW_TIMEOUT_USEC),
         "-f", "mp3", url,
     ]
 
@@ -244,6 +264,7 @@ def build_youtube_output_args(rtmp_url, stream_key):
         "-maxrate", str(YOUTUBE_VIDEO_BITRATE), "-bufsize", str(YOUTUBE_VIDEO_BITRATE),
         "-x264-params", "nal-hrd=cbr:force-cfr=1",
         "-c:a", "aac", "-ar", "48000", "-b:a", "128k",
+        "-rw_timeout", str(RELAY_RW_TIMEOUT_USEC),
         "-f", "flv", url,
     ]
 

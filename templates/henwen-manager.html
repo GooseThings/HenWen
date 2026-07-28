@@ -1361,6 +1361,12 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
         <label class="switch"><input type="checkbox" id="relay-yt-enabled"><span class="slider"></span></label>
       </div>
       <div class="card-body">
+        <div style="border:1px solid var(--warn);border-radius:6px;padding:10px 12px;margin-bottom:14px;font-size:0.78rem;color:var(--warn)">
+          <strong>Hardware note:</strong> the YouTube target encodes video (a live waveform + text overlay), which is
+          real CPU work — unlike the Broadcastify target below, which is audio-only and light on any hardware.
+          A Raspberry Pi Zero 2 W is <em>not</em> expected to keep up with this smoothly; a Raspberry Pi 4 (4GB+) or
+          better is recommended if this node runs on a Pi. Broadcastify and the rest of HenWen are unaffected either way.
+        </div>
         <div style="display:grid;grid-template-columns:1fr;gap:14px">
           <div>
             <label class="toggle-label" style="display:block;margin-bottom:3px">RTMP server URL</label>

@@ -48,6 +48,19 @@ class TestBuildBroadcastifyOutputArgs:
             host="h", port=1, mount="/m", user="u", password="p")
         assert args[args.index("-legacy_icecast") + 1] == "1"
 
+    def test_sets_an_rw_timeout_so_a_dead_connection_is_noticed(self):
+        # Without this, a connection that goes silent mid-stream (internet
+        # drops, the far end stops reading) can block on a write for
+        # minutes before the OS's own TCP timeouts eventually notice --
+        # during which app.py's per-target dead-connection check has
+        # nothing to detect, since the ffmpeg process is still technically
+        # running, just stuck. Confirmed live against a black-holed
+        # address that this option actually bounds connection/write time
+        # instead of being silently ignored.
+        args = stream_relay.build_broadcastify_output_args(
+            host="h", port=1, mount="/m", user="u", password="p")
+        assert args[args.index("-rw_timeout") + 1] == str(stream_relay.RELAY_RW_TIMEOUT_USEC)
+
 
 class TestBuildYoutubeOutputArgs:
     def test_builds_rtmp_url_with_stream_key(self):
@@ -178,6 +191,15 @@ class TestBuildYoutubeOutputArgs:
             rtmp_url="rtmp://host/live", stream_key="key")
         assert args[args.index("-b:a") + 1] == "128k"
         assert args[args.index("-ar") + 1] == "48000"
+
+    def test_sets_an_rw_timeout_so_a_dead_connection_is_noticed(self):
+        # Same rationale as the Broadcastify target -- see that test's
+        # docstring. rw_timeout is a generic AVIOContext-level option, not
+        # protocol-specific, so it applies here too even though it's not
+        # listed among rtmp's own AVOptions.
+        args = stream_relay.build_youtube_output_args(
+            rtmp_url="rtmp://host/live", stream_key="key")
+        assert args[args.index("-rw_timeout") + 1] == str(stream_relay.RELAY_RW_TIMEOUT_USEC)
 
     def test_video_bitrate_is_true_cbr_not_just_a_target(self):
         # An unconstrained encode (or -b:v alone, without matching
