@@ -100,52 +100,36 @@ YOUTUBE_GOP_FRAMES = YOUTUBE_VIDEO_FPS * 2
 # build_youtube_output_args) rather than swinging with scene content.
 YOUTUBE_VIDEO_BITRATE = "2000k"
 
-# Ambient animated background behind the waveform (see build_youtube_output_args).
-# Rendered at this small size then upscaled -- ffmpeg's generative video
-# filters (life, gradients, mandelbrot, ...) cost roughly one unit of CPU
-# per output pixel, so rendering at full 1280x720 directly was measured
-# locally to run *below* real-time (confirmed both for "life" and
-# "gradients") -- nowhere near "not too CPU intensive". Rendering small and
-# letting a cheap bilinear upscale blow it up keeps the per-pixel cost tied
-# to this small canvas instead, at the expense of a slightly soft/blurred
-# look -- which if anything suits an unobtrusive background better than a
-# crisp one would. Smaller than the size originally shipped with (320x180)
-# specifically to buy back some of the margin B2/S below spends -- this
-# server has exactly one CPU core, confirmed live, so headroom here is
-# genuinely scarce, not just a general "keep it modest" preference.
+# Ambient background behind the waveform (see build_youtube_output_args).
+# Went through two cellular-automaton attempts first -- Conway's classic
+# rule reliably went near-static within about a minute regardless of
+# tuning ("doesn't seem to be moving much"), and the "Seeds" rule fixed
+# that but, evolving a full new generation every frame, looked like
+# undifferentiated noise ("too fast and just looks like blurry static").
+# Past that, the underlying complaint was simpler: no cellular-automaton
+# pattern was actually wanted here. This is a single static radial
+# gradient (frozen via trim+loop below, so it's computed exactly once,
+# not regenerated per frame) with a slow, gentle hue oscillation on top
+# -- no structure to ever stabilize or blur, just continuous smooth color
+# drift. Also markedly cheaper than either automaton: libx264 sees a
+# frame that's nearly unchanged tick to tick, which is exactly what lets
+# it skip most macroblocks (measured >80% skipped, versus Seeds' much
+# lower skip rate) -- worth having regardless of the aesthetic call,
+# since this server turned out to have exactly one CPU core.
 YOUTUBE_BG_SMALL_SIZE = "160x90"
-# Conway's classic rule (B3/S23, the "life" filter's own default) reliably
-# settles into an almost-static pattern within about a minute of simulated
-# time regardless of starting density -- confirmed live ("doesn't seem to
-# be moving much") and reproduced locally (measured motion magnitude
-# roughly halves over the first simulated minute and keeps declining).
-# "Seeds" (B2/S) has no survival rule at all -- every live cell dies every
-# generation -- so it structurally cannot reach a static equilibrium;
-# measured to hold constant (if anything, slightly rising) motion over a
-# full simulated minute instead of decaying. It's a chattier, more
-# CPU-costly pattern than Conway's rule -- mainly because a fully static
-# frame is exactly what gives libx264 the cheapest possible encode
-# (skip-macroblocks), and Seeds structurally never offers that -- which is
-# the whole reason for the smaller render size above.
-YOUTUBE_BG_RULE = "B2/S"
-# Seeds evolves a full new generation *every* frame if left at the
-# video's own 25fps -- reported live as "too fast and just looks like
-# blurry static" once actually seen running, and confirmed in preview
-# renders: at 25 generations/sec the frame is a wash of undifferentiated
-# noise, but stepping the automaton at this much slower rate (and letting
-# the cheap `fps` filter duplicate each generation up to 25fps for the
-# rest of the pipeline) leaves clearly separated, individually
-# recognizable clusters on screen instead. Also trims CPU cost further,
-# a second benefit on this single-core box (fewer generations computed
-# per second).
-YOUTUBE_BG_GEN_RATE = "2"
 # Dark teal -- reads as both "blue" and "green" without matching (and so
 # competing with) the waveform's own bright 0x00cc66 green.
-YOUTUBE_BG_LIFE_COLOR = "0x1f5c52"
-YOUTUBE_BG_MOLD_COLOR = "0x0d2e28"   # darker fading trail color for cells that just died
-YOUTUBE_BG_FILL_RATIO = "0.05"       # Seeds is explosive/growing -- a Conway-level
-                                      # density here would quickly overwhelm the frame
-YOUTUBE_BG_MOLD_SPEED = "12"         # how many frames a dead cell takes to fade to black
+YOUTUBE_BG_COLOR_0 = "0x0d2e28"
+YOUTUBE_BG_COLOR_1 = "0x1f5c52"
+# hue= rotates the *existing* hue by this many degrees -- not an absolute
+# target -- so this must stay a small offset around 0, not a full hue
+# value, or it sends the base teal into a completely different part of
+# the color wheel (confirmed: an early version of this used the intended
+# target hue directly as the offset and produced dark maroon, nowhere
+# near "blue/green"). +/-20 degrees stays within blue-to-teal-to-green,
+# never drifting into anything that would clash with the waveform.
+YOUTUBE_BG_HUE_SWING_DEG = 20
+YOUTUBE_BG_HUE_CYCLE_SEC = 45   # one full breathe (out and back) every 45s
 # Multiplies each color channel post-upscale -- keeps the background
 # unmistakably in the background, not competing with the waveform or text.
 YOUTUBE_BG_DIM = "0.4"
@@ -190,16 +174,18 @@ def build_youtube_output_args(rtmp_url, stream_key):
     if no usable font is found on this system (_overlay_font()) rather
     than failing the whole relay.
 
-    Background: an ambient "life" (a cellular automaton, see YOUTUBE_BG_RULE)
-    animation sits behind the waveform so the frame isn't flat black --
-    rendered small and upscaled, then dimmed (YOUTUBE_BG_DIM) and
-    composited via a `screen` blend rather than a chroma-key/alpha
-    overlay. `screen` treats black as a no-op (screen(x, 0) == x), which
-    is exactly what's needed here since the waveform's own canvas is
-    black outside the green line -- and it's meaningfully cheaper than
-    colorkey+overlay, which was measured locally to run *below* real-time
-    on this pipeline (colorkey's per-pixel similarity/threshold math is
-    expensive at 1280x720).
+    Background: a soft radial gradient (see YOUTUBE_BG_COLOR_0/1) sits
+    behind the waveform so the frame isn't flat black -- generated once
+    and frozen (trim to a single frame, then `loop` replays it -- far
+    cheaper than regenerating a gradient every frame), with a slow hue
+    oscillation on top for a gentle "breathing" look, then scaled up,
+    dimmed (YOUTUBE_BG_DIM), and composited via a `screen` blend rather
+    than a chroma-key/alpha overlay. `screen` treats black as a no-op
+    (screen(x, 0) == x), which is exactly what's needed here since the
+    waveform's own canvas is black outside the green line -- and it's
+    meaningfully cheaper than colorkey+overlay, which was measured
+    locally to run *below* real-time on this pipeline (colorkey's
+    per-pixel similarity/threshold math is expensive at 1280x720).
 
     Verified interactively via an ffmpeg-as-RTMP-server loopback: valid
     FLV with synced H.264 video (visibly non-blank frames, confirmed via
@@ -207,11 +193,12 @@ def build_youtube_output_args(rtmp_url, stream_key):
     layer renders and the clock/ticker actually update via reload=1."""
     url = rtmp_url.rstrip("/") + "/" + stream_key
     base_filter = (
-        f"life=s={YOUTUBE_BG_SMALL_SIZE}:rate={YOUTUBE_BG_GEN_RATE}:rule={YOUTUBE_BG_RULE}:"
-        f"mold={YOUTUBE_BG_MOLD_SPEED}:life_color={YOUTUBE_BG_LIFE_COLOR}:"
-        f"mold_color={YOUTUBE_BG_MOLD_COLOR}:death_color=0x000000:"
-        f"ratio={YOUTUBE_BG_FILL_RATIO},fps={YOUTUBE_VIDEO_FPS}[bgsmall];"
-        "[bgsmall]scale=1280:720:flags=bilinear,"
+        f"gradients=s={YOUTUBE_BG_SMALL_SIZE}:type=radial:rate={YOUTUBE_VIDEO_FPS}:"
+        f"c0={YOUTUBE_BG_COLOR_0}:c1={YOUTUBE_BG_COLOR_1}[g0];"
+        "[g0]trim=start_frame=0:end_frame=1,loop=loop=-1:size=1:start=0,"
+        "setpts=N/(FRAME_RATE*TB)[gfrozen];"
+        f"[gfrozen]hue=h={YOUTUBE_BG_HUE_SWING_DEG}*sin(2*PI*t/{YOUTUBE_BG_HUE_CYCLE_SEC})[ghue];"
+        "[ghue]scale=1280:720:flags=bilinear,"
         f"colorchannelmixer=rr={YOUTUBE_BG_DIM}:gg={YOUTUBE_BG_DIM}:bb={YOUTUBE_BG_DIM}[bgdim];"
         "[0:a]aformat=channel_layouts=mono,"
         f"showwaves=s=640x720:mode=cline:rate={YOUTUBE_VIDEO_FPS}:colors=0x00cc66,"

@@ -113,52 +113,51 @@ class TestBuildYoutubeOutputArgs:
 
     def test_ambient_background_is_composited_behind_the_waveform(self):
         # Rendered small (YOUTUBE_BG_SMALL_SIZE) and upscaled rather than
-        # generated at full 1280x720 directly -- a full-res "life" or
-        # "gradients" render was measured locally to run *below*
-        # real-time on this pipeline, nowhere near "not too CPU
-        # intensive". Composited via a cheap `screen` blend (colorkey+
-        # overlay was measured ~2x slower) so it never has to be
-        # perfectly keyed, and dimmed afterwards so it can't compete
-        # with the waveform.
+        # generated at full 1280x720 directly -- a full-res "gradients"
+        # render was measured locally to run *below* real-time on this
+        # pipeline, nowhere near "not too CPU intensive". Composited via
+        # a cheap `screen` blend (colorkey+overlay was measured ~2x
+        # slower) so it never has to be perfectly keyed, and dimmed
+        # afterwards so it can't compete with the waveform.
         args = stream_relay.build_youtube_output_args(
             rtmp_url="rtmp://host/live", stream_key="key")
         fc = args[args.index("-filter_complex") + 1]
-        assert f"life=s={stream_relay.YOUTUBE_BG_SMALL_SIZE}" in fc
+        assert f"gradients=s={stream_relay.YOUTUBE_BG_SMALL_SIZE}" in fc
         assert "scale=1280:720" in fc
-
-    def test_background_uses_a_rule_that_cannot_go_static(self):
-        # Conway's classic rule (the "life" filter's own default) reliably
-        # settles into an almost-static pattern within about a minute of
-        # simulated time regardless of starting density -- confirmed live
-        # ("doesn't seem to be moving much") and reproduced locally
-        # (measured motion magnitude roughly halves over the first
-        # simulated minute and keeps declining). "Seeds" (B2/S) has no
-        # survival rule at all, so it structurally cannot reach a static
-        # equilibrium -- measured to hold steady (not decaying) motion
-        # over a full simulated minute.
-        args = stream_relay.build_youtube_output_args(
-            rtmp_url="rtmp://host/live", stream_key="key")
-        fc = args[args.index("-filter_complex") + 1]
-        assert f"rule={stream_relay.YOUTUBE_BG_RULE}" in fc
-        assert stream_relay.YOUTUBE_BG_RULE == "B2/S"
         assert "blend=all_mode=screen" in fc
         assert "colorchannelmixer" in fc
 
-    def test_background_generation_rate_is_decoupled_from_video_fps(self):
-        # Reported live: at the video's full 25fps, Seeds evolves a whole
-        # new generation every single frame -- confirmed in preview
-        # renders to look like undifferentiated noise rather than
-        # anything resembling moving shapes ("too fast and just looks
-        # like blurry static"). Stepping the automaton at a much slower
-        # rate and letting `fps` duplicate frames up to the video's real
-        # 25fps keeps individual generations on screen long enough to
-        # actually read as shapes.
+    def test_background_is_a_frozen_single_frame_not_regenerated_per_frame(self):
+        # Two cellular-automaton attempts came before this: Conway's
+        # classic rule went near-static within about a minute regardless
+        # of tuning, and the fix for that (the "Seeds" rule) looked like
+        # noise since it evolves a full new generation every frame.
+        # Beyond either specific problem, the pattern itself wasn't
+        # wanted -- this generates one gradient frame and freezes it
+        # (trim to a single frame, then `loop` replays it) rather than
+        # computing a new pattern every tick, which is also markedly
+        # cheaper: libx264 sees an almost-unchanged frame most ticks.
         args = stream_relay.build_youtube_output_args(
             rtmp_url="rtmp://host/live", stream_key="key")
         fc = args[args.index("-filter_complex") + 1]
-        assert f"life=s={stream_relay.YOUTUBE_BG_SMALL_SIZE}:rate={stream_relay.YOUTUBE_BG_GEN_RATE}:" in fc
-        assert int(stream_relay.YOUTUBE_BG_GEN_RATE) < stream_relay.YOUTUBE_VIDEO_FPS
-        assert f"fps={stream_relay.YOUTUBE_VIDEO_FPS}" in fc
+        assert "trim=start_frame=0:end_frame=1" in fc
+        assert "loop=loop=-1:size=1" in fc
+
+    def test_background_hue_oscillates_within_a_small_range(self):
+        # hue= rotates the *existing* pixel hue by the given number of
+        # degrees, it's not an absolute target -- an earlier version used
+        # the intended target hue directly here and it sent the base teal
+        # into dark maroon instead (confirmed visually). The swing must
+        # stay a small offset around 0 so the color only ever drifts
+        # between blue and green, never anything that would clash with
+        # the waveform's own bright green.
+        args = stream_relay.build_youtube_output_args(
+            rtmp_url="rtmp://host/live", stream_key="key")
+        fc = args[args.index("-filter_complex") + 1]
+        swing = stream_relay.YOUTUBE_BG_HUE_SWING_DEG
+        cycle = stream_relay.YOUTUBE_BG_HUE_CYCLE_SEC
+        assert f"hue=h={swing}*sin(2*PI*t/{cycle})" in fc
+        assert 0 < swing <= 30, "a swing this large starts drifting toward clashing colors"
 
     def test_keyframe_interval_is_set_explicitly(self):
         # Without -g, libx264 defaults to a 250-frame GOP -- at this
