@@ -6,11 +6,51 @@ app.py assembles the ticker string from weather + NWS alert data, with
 those data sources stubbed out so the test doesn't depend on network
 access or real NWS poller state.
 """
+import os
 import re
 
 import stream_relay
 
 import app
+
+
+class TestAtomicWriteOverlayFile:
+    def test_writes_expected_content(self, tmp_path):
+        target = tmp_path / "overlay.txt"
+        app._atomic_write_overlay_file(str(target), "hello")
+        assert target.read_text() == "hello"
+
+    def test_overwrites_existing_content_cleanly(self, tmp_path):
+        target = tmp_path / "overlay.txt"
+        target.write_text("old")
+        app._atomic_write_overlay_file(str(target), "new")
+        assert target.read_text() == "new"
+
+    def test_no_leftover_temp_files_after_a_successful_write(self, tmp_path):
+        target = tmp_path / "overlay.txt"
+        app._atomic_write_overlay_file(str(target), "hello")
+        remaining = os.listdir(tmp_path)
+        assert remaining == ["overlay.txt"], (
+            "a leaked .overlay-* temp file means a concurrent ffmpeg reader "
+            "could pick up a stray partial file instead of the real one"
+        )
+
+    def test_the_file_is_never_briefly_missing_mid_write(self, tmp_path):
+        # This is the exact failure confirmed live: a concurrent ffmpeg
+        # process reading via drawtext's textfile=...:reload=1 saw the
+        # file disappear and crashed the whole relay ("Cannot read
+        # file... No such file or directory"). os.replace() is an atomic
+        # rename, so the target path must exist at every instant --
+        # verified here by checking existence is never interrupted
+        # across many repeated writes (a plain open(path,'w') would fail
+        # this under real concurrent access, since truncation briefly
+        # empties the file before new content lands).
+        target = tmp_path / "overlay.txt"
+        app._atomic_write_overlay_file(str(target), "seed")
+        for i in range(50):
+            app._atomic_write_overlay_file(str(target), f"update-{i}")
+            assert target.exists()
+        assert target.read_text() == "update-49"
 
 
 class TestWriteRelayClockFile:

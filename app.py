@@ -9295,6 +9295,31 @@ def _build_relay_targets(cfg):
     return targets
 
 
+def _atomic_write_overlay_file(path, text):
+    """Write via a temp file + os.replace() so a concurrent reader
+    (ffmpeg's drawtext textfile=...:reload=1) never observes the file
+    missing or half-written. Confirmed live: a file disappearing out
+    from under a running relay (even just for the plain open(path,'w')
+    truncate-then-write window every single update ordinarily risks)
+    crashed the whole YouTube encode -- "Cannot read file... No such
+    file or directory" from drawtext, which errors the whole filter
+    graph and kills ffmpeg, not just that one frame's text. os.replace()
+    is an atomic rename at the filesystem level, so ffmpeg always sees
+    either the complete old content or the complete new content."""
+    d = os.path.dirname(path) or '.'
+    fd, tmp_path = tempfile.mkstemp(dir=d, prefix='.overlay-')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(text)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def _write_relay_overlay_static_files(node, cfg):
     """Station callsign/number and the configured website line don't
     change while a relay session runs -- written once at session start.
@@ -9306,10 +9331,8 @@ def _write_relay_overlay_static_files(node, cfg):
         info = lookup_node(node)
         callsign = (info.get('callsign') or '').strip()
         station_text = f"{callsign} — Node {node}" if callsign else f"Node {node}"
-        with open(stream_relay.STATION_OVERLAY_FILE, 'w') as f:
-            f.write(station_text)
-        with open(stream_relay.WEBSITE_OVERLAY_FILE, 'w') as f:
-            f.write((cfg.get('overlay_website') or '').strip())
+        _atomic_write_overlay_file(stream_relay.STATION_OVERLAY_FILE, station_text)
+        _atomic_write_overlay_file(stream_relay.WEBSITE_OVERLAY_FILE, (cfg.get('overlay_website') or '').strip())
     except Exception as e:
         log('WARN', f'[STREAM-RELAY] could not write overlay station/website files: {e}')
     _write_relay_clock_file()
@@ -9321,8 +9344,7 @@ def _write_relay_clock_file():
     amateur radio net scheduling and logging, per feedback after seeing
     the overlay live."""
     try:
-        with open(stream_relay.CLOCK_OVERLAY_FILE, 'w') as f:
-            f.write(datetime.utcnow().strftime('%H:%M:%SZ'))
+        _atomic_write_overlay_file(stream_relay.CLOCK_OVERLAY_FILE, datetime.utcnow().strftime('%H:%M:%SZ'))
     except Exception:
         pass
 
@@ -9356,8 +9378,7 @@ def _build_relay_ticker_text(node):
 
 def _write_relay_ticker_file(node):
     try:
-        with open(stream_relay.TICKER_OVERLAY_FILE, 'w') as f:
-            f.write(_build_relay_ticker_text(node))
+        _atomic_write_overlay_file(stream_relay.TICKER_OVERLAY_FILE, _build_relay_ticker_text(node))
     except Exception as e:
         log('WARN', f'[STREAM-RELAY] could not write ticker file: {e}')
 
