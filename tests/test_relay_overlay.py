@@ -9,6 +9,8 @@ access or real NWS poller state.
 import os
 import re
 
+import pytest
+
 import stream_relay
 
 import app
@@ -66,6 +68,16 @@ class TestWriteRelayClockFile:
 
 
 class TestBuildRelayTickerText:
+    @pytest.fixture(autouse=True)
+    def _no_connected_or_nets_by_default(self, monkeypatch):
+        # Most tests in this class only care about weather/alerts -- stub
+        # the two newer segments to "nothing" so they don't have to know
+        # about AMI status or net_schedules at all. Scoped to this class
+        # only: TestRelayConnectedNodesText/TestRelayNetsTodayText test
+        # these exact functions directly and must see the real ones.
+        monkeypatch.setattr(app, "_relay_connected_nodes_text", lambda node: "")
+        monkeypatch.setattr(app, "_relay_nets_today_text", lambda: "")
+
     def test_combines_weather_and_alerts_with_separator(self, monkeypatch):
         monkeypatch.setattr(app, "lookup_node", lambda node: {"location": "Kenosha, WI"})
         monkeypatch.setattr(app, "_fetch_weather", lambda loc: {
@@ -120,3 +132,126 @@ class TestBuildRelayTickerText:
         monkeypatch.setattr(app, "get_nws_display_alerts", lambda: [{"text": "Still works"}])
         text = app._build_relay_ticker_text("546054")
         assert text == "Still works   //   "
+
+    def test_connected_nodes_and_nets_appended_after_weather_and_alerts(self, monkeypatch):
+        monkeypatch.setattr(app, "lookup_node", lambda node: {"location": ""})
+        monkeypatch.setattr(app, "_fetch_weather", lambda loc: {"error": "No location configured"})
+        monkeypatch.setattr(app, "get_nws_display_alerts", lambda: [])
+        monkeypatch.setattr(app, "_relay_connected_nodes_text", lambda node: "Connected: N8GMZ (546054)")
+        monkeypatch.setattr(app, "_relay_nets_today_text", lambda: "Today's Nets: Weekly Net 20:00")
+        text = app._build_relay_ticker_text("643931")
+        assert text == "Connected: N8GMZ (546054)   //   Today's Nets: Weekly Net 20:00   //   "
+
+
+class TestRelayConnectedNodesText:
+    def test_no_connected_peers_returns_empty(self, monkeypatch):
+        monkeypatch.setattr(app, "get_cached_status", lambda node: {"connected": []})
+        assert app._relay_connected_nodes_text("643931") == ""
+
+    def test_resolves_callsigns_for_each_connected_peer(self, monkeypatch):
+        monkeypatch.setattr(app, "get_cached_status", lambda node: {"connected": ["546054", "27339"]})
+        callsigns = {"546054": "N8GMZ", "27339": "W1ABC"}
+        monkeypatch.setattr(app, "lookup_node", lambda n: {"callsign": callsigns.get(n, "")})
+        assert app._relay_connected_nodes_text("643931") == "Connected: N8GMZ (546054), W1ABC (27339)"
+
+    def test_falls_back_to_bare_node_number_when_no_callsign(self, monkeypatch):
+        monkeypatch.setattr(app, "get_cached_status", lambda node: {"connected": ["546054"]})
+        monkeypatch.setattr(app, "lookup_node", lambda n: {"callsign": ""})
+        assert app._relay_connected_nodes_text("643931") == "Connected: 546054"
+
+    def test_status_lookup_raising_does_not_crash(self, monkeypatch):
+        def _boom(node):
+            raise RuntimeError("boom")
+        monkeypatch.setattr(app, "get_cached_status", _boom)
+        assert app._relay_connected_nodes_text("643931") == ""
+
+
+class TestNetsScheduledToday:
+    def _row(self, **kw):
+        base = {"id": 1, "name": "Weekly Net", "node": "643931", "recurrence": "weekly",
+                "weekday": 0, "net_date": None, "time": "20:00", "end_time": None, "notes": ""}
+        base.update(kw)
+        return base
+
+    def test_weekly_net_matches_todays_weekday(self, monkeypatch):
+        # 2026-07-27 is a Monday -- weekday()==0.
+        fixed_now = app.datetime(2026, 7, 27, 12, 0, tzinfo=app.timezone.utc)
+
+        class _FixedDatetime(app.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fixed_now if tz else fixed_now.replace(tzinfo=None)
+
+        monkeypatch.setattr(app, "datetime", _FixedDatetime)
+        monkeypatch.setattr(app, "get_setting", lambda k, d=None: "UTC")
+        rows = [self._row(weekday=0), self._row(id=2, name="Other Day", weekday=1)]
+        monkeypatch.setattr(app, "get_db", lambda: _FakeDb(rows))
+
+        todays = app._nets_scheduled_today()
+        assert [r["name"] for r in todays] == ["Weekly Net"]
+
+    def test_once_net_matches_todays_date_only(self, monkeypatch):
+        fixed_now = app.datetime(2026, 7, 27, 12, 0, tzinfo=app.timezone.utc)
+
+        class _FixedDatetime(app.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fixed_now if tz else fixed_now.replace(tzinfo=None)
+
+        monkeypatch.setattr(app, "datetime", _FixedDatetime)
+        monkeypatch.setattr(app, "get_setting", lambda k, d=None: "UTC")
+        rows = [
+            self._row(id=2, name="Special Net", recurrence="once", net_date="2026-07-27", weekday=None),
+            self._row(id=3, name="Wrong Day", recurrence="once", net_date="2026-07-28", weekday=None),
+        ]
+        monkeypatch.setattr(app, "get_db", lambda: _FakeDb(rows))
+
+        todays = app._nets_scheduled_today()
+        assert [r["name"] for r in todays] == ["Special Net"]
+
+    def test_results_sorted_by_time(self, monkeypatch):
+        fixed_now = app.datetime(2026, 7, 27, 12, 0, tzinfo=app.timezone.utc)
+
+        class _FixedDatetime(app.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fixed_now if tz else fixed_now.replace(tzinfo=None)
+
+        monkeypatch.setattr(app, "datetime", _FixedDatetime)
+        monkeypatch.setattr(app, "get_setting", lambda k, d=None: "UTC")
+        rows = [self._row(id=1, name="Late", weekday=0, time="21:00"),
+                self._row(id=2, name="Early", weekday=0, time="18:00")]
+        monkeypatch.setattr(app, "get_db", lambda: _FakeDb(rows))
+
+        todays = app._nets_scheduled_today()
+        assert [r["name"] for r in todays] == ["Early", "Late"]
+
+
+class _FakeDb:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def execute(self, *a, **k):
+        return self
+
+    def fetchall(self):
+        return [dict(r) for r in self._rows]
+
+
+class TestRelayNetsTodayText:
+    def test_empty_when_none_scheduled(self, monkeypatch):
+        monkeypatch.setattr(app, "_nets_scheduled_today", lambda: [])
+        assert app._relay_nets_today_text() == ""
+
+    def test_formats_name_and_time(self, monkeypatch):
+        monkeypatch.setattr(app, "_nets_scheduled_today", lambda: [
+            {"name": "Weekly Net", "time": "20:00"},
+            {"name": "Emergency Net", "time": "21:30"},
+        ])
+        assert app._relay_nets_today_text() == "Today's Nets: Weekly Net 20:00, Emergency Net 21:30"
+
+    def test_lookup_raising_does_not_crash(self, monkeypatch):
+        def _boom():
+            raise RuntimeError("boom")
+        monkeypatch.setattr(app, "_nets_scheduled_today", _boom)
+        assert app._relay_nets_today_text() == ""

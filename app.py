@@ -9373,11 +9373,82 @@ def _write_relay_clock_file():
         pass
 
 
+def _relay_connected_nodes_text(node):
+    """'Connected: CALLSIGN (12345), CALLSIGN2 (67890)' for the relayed
+    node's currently-connected peers, or '' when none -- reuses the same
+    'connected' list get_cached_status() already exposes to the kiosk
+    board (populated by the AMI poll loop), just resolved to callsigns
+    via lookup_node() for a human-readable ticker line instead of bare
+    node numbers."""
+    try:
+        connected = get_cached_status(node).get('connected') or []
+    except Exception as e:
+        log('WARN', f'[STREAM-RELAY] connected-nodes lookup for ticker failed: {e}')
+        return ''
+    if not connected:
+        return ''
+    labels = []
+    for cn in connected:
+        try:
+            callsign = (lookup_node(cn).get('callsign') or '').strip()
+        except Exception:
+            callsign = ''
+        labels.append(f"{callsign} ({cn})" if callsign else str(cn))
+    return 'Connected: ' + ', '.join(labels)
+
+
+def _nets_scheduled_today(tz_name=None):
+    """net_schedules rows landing on 'today' in the given (or configured
+    kiosk_timezone) zone. Mirrors status.html's netTodayMinutes()/
+    _kioskWeekdayToday() client-side "is this today" logic, server-side --
+    that JS only runs in a kiosk browser tab, which the relay overlay has
+    none of. Python's datetime.weekday() is already 0=Monday..6=Sunday,
+    the same convention net_schedules.weekday is stored in, so unlike the
+    JS side (which converts from JS Date's 0=Sunday) no remapping is
+    needed here."""
+    import zoneinfo
+    tz_name = tz_name or get_setting('kiosk_timezone', 'UTC')
+    try:
+        now = datetime.now(zoneinfo.ZoneInfo(tz_name))
+    except Exception:
+        now = datetime.now(timezone.utc)
+    today_date = now.strftime('%Y-%m-%d')
+    today_wd = now.weekday()
+    rows = get_db().execute("SELECT * FROM net_schedules").fetchall()
+    todays = []
+    for row in rows:
+        r = dict(row)
+        if r.get('recurrence') == 'once':
+            if r.get('net_date') != today_date:
+                continue
+        elif r.get('weekday') != today_wd:
+            continue
+        todays.append(r)
+    todays.sort(key=lambda r: r.get('time') or '')
+    return todays
+
+
+def _relay_nets_today_text():
+    """'Today's Nets: Name HH:MM, Name2 HH:MM' for nets scheduled today
+    (kiosk-local), or '' when none -- times are shown as stored (kiosk
+    wall-clock, no timezone conversion), same as the board's own nets
+    list."""
+    try:
+        todays = _nets_scheduled_today()
+    except Exception as e:
+        log('WARN', f'[STREAM-RELAY] scheduled-nets lookup for ticker failed: {e}')
+        return ''
+    bits = [f"{r['name']} {r['time']}" for r in todays if r.get('name') and r.get('time')]
+    if not bits:
+        return ''
+    return "Today's Nets: " + ', '.join(bits)
+
+
 def _build_relay_ticker_text(node):
-    """Weather + active NWS alerts for the relayed node's own location,
-    reusing the exact same _fetch_weather()/get_nws_display_alerts() the
-    kiosk board's weather bar and alert ticker already call -- same data,
-    same 10-minute weather cache, same NWS poller-maintained alert list,
+    """Weather, active NWS alerts, currently-connected peers, and today's
+    scheduled nets for the relayed node -- reusing the exact same
+    _fetch_weather()/get_nws_display_alerts()/get_cached_status()/
+    net_schedules data the kiosk board's own widgets already draw from,
     just reformatted as one scrolling line instead of separate widgets."""
     parts = []
     try:
@@ -9395,6 +9466,12 @@ def _build_relay_ticker_text(node):
         parts.extend(a['text'] for a in get_nws_display_alerts() if a.get('text'))
     except Exception as e:
         log('WARN', f'[STREAM-RELAY] NWS alert lookup for ticker failed: {e}')
+    connected_bit = _relay_connected_nodes_text(node)
+    if connected_bit:
+        parts.append(connected_bit)
+    nets_bit = _relay_nets_today_text()
+    if nets_bit:
+        parts.append(nets_bit)
     if not parts:
         return ''
     return '   //   '.join(parts) + '   //   '
