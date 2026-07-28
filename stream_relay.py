@@ -36,14 +36,22 @@ def build_broadcastify_output_args(host, port, mount, user, password):
     """Icecast source-client output args for ffmpeg, mp3-encoded (typical
     Icecast/Broadcastify ingest expectation). Pure function -- no
     subprocess, no network -- so the URL construction is testable without
-    a real Icecast server. Verified interactively against a real local
-    Icecast instance during development; not covered by the automated
-    suite since that needs a running Icecast server."""
+    a real Icecast server.
+
+    -legacy_icecast 1: Broadcastify's ingest server expects the older
+    Shoutcast/Icecast-<2.4-style "SOURCE" HTTP method, not the modern
+    Icecast2 PUT method ffmpeg's icecast:// protocol uses by default --
+    confirmed live: a bare curl PUT against a real Broadcastify mount got
+    no response at all (matching ffmpeg's "End of file" failure exactly),
+    while the legacy SOURCE method returned 200 OK. A local Icecast 2
+    instance (used during earlier development) accepts either, so this
+    wasn't caught until testing against the real target."""
     url = f"icecast://{user}:{password}@{host}:{port}{mount if mount.startswith('/') else '/' + mount}"
     return [
         "-ac", "1", "-ar", "8000",
         "-c:a", "libmp3lame", "-b:a", "64k",
         "-content_type", "audio/mpeg",
+        "-legacy_icecast", "1",
         "-f", "mp3", url,
     ]
 

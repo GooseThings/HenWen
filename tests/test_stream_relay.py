@@ -29,6 +29,15 @@ class TestBuildBroadcastifyOutputArgs:
         assert "-f" in args
         assert args[args.index("-f") + 1] == "mp3"
 
+    def test_uses_legacy_icecast_source_method(self):
+        # Broadcastify's ingest server only accepts the older Shoutcast/
+        # Icecast<2.4-style SOURCE method, not ffmpeg's default modern PUT
+        # -- confirmed against a real Broadcastify mount (see module
+        # docstring in build_broadcastify_output_args).
+        args = stream_relay.build_broadcastify_output_args(
+            host="h", port=1, mount="/m", user="u", password="p")
+        assert args[args.index("-legacy_icecast") + 1] == "1"
+
 
 class TestBuildYoutubeOutputArgs:
     def test_builds_rtmp_url_with_stream_key(self):
