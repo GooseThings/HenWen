@@ -48,6 +48,14 @@ def build_broadcastify_output_args(host, port, mount, user, password):
     ]
 
 
+YOUTUBE_VIDEO_FPS = 25
+# 2s GOP, comfortably under YouTube's documented 4s max -- libx264 defaults
+# to a 250-frame GOP when -g is left unset, which at YOUTUBE_VIDEO_FPS
+# works out to a 10s keyframe interval (confirmed live: YouTube reported
+# exactly "10.0 seconds" before this was added).
+YOUTUBE_GOP_FRAMES = YOUTUBE_VIDEO_FPS * 2
+
+
 def build_youtube_output_args(rtmp_url, stream_key):
     """YouTube Live RTMP push args. Plain RTMP, no OAuth/Data API --
     the same mechanism OBS uses for "Go Live". HenWen has no camera, so
@@ -57,17 +65,37 @@ def build_youtube_output_args(rtmp_url, stream_key):
     reflects on-air activity, and also sidesteps the open question of
     whether YouTube's RTMP ingest accepts a truly audio-only stream
     (untested against a real account in this environment) by always
-    having a genuine, non-trivial video track. Verified interactively
-    via an ffmpeg-as-RTMP-server loopback: valid FLV with synced H.264
-    video (visibly non-blank frames) + AAC audio."""
+    having a genuine, non-trivial video track.
+
+    The waveform is rendered at half width (640, not the final 1280) and
+    explicitly scaled to that same size -- letting showwaves size its
+    output to match the declared canvas exactly avoids a mismatch between
+    how many audio samples it maps per column and the frame width, which
+    otherwise left the right half of a directly-1280-wide render
+    permanently blank (confirmed live). That half-width waveform is then
+    split, mirrored (hflip), and stacked side by side (hstack) into the
+    final 1280x720 frame -- a deliberate symmetric look, and it also means
+    each half only ever has to fill its own correctly-sized 640px region
+    rather than one attempt spanning the full width.
+
+    Verified interactively via an ffmpeg-as-RTMP-server loopback: valid
+    FLV with synced H.264 video (visibly non-blank frames, confirmed via
+    frame extraction) + AAC audio."""
     url = rtmp_url.rstrip("/") + "/" + stream_key
-    return [
-        "-filter_complex",
+    filter_complex = (
         "[0:a]aformat=channel_layouts=mono,"
-        "showwaves=s=1280x720:mode=cline:rate=25:colors=0x00cc66[v]",
+        f"showwaves=s=640x720:mode=cline:rate={YOUTUBE_VIDEO_FPS}:colors=0x00cc66,"
+        "scale=640:720,split=2[wa][wb];"
+        "[wa]hflip[wf];"
+        "[wf][wb]hstack=inputs=2[v]"
+    )
+    return [
+        "-filter_complex", filter_complex,
         "-map", "[v]", "-map", "0:a",
         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "64k",
+        "-g", str(YOUTUBE_GOP_FRAMES), "-keyint_min", str(YOUTUBE_GOP_FRAMES),
+        "-sc_threshold", "0",
+        "-c:a", "aac", "-ar", "48000", "-b:a", "128k",
         "-f", "flv", url,
     ]
 

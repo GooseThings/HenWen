@@ -6504,6 +6504,22 @@ def api_audio_stream(node):
 @app.route('/api/audio/stop', methods=['POST'])
 @limiter.limit("30 per minute")
 def api_audio_stop():
+    """
+    Confirms a listener's intent to stop and validates they're actually a
+    current listener -- but does NOT tear down the shared broadcast itself.
+    That used to happen here unconditionally (broadcast.shutdown()), which
+    was fine back when a browser Listen session was the only kind of client
+    a broadcast could ever have: killing the whole thing when "the"
+    listener stopped was harmless. Now that recording.py and
+    stream_relay.py can hold long-lived clients on the same broadcast, that
+    blanket shutdown meant any single listener toggling Listen off would
+    also kill an unrelated in-progress recording or the persistent stream
+    relay for everyone. Actual cleanup already happens correctly and
+    per-client via the browser's own connection closing (ctrl.abort() in
+    status.html -> GeneratorExit in api_audio_stream()'s generate() ->
+    broadcast.remove_client(), which itself calls shutdown() only once
+    every last client, including a relay or recorder, is gone).
+    """
     node = str((request.json or {}).get('node', '')).strip()
     if not re.match(r'^\d{4,7}$', node):
         return jsonify({'error': 'invalid node'}), 400
@@ -6514,10 +6530,8 @@ def api_audio_stop():
         log('WARN', f'[AUDIO] stop for node {node} rejected: {remote} is not '
                     f'a current listener of this broadcast')
         return jsonify({'error': 'not a listener of this broadcast'}), 403
-    log('DEBUG', f'[AUDIO] explicit stop requested for node {node} '
+    log('DEBUG', f'[AUDIO] explicit stop acknowledged for node {node} '
                 f'(broadcast active={broadcast is not None})')
-    if broadcast:
-        broadcast.shutdown()
     return jsonify({'ok': True})
 
 
@@ -9189,7 +9203,12 @@ def api_stream_relay_config_save():
     broadcastify_host    = str(data.get("broadcastify_host", "")).strip()
     broadcastify_mount   = str(data.get("broadcastify_mount", "")).strip()
     broadcastify_user    = str(data.get("broadcastify_user", "")).strip()
-    broadcastify_pass    = str(data.get("broadcastify_pass", ""))
+    # Stripped like every other credential field here -- an unstripped
+    # password directly corrupts the icecast://user:pass@host URL built
+    # from it (confirmed live: a leading-whitespace password produced
+    # "icecast://source:        <pass>@host..." and Broadcastify rejected
+    # the connection outright).
+    broadcastify_pass    = str(data.get("broadcastify_pass", "")).strip()
     try:
         broadcastify_port = int(data.get("broadcastify_port", 0) or 0)
     except (TypeError, ValueError):

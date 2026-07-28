@@ -55,3 +55,36 @@ class TestBuildYoutubeOutputArgs:
         assert "-c:v" in args
         # Output muxer is the last "-f flv", right before the destination URL.
         assert args[-3:-1] == ["-f", "flv"]
+
+    def test_waveform_is_rendered_at_half_width_and_mirrored(self):
+        # Rendering directly at the final 1280px width left the right half
+        # permanently blank (confirmed live) -- half-width render + scale
+        # to lock in a correct fill, then split/hflip/hstack to mirror it
+        # into the full-width frame.
+        args = stream_relay.build_youtube_output_args(
+            rtmp_url="rtmp://host/live", stream_key="key")
+        fc = args[args.index("-filter_complex") + 1]
+        assert "showwaves=s=640x720" in fc
+        assert "scale=640:720" in fc
+        assert "hflip" in fc
+        assert "hstack" in fc
+
+    def test_keyframe_interval_is_set_explicitly(self):
+        # Without -g, libx264 defaults to a 250-frame GOP -- at this
+        # module's declared waveform framerate that's a 10s keyframe
+        # interval, over YouTube's documented 4s max (confirmed live).
+        args = stream_relay.build_youtube_output_args(
+            rtmp_url="rtmp://host/live", stream_key="key")
+        assert "-g" in args
+        gop = int(args[args.index("-g") + 1])
+        assert gop == stream_relay.YOUTUBE_GOP_FRAMES
+        seconds = gop / stream_relay.YOUTUBE_VIDEO_FPS
+        assert seconds <= 4
+        assert "-keyint_min" in args
+        assert "-sc_threshold" in args
+
+    def test_audio_bitrate_and_sample_rate(self):
+        args = stream_relay.build_youtube_output_args(
+            rtmp_url="rtmp://host/live", stream_key="key")
+        assert args[args.index("-b:a") + 1] == "128k"
+        assert args[args.index("-ar") + 1] == "48000"

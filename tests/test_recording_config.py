@@ -187,6 +187,23 @@ class TestStreamRelayConfigValidation:
         resp = client.put("/api/stream-relay/config", json={"target_node": ""})
         assert resp.status_code == 200
 
+    def test_broadcastify_password_whitespace_is_stripped(self, client, create_user):
+        # A leading/trailing-whitespace password directly corrupts the
+        # icecast://user:pass@host URL built from it -- confirmed live
+        # (Broadcastify rejected the connection outright). Every other
+        # credential field here is already stripped; the password wasn't.
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        resp = client.put("/api/stream-relay/config", json={
+            "target_node": "546054",
+            "broadcastify_enabled": True, "broadcastify_host": "audio.broadcastify.com",
+            "broadcastify_port": 8000, "broadcastify_mount": "/mymount",
+            "broadcastify_user": "src", "broadcastify_pass": "        0yn5pj94   ",
+        })
+        assert resp.status_code == 200
+        body = client.get("/api/stream-relay/config").get_json()
+        assert body["broadcastify_pass"] == "0yn5pj94"
+
 
 class TestCanRecordFlag:
     def test_default_is_false_for_new_user(self, client, create_user):
