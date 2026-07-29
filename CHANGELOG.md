@@ -1,5 +1,19 @@
 # Changelog
 
+## v2026.07.29
+
+- **Added: in-browser audio recording.** A Record button next to Listen on the Status Board, visible only to accounts the owner has flagged "Can record" in User Management. Recordings run silence-trimmed (continuous dead air is trimmed down to a configurable ceiling, not to zero) with a periodic spoken TTS timestamp spliced in, auto-stop at a configurable max duration, and both global and per-user storage caps enforced by a background janitor alongside age-based retention. Stopping a recording triggers an automatic download in the browser; recordings also stay browsable/deletable from a new Manager "Recordings" page (admin+).
+- **Added: a persistent live audio relay to Broadcastify and/or YouTube Live**, configured from a new owner-only Manager "Stream Relay" page. Once enabled it runs continuously in the background — independent of recording sessions, browser tabs, or whether anyone's listening — reconnecting automatically on its own, including recovering from a single target's connection dying (a network blip) without disturbing the other target. The YouTube feed includes a live audio waveform video track (YouTube's RTMP ingest has no confirmed audio-only path) with a text overlay: station callsign/node, a live Zulu clock, a configured website line, and a scrolling ticker showing local weather, active NWS alerts, currently-connected nodes, and today's still-upcoming Smart Connector connections — plus a subtle animated ambient glow behind the waveform so the frame isn't flat black.
+- **Hardened: `rw_timeout` on both relay targets** so a connection that goes silent mid-stream (internet drops, the far end stops reading) is detected and reconnected within ~15s instead of however long the OS's own TCP timeouts take.
+- **Hardened: three hardware-performance fixes** found in an audit — `rpt.conf` is no longer re-read and re-parsed from disk on every call (it only changes when an admin saves an edit; ~20 call sites benefit, including the 1s AMI poll loop and the kiosk board's refresh cycle), a redundant per-node settings lookup in the Status Board endpoint was hoisted out of its loop, and a missing index on the connection-history table (queried on every connect/disconnect) was added.
+- **Hardened: database connections are now cached per thread** instead of opening a brand-new one on every call — matches how the app is actually threaded (a fixed request-handling thread pool plus long-lived background pollers) and cuts a large, constant source of connection-open overhead everywhere in the app.
+- **Changed: node connector and net-schedule times on the YouTube overlay ticker now display in Zulu (UTC)**, matching the overlay's own clock, instead of kiosk-local time.
+- **Changed: removed the redundant "NODE" label from the kiosk Node card.**
+- **Fixed: toggling Listen off no longer kills the shared broadcast (and any active recording/relay) for everyone else** listening to the same node.
+- **Fixed: a single Nominatim geocoding failure could permanently and silently break APRS and the ISS map layer** until the next restart — a failed lookup was cached identically to a successful one, forever, instead of being retried.
+- **Fixed: the YouTube relay's video bitrate swinging both far above and far below YouTube's recommendation** depending on how much was happening on-air — switched to true constant bitrate (CBR) encoding, holding steady regardless of scene content.
+- **Fixed: NWS alert spoken/overlay text falling back to a generic "your area"** when an alert's own area description came back empty from NWS — now names the configured zone/state instead.
+
 ## v2026.07.23
 
 - **Added: row-count selector on the kiosk Recent Connections panel.** A new dropdown (5/10/25/50, default 5) controls how many rows `/api/status/history` returns, instead of a fixed 5.
