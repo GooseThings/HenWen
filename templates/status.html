@@ -134,21 +134,46 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .search-tab.active { color: var(--accent); border-color: var(--accent); }
 
 /* ── Weather ticker + net-schedule reminder bars ── */
-.bars-row { display: flex; gap: 10px; flex-shrink: 0; }
+/* Wrapping is always on (not just below the mobile breakpoint): once the
+   clock + ticker + net-reminder boxes can't all fit on one row, a whole box
+   drops to its own line instead of every box getting squeezed razor-thin on
+   a shared line — see #weather-bar/#net-bar below for why that squeeze used
+   to happen even well above the mobile breakpoint. */
+.bars-row { display: flex; gap: 10px; flex-shrink: 0; flex-wrap: wrap; }
 .weather-bar {
   background: var(--bg2); border: 1px solid var(--border); border-radius: 7px;
   padding: 5px 14px; display: flex; align-items: center; gap: 14px; flex-shrink: 0;
   font-size: 0.85rem; overflow: hidden; min-height: 32px;
   transition: background-color .3s, border-color .3s;
 }
-#weather-bar { flex: 1; min-width: 0; }
-/* Location label + the wrapping item list sit in their own no-wrap row on
-   desktop (ticker-style, one line). Mobile overrides this to flex-wrap so
-   long forecasts don't get clipped — see the mobile media query. */
-#weather-content { display: flex; align-items: center; gap: 14px; flex: 1; min-width: 0; overflow: hidden; }
+/* flex:1 lets the ticker fill whatever space the fixed-width clock and the
+   content-sized net-bar leave it. The min-width floor matters: at flex:1
+   (flex-basis:0) a bare min-width:0 lets this box get shrunk all the way to
+   nothing whenever a sibling's content wants the space (net-bar's item list
+   has no flex-grow of its own, so any leftover/deficit distribution favored
+   it every time) — the box would silently collapse to a sliver and clip its
+   own text via overflow:hidden instead of wrapping. The floor forces
+   .bars-row to wrap this box to its own line once that minimum won't fit,
+   rather than crushing it below a readable width. */
+#weather-bar { flex: 1; min-width: 220px; }
+/* net-bar's width should track its content, not stretch — but that content
+   (a variable-length list of today's nets) still needs to be able to shrink
+   and wrap onto multiple lines instead of forcing .bars-row to overflow
+   horizontally once the net list is longer than what's left after clock +
+   weather claim their share. */
+#net-bar { flex-shrink: 1; min-width: 0; max-width: 100%; }
+/* Location label + the wrapping item list sit in their own row. Wrapping is
+   always on (not just on mobile) so a long forecast — or #weather-bar being
+   squeezed narrow by its siblings above — reflows onto its own lines rather
+   than collapsing into a single crushed column with large gaps between
+   items (the .weather-items row-gap below is deliberately tighter than its
+   column-gap for the same reason: a wide gap reads fine between items on
+   one line but as vertical spacing between wrapped lines it looks like
+   stray blank space). */
+#weather-content { display: flex; align-items: center; gap: 14px; flex: 1; min-width: 0; overflow: visible; flex-wrap: wrap; row-gap: 6px; }
 .weather-location { color: var(--accent); font-weight: 600; white-space: nowrap; flex-shrink: 0; }
 .weather-sep { color: var(--border); flex-shrink: 0; }
-.weather-items { display: flex; gap: 20px; flex-wrap: wrap; overflow: hidden; }
+.weather-items { display: flex; gap: 6px 20px; flex-wrap: wrap; overflow: visible; }
 .weather-item { color: var(--text2); white-space: nowrap; }
 .weather-item strong { color: var(--text); }
 .weather-loading { color: var(--text2); font-style: italic; }
@@ -598,16 +623,15 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   .header-brand strong { font-size: 0.92rem; }
   .header-actions { gap: 6px; }
 
-  .bars-row { flex-wrap: wrap; }
-  .weather-bar { min-height: 0; overflow: visible; flex-wrap: wrap; }
-  #weather-content { flex-wrap: wrap; overflow: visible; row-gap: 6px; }
-  /* The "|" separator only reads right on a single ticker line. Once the bar
-     wraps, hide it and force .weather-items onto its own full-width row
-     below the location — otherwise the separator and the items' own nested
-     wrap (20px gap) fight the outer row-gap (4px) and produce uneven,
-     lopsided spacing between lines. */
+  .weather-bar { min-height: 0; overflow: visible; }
+  /* The "|" separator only reads right on a single ticker line, which never
+     happens at this width — hide it and force .weather-items onto its own
+     full-width row below the location so the two don't compete for the same
+     line. (.bars-row/#weather-content wrapping and #net-bar's shrink/wrap
+     are handled unconditionally above now, not just here — this block only
+     needs to add what's still narrow-width-specific.) */
   .weather-sep { display: none; }
-  .weather-items { overflow: visible; flex-basis: 100%; gap: 6px 14px; }
+  .weather-items { flex-basis: 100%; gap: 6px 14px; }
   #net-bar { flex-basis: 100%; }
 
   /* Single scrolling column. Order follows what a kiosk visitor checks
