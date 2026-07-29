@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <title>HenWen Kiosk</title>
-<link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+<link rel="icon" id="favicon-link" type="image/x-icon" href="/static/favicon.ico">
 <script>(function(){var t=localStorage.getItem('henwen-theme')||localStorage.getItem('asl3ez-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
 <style>
@@ -2879,6 +2879,58 @@ function renderKeyedTimeline(localNode, node) {
 var _lastBoardOk = Date.now();   /* seeded at load so the watchdog doesn't fire before the first fetch has even had a chance to land */
 var BOARD_STALE_MS = 8000;       /* ~4 missed 2s polls (see the refreshBoard interval below) before flagging the server unreachable */
 
+/* ── Favicon activity flip ──
+   Flips the browser tab icon to a solid red silhouette of the normal logo
+   while the hosted node is keyed, so activity is visible from a background
+   tab without watching the board itself. Built client-side from logo-512.png
+   via canvas (same-origin, so no CORS taint) rather than shipping a second
+   .ico asset: drawImage() paints the logo, then a 'source-in' composite
+   replaces every non-transparent pixel with red using the logo's own alpha
+   as the mask, so the silhouette matches whatever the logo actually looks
+   like instead of needing to be kept in sync with it by hand. Built once
+   and cached — cheap to flip back and forth after that. */
+var _faviconLink = document.getElementById('favicon-link');
+var _faviconNormalHref = _faviconLink ? _faviconLink.getAttribute('href') : null;
+var _faviconRedHref = null;
+var _faviconRedPending = false;
+var _faviconIsRed = false;
+
+function _buildRedFavicon(onReady) {
+  if (_faviconRedPending) return;
+  _faviconRedPending = true;
+  var img = new Image();
+  img.onload = function() {
+    _faviconRedPending = false;
+    var c = document.createElement('canvas');
+    c.width = img.naturalWidth || 32; c.height = img.naturalHeight || 32;
+    var ctx = c.getContext('2d');
+    ctx.drawImage(img, 0, 0, c.width, c.height);
+    ctx.globalCompositeOperation = 'source-in';
+    ctx.fillStyle = '#e21c1c';
+    ctx.fillRect(0, 0, c.width, c.height);
+    _faviconRedHref = c.toDataURL('image/png');
+    onReady();
+  };
+  img.onerror = function() { _faviconRedPending = false; };
+  img.src = '/static/logo-512.png';
+}
+
+function setFaviconKeyed(keyed) {
+  keyed = !!keyed;
+  if (!_faviconLink || keyed === _faviconIsRed) return;
+  if (!keyed) {
+    _faviconLink.href = _faviconNormalHref;
+    _faviconIsRed = false;
+    return;
+  }
+  if (_faviconRedHref) {
+    _faviconLink.href = _faviconRedHref;
+    _faviconIsRed = true;
+  } else {
+    _buildRedFavicon(function() { setFaviconKeyed(true); });
+  }
+}
+
 function markServerUnreachable() {
   var dot = document.querySelector('.keyed-dot');
   var label = document.querySelector('.keyed-label');
@@ -2887,6 +2939,7 @@ function markServerUnreachable() {
     label.classList.remove('healthy'); label.classList.add('down');
     label.textContent = 'OFFLINE'; label.title = 'Lost contact with the HenWen server';
   }
+  setFaviconKeyed(false);
 }
 
 function boardWatchdog() {
@@ -2906,11 +2959,16 @@ async function refreshBoard() {
     var nc = document.getElementById('node-info');
     if (!nodes.length) {
       nc.innerHTML = '<div style="color:var(--text2)">No nodes configured</div>';
+      setFaviconKeyed(false);
     } else {
       var n = nodes[0];
       /* Health circle: green pulse only when Asterisk is running, AMI is
          connected, and this node's AMI data isn't stale. Any one down = solid red. */
       var healthy = !!data.asterisk_active && !!data.ami_connected && !n.stale;
+      /* Only trust n.keyed while the node's own status is actually healthy —
+         a stale/offline node shouldn't leave a red favicon stuck on last-known
+         state. */
+      setFaviconKeyed(healthy && !!n.keyed);
       nc.innerHTML =
         nodeLink(n.node, 'node-number') +
         callsignLink(n.callsign, 'node-callsign') +
