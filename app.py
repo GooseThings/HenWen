@@ -540,8 +540,19 @@ def get_db():
         idle_delay_sec  INTEGER NOT NULL DEFAULT 120,
         initial_id      INTEGER NOT NULL DEFAULT 1,
         last_id_time    TEXT,
-        created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+        created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+        play_cmd        TEXT    NOT NULL DEFAULT 'localplay'
     )""")
+    # Same play_cmd convention as announcements/nws_alert_config -- 'localplay'
+    # reaches only other connected ASL nodes, never this node's own local
+    # RF-attached repeater/controller; 'playback' reaches that local RF gear
+    # too, but also every currently-linked node's own (possibly RF) equipment.
+    # A node acting as its own repeater controller needs 'playback' for the
+    # ID to actually transmit on its own RF at all -- see the warning next
+    # to this setting in the Manager UI.
+    _id_cols = {r[1] for r in conn.execute("PRAGMA table_info(id_configs)").fetchall()}
+    if 'play_cmd' not in _id_cols:
+        conn.execute("ALTER TABLE id_configs ADD COLUMN play_cmd TEXT NOT NULL DEFAULT 'localplay'")
     conn.execute("""CREATE TABLE IF NOT EXISTS connection_history (
         id                INTEGER PRIMARY KEY AUTOINCREMENT,
         local_node        TEXT    NOT NULL,
@@ -10631,7 +10642,7 @@ _id_runtime_lock = threading.Lock()
 def _play_id_sound(row):
     node = row["node"]
     path = row["sound_path"].strip()
-    cmd  = f"rpt localplay {node} {path}"
+    cmd  = f"rpt {row['play_cmd']} {node} {path}"
     log("INFO", f"[ID] Playing ID for '{row['name']}' on {node}: {cmd!r}")
     def _play(ami, _cmd=cmd):
         return {"output": ami.command(_cmd)}
@@ -10756,6 +10767,9 @@ def api_id_create():
     interval_sec   = int(data.get("interval_sec",   600))
     idle_delay_sec = int(data.get("idle_delay_sec", 120))
     initial_id     = 1 if data.get("initial_id", True) else 0
+    play_cmd       = str(data.get("play_cmd",       "localplay")).strip()
+    if play_cmd not in ("localplay", "playback"):
+        play_cmd = "localplay"
 
     if not name:
         return jsonify({"error": "Name is required"}), 400
@@ -10768,9 +10782,9 @@ def api_id_create():
 
     db = get_db()
     db.execute(
-        "INSERT INTO id_configs (name, node, sound_path, interval_sec, idle_delay_sec, initial_id) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (name, node, sound_path, interval_sec, idle_delay_sec, initial_id)
+        "INSERT INTO id_configs (name, node, sound_path, interval_sec, idle_delay_sec, initial_id, play_cmd) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (name, node, sound_path, interval_sec, idle_delay_sec, initial_id, play_cmd)
     )
     db.commit()
     row = db.execute("SELECT * FROM id_configs WHERE rowid=last_insert_rowid()").fetchone()
@@ -10794,6 +10808,9 @@ def api_id_update(iid):
     interval_sec   = int(data.get("interval_sec",   row["interval_sec"]))
     idle_delay_sec = int(data.get("idle_delay_sec", row["idle_delay_sec"]))
     initial_id     = 1 if data.get("initial_id", bool(row["initial_id"])) else 0
+    play_cmd       = str(data.get("play_cmd",       row["play_cmd"])).strip()
+    if play_cmd not in ("localplay", "playback"):
+        play_cmd = "localplay"
 
     if not re.match(r'^\d{4,7}$', node):
         return jsonify({"error": "Invalid node number"}), 400
@@ -10804,8 +10821,8 @@ def api_id_update(iid):
 
     db.execute(
         "UPDATE id_configs SET name=?, node=?, sound_path=?, interval_sec=?, "
-        "idle_delay_sec=?, initial_id=? WHERE id=?",
-        (name, node, sound_path, interval_sec, idle_delay_sec, initial_id, iid)
+        "idle_delay_sec=?, initial_id=?, play_cmd=? WHERE id=?",
+        (name, node, sound_path, interval_sec, idle_delay_sec, initial_id, play_cmd, iid)
     )
     db.commit()
     updated = db.execute("SELECT * FROM id_configs WHERE id=?", (iid,)).fetchone()
