@@ -62,6 +62,16 @@ except ImportError:
 
 from collections import deque
 
+# recording.py (in-browser recording) is a standalone module with no
+# import-time dependency on this file — see its module docstring for why.
+# app.py drives it entirely through the Recorder class and the pure
+# retention/cap-sweep functions below.
+import recording
+# stream_relay.py (persistent Broadcastify/YouTube relay) — same
+# independence story as recording.py, and independent of recording.py
+# itself too. Driven entirely through the Relay class below.
+import stream_relay
+
 # aprslib is optional — shelled-out-style guard so a checkout that hasn't
 # picked up the dependency yet (or an admin who edited requirements.txt)
 # fails cleanly at APRS-poller-start time instead of crashing the whole app
@@ -98,6 +108,9 @@ SOUNDS_DIR      = os.environ.get("SOUNDS_DIR",       f"/usr/share/asterisk/sound
 # directory is root:root and the service runs as User=asterisk, so it can't
 # write there. /var/lib/asterisk is already asterisk:asterisk.
 TTS_VOICES_DIR  = os.environ.get("TTS_VOICES_DIR",   "/var/lib/asterisk/henwen_tts_voices")
+# In-browser recordings (recording.py) — same "not under /opt/HenWen, which
+# is root:root and unwritable by the asterisk user" reasoning as TTS_VOICES_DIR.
+RECORDINGS_DIR  = os.environ.get("RECORDINGS_DIR",   "/var/lib/asterisk/henwen_recordings")
 # Resolved via the running interpreter's own directory, not PATH lookup —
 # under systemd, venv/bin isn't on PATH the way it is in an interactive
 # shell, so a bare "piper" subprocess call would fail with FileNotFoundError.
@@ -316,9 +329,33 @@ log("INFO", f"  LOG_LEVEL      = {LOG_LEVEL}")
 # Database
 # ---------------------------------------------------------------------------
 _db_ready = False   # flips True after the schema/migrations run once
+# get_db() used to open a brand-new sqlite3 connection on every single call
+# -- ~90 call sites across this file, hit from both Flask request handlers
+# and ~14 background poller threads, some (the AMI poll loop) firing every
+# second. Caching one connection per *thread* rather than per call fits how
+# this app is actually threaded: gunicorn's gthread worker (--threads 8)
+# creates a fixed pool of request-handling threads once and reuses them for
+# the process's lifetime (it doesn't spawn a thread per request), and every
+# background poller is itself one single long-lived thread -- so this caps
+# total connections at roughly (8 + number of DB-touching pollers), all
+# opened once, instead of reopening one on every call. A single shared
+# connection behind a lock was considered and rejected: it would serialize
+# every DB operation across every thread, which is exactly the contention
+# _poll_loop() already had to work around once (see its own comment about a
+# DB stall inside _ami_pool_lock freezing every AMI command) -- WAL mode
+# exists specifically so concurrent threads don't have to fight over one
+# connection. No connection here is ever explicitly closed: there are no
+# db.close() calls anywhere in this file today (everything relies on GC),
+# and a thread-local connection's lifetime already matches its owning
+# thread's lifetime -- for both the gthread pool and every poller, that's
+# the life of the process, so there's nothing to close early.
+_db_local = threading.local()
 
 
 def get_db():
+    conn = getattr(_db_local, 'conn', None)
+    if conn is not None:
+        return conn
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
@@ -330,11 +367,14 @@ def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=10.0)
     conn.row_factory = sqlite3.Row
     # The schema/migration statements below are idempotent but not free, and
-    # get_db() is called many times per second (poll loop, get_setting(), every
-    # request). Run them once, then hand back a bare connection. A cold-start
-    # race between first callers is harmless — every statement is CREATE TABLE
-    # IF NOT EXISTS or a guarded one-shot migration.
+    # get_db() used to be called many times per second (poll loop,
+    # get_setting(), every request) before the thread-local cache above --
+    # run them once per process, then hand back a bare connection. A
+    # cold-start race between first callers on different threads is
+    # harmless — every statement is CREATE TABLE IF NOT EXISTS or a guarded
+    # one-shot migration.
     if _db_ready:
+        _db_local.conn = conn
         return conn
     # WAL lets readers proceed while a writer commits and sharply reduces
     # writer-vs-writer contention across this app's many threads. The setting
@@ -513,6 +553,21 @@ def get_db():
         disconnected_at   REAL,
         duration_seconds  REAL
     )""")
+    # _db_conn_open()/_db_conn_close() (called from the 1s AMI poll loop, on
+    # every connect/disconnect) both filter on (local_node, peer_node,
+    # disconnected_at) -- unlike permanent_links/kiosk_temp_conns, which use
+    # a natural composite PRIMARY KEY, this table needs its own row per
+    # historical connection (the same pair connects/disconnects repeatedly
+    # over time), so nothing indexed those lookup columns until now. Without
+    # an index those queries are a full table scan on every single
+    # connect/disconnect event, and the table only grows over the life of
+    # the install -- a slow, worsening-over-time cost that's especially
+    # rough on a Pi's SD card, not just a one-off inefficiency.
+    conn.execute("""CREATE INDEX IF NOT EXISTS idx_connhist_lookup
+        ON connection_history(local_node, peer_node, disconnected_at)""")
+    # /api/connection-history's paginated view ORDER BYs this column too.
+    conn.execute("""CREATE INDEX IF NOT EXISTS idx_connhist_connected_at
+        ON connection_history(connected_at DESC)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS alert_config (
         id                 INTEGER PRIMARY KEY CHECK (id = 1),
         enabled            INTEGER NOT NULL DEFAULT 0,
@@ -563,6 +618,51 @@ def get_db():
     if 'state' not in _nws_cfg_cols:
         conn.execute("ALTER TABLE nws_alert_config ADD COLUMN state TEXT NOT NULL DEFAULT ''")
     conn.commit()
+    # Singleton config for the in-browser recording feature (recording.py) —
+    # caps/retention/silence/TTS-timestamp settings, owner-only. Entirely
+    # separate from stream_relay_config below: the two features share only
+    # the live audio source, never a config row or a running pipeline.
+    conn.execute("""CREATE TABLE IF NOT EXISTS recording_config (
+        id                 INTEGER PRIMARY KEY CHECK (id = 1),
+        retention_days     INTEGER NOT NULL DEFAULT 30,
+        max_recording_min  INTEGER NOT NULL DEFAULT 120,
+        global_cap_gb      REAL    NOT NULL DEFAULT 20.0,
+        per_user_cap_gb    REAL    NOT NULL DEFAULT 5.0,
+        silence_rms_thresh INTEGER NOT NULL DEFAULT 300,
+        silence_min_gap_ms INTEGER NOT NULL DEFAULT 2000,
+        tts_interval_min   INTEGER NOT NULL DEFAULT 10,
+        tts_voice          TEXT    NOT NULL DEFAULT 'en_US-lessac-medium',
+        tts_enabled        INTEGER NOT NULL DEFAULT 1,
+        output_format      TEXT    NOT NULL DEFAULT 'opus'
+    )""")
+    conn.commit()
+    # Singleton config for the persistent live stream relay (stream_relay.py)
+    # — Broadcastify (Icecast) / YouTube Live (RTMP) targets, owner-only.
+    # Deliberately its own table, not a shared row with recording_config:
+    # the relay is a continuous background service unrelated to any single
+    # recording session — see stream_relay.py for the poller that reads it.
+    conn.execute("""CREATE TABLE IF NOT EXISTS stream_relay_config (
+        id                   INTEGER PRIMARY KEY CHECK (id = 1),
+        target_node          TEXT    NOT NULL DEFAULT '',
+        broadcastify_enabled INTEGER NOT NULL DEFAULT 0,
+        broadcastify_host    TEXT    NOT NULL DEFAULT '',
+        broadcastify_port    INTEGER NOT NULL DEFAULT 0,
+        broadcastify_mount   TEXT    NOT NULL DEFAULT '',
+        broadcastify_user    TEXT    NOT NULL DEFAULT '',
+        broadcastify_pass    TEXT    NOT NULL DEFAULT '',
+        youtube_enabled      INTEGER NOT NULL DEFAULT 0,
+        youtube_rtmp_url     TEXT    NOT NULL DEFAULT '',
+        youtube_stream_key   TEXT    NOT NULL DEFAULT '',
+        overlay_website      TEXT    NOT NULL DEFAULT ''
+    )""")
+    _relay_cfg_cols = {r[1] for r in conn.execute("PRAGMA table_info(stream_relay_config)").fetchall()}
+    if 'overlay_website' not in _relay_cfg_cols:
+        # Shown as a static line on the YouTube video overlay, alongside
+        # the node's callsign/number and a live clock -- see
+        # build_youtube_output_args() in stream_relay.py. Not hardcoded
+        # to any one club's URL since other installs use this too.
+        conn.execute("ALTER TABLE stream_relay_config ADD COLUMN overlay_website TEXT NOT NULL DEFAULT ''")
+    conn.commit()
     # Per-node lockout: presence of a row means that node is locked by its
     # Owner. Only one lockout state per node, so `node` is the primary key
     # rather than an autoincrement id.
@@ -570,6 +670,23 @@ def get_db():
         node       TEXT PRIMARY KEY,
         locked_by  TEXT NOT NULL DEFAULT '',
         locked_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    )""")
+    conn.commit()
+    # One row per in-browser recording session (recording.py). No equivalent
+    # table exists for the stream relay — that's a continuous service, not a
+    # set of discrete sessions; see stream_relay_config above.
+    conn.execute("""CREATE TABLE IF NOT EXISTS recordings (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        node         TEXT    NOT NULL,
+        user_id      INTEGER NOT NULL,
+        username     TEXT    NOT NULL,
+        filename     TEXT    NOT NULL,
+        started_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+        ended_at     TEXT,
+        duration_sec REAL,
+        size_bytes   INTEGER,
+        status       TEXT    NOT NULL DEFAULT 'recording',
+        stop_reason  TEXT    NOT NULL DEFAULT ''
     )""")
     conn.commit()
     # Kiosk-editable scheduled-net reminders — shared across all visitors (not
@@ -640,6 +757,15 @@ def get_db():
         conn.commit()
     except Exception:
         pass  # column already exists
+    # Recording approval (User Management → "Can record") — 0 (default) means
+    # the account can't start a recording, regardless of role. Unlike
+    # restrict_disconnect this is checked for every role including owner: the
+    # owner grants recording access explicitly, even to themselves.
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN can_record INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass  # column already exists
 
     # Seed kiosk defaults
     for _k, _v in [
@@ -650,6 +776,7 @@ def get_db():
         conn.execute("INSERT OR IGNORE INTO settings (key,value) VALUES (?,?)", (_k, _v))
     conn.commit()
     globals()['_db_ready'] = True
+    _db_local.conn = conn
     return conn
 
 
@@ -721,7 +848,8 @@ def check_auth():
                       'api_audio_client_log',
                       'api_nets_create', 'api_nets_update', 'api_nets_delete',
                       'api_echolink_search', 'api_asl_search',
-                      'api_tx_config'}
+                      'api_tx_config', 'api_recording_permission',
+                      'api_recording_start', 'api_recordings_list', 'api_recording_download'}
 
     endpoint  = request.endpoint
     is_public = endpoint in _PUBLIC
@@ -2253,20 +2381,42 @@ def _check_asterisk_dns_health():
 
 # ── Nominatim geocoding cache ─────────────────────────────────────────────────
 NOMINATIM_URL   = "https://nominatim.openstreetmap.org/search?q={}&format=json&limit=1"
-_geocode_cache  = {}         # {location_str: {"lat": float, "lon": float} | None}
+# {location_str: (result, expires_at)} where result is {"lat":.., "lon":..} or None
+# and expires_at is None (cache forever) for a successful lookup, or a unix
+# timestamp for a failed one. A failure (network error, timeout, Nominatim
+# rate-limit) must NOT be cached forever like a success -- confirmed live: a
+# single transient 429 during a startup geocode burst permanently "poisoned"
+# the node's own location, silently breaking APRS/ISS until the next restart
+# since every retry just re-read the same cached None instead of trying again.
+_geocode_cache    = {}
+_GEOCODE_FAIL_TTL = 300      # retry a failed lookup after 5 min, not never
 _geocode_lock   = threading.Lock()
 _geocode_last   = [0.0]      # time of last Nominatim request (rate-limit: 1 req/s)
 _geocode_rlock  = threading.Lock()
 
 
+def _geocode_cache_get(loc):
+    """Return (hit, result) -- hit is False for a miss or an expired failure."""
+    cached = _geocode_cache.get(loc)
+    if cached is None:
+        return False, None
+    result, expires_at = cached
+    if expires_at is not None and time.time() >= expires_at:
+        return False, None
+    return True, result
+
+
 def _geocode(location: str):
-    """Return {"lat": float, "lon": float} for a location string, or None. Cached forever."""
+    """Return {"lat": float, "lon": float} for a location string, or None.
+    Successful lookups are cached forever; failures expire after
+    _GEOCODE_FAIL_TTL so a transient error gets retried instead of sticking."""
     if not location or not location.strip():
         return None
     loc = location.strip()
     with _geocode_lock:
-        if loc in _geocode_cache:
-            return _geocode_cache[loc]
+        hit, cached_result = _geocode_cache_get(loc)
+        if hit:
+            return cached_result
 
     # Nominatim: at most 1 request per 1.1 seconds
     with _geocode_rlock:
@@ -2285,7 +2435,8 @@ def _geocode(location: str):
             result = None
 
     with _geocode_lock:
-        _geocode_cache[loc] = result
+        expires_at = None if result is not None else time.time() + _GEOCODE_FAIL_TTL
+        _geocode_cache[loc] = (result, expires_at)
     return result
 
 
@@ -2305,8 +2456,9 @@ def _geocode_nonblocking(location: str):
         return None
     loc = location.strip()
     with _geocode_lock:
-        if loc in _geocode_cache:
-            return _geocode_cache[loc]
+        hit, cached_result = _geocode_cache_get(loc)
+        if hit:
+            return cached_result
     with _geocode_queue_lock:
         if loc not in _geocode_queue_seen:
             _geocode_queue_seen.add(loc)
@@ -2850,11 +3002,37 @@ def ami_send_command(subcmd_fn) -> dict:
 # ---------------------------------------------------------------------------
 # rpt.conf file helpers
 # ---------------------------------------------------------------------------
+# read_conf_file(RPT_CONF_PATH) is called from ~20 places across the app,
+# including two hot paths: the 1s AMI poll loop and /api/status/board (hit
+# every 1.5-2s by every open kiosk tab) -- meaning a full disk read + line
+# scan of rpt.conf was happening multiple times a second regardless of
+# whether the file had actually changed, which only happens when an admin
+# saves an edit. Cached below, keyed by mtime: a cheap stat() call replaces
+# the read+return on every call where the file hasn't changed since last
+# read. write_conf_file() always changes the file's mtime (it writes a new
+# temp file and renames it into place), so this self-invalidates on every
+# real edit with no separate cache-busting needed anywhere else.
+_conf_file_cache      = {}   # {path: (mtime, content)}
+_conf_file_cache_lock = threading.Lock()
+
+
 def read_conf_file(path):
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = None   # fall through to open() below for the real error/logging
+    if mtime is not None:
+        with _conf_file_cache_lock:
+            cached = _conf_file_cache.get(path)
+        if cached and cached[0] == mtime:
+            return cached[1]
     try:
         with open(path) as f:
             content = f.read()
         log("DEBUG", f"[CONF] Read {len(content)} bytes from {path}")
+        if mtime is not None:
+            with _conf_file_cache_lock:
+                _conf_file_cache[path] = (mtime, content)
         return content
     except FileNotFoundError:
         log("ERROR", f"[CONF] File not found: {path}")
@@ -4390,7 +4568,7 @@ def api_alerts_test():
 @app.route("/api/users")
 def api_users_list():
     rows = get_db().execute(
-        "SELECT id, username, role, created_at, session_idle_timeout, restrict_disconnect "
+        "SELECT id, username, role, created_at, session_idle_timeout, restrict_disconnect, can_record "
         "FROM users ORDER BY role DESC, username"
     ).fetchall()
     return jsonify({"users": [dict(r) for r in rows]})
@@ -4406,6 +4584,9 @@ def api_users_create():
     # disconnect gate entirely, so the flag is simply ignored for them.
     restrict_disconnect = bool(data.get("restrict_disconnect", False)) and role == "user"
     caller_role = session.get('role', '')
+    if "can_record" in data and caller_role != "owner":
+        return jsonify({"error": "Only the owner can grant recording access"}), 403
+    can_record = bool(data.get("can_record", False))
     if not re.match(r'^[A-Za-z0-9_.-]{2,32}$', username):
         return jsonify({"error": "Username must be 2-32 chars: letters, digits, _ . -"}), 400
     if len(password) < 8:
@@ -4422,12 +4603,12 @@ def api_users_create():
     db = get_db()
     try:
         cur = db.execute(
-            "INSERT INTO users (username, password_hash, role, restrict_disconnect) VALUES (?,?,?,?)",
-            (username, generate_password_hash(password), role, int(restrict_disconnect)))
+            "INSERT INTO users (username, password_hash, role, restrict_disconnect, can_record) VALUES (?,?,?,?,?)",
+            (username, generate_password_hash(password), role, int(restrict_disconnect), int(can_record)))
         db.commit()
         _seed_default_favorites(cur.lastrowid)
         log("INFO", f"[USERS] Created user '{username}' role={role} "
-                    f"restrict_disconnect={restrict_disconnect} by {caller_role}")
+                    f"restrict_disconnect={restrict_disconnect} can_record={can_record} by {caller_role}")
         return jsonify({"ok": True})
     except sqlite3.IntegrityError:
         return jsonify({"error": f"Username '{username}' already exists."}), 409
@@ -4487,6 +4668,12 @@ def api_users_update(uid):
         # gate entirely regardless of this flag.
         restrict_disconnect = bool(data["restrict_disconnect"]) and new_role == "user"
         updates.append("restrict_disconnect=?"); params.append(int(restrict_disconnect))
+    if "can_record" in data:
+        # Unlike restrict_disconnect, meaningful for every role — the owner
+        # grants recording access explicitly, even to their own account.
+        if caller_role != "owner":
+            return jsonify({"error": "Only the owner can grant recording access"}), 403
+        updates.append("can_record=?"); params.append(int(bool(data["can_record"])))
     if not updates:
         return jsonify({"ok": True, "note": "Nothing to update"})
     params.append(uid)
@@ -5180,6 +5367,13 @@ def api_status_board():
         "SELECT COUNT(*) FROM connectors WHERE enabled=1 AND schedule_type != 'manual' AND connect_time IS NOT NULL"
     ).fetchone()[0]
 
+    # Same value for every locally-hosted node in this request -- was
+    # re-fetched (a fresh get_db()/sqlite3.connect() each time) once per
+    # node inside the loop below, needlessly multiplying DB connections on
+    # multi-node installs for a setting that can't differ between nodes
+    # in a single request.
+    idle_timeout = int(get_setting('kiosk_idle_timeout_sec', '600') or 600)
+
     node_data = []
     for node in nodes:
         info     = lookup_node(node)
@@ -5189,7 +5383,6 @@ def api_status_board():
         with _link_stats_lock:
             ls_snapshot = dict(_link_stats)
         node_str_local = str(node)
-        idle_timeout   = int(get_setting('kiosk_idle_timeout_sec', '600') or 600)
         for cn in cached.get("connected", []):
             cn_info    = lookup_node(cn)
             cn_loc     = cn_info.get("location", "")
@@ -5801,6 +5994,15 @@ _audio_active = {}   # node -> _AudioBroadcast
 
 _AUDIO_RELAY_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'audio_relay.py')
 
+# In-browser recordings (recording.py) in progress right now, keyed by their
+# `recordings` table row id -> recording.Recorder. Separate from
+# _audio_active/_audio_lock on purpose: a Recorder attaches to a node's
+# _AudioBroadcast as just another add_client() consumer, so its own
+# lifecycle is tracked independently here rather than folded into the
+# broadcast bookkeeping above.
+_recordings_lock     = threading.Lock()
+_active_recordings   = {}   # recording db id -> recording.Recorder
+
 
 def _node_rxchannel(node):
     """The node's effective `rxchannel` setting from rpt.conf, resolving
@@ -6409,6 +6611,22 @@ def api_audio_stream(node):
 @app.route('/api/audio/stop', methods=['POST'])
 @limiter.limit("30 per minute")
 def api_audio_stop():
+    """
+    Confirms a listener's intent to stop and validates they're actually a
+    current listener -- but does NOT tear down the shared broadcast itself.
+    That used to happen here unconditionally (broadcast.shutdown()), which
+    was fine back when a browser Listen session was the only kind of client
+    a broadcast could ever have: killing the whole thing when "the"
+    listener stopped was harmless. Now that recording.py and
+    stream_relay.py can hold long-lived clients on the same broadcast, that
+    blanket shutdown meant any single listener toggling Listen off would
+    also kill an unrelated in-progress recording or the persistent stream
+    relay for everyone. Actual cleanup already happens correctly and
+    per-client via the browser's own connection closing (ctrl.abort() in
+    status.html -> GeneratorExit in api_audio_stream()'s generate() ->
+    broadcast.remove_client(), which itself calls shutdown() only once
+    every last client, including a relay or recorder, is gone).
+    """
     node = str((request.json or {}).get('node', '')).strip()
     if not re.match(r'^\d{4,7}$', node):
         return jsonify({'error': 'invalid node'}), 400
@@ -6419,10 +6637,8 @@ def api_audio_stop():
         log('WARN', f'[AUDIO] stop for node {node} rejected: {remote} is not '
                     f'a current listener of this broadcast')
         return jsonify({'error': 'not a listener of this broadcast'}), 403
-    log('DEBUG', f'[AUDIO] explicit stop requested for node {node} '
+    log('DEBUG', f'[AUDIO] explicit stop acknowledged for node {node} '
                 f'(broadcast active={broadcast is not None})')
-    if broadcast:
-        broadcast.shutdown()
     return jsonify({'ok': True})
 
 
@@ -6473,6 +6689,327 @@ def api_audio_check(node):
         'channel': channel,
         'node':    node,
     })
+
+
+# ---------------------------------------------------------------------------
+# In-browser recording (recording.py) — Phase 2/3 of the audio recording
+# feature. Deliberately not sharing any code path with the stream relay
+# (Phase 4, stream_relay.py) beyond the audio source itself: a Recorder
+# attaches to the node's _AudioBroadcast as just another add_client()
+# consumer, same as a browser listener, and never touches audio_relay.py
+# or the raw-PCM FIFO plumbing.
+# ---------------------------------------------------------------------------
+def _recording_cfg():
+    return _get_recording_config() or RECORDING_CONFIG_DEFAULTS
+
+
+@app.route('/api/recording/start', methods=['POST'])
+@limiter.limit("10 per minute")
+def api_recording_start():
+    """
+    Starts a recording for `node` and holds the HTTP connection open for
+    the recording's whole duration — the browser tab that opened this
+    connection *is* the recording's lifecycle, mirroring how
+    /api/audio/stream/<node> already ties a listener's presence to an open
+    connection. Closing the tab (or any network drop) triggers Python's
+    GeneratorExit in generate() below exactly the way it does for a
+    listener, which stops the recorder and finalizes its DB row — there is
+    intentionally no "resume a recording after the tab closed" path.
+    """
+    data = request.json or {}
+    node = str(data.get('node', '')).strip()
+    if not re.match(r'^\d{4,7}$', node):
+        return jsonify({'error': 'invalid node'}), 400
+
+    username = session.get('username', '')
+    db = get_db()
+    user_row = db.execute("SELECT id, can_record FROM users WHERE username=?", (username,)).fetchone()
+    if not user_row or not user_row['can_record']:
+        return jsonify({'error': 'You are not approved to record. Ask the node owner to enable it '
+                                  'for your account in User Management.'}), 403
+
+    cfg = _recording_cfg()
+    global_cap_bytes = float(cfg['global_cap_gb']) * 1e9
+    user_cap_bytes   = float(cfg['per_user_cap_gb']) * 1e9
+
+    total_bytes = db.execute(
+        "SELECT COALESCE(SUM(size_bytes),0) FROM recordings WHERE status='finished'"
+    ).fetchone()[0]
+    if total_bytes >= global_cap_bytes:
+        return jsonify({'error': 'The global recording storage cap has been reached. '
+                                  'An admin needs to delete old recordings or raise the cap.'}), 400
+    user_bytes = db.execute(
+        "SELECT COALESCE(SUM(size_bytes),0) FROM recordings WHERE status='finished' AND user_id=?",
+        (user_row['id'],)
+    ).fetchone()[0]
+    if user_bytes >= user_cap_bytes:
+        return jsonify({'error': 'Your personal recording storage cap has been reached. '
+                                  'Delete an old recording or ask the owner to raise your cap.'}), 400
+
+    remote = request.remote_addr or '?'
+    client_label = f'recorder:{username}'
+    try:
+        with _audio_lock:
+            broadcast = _audio_active.get(node)
+            if broadcast is None or broadcast._dead:
+                broadcast = _start_broadcast(node)
+                _audio_active[node] = broadcast
+            client_q = broadcast.add_client(client_label)
+    except Exception as e:
+        log('ERROR', f'[RECORDING] failed to attach to broadcast for node {node}: {e}')
+        return jsonify({'error': str(e)}), 500
+
+    os.makedirs(RECORDINGS_DIR, exist_ok=True)
+    output_format = cfg['output_format']
+    ext = 'mp3' if output_format == 'mp3' else 'ogg'
+    ts = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+    filename = f"{node}_{ts}_{secrets.token_hex(4)}.{ext}"
+    dest_path = os.path.join(RECORDINGS_DIR, filename)
+
+    cur = db.execute(
+        "INSERT INTO recordings (node, user_id, username, filename, status) VALUES (?,?,?,?,'recording')",
+        (node, user_row['id'], username, filename)
+    )
+    db.commit()
+    recording_id = cur.lastrowid
+
+    def _finalize(reason, elapsed_sec):
+        try:
+            size = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
+        except Exception:
+            size = 0
+        try:
+            fdb = get_db()
+            fdb.execute(
+                "UPDATE recordings SET ended_at=datetime('now'), duration_sec=?, size_bytes=?, "
+                "status='finished', stop_reason=? WHERE id=?",
+                (elapsed_sec, size, reason, recording_id)
+            )
+            fdb.commit()
+        except Exception as e:
+            log('ERROR', f'[RECORDING] #{recording_id} failed to finalize DB row: {e}')
+        log('INFO', f'[RECORDING] #{recording_id} finished node={node} user={username} '
+                    f'reason={reason} size={size}b duration={elapsed_sec:.1f}s')
+        with _recordings_lock:
+            _active_recordings.pop(recording_id, None)
+
+    # Spoken timestamps: resolved once at start time (not re-checked mid
+    # -recording) so a config change or a voice-download failure never
+    # interrupts an already-running recording — worst case it just plays
+    # this session's recording without timestamps, per _ensure_voice_model
+    # _cached() being fail-soft here rather than blocking the start.
+    tts_fn = None
+    tts_interval_sec = None
+    if bool(cfg.get('tts_enabled')):
+        tts_voice = cfg['tts_voice']
+        tts_interval_sec = int(cfg['tts_interval_min']) * 60
+        try:
+            _ensure_voice_model_cached(tts_voice)
+            def tts_fn(_voice=tts_voice):
+                return _synthesize_timestamp_pcm(_format_clock_time(datetime.now()), _voice)
+        except Exception as e:
+            log('WARN', f"[RECORDING] voice '{tts_voice}' unavailable, timestamps "
+                        f"disabled for this recording: {e}")
+
+    try:
+        recorder = recording.Recorder(
+            node=node, dest_path=dest_path, output_format=output_format,
+            silence_rms_thresh=int(cfg['silence_rms_thresh']),
+            silence_min_gap_ms=int(cfg['silence_min_gap_ms']),
+            max_duration_sec=int(cfg['max_recording_min']) * 60,
+            on_stop=_finalize,
+            log_fn=lambda msg: log('WARN', msg),
+            tts_interval_sec=tts_interval_sec,
+            tts_fn=tts_fn,
+        )
+    except Exception as e:
+        broadcast.remove_client(client_q, client_label)
+        db.execute("UPDATE recordings SET status='error', stop_reason=? WHERE id=?", (str(e), recording_id))
+        db.commit()
+        log('ERROR', f'[RECORDING] #{recording_id} failed to start pipeline: {e}')
+        return jsonify({'error': f'Could not start recording: {e}'}), 500
+
+    with _recordings_lock:
+        _active_recordings[recording_id] = recorder
+    log('INFO', f'[RECORDING] #{recording_id} started node={node} user={username} '
+                f'format={output_format} dest={dest_path}')
+
+    def generate():
+        yield json.dumps({'recording_id': recording_id}) + '\n'
+        last_heartbeat = time.monotonic()
+        gets_empty = 0
+        try:
+            while True:
+                try:
+                    chunk = client_q.get(timeout=1.0)
+                    gets_empty = 0
+                except _queue_mod.Empty:
+                    chunk = False
+                    gets_empty += 1
+                    if gets_empty in (30, 60) or gets_empty % 120 == 0:
+                        # Real signal (no chunks arriving from the
+                        # broadcast at all) -- low-frequency by design,
+                        # worth keeping permanently rather than one-off
+                        # debug chatter.
+                        log('WARN', f'[RECORDING] #{recording_id} no chunks from node {node}\'s '
+                                    f'broadcast in {gets_empty}s')
+                if chunk is None:
+                    # The underlying broadcast itself shut down (e.g. the
+                    # node went offline) — nothing left to feed.
+                    break
+                if chunk is not False:
+                    recorder.feed(chunk)
+                if recorder.stop_reason:
+                    # Hit its own limit (max_recording_min) — tell the
+                    # browser why before the connection closes.
+                    yield json.dumps({'stopped': True, 'reason': recorder.stop_reason}) + '\n'
+                    break
+                now = time.monotonic()
+                if now - last_heartbeat >= 5.0:
+                    last_heartbeat = now
+                    yield json.dumps({'elapsed_sec': round(recorder.elapsed_sec)}) + '\n'
+        except GeneratorExit:
+            raise
+        finally:
+            broadcast.remove_client(client_q, client_label)
+            recorder.stop(recorder.stop_reason or 'manual')
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='application/x-ndjson',
+        headers={
+            'Cache-Control':     'no-cache, no-store',
+            'X-Accel-Buffering': 'no',
+        },
+    )
+
+
+@app.route('/api/recordings')
+def api_recordings_list():
+    """Any logged-in role — a plain 'user' account only ever sees their own
+    recordings (matches how favorites are scoped per-user elsewhere in the
+    app); admin/superuser/owner see everything, since they're the ones who
+    manage storage and delete old recordings."""
+    role = session.get('role', '')
+    username = session.get('username', '')
+    db = get_db()
+    if role in ('admin', 'superuser', 'owner'):
+        rows = db.execute(
+            "SELECT id, node, username, started_at, ended_at, duration_sec, size_bytes, status, stop_reason "
+            "FROM recordings ORDER BY started_at DESC LIMIT 200"
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT id, node, username, started_at, ended_at, duration_sec, size_bytes, status, stop_reason "
+            "FROM recordings WHERE username=? ORDER BY started_at DESC LIMIT 200",
+            (username,)
+        ).fetchall()
+    return jsonify({'recordings': [dict(r) for r in rows]})
+
+
+@app.route('/api/recording/<int:rid>/download')
+def api_recording_download(rid):
+    role = session.get('role', '')
+    username = session.get('username', '')
+    row = get_db().execute("SELECT * FROM recordings WHERE id=?", (rid,)).fetchone()
+    if not row:
+        return jsonify({'error': 'Recording not found'}), 404
+    if row['username'] != username and role not in ('admin', 'superuser', 'owner'):
+        return jsonify({'error': 'Not your recording'}), 403
+    if row['status'] != 'finished':
+        return jsonify({'error': f"Recording is not finished (status={row['status']})"}), 400
+    path = os.path.join(RECORDINGS_DIR, row['filename'])
+    if not os.path.exists(path):
+        return jsonify({'error': 'Recording file is missing on disk'}), 404
+    return send_file(path, as_attachment=True, download_name=row['filename'])
+
+
+@app.route('/api/recordings/<int:rid>', methods=['DELETE'])
+def api_recordings_delete(rid):
+    """Admin/superuser/owner only (the default check_auth() gate already
+    enforces this — this route is deliberately not in _USER_OR_ABOVE).
+    A regular approved recordist can create recordings but not manage the
+    shared archive, matching the requirements' silence on self-service
+    deletion."""
+    db = get_db()
+    row = db.execute("SELECT * FROM recordings WHERE id=?", (rid,)).fetchone()
+    if not row:
+        return jsonify({'error': 'Recording not found'}), 404
+    if row['status'] == 'recording':
+        return jsonify({'error': 'Cannot delete a recording still in progress'}), 400
+    path = os.path.join(RECORDINGS_DIR, row['filename'])
+    try:
+        if os.path.exists(path):
+            os.unlink(path)
+    except Exception as e:
+        log('WARN', f'[RECORDING] failed to delete file for #{rid}: {e}')
+    db.execute("DELETE FROM recordings WHERE id=?", (rid,))
+    db.commit()
+    log('INFO', f"[RECORDING] #{rid} deleted by {session.get('username', '')}")
+    return jsonify({'ok': True})
+
+
+def _recording_janitor_loop():
+    """Periodic retention/cap sweep — mirrors _nws_prune_expired_locally()'s
+    age-based local prune, plus the genuinely new global/per-user GB-cap
+    sweeps (no prior art for those in this app). The actual delete-set
+    logic lives in recording.py as pure functions so it's unit-testable
+    without a DB or filesystem."""
+    while True:
+        time.sleep(300)
+        try:
+            cfg = _recording_cfg()
+            db = get_db()
+            rows = db.execute(
+                "SELECT id, user_id, size_bytes, started_at FROM recordings WHERE status='finished'"
+            ).fetchall()
+
+            def _epoch(started_at):
+                try:
+                    return datetime.strptime(started_at, '%Y-%m-%d %H:%M:%S').timestamp()
+                except Exception:
+                    return time.time()  # never old enough to purge on a parse failure
+
+            age_rows = [{'id': r['id'], 'started_at': _epoch(r['started_at'])} for r in rows]
+            to_delete = set(recording.select_purge_by_age(
+                age_rows, time.time(), float(cfg['retention_days'])))
+
+            remaining = [r for r in rows if r['id'] not in to_delete]
+            cap_rows = [{'id': r['id'], 'size_bytes': r['size_bytes'] or 0,
+                        'started_at': _epoch(r['started_at'])} for r in remaining]
+            to_delete.update(recording.select_purge_by_cap(
+                cap_rows, float(cfg['global_cap_gb']) * 1e9))
+
+            remaining2 = [r for r in remaining if r['id'] not in to_delete]
+            user_cap_rows = [{'id': r['id'], 'user_id': r['user_id'], 'size_bytes': r['size_bytes'] or 0,
+                              'started_at': _epoch(r['started_at'])} for r in remaining2]
+            to_delete.update(recording.select_purge_by_user_cap(
+                user_cap_rows, float(cfg['per_user_cap_gb']) * 1e9))
+
+            if not to_delete:
+                continue
+            by_id = {r['id']: r for r in rows}
+            for rid in to_delete:
+                r = by_id.get(rid)
+                if not r:
+                    continue
+                path = os.path.join(RECORDINGS_DIR, db.execute(
+                    "SELECT filename FROM recordings WHERE id=?", (rid,)).fetchone()['filename'])
+                try:
+                    if os.path.exists(path):
+                        os.unlink(path)
+                except Exception as e:
+                    log('WARN', f'[RECORDING] janitor failed to delete file for #{rid}: {e}')
+                db.execute("DELETE FROM recordings WHERE id=?", (rid,))
+            db.commit()
+            log('INFO', f'[RECORDING] janitor purged {len(to_delete)} recording(s)')
+        except Exception as e:
+            log('ERROR', f'[RECORDING] janitor loop error: {e}\n{traceback.format_exc()}')
+
+
+def start_recording_janitor():
+    t = threading.Thread(target=_recording_janitor_loop, name="recording-janitor", daemon=True)
+    t.start()
 
 
 @app.route('/api/audio/client-log', methods=['POST'])
@@ -7569,6 +8106,68 @@ def _tts_to_ulaw(text: str, voice_id: str, dest_ulaw: str) -> None:
             pass
 
 
+# In-memory cache for recording.py's periodic spoken-timestamp splice —
+# keyed on (voice_id, text). The text already encodes the target minute
+# ("the time is 3:45 PM"), so a plain dict is a correct per-minute cache
+# without any TTL logic: a given key is only ever asked for again within
+# the same minute, and the process's own memory growth is bounded by
+# swapping in a fresh dict once a minute (see _recording_tts_pcm_cache_key).
+# Shared across every simultaneous Recorder so N concurrent recordings in
+# the same minute only ever shell out to Piper once between them.
+_recording_tts_cache = {}
+_recording_tts_cache_lock = threading.Lock()
+_recording_tts_cache_minute = None
+
+
+def _synthesize_timestamp_pcm(text: str, voice_id: str):
+    """Synthesize `text` to raw PCM in recording.py's working format (8kHz
+    mono s16le) via the same Piper call _synthesize_tts() already uses for
+    announcements, then an ffmpeg one-shot to convert the WAV to raw PCM
+    instead of ULAW. Returns None (never raises) on any failure — a TTS
+    hiccup must never take down the recording it's annotating; the caller
+    (recording.Recorder) just skips that interval's splice and logs it."""
+    global _recording_tts_cache_minute
+    minute_key = datetime.now().strftime("%Y%m%d%H%M")
+    with _recording_tts_cache_lock:
+        if minute_key != _recording_tts_cache_minute:
+            _recording_tts_cache.clear()
+            _recording_tts_cache_minute = minute_key
+        cached = _recording_tts_cache.get((voice_id, text))
+        if cached is not None:
+            return cached
+
+    fd, tmp_wav = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    try:
+        _synthesize_tts(text, voice_id, tmp_wav)
+        # Piper's raw output is normalized much hotter/denser than typical
+        # radio audio (which has natural headroom and pauses) -- without
+        # attenuation the timestamp reads as noticeably louder than the
+        # surrounding stream even at matched peak level, since it has far
+        # less dynamic range. -10dB was tuned by ear against a real
+        # recording; adjust here if it still doesn't match.
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", tmp_wav, "-af", "volume=-10dB",
+             "-f", "s16le", "-ar", "8000", "-ac", "1", "pipe:1"],
+            capture_output=True, timeout=30,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed: {result.stderr.decode(errors='replace')[-500:]}")
+        pcm = result.stdout
+    except Exception as e:
+        log("WARN", f"[RECORDING] timestamp TTS synthesis failed (voice={voice_id}): {e}")
+        return None
+    finally:
+        try:
+            os.unlink(tmp_wav)
+        except OSError:
+            pass
+
+    with _recording_tts_cache_lock:
+        _recording_tts_cache[(voice_id, text)] = pcm
+    return pcm
+
+
 def _ann_slug(name: str) -> str:
     """Turn a user-supplied name into a filesystem/Asterisk-safe slug."""
     slug = re.sub(r'[^a-zA-Z0-9_-]', '_', name.strip().lower())
@@ -8358,10 +8957,19 @@ def _format_clock_time(dt: datetime) -> str:
     return dt.strftime("%-I %p") if dt.minute == 0 else dt.strftime("%-I:%M %p")
 
 
-def _nws_alert_spoken_text(alert: dict) -> str:
+def _nws_alert_spoken_text(alert: dict, fallback_area: str = "") -> str:
     """Build the spoken announcement string — templated, not the verbatim
     NWS headline, which includes wordy issue-time phrasing meant for text
-    display, not repeated speech."""
+    display, not repeated speech.
+
+    fallback_area (typically the configured zone/state's own area name,
+    e.g. "Michigan") is used only when the alert's own per-county
+    areaDesc comes back empty -- some NWS CAP products (particularly
+    broader watches) don't break area down into a semicolon-separated
+    county list the way most warnings do. Falling back to "your area"
+    in that case said nothing useful to a listener/viewer; naming the
+    configured region is a real improvement even though it's coarser
+    than per-county detail."""
     expires_str = ""
     if alert.get("expires"):
         try:
@@ -8371,7 +8979,7 @@ def _nws_alert_spoken_text(alert: dict) -> str:
     raw_area = alert.get("areaDesc", "") or ""
     event    = alert.get("event", "") or "Severe Weather Alert"
     counties = _join_with_and(_strip_state_names(raw_area).split(";"))
-    area_phrase = f"the following counties: {counties}" if counties else "your area"
+    area_phrase = f"the following counties: {counties}" if counties else (fallback_area or "your area")
     if expires_str:
         return f"{NWS_ALERT_SPOKEN_PREFIX}{event}. In effect for {area_phrase}, until {expires_str}."
     return f"{NWS_ALERT_SPOKEN_PREFIX}{event}. In effect for {area_phrase}."
@@ -8383,7 +8991,7 @@ def _nws_sync_alert(alert: dict, cfg: dict):
     exactly one code path for 'turn an alert dict into an announcement
     row' — the poller and manual test can't drift out of sync."""
     db     = get_db()
-    spoken = _nws_alert_spoken_text(alert)
+    spoken = _nws_alert_spoken_text(alert, fallback_area=cfg.get("zone_area_name", ""))
     row    = db.execute(
         "SELECT * FROM announcements WHERE source_type='nws_alert' AND external_id=?",
         (alert["vtec_key"],)
@@ -8571,6 +9179,546 @@ def api_nws_alerts_save_config():
     db.commit()
     log("INFO", "[NWS] Alert config saved")
     return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# Recording config (recording.py) and stream relay config (stream_relay.py)
+# ---------------------------------------------------------------------------
+RECORDING_CONFIG_DEFAULTS = {
+    "retention_days": 30, "max_recording_min": 120,
+    "global_cap_gb": 20.0, "per_user_cap_gb": 5.0,
+    "silence_rms_thresh": 300, "silence_min_gap_ms": 2000,
+    "tts_interval_min": 10, "tts_voice": DEFAULT_TTS_VOICE,
+    "tts_enabled": True, "output_format": "opus",
+}
+
+STREAM_RELAY_CONFIG_DEFAULTS = {
+    "target_node": "",
+    "broadcastify_enabled": False, "broadcastify_host": "", "broadcastify_port": 0,
+    "broadcastify_mount": "", "broadcastify_user": "", "broadcastify_pass": "",
+    "youtube_enabled": False, "youtube_rtmp_url": "", "youtube_stream_key": "",
+    "overlay_website": "",
+}
+
+
+def _get_recording_config():
+    row = get_db().execute("SELECT * FROM recording_config WHERE id=1").fetchone()
+    return dict(row) if row else None
+
+
+def _get_stream_relay_config():
+    row = get_db().execute("SELECT * FROM stream_relay_config WHERE id=1").fetchone()
+    return dict(row) if row else None
+
+
+@app.route("/api/recording/config")
+def api_recording_config_get():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can view recording settings"}), 403
+    cfg = _get_recording_config()
+    return jsonify(dict(cfg) if cfg else RECORDING_CONFIG_DEFAULTS)
+
+
+@app.route("/api/recording/config", methods=["POST", "PUT"])
+def api_recording_config_save():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can change recording settings"}), 403
+    data = request.json or {}
+
+    def _positive_int(key, default, min_val=1):
+        try:
+            v = int(data.get(key, default))
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} must be a whole number")
+        if v < min_val:
+            raise ValueError(f"{key} must be at least {min_val}")
+        return v
+
+    def _positive_float(key, default, min_val=0.1):
+        try:
+            v = float(data.get(key, default))
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} must be a number")
+        if v < min_val:
+            raise ValueError(f"{key} must be at least {min_val}")
+        return v
+
+    try:
+        retention_days      = _positive_int("retention_days", 30)
+        max_recording_min   = _positive_int("max_recording_min", 120)
+        global_cap_gb        = _positive_float("global_cap_gb", 20.0)
+        per_user_cap_gb      = _positive_float("per_user_cap_gb", 5.0)
+        silence_rms_thresh   = _positive_int("silence_rms_thresh", 300, min_val=0)
+        silence_min_gap_ms   = _positive_int("silence_min_gap_ms", 2000, min_val=0)
+        tts_interval_min     = _positive_int("tts_interval_min", 10)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    tts_voice = str(data.get("tts_voice", DEFAULT_TTS_VOICE))
+    if tts_voice not in TTS_VOICES:
+        return jsonify({"error": f"Unknown voice: {tts_voice}"}), 400
+
+    output_format = str(data.get("output_format", "opus")).strip().lower()
+    if output_format not in ("opus", "mp3"):
+        return jsonify({"error": "output_format must be 'opus' or 'mp3'"}), 400
+
+    tts_enabled = bool(data.get("tts_enabled", True))
+    if tts_enabled:
+        try:
+            _ensure_voice_model_cached(tts_voice)
+        except Exception as e:
+            return jsonify({"error": f"Could not download voice '{tts_voice}': {e}"}), 500
+
+    db = get_db()
+    db.execute(
+        """INSERT OR REPLACE INTO recording_config
+           (id, retention_days, max_recording_min, global_cap_gb, per_user_cap_gb,
+            silence_rms_thresh, silence_min_gap_ms, tts_interval_min, tts_voice,
+            tts_enabled, output_format)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (retention_days, max_recording_min, global_cap_gb, per_user_cap_gb,
+         silence_rms_thresh, silence_min_gap_ms, tts_interval_min, tts_voice,
+         int(tts_enabled), output_format)
+    )
+    db.commit()
+    log("INFO", f"[RECORDING] Config saved by {session.get('username', '')}")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/recording/permission")
+def api_recording_permission():
+    """Any logged-in role — lets the frontend decide whether to render the
+    Record button. Re-checked fresh from the DB, never trusted from the
+    session, since the owner can revoke it at any time."""
+    username = session.get('username', '')
+    row = get_db().execute("SELECT can_record FROM users WHERE username=?", (username,)).fetchone()
+    return jsonify({"can_record": bool(row["can_record"]) if row else False})
+
+
+@app.route("/api/stream-relay/config")
+def api_stream_relay_config_get():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can view stream relay settings"}), 403
+    cfg = _get_stream_relay_config()
+    return jsonify(dict(cfg) if cfg else STREAM_RELAY_CONFIG_DEFAULTS)
+
+
+@app.route("/api/stream-relay/config", methods=["POST", "PUT"])
+def api_stream_relay_config_save():
+    """Owner-only. Deliberately independent of /api/recording/config — the
+    relay is a separate always-on service (see stream_relay.py), not tied to
+    any recording session. Broadcastify/YouTube credentials are stored
+    plaintext, matching the existing alert_config.pushover_token precedent;
+    this app has no secrets-encryption layer to plug into."""
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can change stream relay settings"}), 403
+    data = request.json or {}
+
+    target_node = str(data.get("target_node", "")).strip()
+
+    broadcastify_enabled = bool(data.get("broadcastify_enabled", False))
+    broadcastify_host    = str(data.get("broadcastify_host", "")).strip()
+    broadcastify_mount   = str(data.get("broadcastify_mount", "")).strip()
+    broadcastify_user    = str(data.get("broadcastify_user", "")).strip()
+    # Stripped like every other credential field here -- an unstripped
+    # password directly corrupts the icecast://user:pass@host URL built
+    # from it (confirmed live: a leading-whitespace password produced
+    # "icecast://source:        <pass>@host..." and Broadcastify rejected
+    # the connection outright).
+    broadcastify_pass    = str(data.get("broadcastify_pass", "")).strip()
+    try:
+        broadcastify_port = int(data.get("broadcastify_port", 0) or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "broadcastify_port must be a number"}), 400
+    if broadcastify_enabled and not (broadcastify_host and broadcastify_port and broadcastify_mount):
+        return jsonify({"error": "Broadcastify host, port, and mount are required when enabled"}), 400
+
+    youtube_enabled    = bool(data.get("youtube_enabled", False))
+    youtube_rtmp_url   = str(data.get("youtube_rtmp_url", "")).strip()
+    youtube_stream_key = str(data.get("youtube_stream_key", "")).strip()
+    if youtube_enabled and not (youtube_rtmp_url and youtube_stream_key):
+        return jsonify({"error": "YouTube RTMP URL and stream key are required when enabled"}), 400
+
+    if (broadcastify_enabled or youtube_enabled) and not re.match(r'^\d{4,7}$', target_node):
+        return jsonify({"error": "A valid target node number is required to enable relay"}), 400
+
+    # Shown as a static line on the YouTube video overlay -- see
+    # build_youtube_output_args(). Free text, not validated as a URL:
+    # it's just displayed, never fetched or linked.
+    overlay_website = str(data.get("overlay_website", "")).strip()
+
+    db = get_db()
+    db.execute(
+        """INSERT OR REPLACE INTO stream_relay_config
+           (id, target_node, broadcastify_enabled, broadcastify_host, broadcastify_port,
+            broadcastify_mount, broadcastify_user, broadcastify_pass,
+            youtube_enabled, youtube_rtmp_url, youtube_stream_key, overlay_website)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (target_node, int(broadcastify_enabled), broadcastify_host, broadcastify_port,
+         broadcastify_mount, broadcastify_user, broadcastify_pass,
+         int(youtube_enabled), youtube_rtmp_url, youtube_stream_key, overlay_website)
+    )
+    db.commit()
+    log("INFO", f"[STREAM-RELAY] Config saved by {session.get('username', '')}")
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# Stream relay poller (stream_relay.py) — persistent, config-driven,
+# self-reconnecting, mirroring start_aprs_poller()'s shape: re-reads
+# stream_relay_config at the top of every reconnect cycle so a saved
+# settings change (or a toggle-off) takes effect on the next natural
+# reconnect without a HenWen restart, and no-ops cleanly until the owner
+# has enabled at least one target. Entirely independent of recording.py —
+# the only thing shared with it is the audio source (_AudioBroadcast).
+# ---------------------------------------------------------------------------
+_relay_lock          = threading.Lock()
+_relay_instance       = None   # stream_relay.Relay currently running, or None
+_relay_status_cache   = {}     # last known relay.status(), read by the API route
+
+
+def _build_relay_targets(cfg):
+    """cfg -> {target_name: ffmpeg_output_args}, only for enabled targets.
+    Returns {} if cfg is falsy or nothing is enabled."""
+    if not cfg:
+        return {}
+    targets = {}
+    if cfg.get('broadcastify_enabled'):
+        targets['broadcastify'] = stream_relay.build_broadcastify_output_args(
+            host=cfg['broadcastify_host'], port=int(cfg['broadcastify_port']),
+            mount=cfg['broadcastify_mount'], user=cfg['broadcastify_user'],
+            password=cfg['broadcastify_pass'])
+    if cfg.get('youtube_enabled'):
+        targets['youtube'] = stream_relay.build_youtube_output_args(
+            rtmp_url=cfg['youtube_rtmp_url'], stream_key=cfg['youtube_stream_key'])
+    return targets
+
+
+def _atomic_write_overlay_file(path, text):
+    """Write via a temp file + os.replace() so a concurrent reader
+    (ffmpeg's drawtext textfile=...:reload=1) never observes the file
+    missing or half-written. Confirmed live: a file disappearing out
+    from under a running relay (even just for the plain open(path,'w')
+    truncate-then-write window every single update ordinarily risks)
+    crashed the whole YouTube encode -- "Cannot read file... No such
+    file or directory" from drawtext, which errors the whole filter
+    graph and kills ffmpeg, not just that one frame's text. os.replace()
+    is an atomic rename at the filesystem level, so ffmpeg always sees
+    either the complete old content or the complete new content."""
+    d = os.path.dirname(path) or '.'
+    fd, tmp_path = tempfile.mkstemp(dir=d, prefix='.overlay-')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(text)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _write_relay_overlay_static_files(node, cfg):
+    """Station callsign/number and the configured website line don't
+    change while a relay session runs -- written once at session start.
+    Also seeds the clock/ticker files with real content immediately
+    rather than leaving them at whatever stale value (or nonexistent
+    file) a previous session left behind, since ffmpeg's drawtext reads
+    them once at filter-graph setup before reload=1 ever kicks in."""
+    try:
+        info = lookup_node(node)
+        callsign = (info.get('callsign') or '').strip()
+        station_text = f"{callsign} — Node {node}" if callsign else f"Node {node}"
+        _atomic_write_overlay_file(stream_relay.STATION_OVERLAY_FILE, station_text)
+        _atomic_write_overlay_file(stream_relay.WEBSITE_OVERLAY_FILE, (cfg.get('overlay_website') or '').strip())
+    except Exception as e:
+        log('WARN', f'[STREAM-RELAY] could not write overlay station/website files: {e}')
+    _write_relay_clock_file()
+    _write_relay_ticker_file(node)
+
+
+def _write_relay_clock_file():
+    """UTC/Zulu, not server-local time -- the standard convention for
+    amateur radio net scheduling and logging, per feedback after seeing
+    the overlay live."""
+    try:
+        _atomic_write_overlay_file(stream_relay.CLOCK_OVERLAY_FILE, datetime.utcnow().strftime('%H:%M:%SZ'))
+    except Exception:
+        pass
+
+
+def _relay_connected_nodes_text(node):
+    """'Connected: CALLSIGN (12345), CALLSIGN2 (67890)' for the relayed
+    node's currently-connected peers, or '' when none -- reuses the same
+    'connected' list get_cached_status() already exposes to the kiosk
+    board (populated by the AMI poll loop), just resolved to callsigns
+    via lookup_node() for a human-readable ticker line instead of bare
+    node numbers."""
+    try:
+        connected = get_cached_status(node).get('connected') or []
+    except Exception as e:
+        log('WARN', f'[STREAM-RELAY] connected-nodes lookup for ticker failed: {e}')
+        return ''
+    if not connected:
+        return ''
+    labels = []
+    for cn in connected:
+        try:
+            callsign = (lookup_node(cn).get('callsign') or '').strip()
+        except Exception:
+            callsign = ''
+        labels.append(f"{callsign} ({cn})" if callsign else str(cn))
+    return 'Connected: ' + ', '.join(labels)
+
+
+def _local_time_to_utc(date_str, time_str, tz):
+    """Combine a plain kiosk-local date + HH:MM (no timezone attached,
+    the storage convention both net_schedules and connectors.connect_time
+    use) into a tz-aware datetime and convert to UTC -- the relay
+    overlay's clock is Zulu (ham radio convention), so any other time
+    shown alongside it must be Zulu too, not silently mismatched. Returns
+    'HH:MMZ', or None if the date/time can't be parsed."""
+    try:
+        y, m, d = (int(x) for x in date_str.split('-'))
+        hh, mm = (int(x) for x in (time_str or '0:0').split(':'))
+        local_dt = datetime(y, m, d, hh, mm, tzinfo=tz)
+        return local_dt.astimezone(timezone.utc).strftime('%H:%MZ')
+    except Exception:
+        return None
+
+
+def _connectors_scheduled_today(tz_name=None):
+    """Enabled Smart Connectors whose schedule lands on 'today' (00:00 to
+    23:59, the given or configured kiosk_timezone zone) with a connect
+    time still ahead of now, each with a 'utc_time' key added (see
+    _local_time_to_utc). connect_time is plain wall-clock with no
+    timezone attached, evaluated by the scheduler itself
+    (_run_connectors) against naive datetime.now() -- kiosk_timezone is
+    the closest configured stand-in for "the timezone the node is set
+    to" the overlay needs, same convention used for the net-schedule
+    display this replaced."""
+    import zoneinfo
+    tz_name = tz_name or get_setting('kiosk_timezone', 'UTC')
+    try:
+        tz = zoneinfo.ZoneInfo(tz_name)
+    except Exception:
+        tz = timezone.utc
+    now = datetime.now(tz)
+    today_date = now.strftime('%Y-%m-%d')
+    now_hm = now.strftime('%H:%M')
+    rows = get_db().execute("SELECT * FROM connectors WHERE enabled=1").fetchall()
+    todays = []
+    for row in rows:
+        if not row['connect_time'] or row['connect_time'] < now_hm:
+            continue
+        if not _connector_date_matches(row, now):
+            continue
+        r = dict(row)
+        r['utc_time'] = _local_time_to_utc(today_date, r['connect_time'], tz)
+        todays.append(r)
+    todays.sort(key=lambda r: r.get('connect_time') or '')
+    return todays
+
+
+def _relay_connectors_today_text():
+    """'Smart Connector: Name → Target HH:MMZ, ...' for today's still-
+    upcoming Smart Connector connections (kiosk-local day, Zulu time), or
+    '' when none."""
+    try:
+        todays = _connectors_scheduled_today()
+    except Exception as e:
+        log('WARN', f'[STREAM-RELAY] scheduled-connectors lookup for ticker failed: {e}')
+        return ''
+    bits = [f"{r['name']} → {r['target_node']} {r['utc_time']}"
+            for r in todays if r.get('name') and r.get('utc_time')]
+    if not bits:
+        return ''
+    return 'Smart Connector: ' + ', '.join(bits)
+
+
+def _build_relay_ticker_text(node):
+    """Weather, active NWS alerts, currently-connected peers, and today's
+    still-upcoming Smart Connector connections for the relayed node --
+    reusing the exact same _fetch_weather()/get_nws_display_alerts()/
+    get_cached_status()/connectors data the kiosk board's own widgets
+    already draw from, just reformatted as one scrolling line instead of
+    separate widgets. Deliberately does not include net_schedules
+    (calendar) entries -- explicitly requested off the overlay."""
+    parts = []
+    try:
+        location = lookup_node(node).get('location', '')
+        weather = _fetch_weather(location) if location else {}
+        if weather and not weather.get('error'):
+            temp = weather.get('temp_f', '')
+            desc = weather.get('desc', '')
+            bit = f"{temp}°F {desc}".strip() if (temp or desc) else ''
+            if bit:
+                parts.append(bit)
+    except Exception as e:
+        log('WARN', f'[STREAM-RELAY] weather lookup for ticker failed: {e}')
+    try:
+        parts.extend(a['text'] for a in get_nws_display_alerts() if a.get('text'))
+    except Exception as e:
+        log('WARN', f'[STREAM-RELAY] NWS alert lookup for ticker failed: {e}')
+    connected_bit = _relay_connected_nodes_text(node)
+    if connected_bit:
+        parts.append(connected_bit)
+    connectors_bit = _relay_connectors_today_text()
+    if connectors_bit:
+        parts.append(connectors_bit)
+    if not parts:
+        return ''
+    return '   //   '.join(parts) + '   //   '
+
+
+def _write_relay_ticker_file(node):
+    try:
+        _atomic_write_overlay_file(stream_relay.TICKER_OVERLAY_FILE, _build_relay_ticker_text(node))
+    except Exception as e:
+        log('WARN', f'[STREAM-RELAY] could not write ticker file: {e}')
+
+
+def _stream_relay_loop():
+    global _relay_instance, _relay_status_cache
+    while True:
+        # Every other background poller in this codebase (the AMI loop,
+        # connector scheduler, favstats, NWS, APRS) wraps its entire
+        # per-tick body in a top-level try/except that logs and continues
+        # -- this one didn't, and config-read/broadcast-attach/relay-
+        # construction below can all raise (a DB error, a bad broadcast
+        # state, ...). Without this, any of those would kill the whole
+        # daemon thread permanently: not a brief reconnect blip like the
+        # dead-target/dead-relay cases below already handle, but the
+        # entire relay going silent forever with nothing to restart it
+        # short of a full service restart.
+        try:
+            cfg = _get_stream_relay_config()
+            node = (cfg or {}).get('target_node', '')
+            targets_wanted = _build_relay_targets(cfg)
+            if not targets_wanted or not re.match(r'^\d{4,7}$', node or ''):
+                with _relay_lock:
+                    _relay_status_cache = {}
+                time.sleep(15)
+                continue
+
+            client_label = 'stream-relay'
+            try:
+                with _audio_lock:
+                    broadcast = _audio_active.get(node)
+                    if broadcast is None or broadcast._dead:
+                        broadcast = _start_broadcast(node)
+                        _audio_active[node] = broadcast
+                    client_q = broadcast.add_client(client_label)
+            except Exception as e:
+                log('WARN', f'[STREAM-RELAY] could not attach to node {node}: {e}')
+                time.sleep(15)
+                continue
+
+            # Overlay files must exist before Relay spawns the YouTube ffmpeg
+            # process below -- drawtext's textfile= fails filter-graph setup
+            # against a missing file, and reload=1 only takes over from there.
+            if 'youtube' in targets_wanted:
+                _write_relay_overlay_static_files(node, cfg)
+
+            relay = stream_relay.Relay(targets=targets_wanted, log_fn=lambda msg: log('WARN', msg))
+            with _relay_lock:
+                _relay_instance = relay
+            log('INFO', f'[STREAM-RELAY] started for node {node}, targets={list(targets_wanted)}')
+            try:
+                last_cfg_check = time.monotonic()
+                last_ticker_update = time.monotonic()
+                while True:
+                    try:
+                        chunk = client_q.get(timeout=1.0)
+                    except _queue_mod.Empty:
+                        chunk = False
+                    if chunk is None:
+                        log('INFO', f'[STREAM-RELAY] broadcast for node {node} ended, reconnecting')
+                        break
+                    if chunk is not False:
+                        relay.feed(chunk)
+                    if not relay.alive:
+                        # relay's internal decode ffmpeg exited (crashed, or
+                        # rejected malformed input) -- confirmed live: without
+                        # this check the loop kept calling relay.feed() on a
+                        # dead relay forever (feed() swallows the resulting
+                        # BrokenPipeError), leaving both targets silently dark
+                        # until a full service restart, since nothing else in
+                        # this loop would ever notice.
+                        log('WARN', f'[STREAM-RELAY] relay for node {node} died unexpectedly, reconnecting')
+                        break
+                    status = relay.status()
+                    dead_targets = [name for name, s in status.items() if not s.get('connected')]
+                    if dead_targets:
+                        # A single target's own ffmpeg process can die (crash,
+                        # or its outbound RTMP/Icecast connection failing hard
+                        # after a network blip) while the shared decode process
+                        # and every other target stay perfectly healthy --
+                        # relay.alive above only catches the *shared* pipeline
+                        # dying, not this. Without this check a target lost to
+                        # a transient internet drop would stay dark for the
+                        # rest of this relay session with nothing to notice or
+                        # restart it. Reconnecting the whole relay (not just
+                        # the dead target) is the simplest fix that reuses the
+                        # existing, already-tested reconnect path below --
+                        # costs the still-healthy target(s) a brief reconnect
+                        # blip too, which is a small price for closing this
+                        # gap.
+                        log('WARN', f'[STREAM-RELAY] target(s) {dead_targets} for node {node} disconnected '
+                                     f'(crash or network loss) -- reconnecting all targets')
+                        break
+                    with _relay_lock:
+                        _relay_status_cache = status
+                    if 'youtube' in targets_wanted:
+                        # Cheap -- one small file write -- so just do it every
+                        # loop tick (~1s, per the queue.get timeout above)
+                        # rather than tracking yet another timestamp.
+                        _write_relay_clock_file()
+                        if time.monotonic() - last_ticker_update > 60:
+                            last_ticker_update = time.monotonic()
+                            _write_relay_ticker_file(node)
+                    if time.monotonic() - last_cfg_check > 30:
+                        last_cfg_check = time.monotonic()
+                        new_cfg = _get_stream_relay_config()
+                        if (_build_relay_targets(new_cfg) != targets_wanted
+                                or (new_cfg or {}).get('target_node') != node):
+                            log('INFO', '[STREAM-RELAY] config changed, reconnecting')
+                            break
+            except Exception as e:
+                log('ERROR', f'[STREAM-RELAY] loop error: {e}\n{traceback.format_exc()}')
+            finally:
+                broadcast.remove_client(client_q, client_label)
+                relay.stop()
+                with _relay_lock:
+                    _relay_instance = None
+                    _relay_status_cache = {}
+            time.sleep(5)
+        except Exception as outer:
+            log('ERROR', f'[STREAM-RELAY] unexpected outer error: {outer}\n{traceback.format_exc()}')
+            with _relay_lock:
+                _relay_status_cache = {}
+            time.sleep(15)
+
+
+def start_stream_relay():
+    t = threading.Thread(target=_stream_relay_loop, name="stream-relay", daemon=True)
+    t.start()
+
+
+@app.route('/api/stream-relay/status')
+def api_stream_relay_status():
+    if session.get('role') != 'owner':
+        return jsonify({'error': 'Only the owner can view stream relay status'}), 403
+    with _relay_lock:
+        active = _relay_instance is not None
+        targets_status = dict(_relay_status_cache)
+    cfg = _get_stream_relay_config()
+    return jsonify({
+        'active':      active,
+        'target_node': (cfg or {}).get('target_node', ''),
+        'targets':     targets_status,
+    })
 
 
 def _nws_location_is_bare_state(location: str):
@@ -8780,7 +9928,7 @@ def _nws_alert_poll_loop():
                         _nws_display_cache[:] = [
                             {
                                 "event":    a["event"],
-                                "text":     _nws_alert_spoken_text(a),
+                                "text":     _nws_alert_spoken_text(a, fallback_area=cfg.get("zone_area_name", "")),
                                 "severity": a.get("severity", ""),
                                 "expires":  a.get("expires", ""),
                                 "vtec_key": a["vtec_key"],
@@ -8920,12 +10068,13 @@ def _connector_link_present(local: str, target: str) -> bool:
     return target in cached.get("connected", [])
 
 
-def _connector_should_fire(row, now):
-    """Return True if this connector's schedule says it should trigger right now."""
-    if not row["connect_time"]:
-        return False
-    if now.strftime("%H:%M") != row["connect_time"]:
-        return False
+def _connector_date_matches(row, now):
+    """Does this connector's schedule pattern (schedule_type/schedule_days)
+    land on `now`'s calendar date, independent of connect_time's exact
+    minute? Split out of _connector_should_fire so schedule *display* (the
+    relay overlay's "today's Smart Connectors" ticker) can ask "is this
+    scheduled today" without also requiring the trigger minute to have
+    already arrived."""
     stype = row["schedule_type"] or "daily"
     sdays = row["schedule_days"] or ""
 
@@ -8982,6 +10131,15 @@ def _connector_should_fire(row, now):
         except (ValueError, AttributeError):
             return False
     return False
+
+
+def _connector_should_fire(row, now):
+    """Return True if this connector's schedule says it should trigger right now."""
+    if not row["connect_time"]:
+        return False
+    if now.strftime("%H:%M") != row["connect_time"]:
+        return False
+    return _connector_date_matches(row, now)
 
 
 def _connector_upcoming_disconnect_all():
@@ -9880,6 +11038,8 @@ if not os.environ.get("HENWEN_SKIP_STARTUP"):
     start_release_poller()
     start_aprs_poller()
     start_iss_poller()
+    start_recording_janitor()
+    start_stream_relay()
 
 if __name__ == "__main__":
     log("INFO", "Starting in direct-run mode (not via gunicorn)")
