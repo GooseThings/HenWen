@@ -10192,16 +10192,18 @@ def _run_connectors():
         local  = row["local_node"]
         target = row["target_node"]
 
-        # idle → check if scheduled connect_time has arrived
-        if state == "idle" and _connector_should_fire(row, now):
+        # idle → check if scheduled connect_time has arrived. Also re-arms
+        # from 'error': a connector that failed once (AMI hiccup, target
+        # unreachable, ilink rejected, ...) must not stay permanently stuck
+        # requiring a manual "Clear Error" click just to get back on its own
+        # recurring schedule — the next scheduled occurrence should still
+        # fire normally. (A one-time connector's single date won't match
+        # again after today regardless, so this doesn't cause retry loops.)
+        if state in ("idle", "error") and _connector_should_fire(row, now):
             db.execute(
                 "UPDATE connectors SET state='waiting', state_msg='Waiting for node to be idle', "
                 "state_updated=? WHERE id=?", (now_str, cid)
             )
-            # One-time connectors auto-disable after triggering
-            if (row["schedule_type"] or "daily") == "onetime":
-                db.execute("UPDATE connectors SET enabled=0 WHERE id=?", (cid,))
-                log("INFO", f"[CONNECTOR] '{row['name']}' one-time trigger — auto-disabled")
             db.commit()
             state = "waiting"
             log("INFO", f"[CONNECTOR] '{row['name']}' entered waiting state at {now_hm}")
@@ -10219,6 +10221,13 @@ def _run_connectors():
 
             if node_idle or forced:
                 label = "forced" if forced else "node idle"
+                # One-time connectors auto-disable once their single shot has
+                # been used (success or failure, decided below) — not at the
+                # moment they entered 'waiting'. Disabling any earlier would
+                # drop the row from every future SELECT ... WHERE enabled=1
+                # scheduler tick (including this connect attempt's own
+                # retries) before it ever actually got to connect.
+                onetime = (row["schedule_type"] or "daily") == "onetime"
                 try:
                     result = _connector_do_connect(local, target,
                                                    disconnect_first=bool(row["disconnect_all_first"]),
@@ -10229,18 +10238,26 @@ def _run_connectors():
                         )
                     db.execute(
                         "UPDATE connectors SET state='connected', state_msg='Connected', "
-                        "state_updated=?, connected_at=?, last_activity=? WHERE id=?",
+                        "state_updated=?, connected_at=?, last_activity=?"
+                        + (", enabled=0" if onetime else "") +
+                        " WHERE id=?",
                         (now_str, now_str, now_str, cid)
                     )
                     db.commit()
                     log("INFO", f"[CONNECTOR] '{row['name']}' connected ({label})")
+                    if onetime:
+                        log("INFO", f"[CONNECTOR] '{row['name']}' one-time trigger — auto-disabled")
                 except Exception as e:
                     db.execute(
-                        "UPDATE connectors SET state='error', state_msg=?, state_updated=? WHERE id=?",
+                        "UPDATE connectors SET state='error', state_msg=?, state_updated=?"
+                        + (", enabled=0" if onetime else "") +
+                        " WHERE id=?",
                         (str(e)[:200], now_str, cid)
                     )
                     db.commit()
                     log("ERROR", f"[CONNECTOR] Connect failed for '{row['name']}': {e}")
+                    if onetime:
+                        log("INFO", f"[CONNECTOR] '{row['name']}' one-time trigger — auto-disabled after failure")
 
         # connected → verify link still exists, settle, then monitor idle
         elif state == "connected":
@@ -10462,10 +10479,15 @@ def api_conn_manual_connect(cid):
     if not row:
         return jsonify({"error": "Not found"}), 404
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    # Set to waiting — the scheduler will connect on its next tick when node is idle
+    # Set to waiting — the scheduler will connect on its next tick when node is
+    # idle. Also force enabled=1: _run_connectors only ever looks at rows with
+    # enabled=1, so a disabled connector (manually disabled, or a one-time
+    # connector auto-disabled after its trigger) would otherwise sit in
+    # 'waiting' forever, invisible to the scheduler, since this button is
+    # shown whenever state is idle/error regardless of the enabled flag.
     db.execute(
         "UPDATE connectors SET state='waiting', state_msg='Waiting for node to be idle', "
-        "state_updated=? WHERE id=?", (now_str, cid)
+        "state_updated=?, enabled=1 WHERE id=?", (now_str, cid)
     )
     db.commit()
     log("INFO", f"[CONNECTOR] Manual connect requested for '{row['name']}'")

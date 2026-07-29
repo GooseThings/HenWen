@@ -4,6 +4,17 @@ should it fire this minute? All schedule_type variants are covered.
 
 Row is accessed via row["key"] in app.py, so plain dicts stand in fine for
 sqlite3.Row here.
+
+Also covers _run_connectors() itself -- the state-machine driver that reads
+real connectors rows from the DB -- for the two bugs that made scheduled
+connections silently stop firing: a connector left in 'error' by one failed
+attempt could never re-arm on its own future schedule (needed a manual
+"Clear Error" click), and a one-time connector was flagged enabled=0 the
+instant it entered 'waiting', which -- since every scheduler tick's SELECT
+is WHERE enabled=1 -- dropped it out of consideration before it ever
+actually got to connect whenever the local node wasn't idle at that exact
+moment. These need a real sqlite3.Row (not a plain dict), so they go through
+the fresh_db fixture and real INSERTs.
 """
 from datetime import datetime
 
@@ -146,3 +157,154 @@ class TestOnetime:
 def test_unknown_schedule_type_never_fires():
     row = _row(schedule_type="bogus")
     assert app._connector_should_fire(row, AT_TIME) is False
+
+
+def _patch_now(monkeypatch, fixed_now):
+    """Freeze app.datetime.now()/strptime still work normally since
+    _FixedDatetime only overrides now() -- same pattern as
+    TestConnectorsScheduledToday._patch_now in test_relay_overlay.py."""
+    class _FixedDatetime(app.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now
+    monkeypatch.setattr(app, "datetime", _FixedDatetime)
+
+
+def _insert_connector(db, **overrides):
+    row = {
+        "name": "Test Net", "local_node": "643931", "target_node": "546054",
+        "enabled": 1, "connect_time": "14:30", "idle_limit_sec": 180,
+        "settle_sec": 300, "state": "idle", "state_msg": "", "state_updated": None,
+        "connected_at": None, "last_activity": None,
+        "schedule_type": "daily", "schedule_days": "",
+        "disconnect_all_first": 0, "disconnect_skip_permanent": 0,
+    }
+    row.update(overrides)
+    cols = ", ".join(row)
+    qs = ", ".join("?" for _ in row)
+    db.execute(f"INSERT INTO connectors ({cols}) VALUES ({qs})", tuple(row.values()))
+    db.commit()
+    return db.execute("SELECT * FROM connectors WHERE rowid=last_insert_rowid()").fetchone()["id"]
+
+
+AT_1430 = datetime(2024, 1, 1, 14, 30)  # matches connect_time "14:30" used by _insert_connector's default
+
+
+class TestRunConnectorsErrorRecovery:
+    """A connector stuck in 'error' from some earlier failed attempt must
+    still fire on its next legitimately scheduled occurrence, not require a
+    manual 'Clear Error' click just to get back on schedule."""
+
+    def test_error_state_refires_and_connects_when_schedule_matches(self, fresh_db, monkeypatch):
+        cid = _insert_connector(fresh_db, state="error", state_msg="ilink 3 rejected by Asterisk: boom")
+        _patch_now(monkeypatch, AT_1430)
+        monkeypatch.setattr(app, "_node_active", lambda node: False)  # local node idle
+        monkeypatch.setattr(app, "_connector_do_connect", lambda *a, **k: {"success": True})
+
+        app._run_connectors()
+
+        row = fresh_db.execute("SELECT * FROM connectors WHERE id=?", (cid,)).fetchone()
+        assert row["state"] == "connected"
+
+    def test_error_state_does_not_refire_off_schedule(self, fresh_db, monkeypatch):
+        cid = _insert_connector(fresh_db, state="error")
+        _patch_now(monkeypatch, datetime(2024, 1, 1, 9, 0))  # doesn't match connect_time "14:30"
+        monkeypatch.setattr(app, "_node_active", lambda node: False)
+        monkeypatch.setattr(app, "_connector_do_connect", lambda *a, **k: {"success": True})
+
+        app._run_connectors()
+
+        row = fresh_db.execute("SELECT * FROM connectors WHERE id=?", (cid,)).fetchone()
+        assert row["state"] == "error"
+
+
+class TestRunConnectorsOnetimeEnabledRace:
+    """A one-time connector must stay enabled=1 all the way through 'waiting'
+    -- disabling it the instant it entered 'waiting' (the old behavior) drops
+    it out of every future SELECT ... WHERE enabled=1 scheduler tick before
+    it ever actually gets to connect, whenever the local node isn't
+    immediately idle."""
+
+    def test_stays_enabled_while_waiting_for_node_to_go_idle(self, fresh_db, monkeypatch):
+        cid = _insert_connector(fresh_db, schedule_type="onetime", schedule_days="2024-01-01")
+        _patch_now(monkeypatch, AT_1430)
+        monkeypatch.setattr(app, "_node_active", lambda node: True)  # local node busy -- can't connect yet
+
+        app._run_connectors()
+
+        row = fresh_db.execute("SELECT * FROM connectors WHERE id=?", (cid,)).fetchone()
+        assert row["state"] == "waiting"
+        assert row["enabled"] == 1  # must still be selectable on the next tick
+
+    def test_disables_only_once_actually_connected(self, fresh_db, monkeypatch):
+        cid = _insert_connector(fresh_db, schedule_type="onetime", schedule_days="2024-01-01")
+        _patch_now(monkeypatch, AT_1430)
+        monkeypatch.setattr(app, "_node_active", lambda node: True)
+        app._run_connectors()  # -> waiting, still enabled (previous test's assertion)
+
+        monkeypatch.setattr(app, "_node_active", lambda node: False)  # node goes idle
+        monkeypatch.setattr(app, "_connector_do_connect", lambda *a, **k: {"success": True})
+        app._run_connectors()
+
+        row = fresh_db.execute("SELECT * FROM connectors WHERE id=?", (cid,)).fetchone()
+        assert row["state"] == "connected"
+        assert row["enabled"] == 0
+
+    def test_disables_after_a_failed_attempt_too(self, fresh_db, monkeypatch):
+        cid = _insert_connector(fresh_db, schedule_type="onetime", schedule_days="2024-01-01")
+        _patch_now(monkeypatch, AT_1430)
+        monkeypatch.setattr(app, "_node_active", lambda node: False)
+        monkeypatch.setattr(app, "_connector_do_connect", lambda *a, **k: {"success": False, "raw": "boom"})
+
+        app._run_connectors()
+
+        row = fresh_db.execute("SELECT * FROM connectors WHERE id=?", (cid,)).fetchone()
+        assert row["state"] == "error"
+        assert row["enabled"] == 0
+
+    def test_recurring_connector_is_never_auto_disabled(self, fresh_db, monkeypatch):
+        cid = _insert_connector(fresh_db, schedule_type="daily")
+        _patch_now(monkeypatch, AT_1430)
+        monkeypatch.setattr(app, "_node_active", lambda node: False)
+        monkeypatch.setattr(app, "_connector_do_connect", lambda *a, **k: {"success": True})
+
+        app._run_connectors()
+
+        row = fresh_db.execute("SELECT * FROM connectors WHERE id=?", (cid,)).fetchone()
+        assert row["state"] == "connected"
+        assert row["enabled"] == 1
+
+
+def _login(client, username):
+    """Stamp the session directly rather than POSTing to /login -- see the
+    identical helper's docstring in test_recording_config.py for why."""
+    row = app.get_db().execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+    with client.session_transaction() as sess:
+        sess["logged_in"]    = True
+        sess["username"]     = username
+        sess["role"]         = row["role"]
+        sess["user_id"]      = row["id"]
+        sess["idle_timeout"] = (row["session_idle_timeout"] if row["session_idle_timeout"] is not None
+                                 else app.SESSION_IDLE_TIMEOUT)
+        sess["sid"]          = "test-sid-" + username
+
+
+class TestManualConnectReEnables:
+    """The 'Connect Now' button is shown for any connector in state
+    idle/error regardless of its enabled flag (see connCard() in
+    henwen-manager.html), but the scheduler only ever looks at enabled=1
+    rows -- so without re-enabling here, clicking it on a disabled connector
+    (manually disabled, or a one-time connector past its auto-disable) left
+    it stuck in 'waiting' forever, never picked up by _run_connectors()."""
+
+    def test_connect_now_re_enables_a_disabled_connector(self, client, create_user):
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        cid = _insert_connector(app.get_db(), enabled=0, state="idle")
+
+        resp = client.post(f"/api/connectors/{cid}/connect")
+
+        assert resp.status_code == 200
+        row = app.get_db().execute("SELECT * FROM connectors WHERE id=?", (cid,)).fetchone()
+        assert row["state"] == "waiting"
+        assert row["enabled"] == 1
