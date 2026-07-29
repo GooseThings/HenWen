@@ -45,13 +45,22 @@ def fresh_db(tmp_path, monkeypatch):
     every request -- so a test that just swapped DB_PATH also has to reset
     _db_ready, or get_db() will happily hand back a connection to a file
     that was never initialized.
+
+    get_db() also caches one connection per *thread* (see its own comment)
+    so it doesn't have to reopen one on every call -- pytest runs this whole
+    suite on a single thread, so without clearing that cache here too,
+    every test after the first would silently reuse the *previous* test's
+    cached connection (pointed at that test's now-`.close()`'d temp DB)
+    instead of opening a fresh one against the DB_PATH just set above.
     """
     db_path = tmp_path / "henwen.db"
     monkeypatch.setattr(henwen_app, "DB_PATH", str(db_path))
     monkeypatch.setattr(henwen_app, "_db_ready", False)
+    monkeypatch.setattr(henwen_app._db_local, "conn", None, raising=False)
     conn = henwen_app.get_db()
     yield conn
     conn.close()
+    monkeypatch.setattr(henwen_app._db_local, "conn", None, raising=False)
 
 
 @pytest.fixture()

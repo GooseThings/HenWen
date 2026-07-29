@@ -329,9 +329,33 @@ log("INFO", f"  LOG_LEVEL      = {LOG_LEVEL}")
 # Database
 # ---------------------------------------------------------------------------
 _db_ready = False   # flips True after the schema/migrations run once
+# get_db() used to open a brand-new sqlite3 connection on every single call
+# -- ~90 call sites across this file, hit from both Flask request handlers
+# and ~14 background poller threads, some (the AMI poll loop) firing every
+# second. Caching one connection per *thread* rather than per call fits how
+# this app is actually threaded: gunicorn's gthread worker (--threads 8)
+# creates a fixed pool of request-handling threads once and reuses them for
+# the process's lifetime (it doesn't spawn a thread per request), and every
+# background poller is itself one single long-lived thread -- so this caps
+# total connections at roughly (8 + number of DB-touching pollers), all
+# opened once, instead of reopening one on every call. A single shared
+# connection behind a lock was considered and rejected: it would serialize
+# every DB operation across every thread, which is exactly the contention
+# _poll_loop() already had to work around once (see its own comment about a
+# DB stall inside _ami_pool_lock freezing every AMI command) -- WAL mode
+# exists specifically so concurrent threads don't have to fight over one
+# connection. No connection here is ever explicitly closed: there are no
+# db.close() calls anywhere in this file today (everything relies on GC),
+# and a thread-local connection's lifetime already matches its owning
+# thread's lifetime -- for both the gthread pool and every poller, that's
+# the life of the process, so there's nothing to close early.
+_db_local = threading.local()
 
 
 def get_db():
+    conn = getattr(_db_local, 'conn', None)
+    if conn is not None:
+        return conn
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
@@ -343,11 +367,14 @@ def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=10.0)
     conn.row_factory = sqlite3.Row
     # The schema/migration statements below are idempotent but not free, and
-    # get_db() is called many times per second (poll loop, get_setting(), every
-    # request). Run them once, then hand back a bare connection. A cold-start
-    # race between first callers is harmless — every statement is CREATE TABLE
-    # IF NOT EXISTS or a guarded one-shot migration.
+    # get_db() used to be called many times per second (poll loop,
+    # get_setting(), every request) before the thread-local cache above --
+    # run them once per process, then hand back a bare connection. A
+    # cold-start race between first callers on different threads is
+    # harmless — every statement is CREATE TABLE IF NOT EXISTS or a guarded
+    # one-shot migration.
     if _db_ready:
+        _db_local.conn = conn
         return conn
     # WAL lets readers proceed while a writer commits and sharply reduces
     # writer-vs-writer contention across this app's many threads. The setting
@@ -749,6 +776,7 @@ def get_db():
         conn.execute("INSERT OR IGNORE INTO settings (key,value) VALUES (?,?)", (_k, _v))
     conn.commit()
     globals()['_db_ready'] = True
+    _db_local.conn = conn
     return conn
 
 
