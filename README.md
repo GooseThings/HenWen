@@ -310,6 +310,8 @@ Found under **Manager → Node ID**.
 
 Plays a configurable sound file for FCC-required station identification. Triggers on initial key-up (optional), every N seconds of continuous activity, and M seconds after the node goes idle. Monitors multiple nodes simultaneously.
 
+> **Only enable this on a node attached to your own repeater**, not one that's RF-linked to any other AllStarLink node or repeater system. Playback uses `rpt localplay`, so it's never relayed over an AllStarLink software link (ilink) to a remote node — but if your node's own transmitter feeds a repeater that is itself RF-linked (a physical link radio, not an AllStarLink connection) to other repeaters, your ID goes out over all of them too, identifying a station that isn't yours on a system you don't control. If your node is a link/hub node rather than a standalone repeater's own controller, leave this feature off.
+
 ---
 
 ## Audio Recording

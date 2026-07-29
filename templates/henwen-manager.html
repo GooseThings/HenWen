@@ -1764,6 +1764,10 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
     <div class="page-title">Node ID</div>
     <div class="page-sub">FCC-compliant repeater identification — plays your ID on key-up, every 10 min during activity, and after the transmission ends.</div>
 
+    <div style="border:1px solid var(--warn);border-radius:6px;padding:10px 12px;margin-bottom:14px;font-size:0.8rem;color:var(--warn);max-width:820px">
+      <strong>Only enable this on a node attached to your own repeater</strong>, not one that's RF-linked to any other AllStarLink node or repeater system. ID playback uses <code>rpt localplay</code>, so it's never relayed over an AllStarLink software link (ilink) to a remote node — but if your node's own transmitter feeds a repeater that is itself RF-linked (a physical link radio, not an AllStarLink connection) to other repeaters, your ID will go out over all of them too, identifying a station that isn't yours on a system you don't control. If your node is a link/hub node rather than a standalone repeater's own controller, leave this feature off.
+    </div>
+
     <div class="card">
       <div class="card-header"><h2>Add ID Monitor</h2></div>
       <div class="card-body">
