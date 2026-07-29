@@ -21,7 +21,7 @@ There is no build step. The app runs directly via gunicorn.
 
 **Deploy changes to the live service:**
 ```bash
-sudo cp -r app.py audio_relay.py templates static /opt/HenWen/
+sudo cp -r app.py audio_relay.py recording.py stream_relay.py templates static /opt/HenWen/
 sudo systemctl restart HenWen
 ```
 

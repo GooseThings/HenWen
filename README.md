@@ -9,20 +9,39 @@ A browser-based web interface for managing and using your AllStarLink 3 node. Al
 ![Manager](manager-example.png)
 
 **Key features:**
+
+**Node management**
 - Edit `rpt.conf` field-by-field (validated dropdowns and range-checked inputs sourced from the official ASL3 docs) or switch to a raw text editor
 - Connect, disconnect, and **Monitor** (listen-only, `ilink 2`) remote nodes from the browser
+- **Smart Connector** — automatically link to a net node on a schedule (daily, weekly, monthly, one-time, and more), wait for the local node to go idle before connecting, then disconnect after an idle timeout
+- Automatic `rpt.conf` backups on every save
+
+**Audio**
 - **Stream live receive audio** from your node to any browser tab — WebM/Opus over HTTP, multiple simultaneous listeners
 - **Transmit from the browser** — any logged-in account can key up and talk through the node with no radio, straight from the Kiosk (requires one-time HTTPS + Asterisk setup, see [Browser TX](#browser-tx-transmit) below)
-- **Status Board** (`/status`) — full-screen kiosk display for TVs and public screens: connected nodes, global activity feed, network map with grayline, weather bar
-- **Smart Connector** — automatically link to a net node on a schedule (daily, weekly, monthly, one-time, and more), wait for the local node to go idle before connecting, then disconnect after an idle timeout
+- **Record live audio on demand** — silence-trimmed, with a periodic spoken timestamp, configurable storage caps/retention, and an automatic browser download when you stop (see [Audio Recording](#audio-recording) below)
+- **Relay live audio to Broadcastify and/or YouTube Live**, continuously and independent of any listener or recording session — the YouTube feed includes a live waveform video with a station/clock/weather text overlay (see [Stream Relay](#stream-relay) below)
 - **Announcements** — upload audio files, or type a message and have it read aloud via text-to-speech, and schedule either to play on a node at configured times
 - **Weather Alerts** — automatically play Tornado/Severe Thunderstorm/Flash Flood alerts from the National Weather Service on your node, repeating at an interval for as long as they stay active, no manual action needed once configured
 - **Node ID** — FCC-compliant background ID monitor: plays a sound file on key-up, on interval during continuous activity, and after the node goes idle
+
+**Status Board (kiosk display)**
+- Full-screen display for TVs and public screens at `/status` — no login required to view
+- Network map with grayline (day/night terminator), sunrise/sunset times and moon phase, and optional NEXRAD radar, APRS-IS station, and ISS pass-tracking overlays
+- Fully customizable panel layout on desktop — drag, resize, collapse, or hide any panel; saved per browser
+- Connected-nodes list with a per-connection keyed-activity timeline, a global network activity feed, and a weather bar
+
+**Administration**
 - **Multi-user accounts** — Owner, Superuser, Admin, and User (Kiosk) roles; kiosk accounts can connect/disconnect nodes but cannot access settings; an Owner can lock a node to put everyone else in read-only mode
 - **Asterisk Console** — live log viewer, CLI command runner, and verbosity control, all from the browser
-- Automatic `rpt.conf` backups on every save
 - Dashboard with system vitals, AMI diagnostics, and a Reload/Restart Asterisk button
 - 12 color themes, mobile-responsive layout
+
+**Setup:** [Requirements](#requirements) · [Install](#step-1--install) · [Create account](#step-2--first-launch-create-your-account) · [AMI setup](#step-3--commission-ami-setup) · [Secret key](#step-4--commission-rotate-the-secret-key) · [Verify rpt.conf](#step-5--verify-your-rptconf) · [Updating](#updating-henwen)
+
+**Using HenWen:** [Status Board](#using-the-status-board) · [Accounts](#multi-user-accounts) · [Smart Connector](#smart-connector-auto-connector) · [Announcements](#announcements) · [Weather Alerts](#weather-alerts) · [Node ID](#node-id) · [Audio Recording](#audio-recording) · [Stream Relay](#stream-relay) · [Browser TX](#browser-tx-transmit)
+
+**Reference:** [Troubleshooting](#troubleshooting) · [Environment Variables](#environment-variables) · [File Structure](#file-structure)
 
 ---
 
@@ -32,8 +51,10 @@ A browser-based web interface for managing and using your AllStarLink 3 node. Al
 - Asterisk already installed and running (`systemctl status asterisk`)
 - Python 3.8 or later
 - Root access (required to write `/etc/asterisk/rpt.conf` and restart Asterisk)
-- `ffmpeg` — required only if you use the Announcements or Node ID audio upload features (`sudo apt install ffmpeg`)
+- `ffmpeg` — required for Announcements/Node ID audio uploads, live audio streaming/recording, and the Stream Relay feature (`sudo apt install ffmpeg`)
 - `piper-tts` — required only for the text-to-speech Announcements feature; installed automatically into the venv by `install.sh`/`requirements.txt`, unlike `ffmpeg` there's no separate apt step. On an existing install being upgraded in place, re-run `venv/bin/pip install -r requirements.txt` to pick it up (a HenWen restart alone won't).
+
+**Hardware:** a Raspberry Pi Zero 2 W (quad-core, has NEON) is a reasonable minimum for everything in HenWen — **except the Stream Relay's YouTube target**, which encodes a live video overlay and is genuinely CPU-heavy; a Raspberry Pi 4 (4GB+) or better is recommended if you plan to use that specific feature. The Broadcastify relay target is audio-only and stays light on any hardware. The original Pi Zero/Zero W (no NEON) is not sufficient for real-time audio streaming or recording at all, regardless of which features you use.
 
 ---
 
@@ -77,7 +98,7 @@ After creating the account you will be logged in and taken to the Dashboard.
 
 ## Step 3 — Commission: AMI Setup
 
-Most features (node connect/disconnect, monitor, status board, smart connector, audio streaming, node ID) require a working AMI connection. This is set up once.
+Most features (node connect/disconnect, monitor, status board, smart connector, audio streaming, recording, stream relay, node ID) require a working AMI connection. This is set up once.
 
 > `install.sh` already ran `ami-setup.sh` for you interactively at the end of Step 1 — if that succeeded, you can skip straight to **3c — Verify** below. Use the steps below if you skipped it, it failed, or you need to redo it manually.
 
@@ -156,8 +177,9 @@ Go to **Manager** in the web UI. Your node stanzas from `/etc/asterisk/rpt.conf`
 HenWen's code installs to `/opt/HenWen`, while your configuration and data live elsewhere and are **not** touched by a code update:
 
 - AMI credentials and `SECRET_KEY` — `/etc/systemd/system/HenWen.service`
-- Users, favorites, connectors, announcements — `/etc/asterisk/henwen.db`
+- Users, favorites, connectors, announcements, recording/stream relay settings — `/etc/asterisk/henwen.db`
 - rpt.conf backups — `/etc/asterisk/rpt_backups/`
+- Saved audio recordings — `/var/lib/asterisk/henwen_recordings/` (see [`RECORDINGS_DIR`](#environment-variables))
 
 The SQLite schema migrates automatically on startup, so new features need no manual database steps.
 
@@ -172,7 +194,7 @@ Pulls the latest code and restarts the service. Your service file, database, and
 ```bash
 cd ~/HenWen          # the directory you originally cloned into
 git pull
-sudo cp -r app.py audio_relay.py templates static tx-spike /opt/HenWen/
+sudo cp -r app.py audio_relay.py recording.py stream_relay.py templates static tx-spike /opt/HenWen/
 sudo systemctl restart HenWen
 ```
 
@@ -212,7 +234,12 @@ Then open the web UI and run **Dashboard → AMI Diagnostics → Run Test**. Har
 
 The Status Board at `/status` (or **Status Board ↗** in the sidebar) is designed for TV or kiosk display. It requires no login to view.
 
-Features: live node status, connected node list, global activity feed, network map with grayline, and a weather bar.
+Features: live node status, connected node list with a per-connection keyed-activity timeline, global activity feed, a weather bar with grayline (day/night terminator) and moon phase, and a network map with optional NEXRAD radar, APRS-IS station, and ISS pass-tracking overlays.
+
+- **APRS** needs a licensed amateur's own callsign saved once under **Manager → Kiosk Settings** — the layer stays off until one is set, and `aprslib` (installed automatically) must be present.
+- **ISS** and **Radar** need no setup — just toggle them on from the map.
+
+On desktop, the whole panel layout (Node, Recent Connections, Connected Nodes, Network Map, Latest Activity, Favorites) can be dragged into any arrangement, resized, collapsed, or hidden via the layout-edit toggle in the Node panel's toolbar — saved per browser. Mobile keeps a fixed stacked layout.
 
 Owner, Superuser, and Admin accounts can connect/disconnect nodes directly from the Status Board. Kiosk (User) accounts see a login prompt and are limited to one active connection at a time; an individual User account can also be marked **Restrict disconnect** in User Management, letting it listen, TX, and make the first connection but never disconnect one.
 
@@ -236,6 +263,8 @@ Manage accounts under **Manager → User Management**.
 Kiosk accounts can be given a **Favorites** list of pre-configured nodes to connect to quickly from the Status Board.
 
 Any User account can also be checked **Restrict disconnect** in User Management — it can still listen, TX, and make the first connection when nothing else is connected, but it can never disconnect a node (the kiosk shows a locked disconnect button instead). This is enforced server-side, live against the account's current setting, not cached in the session.
+
+Any account, including the owner's own, needs **Can record** checked in User Management before the Record button appears for it — see [Audio Recording](#audio-recording) above.
 
 ### Node Lockout
 
@@ -280,6 +309,24 @@ Click **Detect Zone** to auto-fill the zone from your node's configured location
 Found under **Manager → Node ID**.
 
 Plays a configurable sound file for FCC-required station identification. Triggers on initial key-up (optional), every N seconds of continuous activity, and M seconds after the node goes idle. Monitors multiple nodes simultaneously.
+
+---
+
+## Audio Recording
+
+A **Record** button appears next to Listen on the Status Board for any account the owner has flagged **Can record** in User Management (a per-account flag, checked for every role including the owner). Configure the pipeline itself under **Manager → Recording Settings** (owner only).
+
+Recordings trim continuous dead air down to a configurable ceiling (not to zero, so a natural pause still sounds natural), splice in a periodic spoken timestamp, and auto-stop at a configurable maximum duration. Stopping a recording — including by just closing the browser tab — triggers an automatic download to your device; the file also stays on the server under a global and per-user storage cap plus age-based retention (both enforced by a background sweep), browsable and deletable from **Manager → Recordings** (admin and above).
+
+---
+
+## Stream Relay
+
+Found under **Manager → Stream Relay**. Owner only.
+
+A persistent, always-on relay of one node's live audio to [Broadcastify](https://www.broadcastify.com/) and/or YouTube Live, targeting one node at a time. Each destination is enabled independently. Once turned on it keeps running continuously in the background — independent of any recording session, any browser tab, or whether anyone is actually listening — and reconnects automatically, including recovering a single target's connection on its own if it drops (a network blip, for example) without disturbing the other one.
+
+The YouTube target pushes plain RTMP (the same mechanism OBS's "Go Live" uses — no Google sign-in needed here) and includes a live audio waveform video track with a text overlay: your station callsign/node, a live clock (Zulu/UTC), a configured website line, and a scrolling ticker of local weather, active NWS alerts, currently-connected nodes, and today's still-upcoming Smart Connector connections, all in front of a subtle animated background. See [Requirements](#requirements) above for the hardware this specifically needs — meaningfully more than the rest of HenWen. The Broadcastify target is audio-only and light on any hardware.
 
 ---
 
@@ -344,6 +391,15 @@ systemctl status HenWen
 - Confirm `ffmpeg` is installed: `ffmpeg -version`
 - Install if missing: `sudo apt install ffmpeg`
 
+**Record button doesn't appear on the Status Board:**
+- The account needs **Can record** checked in **Manager → User Management** — this isn't implied by any role, including the owner's own account.
+- Confirm `ffmpeg` is installed (same requirement as Announcements/Node ID above).
+
+**Stream Relay shows a target as disconnected:**
+- Check **Manager → Stream Relay** for the current per-target status, and confirm the target node number, and Broadcastify/YouTube credentials, are entered correctly.
+- The relay reconnects automatically on its own — including recovering a single target without touching the other one — so a brief disconnected state during a real network blip should resolve within about 15 seconds on its own.
+- If it stays disconnected, check `journalctl -u HenWen -f` for `[STREAM-RELAY]` lines while it retries.
+
 **Text-to-speech announcements fail with "piper: command not found" or similar:**
 - An in-place upgrade needs its own pip step — a HenWen restart alone doesn't install new Python dependencies. Run `sudo -u asterisk venv/bin/pip install -r requirements.txt` from `/opt/HenWen`, then restart the service.
 - Confirm it resolved correctly: `sudo -u asterisk /opt/HenWen/venv/bin/piper --help`
@@ -369,6 +425,10 @@ All settings are configured in the systemd service file (`/etc/systemd/system/He
 | `SOUNDS_DIR` | `/usr/share/asterisk/sounds/henwen` | Uploaded audio files for Announcements and Node ID |
 | `TTS_VOICES_DIR` | `/var/lib/asterisk/henwen_tts_voices` | Downloaded Piper voice models for text-to-speech Announcements |
 | `PIPER_BIN` | *(resolved from the venv automatically)* | Path to the `piper` executable, if it needs to be overridden |
+| `RECORDINGS_DIR` | `/var/lib/asterisk/henwen_recordings` | Saved audio recordings (see [Audio Recording](#audio-recording)) |
+| `APRS_IS_HOST` | `rotate.aprs2.net` | APRS-IS server for the kiosk map's APRS layer |
+| `APRS_IS_PORT` | `14580` | APRS-IS port |
+| `APRS_IS_PASSCODE` | `-1` | APRS-IS login passcode — `-1` is the documented receive-only passcode; this app never transmits to APRS-IS |
 | `TX_SECRET_PATH` | `/etc/asterisk/henwen-tx.secret` | SIP secret for the browser TX button, generated by `tx-spike/apply.sh` |
 | `TX_SIP_USER` | `henwen-tx` | SIP username the browser TX button registers as |
 | `TX_WS_PATH` | `/asterisk-ws` | Path Apache proxies to Asterisk's WSS signaling endpoint |
@@ -392,6 +452,8 @@ All settings are configured in the systemd service file (`/etc/systemd/system/He
 HenWen/
 ├── app.py                    # Flask backend — all routes, AMI, scheduler threads
 ├── audio_relay.py            # Standalone process that paces live audio into 20ms frames for streaming
+├── recording.py              # In-browser audio recording pipeline (silence-trim, TTS timestamps, storage caps)
+├── stream_relay.py           # Persistent Broadcastify/YouTube Live relay pipeline
 ├── templates/
 │   ├── henwen-manager.html   # Manager shell + all manager pages (settings, connectors, users, etc.)
 │   ├── login.html            # Login / first-run account creation
@@ -399,7 +461,9 @@ HenWen/
 ├── static/
 │   ├── favicon.ico
 │   └── logo-512.png
+├── tests/                    # pytest suite for the pure logic in app.py/recording.py/stream_relay.py
 ├── requirements.txt          # Python dependencies (flask, gunicorn, flask-wtf, flask-limiter, piper-tts)
+├── requirements-dev.txt      # Additional dependencies for running the test suite (pytest)
 ├── HenWen.service            # systemd unit file template
 ├── install.sh                # Installer
 ├── uninstall.sh              # Uninstaller
