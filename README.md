@@ -60,6 +60,15 @@ A browser-based web interface for managing and using your AllStarLink 3 node. Al
 
 ## Step 1 — Install
 
+Note: If you have a minimalistic debian install you'll need to update, upgrade, and then install sudo first, as root:
+
+```bash
+su -
+apt update
+apt upgrade
+apt install sudo
+```
+Then install HenWen:
 ```bash
 git clone https://github.com/GooseThings/HenWen.git
 cd HenWen
