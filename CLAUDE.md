@@ -158,7 +158,7 @@ Sessions are plain signed cookies — there is no server-side session store. To 
 
 ### External dependencies
 
-- `https://stats.allstarlink.org/api/stats/{node}` — node keyed/connected counts, one request per favorite node, polled every 90s (`FAVORITES_POLL_INTERVAL`)
+- `https://stats.allstarlink.org/api/stats/{node}` — node keyed/connected counts, one request per favorite node (5s paced apart within a cycle), polled every 180s (`FAVORITES_POLL_INTERVAL`)
 - `https://stats.allstarlink.org/stats/keyed` — scraped (regex, no HTML parser dependency) for the global activity feed on the kiosk map; every node currently keyed network-wide, polled every 5 min (`GLOBAL_ACTIVITY_INTERVAL`)
 - `https://allmondb.allstarlink.org/allmondb.php` — node callsign/location database
 - `astdb.txt` — local copy of ASL node DB written by `asl3-update-nodelist` package

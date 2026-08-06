@@ -166,11 +166,15 @@ CACHE_TTL       = float(os.environ.get("AMI_CACHE_TTL",     "10.0"))  # seconds 
 # live that this API rate-limits (HTTP 429) and will outright refuse
 # connections from an IP that exceeds it for a while afterward — the
 # poller also backs off exponentially on failures (see _favstats_poll_loop).
-# Bumped 30s -> 90s (owner request, 2026-08-06): this is one request *per
-# favorite node* per cycle (2s paced apart, see _favstats_poll_loop), so a
+# Bumped 30s -> 90s -> 180s (owner request, 2026-08-06): this is one request
+# *per favorite node* per cycle (paced apart, see _favstats_poll_loop), so a
 # handful of favorites was already enough real outbound traffic to be worth
-# spacing out further even without hitting the 429 backoff path.
-FAVORITES_POLL_INTERVAL = max(5.0, float(os.environ.get("FAVORITES_POLL_INTERVAL", "90.0")))
+# spacing out further even without hitting the 429 backoff path. Confirmed
+# live that 90s alone wasn't enough with 10 favorites configured — the
+# first couple nodes queried each cycle kept landing inside the tail of the
+# API's own rate-limit window and drawing 429s while the rest of that same
+# cycle, a few seconds later, cleared it and succeeded.
+FAVORITES_POLL_INTERVAL = max(5.0, float(os.environ.get("FAVORITES_POLL_INTERVAL", "180.0")))
 
 # Log verbosity: DEBUG shows all messages; INFO (default) suppresses DEBUG noise.
 # Set LOG_LEVEL=DEBUG in the service file Environment= lines for full verbose output.
@@ -1927,7 +1931,11 @@ def _favstats_poll_loop():
                 # requests per 30s+) was low — an isolated single request
                 # succeeded immediately after a burst got blocked. The
                 # burst itself looks like abuse, not the average rate.
-                time.sleep(2.0)
+                # Bumped 2.0s -> 5.0s (owner request, 2026-08-06): even at
+                # 2.0s, 10 favorites still spent 18s bursting every cycle and
+                # kept drawing 429s on whichever nodes queried first each
+                # cycle — the API's own rate-limit window outlasted that gap.
+                time.sleep(5.0)
         except Exception as outer:
             log("ERROR", f"[FAVSTATS-POLL] Unexpected outer error: {outer}")
 
