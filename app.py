@@ -9483,6 +9483,23 @@ def _relay_connected_nodes_text(node):
     return 'Connected: ' + ', '.join(labels)
 
 
+def _kiosk_tz():
+    """zoneinfo for the configured Kiosk Settings timezone (Manager > Kiosk
+    Settings > Timezone), falling back to UTC if unset/invalid. Smart
+    Connector connect_time/schedule_days are defined against this zone's
+    wall clock (see _local_time_to_utc) -- anything deciding whether a
+    connector should fire *right now* must resolve "now" the same way, or
+    it can disagree with what's shown to the admin whenever this setting
+    differs from the box's own OS timezone (the previous bug: the ticker
+    display used this zone but the actual scheduler in _run_connectors used
+    naive datetime.now(), i.e. the server's system timezone)."""
+    import zoneinfo
+    try:
+        return zoneinfo.ZoneInfo(get_setting('kiosk_timezone', 'UTC'))
+    except Exception:
+        return timezone.utc
+
+
 def _local_time_to_utc(date_str, time_str, tz):
     """Combine a plain kiosk-local date + HH:MM (no timezone attached,
     the storage convention both net_schedules and connectors.connect_time
@@ -9503,18 +9520,18 @@ def _connectors_scheduled_today(tz_name=None):
     """Enabled Smart Connectors whose schedule lands on 'today' (00:00 to
     23:59, the given or configured kiosk_timezone zone) with a connect
     time still ahead of now, each with a 'utc_time' key added (see
-    _local_time_to_utc). connect_time is plain wall-clock with no
-    timezone attached, evaluated by the scheduler itself
-    (_run_connectors) against naive datetime.now() -- kiosk_timezone is
-    the closest configured stand-in for "the timezone the node is set
-    to" the overlay needs, same convention used for the net-schedule
-    display this replaced."""
-    import zoneinfo
-    tz_name = tz_name or get_setting('kiosk_timezone', 'UTC')
-    try:
-        tz = zoneinfo.ZoneInfo(tz_name)
-    except Exception:
-        tz = timezone.utc
+    _local_time_to_utc). connect_time is plain wall-clock with no timezone
+    attached, defined against kiosk_timezone -- the scheduler itself
+    (_run_connectors) resolves 'now' the same way, via _kiosk_tz(), so this
+    display and the actual firing logic agree."""
+    if tz_name:
+        import zoneinfo
+        try:
+            tz = zoneinfo.ZoneInfo(tz_name)
+        except Exception:
+            tz = timezone.utc
+    else:
+        tz = _kiosk_tz()
     now = datetime.now(tz)
     today_date = now.strftime('%Y-%m-%d')
     now_hm = now.strftime('%H:%M')
@@ -10167,7 +10184,7 @@ def _connector_upcoming_disconnect_all():
         ).fetchall()
     except Exception:
         return None
-    now = datetime.now()
+    now = datetime.now(_kiosk_tz()).replace(tzinfo=None)
     for row in rows:
         what = "non-permanent nodes" if row["disconnect_skip_permanent"] else "all nodes"
         if row["state"] == "waiting":
@@ -10179,7 +10196,13 @@ def _connector_upcoming_disconnect_all():
 
 
 def _run_connectors():
-    now     = datetime.now()
+    # kiosk_timezone-aware, not the server's own OS timezone -- connect_time
+    # and schedule_days are defined against kiosk_timezone wall clock (see
+    # _kiosk_tz()/_local_time_to_utc), the same convention the "today's
+    # upcoming Smart Connectors" ticker already uses. Stays a naive datetime
+    # from here on (like before) so it keeps comparing cleanly against the
+    # naive state_updated/connected_at/last_activity timestamps parsed below.
+    now     = datetime.now(_kiosk_tz()).replace(tzinfo=None)
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
     now_hm  = now.strftime("%H:%M")
 
