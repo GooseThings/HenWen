@@ -166,7 +166,11 @@ CACHE_TTL       = float(os.environ.get("AMI_CACHE_TTL",     "10.0"))  # seconds 
 # live that this API rate-limits (HTTP 429) and will outright refuse
 # connections from an IP that exceeds it for a while afterward — the
 # poller also backs off exponentially on failures (see _favstats_poll_loop).
-FAVORITES_POLL_INTERVAL = max(5.0, float(os.environ.get("FAVORITES_POLL_INTERVAL", "30.0")))
+# Bumped 30s -> 90s (owner request, 2026-08-06): this is one request *per
+# favorite node* per cycle (2s paced apart, see _favstats_poll_loop), so a
+# handful of favorites was already enough real outbound traffic to be worth
+# spacing out further even without hitting the 429 backoff path.
+FAVORITES_POLL_INTERVAL = max(5.0, float(os.environ.get("FAVORITES_POLL_INTERVAL", "90.0")))
 
 # Log verbosity: DEBUG shows all messages; INFO (default) suppresses DEBUG noise.
 # Set LOG_LEVEL=DEBUG in the service file Environment= lines for full verbose output.
@@ -2504,9 +2508,12 @@ def start_geocode_worker():
 # ── Global ASL activity (currently-keyed nodes network-wide) ──────────────────
 # Scrapes the public "Keyed Nodes" page, which lists every node presently
 # keyed up anywhere on the AllStarLink network — no arbitrary top-N cap,
-# we take every row the page lists. Polled every 2 minutes.
+# we take every row the page lists. Polled every 5 minutes (owner request,
+# 2026-08-06, bumped from 2min to ease load on stats.allstarlink.org — this
+# feed is ambient/decorative on the kiosk map, not something that needs to
+# track real-time).
 ASL_KEYED_STATS_URL      = "https://stats.allstarlink.org/stats/keyed"
-GLOBAL_ACTIVITY_INTERVAL = 120.0   # 2 minutes between sweeps
+GLOBAL_ACTIVITY_INTERVAL = 300.0   # 5 minutes between sweeps
 
 # Only the most recent activity matters for display — the keyed page is a
 # live snapshot, not a history, so there's no reason to retain entries past
@@ -5558,7 +5565,7 @@ def api_status_activity():
     Combined activity feed for the Status Board:
     - recently_keyed: nodes observed keying via this node's AMI (real-time)
     - global_nodes:   every node currently keyed network-wide, last 15 min
-                      (polled every 2 min from stats.allstarlink.org/stats/keyed)
+                      (polled every 5 min from stats.allstarlink.org/stats/keyed)
     """
     pin_min = int(get_setting('kiosk_map_pin_duration_min', '60') or 60)
     cutoff  = time.time() - pin_min * 60
