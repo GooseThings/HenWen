@@ -1,5 +1,12 @@
 # Changelog
 
+## v2026.08.06
+
+- **Added: Local/All-links playback mode for Node ID**, alongside a corrected, more nuanced RF-linking warning on the Manager's Node ID page (and README) explaining the actual tradeoff: `localplay` reaches other connected AllStarLink nodes but never a node's own local RF-attached repeater/controller, while `playback` reaches that RF gear too plus everything else currently linked — a node that needs its ID to transmit on its own RF requires `playback`, at the cost of also sending it out over whatever else is linked at the time.
+- **Fixed: kiosk clock/weather/net bars collapsing to a blank-line stack** on narrow-but-not-mobile widths (roughly 861–1400px) — the weather and net bars now wrap and shrink properly instead of one getting crushed to nothing while the other overflows.
+- **Fixed: Smart Connector schedules could silently and permanently stop firing.** A connector that hit any single connect failure was left stuck in `error` with no automatic path back to `idle`, requiring a manual "Clear Error" click before its schedule would ever fire again; a one-time connector was also disabled the instant it entered `waiting` rather than once it actually connected, dropping it out of the scheduler entirely whenever the local node wasn't immediately idle.
+- **Fixed: Smart Connector schedules fired against the server's own system timezone instead of the configured Kiosk Timezone.** Whenever the two differ (confirmed live: server OS set to UTC, Kiosk Timezone set to `America/New_York`), a connector's `connect_time` fired hours off from when it was actually configured, making the whole feature appear broken.
+
 ## v2026.07.29
 
 - **Added: in-browser audio recording.** A Record button next to Listen on the Status Board, visible only to accounts the owner has flagged "Can record" in User Management. Recordings run silence-trimmed (continuous dead air is trimmed down to a configurable ceiling, not to zero) with a periodic spoken TTS timestamp spliced in, auto-stop at a configurable max duration, and both global and per-user storage caps enforced by a background janitor alongside age-based retention. Stopping a recording triggers an automatic download in the browser; recordings also stay browsable/deletable from a new Manager "Recordings" page (admin+).
