@@ -40,9 +40,21 @@ class TestReadConfFileCache:
         # actually works against a real file, not just the theory of it.
         path = tmp_path / "rpt.conf"
         path.write_text("[1000]\nnode=1000\n")
+        first_mtime = path.stat().st_mtime_ns
         first = app.read_conf_file(str(path))
 
-        path.write_text("[2000]\nnode=2000\n")
+        # Some sandboxed/virtualized filesystems coarsen mtime resolution
+        # (observed ~4ms ticks even on real ext4 under this test runner),
+        # so two writes issued back-to-back can land on the same tick. Retry
+        # until the mtime actually advances -- what the cache keys off of --
+        # rather than assuming any fixed resolution or sleeping blindly.
+        for _ in range(200):
+            path.write_text("[2000]\nnode=2000\n")
+            if path.stat().st_mtime_ns != first_mtime:
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("file mtime never advanced after rewrite")
         second = app.read_conf_file(str(path))
 
         assert first == "[1000]\nnode=1000\n"

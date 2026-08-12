@@ -66,6 +66,13 @@ html[data-theme="cotton-candy"] {
 }
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+.a11y-skip-link {
+  position: absolute; left: -999px; top: 0; z-index: 200;
+  background: #ffd400; color: #000; padding: 10px 16px;
+  font-weight: 700; font-size: 1rem; border-radius: 0 0 8px 0;
+}
+.a11y-skip-link:focus { left: 0; }
+
 :root {
   --bg:      #070a0f;
   --bg2:     #0d1117;
@@ -697,6 +704,12 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 </head>
 <body>
 
+<!-- Discoverable, not hidden behind small print: first focusable element in
+     the document so a sight-impaired visitor tabbing in from the address
+     bar reaches it before anything else. Off-screen until focused, like a
+     standard skip-link. -->
+<a href="/accessible" class="a11y-skip-link">Accessible View — larger text and screen-reader support</a>
+
 <!-- ─────────────────────────────────────────────────────────────────────
      Icon sprite — Lucide icons (ISC license, https://lucide.dev), inlined
      so the kiosk stays fully self-contained (no CDN request, no build
@@ -876,6 +889,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       </div>
       <button class="btn-icon" id="dash-edit-btn" onclick="toggleDashEditMode()" title="Rearrange, resize, or hide the panels below"><svg class="icon"><use href="#icon-layout-dashboard"></use></svg></button>
       <button class="btn-icon" onclick="toggleFS()" title="Fullscreen"><svg class="icon"><use href="#icon-maximize"></use></svg></button>
+      <a class="btn-icon" href="/accessible" title="Accessible View — larger text and screen-reader support">Accessible</a>
       <a class="btn-icon" href="/henwen-manager" target="_blank" rel="noopener" title="Manager"><svg class="icon"><use href="#icon-book-open"></use></svg></a>
     </div>
   </header>
@@ -3846,7 +3860,11 @@ function renderFavorites() {
   fl.innerHTML = _favoritesForDisplay().map(function(f) {
     var isConn  = !!connSet[f.node];
     var dot     = isConn ? '<span class="fav-conn-dot"></span>' : '';
-    var name    = f.label || f.callsign || '';
+    /* f.label is a saved custom name; f.callsign is resolved live on every
+       fetch (see /api/favorites) so a node unresolved at add-time still
+       picks up its real callsign once the node database is available,
+       instead of being stuck on a stored placeholder. */
+    var name    = f.label || f.callsign || ('Node ' + f.node);
     var loc     = f.location || '';
     var handle  = isCustomSort ? '<span class="fav-drag-handle" title="Drag to reorder"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>' : '';
     var dragAttrs = isCustomSort ?

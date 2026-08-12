@@ -1,0 +1,1009 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="csrf-token" content="{{ csrf_token() }}">
+<title>HenWen Kiosk — Accessible View</title>
+<link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+<script>(function(){var t=localStorage.getItem('henwen-accessible-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:      #000000;
+  --bg2:     #111111;
+  --border:  #6a6a6a;
+  --fg:      #ffffff;
+  --fg2:     #cfcfcf;
+  --accent:  #7cc4ff;
+  --ok:      #5ce65c;
+  --danger:  #ff8a8a;
+  --focus:   #ffd400;
+}
+html[data-theme="light"] {
+  --bg:      #ffffff;
+  --bg2:     #f0f0f0;
+  --border:  #444444;
+  --fg:      #000000;
+  --fg2:     #262626;
+  --accent:  #0050b3;
+  --ok:      #086b08;
+  --danger:  #a30000;
+  --focus:   #a06800;
+}
+
+html, body { background: var(--bg); color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+  font-size: 20px; line-height: 1.5; }
+
+body { padding: 1rem 1.25rem 3rem; max-width: 56rem; margin: 0 auto; }
+
+h1 { font-size: 1.7rem; }
+h2 { font-size: 1.4rem; margin-top: 2rem; border-bottom: 2px solid var(--border); padding-bottom: 0.3rem; }
+h3 { font-size: 1.15rem; margin-top: 1rem; }
+p, li { color: var(--fg2); }
+a { color: var(--accent); }
+a:not(:focus):not(:hover) { text-decoration: underline; }
+
+/* Visible, high-contrast focus ring on every interactive element — the
+   single most important a11y CSS rule on this page. Never suppressed. */
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+
+.skip-link {
+  position: absolute; left: -999px; top: 0; z-index: 100;
+  background: var(--focus); color: #000; padding: 0.75rem 1.25rem;
+  font-weight: 700; font-size: 1.1rem; border-radius: 0 0 6px 0;
+}
+.skip-link:focus { left: 0; }
+
+header.page-header {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: 0.75rem; border-bottom: 2px solid var(--border); padding-bottom: 1rem;
+}
+header.page-header nav { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+
+button, .btn, input[type=text], input[type=password] {
+  font-size: 1.05rem; font-family: inherit;
+}
+
+button, .btn {
+  min-height: 3.4rem; min-width: 3.4rem;
+  background: var(--bg2); color: var(--fg); border: 2px solid var(--border);
+  border-radius: 8px; padding: 0.6rem 1.1rem; cursor: pointer; font-weight: 600;
+}
+button:hover, .btn:hover { border-color: var(--accent); }
+button:disabled { opacity: 0.55; cursor: not-allowed; }
+button.primary { border-color: var(--accent); }
+button.danger { border-color: var(--danger); }
+
+input[type=text], input[type=password] {
+  min-height: 3.4rem; background: var(--bg2); color: var(--fg);
+  border: 2px solid var(--border); border-radius: 8px; padding: 0.5rem 0.8rem;
+  width: 100%; max-width: 20rem;
+}
+
+label { display: block; font-weight: 600; margin-bottom: 0.3rem; }
+
+.field { margin-bottom: 0.9rem; }
+
+.row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
+
+.banner {
+  margin-top: 1rem; padding: 0.9rem 1.1rem; border: 3px solid var(--danger);
+  border-radius: 8px; background: var(--bg2); color: var(--fg); font-weight: 600;
+}
+.banner ul { margin: 0.4rem 0 0 1.3rem; }
+
+.live-status {
+  margin-top: 1rem; padding: 0.7rem 1rem; border: 2px solid var(--border);
+  border-radius: 8px; background: var(--bg2); color: var(--fg2); font-size: 0.95rem;
+  min-height: 3.4rem; display: flex; align-items: center;
+}
+
+.card {
+  border: 2px solid var(--border); border-radius: 10px; padding: 1rem 1.1rem;
+  margin-top: 0.75rem; background: var(--bg2);
+}
+
+.node-list, .fav-list { list-style: none; margin-top: 0.75rem; display: flex; flex-direction: column; gap: 0.75rem; }
+.node-list li, .fav-list li {
+  border: 2px solid var(--border); border-radius: 8px; padding: 0.8rem 1rem;
+  display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 0.75rem;
+}
+.node-list .meta, .fav-list .meta { color: var(--fg2); font-size: 0.95rem; }
+.badge { font-size: 0.85rem; font-weight: 700; padding: 0.15rem 0.5rem; border-radius: 5px; border: 1px solid var(--border); }
+.badge.tx { color: var(--danger); border-color: var(--danger); }
+
+.status-word { font-weight: 700; }
+.status-word.ok { color: var(--ok); }
+.status-word.bad { color: var(--danger); }
+
+.msg { font-size: 0.95rem; min-height: 1.4em; color: var(--fg2); }
+.msg.error { color: var(--danger); font-weight: 700; }
+.msg.success { color: var(--ok); font-weight: 700; }
+
+footer { margin-top: 2.5rem; padding-top: 1rem; border-top: 2px solid var(--border); color: var(--fg2); font-size: 0.9rem; }
+
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+
+<a class="skip-link" href="#main-content">Skip to main content</a>
+
+<audio id="node-audio" preload="none"><source type="audio/webm; codecs=opus"></audio>
+
+<header class="page-header">
+  <h1>HenWen Kiosk — Accessible View</h1>
+  <nav aria-label="Page options">
+    <button id="theme-toggle-btn" onclick="toggleAccessibleTheme()">Switch to Light Theme</button>
+    <a class="btn" href="/">Full Dashboard</a>
+  </nav>
+</header>
+
+<div id="alert-banner" class="banner" role="alert" hidden></div>
+
+<div id="live-status" class="live-status" role="status" aria-live="polite">Loading node status&hellip;</div>
+
+<main id="main-content">
+
+  <section aria-labelledby="h-node-status">
+    <h2 id="h-node-status">Node Status</h2>
+    <div id="node-status-area">
+      <p>Loading&hellip;</p>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-account" class="card">
+    <h2 id="h-account" style="margin-top:0;border:none;padding-bottom:0">Your Account</h2>
+    <p>Logging in lets you connect, disconnect, and listen to live audio. Checking status does not require logging in.</p>
+
+    <div id="login-form-area">
+      <form id="login-form" onsubmit="return doLogin(event)">
+        <div class="field">
+          <label for="login-username">Username</label>
+          <input type="text" id="login-username" name="username" autocomplete="username" required>
+        </div>
+        <div class="field">
+          <label for="login-password">Password</label>
+          <input type="password" id="login-password" name="password" autocomplete="current-password" required>
+        </div>
+        <button type="submit" class="primary">Log In</button>
+        <p id="login-msg" class="msg" role="alert"></p>
+      </form>
+    </div>
+
+    <div id="logged-in-area" hidden>
+      <p>Logged in as <strong id="logged-in-user"></strong>.</p>
+      <button onclick="doLogout()">Log Out</button>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-listen" class="card">
+    <h2 id="h-listen" style="margin-top:0;border:none;padding-bottom:0">Listen to This Node</h2>
+    <p>Streams live audio from the node. There is about a 1 second delay. Requires logging in above.</p>
+    <div class="row">
+      <button id="listen-btn" onclick="toggleListen()">Listen</button>
+      <div class="field" style="margin:0;min-width:12rem">
+        <label for="listen-volume">Listen Volume</label>
+        <input type="range" id="listen-volume" min="0" max="100" value="100">
+      </div>
+    </div>
+    <p id="listen-msg" class="msg" role="status"></p>
+  </section>
+
+  <section aria-labelledby="h-connect" class="card">
+    <h2 id="h-connect" style="margin-top:0;border:none;padding-bottom:0">Connect to Another Node</h2>
+    <p>Requires logging in above.</p>
+    <form onsubmit="manualConnect(false); return false">
+      <div class="field">
+        <label for="conn-node-input">Node number</label>
+        <input type="text" id="conn-node-input" inputmode="numeric" maxlength="7" placeholder="e.g. 12345">
+      </div>
+      <div class="row">
+        <button type="submit">Connect</button>
+        <button type="button" onclick="manualConnect(true)">Monitor (listen-only link)</button>
+      </div>
+      <p id="conn-msg" class="msg" role="alert"></p>
+    </form>
+  </section>
+
+  <section aria-labelledby="h-favorites">
+    <h2 id="h-favorites">Your Favorites</h2>
+    <div id="favorites-area">
+      <p>Log in above to see and use your saved favorite nodes.</p>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <p>HenWen Kiosk {{ henwen_version }} · <a href="/henwen-manager">Manager</a></p>
+</footer>
+
+<script>
+/* ── Small helpers ── */
+function esc(s) {
+  return String(s||'')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+var _csrfToken = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
+function apiFetch(url, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({'X-CSRFToken': _csrfToken}, opts.headers || {});
+  return fetch(url, opts);
+}
+
+function toggleAccessibleTheme() {
+  var cur = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+  var next = cur === 'light' ? 'dark' : 'light';
+  if (next === 'light') document.documentElement.setAttribute('data-theme', 'light');
+  else document.documentElement.removeAttribute('data-theme');
+  localStorage.setItem('henwen-accessible-theme', next === 'light' ? 'light' : '');
+  document.getElementById('theme-toggle-btn').textContent =
+    next === 'light' ? 'Switch to Dark Theme' : 'Switch to Light Theme';
+}
+(function() {
+  var saved = localStorage.getItem('henwen-accessible-theme');
+  document.getElementById('theme-toggle-btn').textContent =
+    saved === 'light' ? 'Switch to Dark Theme' : 'Switch to Light Theme';
+})();
+
+function setLiveStatus(text) {
+  document.getElementById('live-status').textContent = text;
+}
+
+/* ── Account / session ── */
+window._role = '';
+window._restrictDisconnect = false;
+
+function _isAdminRole() {
+  return window._role === 'admin' || window._role === 'superuser' || window._role === 'owner';
+}
+
+function updateAccountUI(username, role) {
+  var loginArea  = document.getElementById('login-form-area');
+  var loggedArea = document.getElementById('logged-in-area');
+  if (username) {
+    loginArea.hidden  = true;
+    loggedArea.hidden = false;
+    document.getElementById('logged-in-user').textContent = username + ' (' + role + ')';
+  } else {
+    loginArea.hidden  = false;
+    loggedArea.hidden = true;
+  }
+}
+
+async function checkSession() {
+  try {
+    var r = await apiFetch('/api/session');
+    var d = await r.json();
+    if (d.logged_in) {
+      window._role = d.role;
+      window._restrictDisconnect = !!d.restrict_disconnect;
+      updateAccountUI(d.username, d.role);
+    } else {
+      window._role = '';
+      window._restrictDisconnect = false;
+      updateAccountUI(null, null);
+    }
+  } catch (e) {}
+  loadFavorites();
+}
+
+async function doLogin(ev) {
+  if (ev) ev.preventDefault();
+  var username = document.getElementById('login-username').value.trim();
+  var password = document.getElementById('login-password').value;
+  var msg = document.getElementById('login-msg');
+  msg.className = 'msg'; msg.textContent = 'Logging in…';
+  try {
+    var r = await apiFetch('/api/login', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username: username, password: password})
+    });
+    var d = await r.json();
+    if (r.ok && d.ok) {
+      window._role = d.role;
+      window._restrictDisconnect = !!d.restrict_disconnect;
+      if (d.csrf_token) _csrfToken = d.csrf_token;
+      msg.textContent = '';
+      document.getElementById('login-password').value = '';
+      updateAccountUI(d.username, d.role);
+      loadFavorites();
+      setLiveStatus('Logged in as ' + d.username + '.');
+    } else {
+      msg.className = 'msg error';
+      msg.textContent = d.error || ('Login failed (HTTP ' + r.status + ')');
+    }
+  } catch (e) {
+    msg.className = 'msg error';
+    msg.textContent = 'Request error — try reloading the page';
+  }
+  return false;
+}
+
+async function doLogout() {
+  await apiFetch('/logout', {method: 'POST'});
+  try {
+    var tr = await fetch('/api/csrf-token');
+    var td = await tr.json();
+    if (td.csrf_token) _csrfToken = td.csrf_token;
+  } catch (e) {}
+  window._role = '';
+  window._restrictDisconnect = false;
+  updateAccountUI(null, null);
+  if (_listenActive) _stopListen();
+  loadFavorites();
+  setLiveStatus('Logged out.');
+}
+
+function _requireLogin(actionMsg) {
+  /* Covers the idle-session-expiry case too: role/UI can be stale-"logged
+     in" right up until an action 401s, so reset both before focusing —
+     otherwise #login-username is still inside a hidden container and the
+     focus() call silently no-ops. */
+  window._role = '';
+  window._restrictDisconnect = false;
+  updateAccountUI(null, null);
+  loadFavorites();
+  var msg = document.getElementById('login-msg');
+  msg.className = 'msg error';
+  msg.textContent = 'Please log in first' + (actionMsg ? ' to ' + actionMsg : '') + '.';
+  document.getElementById('login-username').focus();
+}
+
+/* ── Board / node status ── */
+window._lastBoardNodes = [];
+var _prevConnectedKeys = null;   /* null until first successful load (no announce on first load) */
+
+async function refreshBoard() {
+  var r;
+  try {
+    r = await apiFetch('/api/status/board', {cache: 'no-store'});
+  } catch (e) { return; }
+  if (!r.ok) return;
+  var data = await r.json();
+  var nodes = data.nodes || [];
+  window._lastBoardNodes = nodes;
+
+  var area = document.getElementById('node-status-area');
+  /* refreshBoard() replaces this area's innerHTML every 4s (duration/keyed
+     text changes on nearly every poll while something's connected), which
+     would otherwise throw keyboard/screen-reader focus back to <body> mid-
+     interaction — on the one page built for exactly that kind of user.
+     Element ids for Disconnect buttons are stable per (local,remote) pair,
+     so re-focusing by id after the rebuild is safe even though the DOM
+     node itself was replaced. */
+  var _focusedId = (document.activeElement && document.activeElement.id) || null;
+  if (!nodes.length) {
+    area.innerHTML = '<p>No nodes configured on this HenWen install.</p>';
+  } else {
+    var healthy = !!data.asterisk_active && !!data.ami_connected;
+    area.innerHTML = nodes.map(function(n) {
+      var nodeHealthy = healthy && !n.stale;
+      var html = '<h3>Node ' + esc(n.node) + (n.callsign ? ' — ' + esc(n.callsign) : '') + '</h3>';
+      if (n.location) html += '<p>' + esc(n.location) + '</p>';
+      html += '<p>Status: <span class="status-word ' + (nodeHealthy ? 'ok">Online' : 'bad">Offline — check the Asterisk/AMI connection') + '</span></p>';
+      if (n.locked) {
+        html += '<p><strong>Locked' + (n.locked_by ? ' by ' + esc(n.locked_by) : '') + '</strong> — connections are read-only right now.</p>';
+      }
+      var conns = n.connected || [];
+      html += '<h4>Connected nodes: ' + conns.length + '</h4>';
+      if (!conns.length) {
+        html += '<p>No nodes currently connected.</p>';
+      } else {
+        html += '<ul class="node-list">' + conns.map(function(c) {
+          var isConn = (c.connect_state || 'ESTABLISHED') === 'ESTABLISHED';
+          var metaParts = [];
+          if (!isConn) metaParts.push('Connecting…');
+          if (c.keyed) metaParts.push('Currently transmitting');
+          if (c.permanent === true) metaParts.push('permanent link');
+          if (typeof c.connect_elapsed_sec === 'number') metaParts.push('connected ' + _fmtDuration(c.connect_elapsed_sec));
+
+          var isAdmin = _isAdminRole();
+          var actionHtml;
+          var discId = 'disc-' + n.node + '-' + c.node;
+          if (c.connector_managed && !isAdmin) {
+            actionHtml = '<span class="msg">Managed by Smart Connector — ask an admin to disconnect this.</span>';
+          } else if (window._restrictDisconnect && !isAdmin) {
+            actionHtml = '<span class="msg">Your account cannot disconnect nodes.</span>';
+          } else {
+            actionHtml = '<button id="' + esc(discId) + '" class="danger" onclick="doDisconnect(\'' + esc(n.node) + '\',\'' + esc(c.node) + '\',this)">Disconnect ' + esc(c.node) + '</button>';
+          }
+
+          return '<li>' +
+            '<span><strong>' + esc(c.node) + (c.callsign ? ' — ' + esc(c.callsign) : '') + '</strong>' +
+            (c.location ? '<br><span class="meta">' + esc(c.location) + '</span>' : '') +
+            (metaParts.length ? '<br><span class="meta">' + esc(metaParts.join(' · ')) + '</span>' : '') +
+            '</span>' + actionHtml + '</li>';
+        }).join('') + '</ul>';
+      }
+      return html;
+    }).join('<hr style="border-color:var(--border);margin:1.2rem 0">');
+
+    if (data.connector_warning) {
+      area.innerHTML += '<p class="msg error">' + esc(data.connector_warning) +
+        ' — you will be disconnected and will need to reconnect.</p>';
+    }
+  }
+  if (_focusedId) {
+    var _refocus = document.getElementById(_focusedId);
+    if (_refocus) _refocus.focus();
+  }
+
+  _announceConnectionChanges(nodes);
+  loadFavorites();
+}
+
+function _fmtDuration(sec) {
+  sec = Math.round(sec);
+  var h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60;
+  if (h) return h + 'h ' + m + 'm';
+  if (m) return m + 'm';
+  return s + 's';
+}
+
+/* Announces only connect/disconnect *transitions*, never keyed/unkeyed —
+   keyed state changes constantly on an active node and would otherwise
+   make this page unusable with a screen reader. */
+function _announceConnectionChanges(nodes) {
+  var keys = {};
+  nodes.forEach(function(n) {
+    (n.connected || []).forEach(function(c) {
+      keys[n.node + ':' + c.node] = c.callsign || c.node;
+    });
+  });
+
+  if (_prevConnectedKeys === null) {
+    _prevConnectedKeys = keys;
+    setLiveStatus('Node status loaded.');
+    return;
+  }
+
+  var added = [], removed = [];
+  Object.keys(keys).forEach(function(k) { if (!(k in _prevConnectedKeys)) added.push(keys[k]); });
+  Object.keys(_prevConnectedKeys).forEach(function(k) { if (!(k in keys)) removed.push(_prevConnectedKeys[k]); });
+  _prevConnectedKeys = keys;
+
+  var parts = [];
+  if (added.length)   parts.push('Connected: ' + added.join(', ') + '.');
+  if (removed.length) parts.push('Disconnected: ' + removed.join(', ') + '.');
+  if (parts.length) setLiveStatus(parts.join(' '));
+}
+
+/* ── Connect / disconnect ── */
+async function doDisconnect(localNode, remoteNode, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  try {
+    var r = await apiFetch('/api/status/disconnect', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({local_node: localNode, remote_node: remoteNode})
+    });
+    var d = await r.json();
+    if (r.ok && d.ok) {
+      setLiveStatus('Disconnecting ' + remoteNode + '…');
+      setTimeout(refreshBoard, 1000);
+    } else if (r.status === 401) {
+      _requireLogin('disconnect a node');
+      if (btn) { btn.disabled = false; }
+      refreshBoard();
+    } else {
+      setLiveStatus('Disconnect failed: ' + (d.error || r.status));
+      if (btn) { btn.disabled = false; }
+    }
+  } catch (e) {
+    setLiveStatus('Disconnect error: ' + e.message);
+    if (btn) { btn.disabled = false; }
+  }
+}
+
+async function doConnect(localNode, remoteNode, monitor, msgEl) {
+  var r;
+  try {
+    r = await apiFetch('/api/status/connect', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({local_node: localNode, remote_node: remoteNode, monitor: !!monitor})
+    });
+  } catch (e) {
+    if (msgEl) { msgEl.className = 'msg error'; msgEl.textContent = 'Connect error: ' + e.message; }
+    return;
+  }
+  var d = await r.json();
+  if (r.ok && d.ok) {
+    if (msgEl) { msgEl.className = 'msg success'; msgEl.textContent = (monitor ? 'Monitoring' : 'Connecting to') + ' ' + remoteNode + '…'; }
+    setLiveStatus((monitor ? 'Monitoring ' : 'Connecting to ') + remoteNode + '…');
+    setTimeout(refreshBoard, 1000);
+  } else if (r.status === 401) {
+    _requireLogin('connect to a node');
+  } else {
+    if (msgEl) { msgEl.className = 'msg error'; msgEl.textContent = d.error || ('Error ' + r.status); }
+  }
+}
+
+function manualConnect(monitor) {
+  var inp = document.getElementById('conn-node-input');
+  var msgEl = document.getElementById('conn-msg');
+  var remote = inp.value.trim();
+  if (!/^\d{4,7}$/.test(remote)) {
+    msgEl.className = 'msg error';
+    msgEl.textContent = 'Enter a 4 to 7 digit node number.';
+    return;
+  }
+  var local = (window._lastBoardNodes && window._lastBoardNodes[0]) ? window._lastBoardNodes[0].node : '';
+  if (!local) { msgEl.className = 'msg error'; msgEl.textContent = 'No local node found.'; return; }
+  msgEl.className = 'msg';
+  msgEl.textContent = 'Connecting…';
+  doConnect(local, remote, monitor, msgEl);
+}
+
+/* ── Favorites ── */
+async function loadFavorites() {
+  var area = document.getElementById('favorites-area');
+  if (!window._role) {
+    area.innerHTML = '<p>Log in above to see and use your saved favorite nodes.</p>';
+    return;
+  }
+  var r;
+  try { r = await apiFetch('/api/favorites', {cache: 'no-store'}); } catch (e) { return; }
+  if (!r.ok) return;
+  var d = await r.json();
+  var favs = d.favorites || [];
+  if (!favs.length) {
+    area.innerHTML = '<p>No favorites saved yet.</p>';
+    return;
+  }
+  var connSet = {};
+  (window._lastBoardNodes || []).forEach(function(n) {
+    (n.connected || []).forEach(function(c) { connSet[c.node] = true; });
+  });
+  var local = (window._lastBoardNodes && window._lastBoardNodes[0]) ? window._lastBoardNodes[0].node : '';
+  var _focusedId = (document.activeElement && document.activeElement.id) || null;
+  area.innerHTML = '<ul class="fav-list">' + favs.map(function(f) {
+    var name = f.label || f.callsign || '';
+    var isConn = !!connSet[f.node];
+    var favId  = 'favconn-' + f.node;
+    var actions = isConn
+      ? '<span class="msg">Already connected</span>'
+      : '<button id="' + esc(favId) + '" onclick="favConnectClick(\'' + esc(local) + '\',\'' + esc(f.node) + '\',this)">Connect</button>';
+    return '<li><span><strong>' + esc(f.node) + (name ? ' — ' + esc(name) : '') + '</strong>' +
+      (f.location ? '<br><span class="meta">' + esc(f.location) + '</span>' : '') + '</span>' +
+      actions + '</li>';
+  }).join('') + '</ul>';
+  if (_focusedId) {
+    var _refocus = document.getElementById(_focusedId);
+    if (_refocus) _refocus.focus();
+  }
+}
+
+function favConnectClick(local, remote, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  doConnect(local, remote, false, null).then(function() { loadFavorites(); });
+}
+
+/* ── NWS severe weather alerts ── */
+var _lastNwsKey = null;   /* dedupe key of the currently-shown alert set */
+
+async function refreshNwsAlerts() {
+  var r;
+  try { r = await apiFetch('/api/status/nws-alerts'); } catch (e) { return; }
+  if (!r.ok) return;
+  var d = await r.json();
+  var banner = document.getElementById('alert-banner');
+  var alerts = d.enabled ? (d.alerts || []) : [];
+
+  if (!alerts.length) {
+    if (_lastNwsKey !== null) { banner.hidden = true; banner.innerHTML = ''; _lastNwsKey = null; }
+    return;
+  }
+
+  /* banner has role="alert" (implicit aria-live="assertive") — replacing its
+     content re-triggers the announcement even when the text is unchanged,
+     so a real severe-weather alert would otherwise interrupt the user every
+     60s with the same warning. Only touch the DOM when the alert set
+     actually changes. */
+  var key = alerts.map(function(a) { return a.vtec_key || a.text; }).join('|');
+  if (key === _lastNwsKey) return;
+  _lastNwsKey = key;
+
+  banner.hidden = false;
+  banner.innerHTML = '<strong>Weather Alert' + (alerts.length > 1 ? 's' : '') + '</strong>' +
+    '<ul>' + alerts.map(function(a) { return '<li>' + esc(a.text) + '</li>'; }).join('') + '</ul>';
+}
+
+/* ── Listen (live audio) ──────────────────────────────────────────────────
+   A copy of the main Status Board's MSE live-edge player (not a shared
+   module) — see CLAUDE.md/build notes: this page's copy can safely diverge
+   without risking the already-verified player on the main board. */
+var _listenActive     = false;
+var _listenNode       = '';
+var _listenCtrl       = null;
+var _listenObjURL     = null;
+var _listenRenewTimer = null;
+var _listenRateTimer  = null;
+var _listenStartTimer = null;
+var _LISTEN_START_MS  = 12000;
+
+var _LISTEN_TARGET_S        = 0.75;
+var _LISTEN_STARTUP_S       = 0.5;
+var _LISTEN_TARGET_MAX_S    = 4.0;
+var _LISTEN_TARGET_STEP_S   = 0.75;
+var _LISTEN_TARGET_DECAY_MS = 45000;
+var _LISTEN_TARGET_DECAY_S  = 0.25;
+var _listenTargetS          = _LISTEN_TARGET_S;
+var _listenLastStallTs      = 0;
+var _LISTEN_KEEPBUF_S       = 3.0;
+var _LISTEN_RATE_MS         = 150;
+var _LISTEN_RENEW_MS        = 30 * 60 * 1000;
+var _LISTEN_JUMP_LAG        = 6.0;
+var _LISTEN_JUMP_COOLDOWN_MS = 5000;
+var _listenLastJumpTs       = 0;
+
+function _audioClientLog(node, type, detail) {
+  try {
+    apiFetch('/api/audio/client-log', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({node: node, type: type, detail: detail}), keepalive: true
+    }).catch(function() {});
+  } catch (e) {}
+}
+
+function toggleListen() {
+  if (_listenActive) { _stopListen(); return; }
+  _listenTargetS     = _LISTEN_TARGET_S;
+  _listenLastStallTs = 0;
+  _startListen();
+}
+
+function _listenSetBtn(text, disabled) {
+  var btn = document.getElementById('listen-btn');
+  if (!btn) return;
+  btn.textContent = text;
+  btn.disabled = !!disabled;
+}
+
+(function() {
+  var audio = document.getElementById('node-audio');
+  var vol   = document.getElementById('listen-volume');
+  var saved = parseInt(localStorage.getItem('henwen-listen-volume') || '100', 10);
+  if (!(saved >= 0 && saved <= 100)) saved = 100;
+  vol.value = saved;
+  audio.volume = saved / 100;
+  vol.addEventListener('input', function() {
+    audio.volume = vol.value / 100;
+    localStorage.setItem('henwen-listen-volume', vol.value);
+  });
+})();
+
+function _listenMsg(text) { document.getElementById('listen-msg').textContent = text || ''; }
+
+function _startListen() {
+  var node = (window._lastBoardNodes && window._lastBoardNodes[0]) ? window._lastBoardNodes[0].node : '';
+  if (!node) { _listenMsg('No local node found.'); return; }
+
+  var audio = document.getElementById('node-audio');
+  audio.muted = false;
+  _listenSetBtn('Connecting…', true);
+  audio.onloadstart = null;
+  audio.onerror = null;
+
+  if (_listenStartTimer) clearTimeout(_listenStartTimer);
+  _listenStartTimer = setTimeout(function() {
+    _listenStartTimer = null;
+    if (_listenActive) return;
+    _stopListen();
+    _listenSetBtn('Listen', false);
+    _listenMsg('Audio did not start — your network may be blocking the live stream. Try again.');
+  }, _LISTEN_START_MS);
+
+  apiFetch('/api/audio/check/' + node)
+    .then(function(r) {
+      if (r.status === 401) {
+        if (_listenStartTimer) { clearTimeout(_listenStartTimer); _listenStartTimer = null; }
+        _listenSetBtn('Listen', false);
+        _requireLogin('listen to this node');
+        return null;
+      }
+      return r.json();
+    })
+    .then(function(d) {
+      if (!d) return;
+      if (!d.ok) {
+        if (_listenStartTimer) { clearTimeout(_listenStartTimer); _listenStartTimer = null; }
+        _listenSetBtn('Listen', false);
+        _listenMsg('Audio unavailable: ' + (d.issues || []).join('; '));
+        return;
+      }
+      _doStartListen(audio, node);
+    })
+    .catch(function(e) {
+      if (_listenStartTimer) { clearTimeout(_listenStartTimer); _listenStartTimer = null; }
+      _listenSetBtn('Listen', false);
+      _listenMsg('Check failed: ' + e.message);
+    });
+}
+
+function _doStartListen(audio, node) {
+  _listenNode = node;
+  if (_listenRenewTimer) { clearTimeout(_listenRenewTimer); _listenRenewTimer = null; }
+  if (_listenCtrl) { _listenCtrl.abort(); _listenCtrl = null; }
+  if (_listenObjURL) { URL.revokeObjectURL(_listenObjURL); _listenObjURL = null; }
+
+  if (typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported('audio/webm; codecs=opus')) {
+    _doStartListenMSE(audio, node);
+  } else {
+    _doStartListenFallback(audio, node);
+  }
+}
+
+function _doStartListenMSE(audio, node) {
+  var ctrl = new AbortController();
+  _listenCtrl = ctrl;
+
+  var ms  = new MediaSource();
+  var url = URL.createObjectURL(ms);
+  _listenObjURL = url;
+
+  var _tm = { chunks: 0, bytes: 0, lastArr: 0, maxGapMs: 0 };
+  function _now() { return (window.performance && performance.now) ? performance.now() : Date.now(); }
+
+  var pending  = [];
+  var cleaning = false;
+  var _cleaningWatchdog = null;
+  var sb = null;
+
+  function appendNext() {
+    if (!sb || sb.updating || cleaning) return;
+    if (sb.buffered.length > 0 && audio.currentTime > _LISTEN_KEEPBUF_S + 1) {
+      var cut = audio.currentTime - _LISTEN_KEEPBUF_S;
+      var s0  = sb.buffered.start(0);
+      if (cut > s0 + 0.1) {
+        cleaning = true;
+        _cleaningWatchdog = setTimeout(function() {
+          if (cleaning) { cleaning = false; appendNext(); }
+        }, 1000);
+        try { sb.remove(s0, cut); } catch (e) { cleaning = false; }
+        return;
+      }
+    }
+    if (pending.length === 0) return;
+    var chunk = pending.shift();
+    try { sb.appendBuffer(chunk); } catch (e) {}
+  }
+
+  ms.addEventListener('sourceopen', function() {
+    URL.revokeObjectURL(url);
+    _listenObjURL = null;
+
+    try { sb = ms.addSourceBuffer('audio/webm; codecs=opus'); }
+    catch (e) {
+      _listenSetBtn('Listen', false);
+      _listenMsg('Codec not supported: ' + e.message);
+      return;
+    }
+    sb.mode = 'sequence';
+
+    sb.addEventListener('updateend', function() {
+      if (_cleaningWatchdog) { clearTimeout(_cleaningWatchdog); _cleaningWatchdog = null; }
+      cleaning = false;
+      appendNext();
+    });
+
+    if (_listenRateTimer) clearInterval(_listenRateTimer);
+    _listenRateTimer = setInterval(function() {
+      if (!_listenActive || !sb || sb.updating || !sb.buffered.length) return;
+      if (audio.readyState < 2) return;
+      var liveEdge = sb.buffered.end(sb.buffered.length - 1);
+      var lag      = liveEdge - audio.currentTime;
+      var nowMs    = _now();
+
+      if (_listenTargetS > _LISTEN_TARGET_S &&
+          (nowMs - _listenLastStallTs) > _LISTEN_TARGET_DECAY_MS) {
+        _listenTargetS = Math.max(_LISTEN_TARGET_S, _listenTargetS - _LISTEN_TARGET_DECAY_S);
+        _listenLastStallTs = nowMs;
+      }
+
+      var rate;
+      if (lag > _listenTargetS + _LISTEN_JUMP_LAG &&
+          (nowMs - _listenLastJumpTs) > _LISTEN_JUMP_COOLDOWN_MS) {
+        var _skipped = lag - _listenTargetS;
+        audio.currentTime = liveEdge - _listenTargetS;
+        _listenLastJumpTs = nowMs;
+        rate = 1.0;
+        _audioClientLog(node, 'emergency_jump', 'lag=' + lag.toFixed(3) + 's skipped=' + _skipped.toFixed(3) + 's');
+      } else if (lag > _listenTargetS + 1.75) {
+        rate = 1.25;
+      } else if (lag > _listenTargetS + 0.75) {
+        rate = 1.12;
+      } else if (lag > _listenTargetS + 0.35) {
+        rate = 1.05;
+      } else {
+        rate = 1.0;
+      }
+      if (audio.playbackRate !== rate) audio.playbackRate = rate;
+    }, _LISTEN_RATE_MS);
+
+    apiFetch('/api/audio/stream/' + node, { signal: ctrl.signal })
+      .then(function(r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        _listenActive = true;
+        if (_listenStartTimer) { clearTimeout(_listenStartTimer); _listenStartTimer = null; }
+        _listenSetBtn('Stop Listening', false);
+        _listenMsg('Playing live audio from node ' + node + '.');
+
+        var reader = r.body.getReader();
+        function pump() {
+          if (ctrl.signal.aborted) return;
+          reader.read().then(function(result) {
+            if (result.done || ctrl.signal.aborted) {
+              try { ms.endOfStream(); } catch (e) {}
+              return;
+            }
+            var nowA = _now();
+            if (_tm.lastArr) _tm.maxGapMs = Math.max(_tm.maxGapMs, nowA - _tm.lastArr);
+            _tm.lastArr = nowA;
+            _tm.chunks++;
+            _tm.bytes += result.value.length;
+            pending.push(result.value);
+            appendNext();
+            pump();
+          }).catch(function(e) {
+            if (e.name === 'AbortError') return;
+            if (_listenActive) {
+              _listenActive = false;
+              _listenSetBtn('Reconnecting…', true);
+              setTimeout(function() { if (!_listenActive) _startListen(); }, 3000);
+            }
+          });
+        }
+        pump();
+      })
+      .catch(function(e) {
+        if (e.name === 'AbortError') return;
+        _listenActive = false;
+        _listenSetBtn('Reconnecting…', true);
+        setTimeout(function() { if (!_listenActive) _startListen(); }, 3000);
+      });
+  });
+
+  audio.onerror = function() {
+    if (ctrl.signal.aborted) return;
+    var codes = {1:'ABORTED',2:'NETWORK',3:'DECODE',4:'FORMAT'};
+    var code = audio.error ? (codes[audio.error.code]||'ERR_'+audio.error.code) : 'unknown';
+    _audioClientLog(node, 'error', code);
+    _listenActive = false;
+    _listenSetBtn('Listen', false);
+    _listenMsg('Audio error: ' + code);
+  };
+
+  var _rebufferTimer = null;
+  audio.addEventListener('waiting', function() {
+    if (!_listenActive || ctrl.signal.aborted) return;
+    if (_rebufferTimer) return;
+    _listenLastStallTs = _now();
+    _listenTargetS = Math.min(_LISTEN_TARGET_MAX_S, _listenTargetS + _LISTEN_TARGET_STEP_S);
+    var _stallStart = audio.currentTime;
+    _rebufferTimer = setInterval(function() {
+      if (!_listenActive || ctrl.signal.aborted) { clearInterval(_rebufferTimer); _rebufferTimer = null; return; }
+      if (!sb || !sb.buffered.length) return;
+      var liveEdge3 = sb.buffered.end(sb.buffered.length - 1);
+      var ahead = liveEdge3 - audio.currentTime;
+      if (ahead >= _listenTargetS) {
+        clearInterval(_rebufferTimer); _rebufferTimer = null;
+        var _behind = liveEdge3 - audio.currentTime;
+        if (_behind > _listenTargetS + _LISTEN_JUMP_LAG) {
+          audio.currentTime = liveEdge3 - _listenTargetS;
+          _listenLastJumpTs = _now();
+        } else {
+          try {
+            for (var gi = 0; gi < sb.buffered.length - 1; gi++) {
+              if (audio.currentTime >= sb.buffered.start(gi) - 0.1 &&
+                  audio.currentTime <= sb.buffered.end(gi) + 0.1) {
+                audio.currentTime = sb.buffered.start(gi + 1) + 0.05;
+                break;
+              }
+            }
+          } catch (e) {}
+        }
+        audio.play().catch(function() {});
+      }
+    }, 100);
+  });
+  audio.addEventListener('playing', function() {
+    if (_rebufferTimer) { clearInterval(_rebufferTimer); _rebufferTimer = null; }
+  });
+
+  audio.src = url;
+  var _startupT0 = Date.now();
+  var _startupTimer = setInterval(function() {
+    if (ctrl.signal.aborted) { clearInterval(_startupTimer); return; }
+    if (!sb || !sb.buffered.length) return;
+    var buffered = sb.buffered.end(sb.buffered.length - 1) - sb.buffered.start(0);
+    if (buffered < _LISTEN_STARTUP_S && (Date.now() - _startupT0) < 2000) return;
+    clearInterval(_startupTimer);
+    audio.play().catch(function(e) {
+      if (ctrl.signal.aborted) return;
+      _listenActive = false;
+      _listenSetBtn('Listen', false);
+      _listenMsg('Playback blocked: ' + e.message);
+    });
+  }, 50);
+
+  _listenRenewTimer = setTimeout(function() {
+    if (!_listenActive) return;
+    _stopListen();
+    setTimeout(function() { _startListen(); }, 500);
+  }, _LISTEN_RENEW_MS);
+}
+
+function _doStartListenFallback(audio, node) {
+  audio.onloadstart = function() {
+    _listenActive = true;
+    if (_listenStartTimer) { clearTimeout(_listenStartTimer); _listenStartTimer = null; }
+    _listenSetBtn('Stop Listening', false);
+    _listenMsg('Playing live audio from node ' + node + '.');
+  };
+  audio.onerror = function() {
+    var codes = {1:'ABORTED',2:'NETWORK',3:'DECODE',4:'FORMAT'};
+    var code = audio.error ? (codes[audio.error.code]||'ERR_'+audio.error.code) : 'unknown';
+    _listenActive = false;
+    _listenSetBtn('Listen', false);
+    _listenMsg('Audio error: ' + code);
+  };
+  audio.onended = function() {
+    _listenActive = false;
+    _listenSetBtn('Listen', false);
+    _listenMsg('Stream ended — press Listen to reconnect.');
+  };
+  audio.src = '/api/audio/stream/' + node;
+  audio.load();
+  audio.play().catch(function(e) {
+    _listenActive = false;
+    _listenSetBtn('Listen', false);
+    _listenMsg('Playback blocked: ' + e.message);
+    audio.src = '';
+  });
+  _listenRenewTimer = setTimeout(function() {
+    if (!_listenActive) return;
+    audio.pause(); audio.src = ''; audio.load();
+    setTimeout(function() { _doStartListenFallback(audio, node); }, 500);
+  }, 8 * 60 * 1000);
+}
+
+function _stopListen() {
+  if (_listenStartTimer) { clearTimeout(_listenStartTimer); _listenStartTimer = null; }
+  if (_listenRenewTimer) { clearTimeout(_listenRenewTimer); _listenRenewTimer = null; }
+  if (_listenRateTimer)  { clearInterval(_listenRateTimer); _listenRateTimer = null; }
+  if (_listenCtrl) { _listenCtrl.abort(); _listenCtrl = null; }
+  if (_listenObjURL) { URL.revokeObjectURL(_listenObjURL); _listenObjURL = null; }
+
+  var audio = document.getElementById('node-audio');
+  audio.playbackRate = 1.0;
+  audio.onloadstart = null;
+  audio.onerror = null;
+  audio.pause();
+  audio.removeAttribute('src');
+  audio.load();
+  _listenActive = false;
+  _listenNode = '';
+  _listenSetBtn('Listen', false);
+  _listenMsg('Stopped listening.');
+}
+
+/* ── Boot ── */
+checkSession();
+refreshBoard();
+refreshNwsAlerts();
+setInterval(refreshBoard, 4000);
+setInterval(refreshNwsAlerts, 60000);
+</script>
+</body>
+</html>

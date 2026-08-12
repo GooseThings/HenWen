@@ -431,6 +431,16 @@ def get_db():
             WHERE f2.user_id = favorites.user_id AND f2.id <= favorites.id
         )""")
         conn.commit()
+    # Cleanup (runs every startup, idempotent — no matching rows once fixed)
+    # for rows written before _seed_default_favorites()/
+    # api_fav_add() stopped baking a "Node XXXXX" placeholder into label when
+    # the node database wasn't loaded/reachable yet: that stored text
+    # permanently shadowed the live callsign lookup in the UI (label takes
+    # display precedence over callsign). Only matches the exact
+    # auto-generated pattern, so a user who deliberately typed that as a
+    # custom label is the sole (acceptable) collateral.
+    conn.execute("UPDATE favorites SET label='' WHERE label = 'Node ' || node")
+    conn.commit()
     conn.execute("""CREATE TABLE IF NOT EXISTS settings (
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -850,7 +860,7 @@ def is_auth_configured():
 @app.before_request
 def check_auth():
     _PUBLIC          = {'login', 'logout', 'static', None,
-                        'status_board', 'status_board_redirect',
+                        'status_board', 'status_board_redirect', 'status_board_accessible',
                         'api_status_board', 'api_status_weather', 'api_status_activity',
                         'api_status_history', 'api_status_nws_alerts',
                         'api_aprs_stations', 'api_iss_tle',
@@ -4744,8 +4754,15 @@ DEFAULT_FAVORITE_NODES = ['64549', '666380', '27664', '55553']
 def _seed_default_favorites(user_id):
     db = get_db()
     for i, node in enumerate(DEFAULT_FAVORITE_NODES):
+        # Leave label blank rather than baking in a "Node XXXXX" placeholder:
+        # the node database may not be loaded yet this early (first-run setup
+        # races load_astdb()/the live allmondb fetch), and a placeholder
+        # written to the label column would permanently shadow the real
+        # callsign — api_favorites() re-resolves it live on every fetch, but
+        # only when label is empty (see status.html's `f.label || f.callsign`
+        # display precedence).
         info  = lookup_node(node)
-        label = info.get("callsign") or info.get("desc") or f"Node {node}"
+        label = info.get("callsign") or info.get("desc") or ""
         db.execute("INSERT OR IGNORE INTO favorites (user_id, node, label, sort_order) VALUES (?,?,?,?)",
                    (user_id, node, label, i))
     db.commit()
@@ -4806,8 +4823,11 @@ def api_fav_add():
     if not node or not node.isdigit():
         return jsonify({"error": "Invalid node number"}), 400
     if not label:
+        # Leave blank on a miss rather than storing "Node XXXXX" — see
+        # _seed_default_favorites() for why that placeholder must never be
+        # persisted into the label column.
         info  = lookup_node(node)
-        label = info.get("callsign") or info.get("desc") or f"Node {node}"
+        label = info.get("callsign") or info.get("desc") or ""
     try:
         db = get_db()
         next_order = db.execute(
@@ -6113,10 +6133,13 @@ class _AudioBroadcast:
                                     # captured by _drain_webm and replayed to
                                     # every client that joins after it went by
 
-        self._started_at   = time.monotonic()
-        self._chunks_out   = 0
-        self._bytes_out    = 0
-        self._total_drops  = 0
+        self._started_at    = time.monotonic()
+        self._chunks_out    = 0
+        self._bytes_out     = 0
+        self._total_drops   = 0
+        self._mixmonitor_id = None  # set by _start_broadcast() once MixMonitor
+                                     # confirms its instance ID, so shutdown()
+                                     # can target StopMixMonitor precisely
 
         self._reader = threading.Thread(target=self._read_loop, daemon=True,
                                         name=f'audio-reader-{node}')
@@ -6409,7 +6432,16 @@ class _AudioBroadcast:
                     pass
 
         def _stop_mm(ami):
-            ami._send_action({'Action': 'StopMixMonitor', 'Channel': self.channel})
+            params = {'Action': 'StopMixMonitor', 'Channel': self.channel}
+            if self._mixmonitor_id:
+                # Targets this exact MixMonitor instance rather than "whatever
+                # is currently running on this channel" — without this, a
+                # shutdown racing a newer broadcast's fresh MixMonitor on the
+                # same channel (e.g. a listener reconnecting the instant its
+                # old stream is torn down) could stop the NEW instance
+                # instead of this one.
+                params['MixMonitorID'] = self._mixmonitor_id
+            ami._send_action(params)
             ami._recv_until('\r\n\r\n', timeout=ami.timeout)
             return {'ok': True}
         try:
@@ -6436,8 +6468,18 @@ def _start_broadcast(node):
     log('INFO', f'[AUDIO] found channel {channel!r} for node {node} '
                 f'({time.monotonic() - _t0:.3f}s)')
 
-    fifo_in_path  = f'/tmp/henwen_audio_{node}.sln'
-    fifo_out_path = f'/tmp/henwen_audio_{node}_paced.sln'
+    # Suffixed with a random per-instance tag (not just the node number) so a
+    # shutdown() racing this same node's *next* broadcast — e.g. a listener
+    # reconnecting in the same instant its old stream is being torn down —
+    # can never unlink/recreate a FIFO the other instance is actively using.
+    # That exact race (fixed, node-only paths) is what wedged Asterisk's
+    # audio pipeline for ~34 minutes on 2026-08-12: the old broadcast's
+    # teardown unlinked the new broadcast's freshly-created FIFO between its
+    # mkfifo() and audio_relay.py's open(), leaving a MixMonitor writing into
+    # a FIFO with no reader.
+    _gen = secrets.token_hex(4)
+    fifo_in_path  = f'/tmp/henwen_audio_{node}_{_gen}.sln'
+    fifo_out_path = f'/tmp/henwen_audio_{node}_{_gen}_paced.sln'
     for p in (fifo_in_path, fifo_out_path):
         if os.path.exists(p):
             os.unlink(p)
@@ -6552,26 +6594,49 @@ def _start_broadcast(node):
     except Exception as e:
         log('WARN', f'[AUDIO] module load check failed: {e}')
 
-    # Apply MixMonitor to the existing node channel
+    # Apply MixMonitor to the existing node channel, then immediately read
+    # back its instance ID (via the i() option's channel variable) in the
+    # same ami_send_command() call — that call holds _ami_pool_lock for its
+    # whole duration, so no other broadcast's AMI actions can land on this
+    # channel between the start and the read, guaranteeing the ID we get
+    # back is this MixMonitor's own. Passed to StopMixMonitor in shutdown()
+    # so a torn-down instance can never be confused with a newer one.
+    _mm_id_var = 'HENWEN_MM_ID'
+
     def _start_mm(ami):
         ami._send_action({
             'Action':  'MixMonitor',
             'Channel': channel,
             'File':    fifo_in_path,
-            'Options': '',
+            'Options': f'i({_mm_id_var})',
         })
         raw = ami._recv_until('\r\n\r\n', timeout=ami.timeout)
         pkt = ami._parse_packet(raw)
         if pkt.get('Response') == 'Error':
             raise RuntimeError(pkt.get('Message', 'MixMonitor failed'))
         log('DEBUG', f'[AUDIO] MixMonitor AMI response: {pkt}')
+
+        ami._send_action({
+            'Action':   'GetVar',
+            'Channel':  channel,
+            'Variable': _mm_id_var,
+        })
+        var_raw = ami._recv_until('\r\n\r\n', timeout=ami.timeout)
+        var_pkt = ami._parse_packet(var_raw)
+        pkt['_mixmonitor_id'] = var_pkt.get('Value') or None
         return pkt
 
     try:
-        ami_send_command(_start_mm)
+        start_pkt = ami_send_command(_start_mm)
     except Exception as e:
         broadcast.shutdown()
         raise RuntimeError(f'MixMonitor failed: {e}')
+
+    broadcast._mixmonitor_id = start_pkt.get('_mixmonitor_id')
+    if not broadcast._mixmonitor_id:
+        log('WARN', f'[AUDIO] could not read back MixMonitorID for node {node} '
+                    f'(channel var {_mm_id_var!r} came back empty) — '
+                    f'StopMixMonitor will fall back to targeting by channel only')
 
     log('INFO', f'[AUDIO] MixMonitor started on {channel} for node {node}, '
                 f'broadcast setup took {time.monotonic() - _t0:.3f}s total')
@@ -6788,7 +6853,7 @@ def api_recording_start():
     os.makedirs(RECORDINGS_DIR, exist_ok=True)
     output_format = cfg['output_format']
     ext = 'mp3' if output_format == 'mp3' else 'ogg'
-    ts = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+    ts = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     filename = f"{node}_{ts}_{secrets.token_hex(4)}.{ext}"
     dest_path = os.path.join(RECORDINGS_DIR, filename)
 
@@ -7065,6 +7130,14 @@ def status_board():
 @app.route("/status")
 def status_board_redirect():
     return redirect(url_for('status_board'), 301)
+
+
+@app.route("/accessible")
+def status_board_accessible():
+    """Alternate Status Board for sight-impaired users — large fonts, real
+    semantic HTML/ARIA, no map/APRS/ISS/drag-and-drop. Public like the main
+    board; reuses the same JSON endpoints and CSRF/session model."""
+    return render_template("status-accessible.html", henwen_version=HENWEN_VERSION)
 
 
 # ── Asterisk console log viewer ───────────────────────────────────────────────
@@ -9469,7 +9542,7 @@ def _write_relay_clock_file():
     amateur radio net scheduling and logging, per feedback after seeing
     the overlay live."""
     try:
-        _atomic_write_overlay_file(stream_relay.CLOCK_OVERLAY_FILE, datetime.utcnow().strftime('%H:%M:%SZ'))
+        _atomic_write_overlay_file(stream_relay.CLOCK_OVERLAY_FILE, datetime.now(timezone.utc).strftime('%H:%M:%SZ'))
     except Exception:
         pass
 
