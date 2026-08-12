@@ -885,7 +885,14 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       <button class="btn-icon" id="kiosk-login-btn" onclick="openKioskLogin()" style="display:none">Login</button>
       <div id="dash-hidden-wrap" style="position:relative;display:inline-flex">
         <button class="btn-icon" id="dash-hidden-btn" onclick="toggleDashHiddenMenu(event)" title="Hidden panels" style="display:none"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
-        <div id="dash-hidden-menu" style="display:none;position:absolute;top:100%;right:0;margin-top:6px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:6px;min-width:170px;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:50;font-size:0.78rem"></div>
+        <!-- position:fixed, not absolute: .header-actions has overflow-x:auto as a
+             narrow-screen safety net (see its CSS comment), which implicitly sets
+             overflow-y:auto too — an absolutely-positioned dropdown anchored inside
+             it would get clipped/scrolled instead of floating over the page.
+             toggleDashHiddenMenu() computes top/right from the button's own
+             bounding rect each time it opens since fixed positioning is
+             viewport-relative, not relative to #dash-hidden-wrap. -->
+        <div id="dash-hidden-menu" style="display:none;position:fixed;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:6px;min-width:170px;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:50;font-size:0.78rem"></div>
       </div>
       <button class="btn-icon" id="dash-edit-btn" onclick="toggleDashEditMode()" title="Rearrange, resize, or hide the panels below"><svg class="icon"><use href="#icon-layout-dashboard"></use></svg></button>
       <button class="btn-icon" onclick="toggleFS()" title="Fullscreen"><svg class="icon"><use href="#icon-maximize"></use></svg></button>
@@ -5149,15 +5156,18 @@ window.addEventListener('resize', function() {
    tmux panes / a tiling window manager), not in six fixed slots. Each
    internal node is {dir:'row'|'col', ratio, a, b} — 'row' stacks its two
    children vertically, 'col' places them side by side, `ratio` is how much
-   of the space `a` gets. A tree with N leaves always has exactly N-1
-   internal nodes (regardless of shape) — 5 for these 6 cards — which is why
-   exactly 5 <div class="dash-divider"> elements in the HTML are enough no
-   matter how the tree is currently arranged — dashApply() just re-walks the
-   tree and reassigns each one's position/orientation/target node every
-   render. (If a 7th card is ever added, add one more .dash-divider element
-   and bump DASH_STORE_KEY — dashLoadSaved() rejects a saved tree that
-   doesn't contain every current id, so a stale tree just falls back to
-   DASH_DEFAULT_TREE rather than silently rendering incomplete.)
+   of the space `a` gets. A tree with N leaves has at most N-1 internal
+   nodes actually rendered as dividers (regardless of shape) — up to 5 for
+   these 6 cards — which is why 5 <div class="dash-divider"> elements in
+   the HTML are always enough no matter how the tree is arranged or how
+   many cards are currently hidden (fewer rendered splits just means some
+   divider elements go unused for that render — see dashPositionDividers()'s
+   `if (!dv)` case). dashApply() re-walks the tree and reassigns each used
+   one's position/orientation/target node every render. (If a 7th card is
+   ever added, add one more .dash-divider element and bump DASH_STORE_KEY —
+   dashLoadSaved() rejects a saved tree that doesn't contain every current
+   id, so a stale tree just falls back to DASH_DEFAULT_TREE rather than
+   silently rendering incomplete.)
 
    This is what makes "move a card under/beside a card in a different
    column" possible: dragging a card's grip and dropping it near an EDGE of
@@ -5173,10 +5183,17 @@ window.addEventListener('resize', function() {
    node, they can never overlap or leave a gap by construction; no
    collision search needed anywhere in this file.
 
-   Hiding a card (see the Hide/unhide section further down) overrides just
-   its own rendered box to display:none at render time, independent of the
-   tree; it doesn't reflow neighbors into the freed space — the user has
-   resize for that if they want to reclaim it by hand. */
+   Hiding a card doesn't touch the tree or its stored ratios at all — see
+   dashSubtreeHidden()/dashWalk(). A split whose one side is entirely
+   hidden leaves is simply not walked as a split: dashWalk() recurses
+   straight into the visible side with the *whole* range that split would
+   otherwise have divided, so that side's sibling reflows to fill the freed
+   space immediately, with no dead space left for the user to reclaim by
+   hand and no divider rendered for a boundary that no longer exists.
+   Unhiding needs no tree surgery to undo either way: the internal node and
+   its ratio were never touched, so the next render just splits normally
+   again and the leaf reappears at exactly its old proportion of its old
+   spot. */
 var DASH_COLS = 12, DASH_ROWS = 24;
 var DASH_GAP = 10;             /* must match .content-area's CSS `gap` */
 var DASH_MIN_CS = 2, DASH_MIN_RS = 3;
@@ -5280,16 +5297,34 @@ function dashValidTree(node, seen) {
   return dashValidTree(node.a, seen) && dashValidTree(node.b, seen);
 }
 
+/* True if every leaf under `node` is currently hidden (a plain leaf just
+   reads _dashHidden directly). Used by dashWalk() to fold a fully-hidden
+   side out of the split entirely rather than reserving its space. */
+function dashSubtreeHidden(node) {
+  if (node.type === 'leaf') return !!_dashHidden[node.id];
+  return dashSubtreeHidden(node.a) && dashSubtreeHidden(node.b);
+}
+
 /* ── Render: walk the tree, assigning each leaf a {col,cs,row,rs} rect in
    the 12x24 grid and collecting one descriptor per internal (split) node
    for the divider overlay — see the module doc comment above for how a
    {dir,ratio} node divides the [colStart,colEnd)x[rowStart,rowEnd) range
-   it's given. Always visits exactly DASH_CARD_IDS.length - 1 split nodes. ── */
+   it's given, and for why a split gets skipped (no divider pushed, full
+   range handed to the other side) whenever one side is entirely hidden
+   leaves. Visits at most DASH_CARD_IDS.length - 1 split nodes. ── */
 function dashWalk(node, colStart, colEnd, rowStart, rowEnd, rects, dividers) {
   if (node.type === 'leaf') {
     rects[node.id] = {col: colStart, cs: colEnd - colStart, row: rowStart, rs: rowEnd - rowStart};
     return;
   }
+  var aHidden = dashSubtreeHidden(node.a), bHidden = dashSubtreeHidden(node.b);
+  /* Both-hidden can't reach here: dashWalk is only ever called on a node
+     that isn't itself fully hidden (the top-level call site is guaranteed
+     at least one visible card, and every recursive call below only
+     descends into a side that isn't fully hidden), so at most one of
+     aHidden/bHidden is true. */
+  if (aHidden) { dashWalk(node.b, colStart, colEnd, rowStart, rowEnd, rects, dividers); return; }
+  if (bHidden) { dashWalk(node.a, colStart, colEnd, rowStart, rowEnd, rects, dividers); return; }
   if (node.dir === 'col') {
     var c = dashClamp(Math.round(colStart + (colEnd - colStart) * node.ratio), colStart + DASH_MIN_CS, colEnd - DASH_MIN_CS);
     dividers.push({node: node, dir: 'v', colStart: c, colEnd: c, rowStart: rowStart, rowEnd: rowEnd, range: {colStart: colStart, colEnd: colEnd, rowStart: rowStart, rowEnd: rowEnd}});
@@ -5350,17 +5385,15 @@ function dashApply() {
       el.style.gridRow = r.row + ' / span ' + r.rs;
     });
   }
-  /* Hide leaves the split tree untouched — own rendered box only, doesn't
-     reflow neighbors. The card's grid rect is still reserved (its
-     neighbors' rects/dividers are unaffected), so the freed area shows as
-     blank space until the user drags the divider bordering it by hand —
-     there's no tree surgery to undo when unhidden, it just reappears at
-     its old spot. A CSS class + media-scoped rule, not a direct
-     style.display write: toggling this class is safe to leave set while
-     the viewport crosses the mobile breakpoint, since the rule that acts
-     on it only exists at desktop widths — an inline display:none here
-     would otherwise stick past that breakpoint with no way for the
-     (desktop-only) unhide controls to clear it again. */
+  /* dashWalk() already folded any hidden leaf's space into its sibling (see
+     its own doc comment), so the actual card element just needs to go
+     display:none — nothing to reflow here, its rect was never reserved.
+     A CSS class + media-scoped rule, not a direct style.display write:
+     toggling this class is safe to leave set while the viewport crosses
+     the mobile breakpoint, since the rule that acts on it only exists at
+     desktop widths — an inline display:none here would otherwise stick
+     past that breakpoint with no way for the (desktop-only) unhide
+     controls to clear it again. */
   DASH_CARD_IDS.forEach(function(id) {
     var el = dashCardEl(id); if (!el) return;
     el.classList.toggle('dash-fully-hidden', !!_dashHidden[id]);
@@ -5425,20 +5458,33 @@ function toggleDashHide(id, ev) {
   if (ev) ev.stopPropagation();
   if (!dashSupported()) return;
   if (!_dashHidden[id] && dashHiddenIds().length >= DASH_CARD_IDS.length - 1) return;   /* always keep at least one panel visible */
+  /* Needed even just to hide something: dashApply() only writes the inline
+     grid-column/grid-row that lets a sibling reflow into freed space when
+     _dashTree is non-null (see dashWalk()'s doc comment on collapsing a
+     hidden side) — without ensuring it here first, hiding a card while
+     still on the CSS-stylesheet default layout would toggle the card's own
+     display:none but leave its neighbor sitting at its old (unexpanded)
+     size until something else happened to customize the tree. */
+  dashEnsureCustom();
   _dashHidden[id] = !_dashHidden[id];
   dashApply();
   dashSave();
   updateDashHiddenBtn();
-  if (id === 'map') setTimeout(function() { if (_map) _map.invalidateSize(); }, 50);
+  /* Unconditional, not just for id==='map': hiding/unhiding *any* card can
+     reflow the map's box now that a hidden sibling's space collapses into
+     it, same reasoning as dashDividerEnd's "any divider can change the
+     map's box". */
+  setTimeout(function() { if (_map) _map.invalidateSize(); }, 50);
 }
 
 function dashUnhide(id, ev) {
   if (ev) ev.stopPropagation();
+  dashEnsureCustom();
   _dashHidden[id] = false;
   dashApply();
   dashSave();
   updateDashHiddenBtn();
-  if (id === 'map') setTimeout(function() { if (_map) _map.invalidateSize(); }, 50);
+  setTimeout(function() { if (_map) _map.invalidateSize(); }, 50);
 }
 
 function updateDashHiddenBtn() {
@@ -5478,8 +5524,17 @@ function toggleDashHiddenMenu(ev) {
   if (ev) ev.stopPropagation();
   if (_dashHiddenMenuOpen) { hideDashHiddenMenu(); return; }
   var menu = document.getElementById('dash-hidden-menu');
-  if (!menu) return;
+  var btn = document.getElementById('dash-hidden-btn');
+  if (!menu || !btn) return;
   renderDashHiddenMenu();
+  /* Fixed positioning is viewport-relative, so compute it from the button's
+     own rect on each open rather than relying on CSS anchoring — see the
+     HTML comment above #dash-hidden-menu for why absolute+top:100% was
+     getting clipped instead. */
+  var r = btn.getBoundingClientRect();
+  menu.style.top = (r.bottom + 6) + 'px';
+  menu.style.right = (window.innerWidth - r.right) + 'px';
+  menu.style.left = 'auto';
   menu.style.display = 'block';
   _dashHiddenMenuOpen = true;
   document.addEventListener('click', _dashHiddenOutsideClick);
