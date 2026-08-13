@@ -194,12 +194,25 @@ class TestRecordingDownload:
 
 
 class TestRecordingsDelete:
-    def test_plain_user_cannot_delete(self, client, create_user):
+    def test_plain_user_can_delete_own_recording(self, client, create_user, tmp_path, monkeypatch):
+        monkeypatch.setattr(app, "RECORDINGS_DIR", str(tmp_path))
         create_user("owner1", role="owner")
         alice = create_user("alice", password="password12345", role="user")
         db = app.get_db()
-        rid = _insert_recording(db, user_id=alice["id"], username="alice")
+        rid = _insert_recording(db, user_id=alice["id"], username="alice", filename="a.ogg")
+        (tmp_path / "a.ogg").write_bytes(b"fake audio")
         _login(client, "alice")
+        resp = client.delete(f"/api/recordings/{rid}")
+        assert resp.status_code == 200
+        assert not (tmp_path / "a.ogg").exists()
+
+    def test_plain_user_cannot_delete_someone_elses_recording(self, client, create_user):
+        create_user("owner1", role="owner")
+        alice = create_user("alice", password="password12345", role="user")
+        create_user("bob", password="password12345", role="user")
+        db = app.get_db()
+        rid = _insert_recording(db, user_id=alice["id"], username="alice")
+        _login(client, "bob")
         resp = client.delete(f"/api/recordings/{rid}")
         assert resp.status_code == 403
 
@@ -229,3 +242,53 @@ class TestRecordingsDelete:
         create_user("owner1", role="owner")
         _login(client, "owner1")
         assert client.delete("/api/recordings/9999").status_code == 404
+
+
+class TestRecordingsRename:
+    def test_requires_login(self, client, create_user):
+        create_user("owner1", role="owner")
+        alice = create_user("alice", password="password12345", role="user")
+        db = app.get_db()
+        rid = _insert_recording(db, user_id=alice["id"], username="alice")
+        resp = client.post(f"/api/recordings/{rid}/rename", json={"label": "Net check-in"})
+        assert resp.status_code == 401
+
+    def test_owner_of_recording_can_rename(self, client, create_user):
+        create_user("owner1", role="owner")
+        alice = create_user("alice", password="password12345", role="user")
+        db = app.get_db()
+        rid = _insert_recording(db, user_id=alice["id"], username="alice")
+        _login(client, "alice")
+        resp = client.post(f"/api/recordings/{rid}/rename", json={"label": "  Net check-in  "})
+        assert resp.status_code == 200
+        assert resp.get_json()["label"] == "Net check-in"
+        row = app.get_db().execute("SELECT label FROM recordings WHERE id=?", (rid,)).fetchone()
+        assert row["label"] == "Net check-in"
+
+    def test_cannot_rename_someone_elses_recording(self, client, create_user):
+        create_user("owner1", role="owner")
+        alice = create_user("alice", password="password12345", role="user")
+        create_user("bob", password="password12345", role="user")
+        db = app.get_db()
+        rid = _insert_recording(db, user_id=alice["id"], username="alice")
+        _login(client, "bob")
+        resp = client.post(f"/api/recordings/{rid}/rename", json={"label": "hijacked"})
+        assert resp.status_code == 403
+
+    def test_admin_can_rename_anyones_recording(self, client, create_user):
+        create_user("owner1", role="owner")
+        admin = create_user("admin1", password="password12345", role="admin")
+        alice = create_user("alice", password="password12345", role="user")
+        db = app.get_db()
+        rid = _insert_recording(db, user_id=alice["id"], username="alice")
+        _login(client, "admin1")
+        resp = client.post(f"/api/recordings/{rid}/rename", json={"label": "Renamed by admin"})
+        assert resp.status_code == 200
+        row = app.get_db().execute("SELECT label FROM recordings WHERE id=?", (rid,)).fetchone()
+        assert row["label"] == "Renamed by admin"
+
+    def test_404_for_unknown_id(self, client, create_user):
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        resp = client.post("/api/recordings/9999/rename", json={"label": "x"})
+        assert resp.status_code == 404

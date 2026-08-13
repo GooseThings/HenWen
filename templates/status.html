@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <title>HenWen Kiosk</title>
-<link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+<link id="dyn-favicon" rel="icon" type="image/x-icon" href="/static/favicon.ico">
 <script>(function(){var t=localStorage.getItem('henwen-theme')||localStorage.getItem('asl3ez-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
 <style>
@@ -64,6 +64,56 @@ html[data-theme="cotton-candy"] {
   --border:  #ddb8e8; --accent: #b44cc0; --green:  #2e9e6e;
   --warn:    #c87820; --danger: #c83050; --text:   #2a1030; --text2:  #8850a0;
 }
+html[data-theme="gruvbox"] {
+  --bg:      #1d2021; --bg2:    #282828; --bg3:    #3c3836;
+  --border:  #504945; --accent: #83a598; --green:  #b8bb26;
+  --warn:    #fabd2f; --danger: #fb4934; --text:   #ebdbb2; --text2:  #a89984;
+}
+html[data-theme="tokyo-night"] {
+  --bg:      #1a1b26; --bg2:    #16161e; --bg3:    #24283b;
+  --border:  #414868; --accent: #7aa2f7; --green:  #9ece6a;
+  --warn:    #e0af68; --danger: #f7768e; --text:   #c0caf5; --text2:  #565f89;
+}
+html[data-theme="catppuccin"] {
+  --bg:      #1e1e2e; --bg2:    #181825; --bg3:    #313244;
+  --border:  #45475a; --accent: #89b4fa; --green:  #a6e3a1;
+  --warn:    #f9e2af; --danger: #f38ba8; --text:   #cdd6f4; --text2:  #7f849c;
+}
+html[data-theme="onedark"] {
+  --bg:      #282c34; --bg2:    #21252b; --bg3:    #2c313a;
+  --border:  #3e4451; --accent: #61afef; --green:  #98c379;
+  --warn:    #e5c07b; --danger: #e06c75; --text:   #abb2bf; --text2:  #5c6370;
+}
+html[data-theme="rosepine"] {
+  --bg:      #191724; --bg2:    #1f1d2e; --bg3:    #26233a;
+  --border:  #403d52; --accent: #c4a7e7; --green:  #a3be8c;
+  --warn:    #f6c177; --danger: #eb6f92; --text:   #e0def4; --text2:  #6e6a86;
+}
+html[data-theme="synthwave"] {
+  --bg:      #241b2f; --bg2:    #2b213c; --bg3:    #34294f;
+  --border:  #4a3768; --accent: #f92aad; --green:  #72f1b8;
+  --warn:    #fede5d; --danger: #fe4450; --text:   #f4eee8; --text2:  #a58fc7;
+}
+html[data-theme="forest"] {
+  --bg:      #0f1a0d; --bg2:    #152413; --bg3:    #1e321a;
+  --border:  #31492a; --accent: #4fd1c5; --green:  #57a643;
+  --warn:    #d9a441; --danger: #c0392b; --text:   #dbe8d5; --text2:  #7c9974;
+}
+html[data-theme="ayu"] {
+  --bg:      #fafafa; --bg2:    #ffffff; --bg3:    #f0eee4;
+  --border:  #e7e6e2; --accent: #fa8d3e; --green:  #86b300;
+  --warn:    #f2ae49; --danger: #f51818; --text:   #5c6166; --text2:  #828c99;
+}
+html[data-theme="ocean"] {
+  --bg:      #eef6f8; --bg2:    #ffffff; --bg3:    #dcedf0;
+  --border:  #bcdde3; --accent: #0f7fa3; --green:  #1f9c6e;
+  --warn:    #c98a1a; --danger: #d1495b; --text:   #123640; --text2:  #5c8894;
+}
+html[data-theme="vampire"] {
+  --bg:      #0a0505; --bg2:    #140808; --bg3:    #1f0d0d;
+  --border:  #3d1414; --accent: #c81d3f; --green:  #7a9b5c;
+  --warn:    #c99a3a; --danger: #ff3b3b; --text:   #e8d8d8; --text2:  #8a5a5a;
+}
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 .a11y-skip-link {
@@ -101,12 +151,24 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .header {
   display: flex; align-items: center; justify-content: space-between;
   border-bottom: 1px solid var(--border); padding-bottom: 10px; flex-shrink: 0;
+  position: relative;
 }
 .header-brand { display: flex; align-items: center; gap: 10px; color: var(--text2);
   font-size: 0.9rem; letter-spacing: 0.06em; }
 .header-brand strong { color: var(--accent); font-size: 1rem; }
 .header-logo { height: 48px; width: 48px; object-fit: contain; flex-shrink: 0;
   filter: drop-shadow(0 0 6px rgba(63,185,80,.35)); }
+/* Owner-uploaded club/callsign branding, centered independent of the two
+   flex siblings either side (their widths differ, so plain flex centering
+   can't put this dead-center against the whole header — absolute+transform
+   can). Hidden by default; JS only reveals it once a logo_url comes back
+   from /api/kiosk/settings. Hidden entirely below the mobile breakpoint —
+   .header-actions' icon row already needs the width there and this is
+   decorative, not functional. */
+.header-club-logo {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  max-height: 44px; max-width: 220px; object-fit: contain; pointer-events: none;
+}
 /* Clock frame lives in .bars-row now (see #clock-bar), styled like the
    weather/net frames next to it — .clock-time deliberately sets no
    font-size of its own so it inherits .weather-bar's, keeping it visually
@@ -218,11 +280,11 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .nws-alert-item.nws-sev-advisory strong { color: var(--warn); }
 @keyframes nws-scroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
 
-/* ── Content area: Node info | Recent Connections | Connected/Map | Favorites | Latest Activity ──
+/* ── Content area: Node info | Recent Connections | Connected/Map | Favorites/Chat | Latest Activity ──
    A 12-col x 24-row grid built from `fr` tracks, not fixed px, so it always
    fills exactly the space .content-area has (same "fits the viewport, never
    scrolls" behavior the old fixed 4-column grid had) regardless of screen
-   size. The six cards' default positions below reproduce the old layout's
+   size. The cards' default positions below reproduce the old layout's
    proportions in that coordinate space. Once the user drags/resizes a card
    (see the Dashboard grid section further down), JS takes over with inline
    grid-column/grid-row on that card — inline style always wins over these
@@ -377,7 +439,13 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   border-bottom: 1px solid rgba(244,63,94,.35); background: rgba(244,63,94,.1);
   align-items: center; gap: 6px; flex-shrink: 0;
 }
-.node-list { flex: 1; overflow-y: auto; }
+/* min-height:0 overrides the flex default of min-height:auto (content-sized),
+   which otherwise refuses to let this shrink below its content height — so
+   e.g. arming TX (which adds #tx-bar above this in the same flex column)
+   would grow the whole column past .connected-card's fixed height instead of
+   this scrolling within the space left over, clipping node entries via the
+   card's own overflow:hidden. */
+.node-list { flex: 1; overflow-y: auto; min-height: 0; }
 .node-list::-webkit-scrollbar { width: 3px; }
 .node-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 .empty-msg { display: flex; align-items: center; justify-content: center; height: 100%;
@@ -396,7 +464,15 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   border-bottom: 1px solid var(--border); transition: background .15s; }
 .node-row:last-child { border-bottom: none; }
 .node-row:hover { background: var(--bg3); }
+/* Base (gray) is the disconnected/no-state fallback only — an ESTABLISHED
+   connection always gets one of the three classes below, never the bare
+   element, so .fav-conn-dot's always-green-while-connected look (Favorites
+   has no keyed concept to distinguish) and this dot's red-while-keyed look
+   agree on the connected-but-idle color instead of this one alone falling
+   through to gray. */
 .nr-dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; background: #2a2a2a; border: 1px solid #333; }
+.nr-dot.connected { background: var(--green); border-color: var(--green);
+  box-shadow: 0 0 5px rgba(63,185,80,.6); }
 .nr-dot.keyed { background: var(--danger); border-color: var(--danger);
   box-shadow: 0 0 5px rgba(224,68,68,.7); }
 .nr-dot.connecting { background: #d9a520; border-color: #d9a520;
@@ -413,19 +489,47 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   display: flex; align-items: center; gap: 10px; row-gap: 3px; flex-wrap: wrap; }
 .nr-meta span { white-space: nowrap; }
 .nr-meta strong { color: var(--text); }
-.node-row > .sb-btn.disconnect { flex: 0 0 auto; }
+/* margin-left:auto, not just flex:0 0 auto: this used to sit flush against
+   the row's right edge for free, because .nr-timeline's old flex:1 1 0
+   consumed every pixel of leftover row space right up to it. Now that the
+   timeline caps out at a fixed width (see its own comment below) instead of
+   growing to fill the row, nothing claims that leftover space any more —
+   without an explicit auto margin here the button would just sit wherever
+   the timeline's fixed width happens to end, drifting left on wide rows. */
+.node-row > .sb-btn.disconnect { flex: 0 0 auto; margin-left: auto; }
 
-/* Keyed-activity timeline: a strip of per-bucket bars, newest on the right,
-   that grows to fill whatever space nr-main isn't using (nr-main only takes
-   the width its own content needs, so the timeline gets the rest and rescales
-   with the window instead of sitting at a fixed pixel width). Bars spike
-   full-height red when that bucket saw any keyup, otherwise sit at a low gray
-   baseline (seen but quiet) or render invisible (no data yet for that slice —
-   e.g. right after the connection appeared or right after page load, before
-   history has had time to fill the window). */
-.nr-timeline { flex: 1 1 0; min-width: 60px; display: flex; align-items: flex-end; gap: 1px;
-  height: 24px; padding: 0 2px; }
-.nr-tl-bar { flex: 1 1 0; min-width: 1px; height: 15%; border-radius: 1px; background: #3a3a3a; }
+/* Keyed-activity timeline: a strip of per-bucket bars, newest on the right.
+   flex-grow:0 on the strip and a fixed flex-basis (not width — see below)
+   keeps every bar a constant, predictable pixel width regardless of screen
+   size or how wide the Connected Nodes panel happens to be resized, instead
+   of the old flex:1 1 0 which stretched all 60 bars to fill whatever space
+   nr-main wasn't using — fine on a phone, but on a wide desktop kiosk each
+   bar could balloon to 10+px, well past what a single 5s sample needs to
+   read clearly. flex-shrink stays 1 (not 0) and min-width stays 60px so a
+   custom-resized narrow column can still compress the strip rather than
+   overflow the row — basis, not a hard width, so that shrink still applies.
+   Bars spike full-height red when that bucket saw any keyup, otherwise sit
+   at a low gray baseline (seen but quiet) or render invisible (no data yet
+   for that slice — e.g. right after the connection appeared or right after
+   page load, before history has had time to fill the window).
+
+   Framed (border + subtle fill) now that it no longer stretches to the
+   row's edge on its own — at a fixed width it would otherwise float
+   unanchored in whatever leftover space sits between nr-main and the
+   (now right-pinned) disconnect button, with nothing marking where the
+   strip actually starts/ends.
+
+   No gap between bars: at a static ~240px for 60 of them, each bar is only
+   ~3-4px wide, and the same 1px inter-bar gap that was barely visible when
+   bars stretched wide on a big screen ate a quarter or more of that width
+   once bars got that narrow — reading as the strip being made of gaps
+   rather than bars. Sitting flush removes that, and a real "no history
+   yet" .empty bar (genuinely transparent, unlike its solid on/off
+   neighbors) still reads as a gap exactly where one belongs. */
+.nr-timeline { flex: 0 1 240px; min-width: 60px; display: flex; align-items: flex-end;
+  height: 24px; padding: 3px 4px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg3); }
+.nr-tl-bar { flex: 1 1 0; min-width: 1px; height: 15%; background: #3a3a3a; }
 .nr-tl-bar.on { height: 100%; background: var(--danger); box-shadow: 0 0 3px rgba(224,68,68,.7); }
 .nr-tl-bar.empty { background: transparent; }
 
@@ -480,9 +584,15 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .map-ctl-radar input { cursor: pointer; }
 .popup-node-link { color: var(--accent); font-weight: 600; text-decoration: none; }
 
-/* ── Favorites sidebar ── */
+/* ── Favorites sidebar (top 2/3 of the right column; Chat takes the bottom
+   third below it — see .chat-card and DASH_DEFAULT_TREE) ── */
 .favorites-card {
-  grid-column: 10 / span 3; grid-row: 1 / span 24;
+  grid-column: 10 / span 3; grid-row: 1 / span 16;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+  display: flex; flex-direction: column; overflow: hidden; min-height: 0;
+}
+.chat-card {
+  grid-column: 10 / span 3; grid-row: 17 / span 8;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
@@ -530,6 +640,20 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .fav-drag-handle { cursor: grab; color: var(--text2); opacity: 0.5; font-size: 0.75rem;
   padding-right: 2px; flex-shrink: 0; }
 .fav-drag-handle:hover { opacity: 0.9; }
+
+/* ── Chat panel ── */
+.chat-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; padding: 4px 10px; }
+.chat-list::-webkit-scrollbar { width: 3px; }
+.chat-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.chat-row { padding: 4px 2px; font-size: 0.78rem; line-height: 1.4; word-wrap: break-word; white-space: pre-wrap; }
+.chat-row .chat-ts { font-size: 0.85em; color: var(--text2); }
+.chat-row .chat-user { font-weight: 700; color: var(--accent); }
+.chat-row .chat-body { color: var(--text); }
+.chat-login-note { padding: 14px; text-align: center; font-size: 0.78rem; color: var(--text2); }
+.chat-composer { display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--border); flex-shrink: 0; }
+.chat-composer input { flex: 1; font-size: 0.78rem; padding: 5px 8px; border-radius: 5px;
+  border: 1px solid var(--border); background: var(--bg3); color: var(--text); }
+.chat-composer input:focus { outline: none; border-color: var(--accent); }
 
 
 /* ── Status-board action buttons ── */
@@ -629,6 +753,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   .header-brand { font-size: 0.8rem; }
   .header-brand strong { font-size: 0.92rem; }
   .header-actions { gap: 6px; }
+  .header-club-logo { display: none; }
 
   .weather-bar { min-height: 0; overflow: visible; }
   /* The "|" separator only reads right on a single ticker line, which never
@@ -648,7 +773,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     display: flex; flex-direction: column; grid-template-columns: none;
     grid-template-rows: none; flex: none; min-height: 0;
   }
-  .node-card, .history-card, .connected-card, .map-card, .activity-card, .favorites-card {
+  .node-card, .history-card, .connected-card, .map-card, .activity-card, .favorites-card, .chat-card {
     grid-column: auto; grid-row: auto;
   }
   .node-card    { order: 1; }
@@ -657,6 +782,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   .map-card     { order: 4; }
   .activity-card { order: 5; }
   .favorites-card { order: 6; }
+  .chat-card    { order: 7; }
 
   /* Resizable/movable/collapsible cards are desktop-only (see dashSupported()
      in JS) — hide their controls entirely here rather than leave dead UI. */
@@ -667,7 +793,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   .node-card {
     min-height: 0; max-height: none; padding: 14px 12px;
   }
-  .connected-card, .activity-card, .favorites-card, .history-card { max-height: 320px; }
+  .connected-card, .activity-card, .favorites-card, .history-card, .chat-card { max-height: 320px; }
   .map-card { height: 340px; flex-shrink: 0; }
 
   .node-number { font-variant-numeric: tabular-nums; font-size: 1.9rem; }
@@ -861,6 +987,14 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <path d="M5 11V5h6" />
     <path d="m5 5 14 14" />
   </symbol>
+  <symbol id="icon-folder-open" viewBox="0 0 24 24">
+    <path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" />
+  </symbol>
+  <symbol id="icon-download" viewBox="0 0 24 24">
+    <path d="M12 15V3" />
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+    <path d="m7 10 5 5 5-5" />
+  </symbol>
 </svg>
 
 <div class="board">
@@ -871,6 +1005,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       <img class="header-logo" src="/static/logo-512.png" alt="HenWen">
       <strong>HenWen</strong> <span>KIOSK</span>
     </div>
+    <img class="header-club-logo" id="club-logo-img" alt="" style="display:none">
     <div class="header-actions">
       <audio id="node-audio" preload="none">
         <source type="audio/webm; codecs=opus">
@@ -897,7 +1032,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       <button class="btn-icon" id="dash-edit-btn" onclick="toggleDashEditMode()" title="Rearrange, resize, or hide the panels below"><svg class="icon"><use href="#icon-layout-dashboard"></use></svg></button>
       <button class="btn-icon" onclick="toggleFS()" title="Fullscreen"><svg class="icon"><use href="#icon-maximize"></use></svg></button>
       <a class="btn-icon" href="/accessible" title="Accessible View — larger text and screen-reader support">Accessible</a>
-      <a class="btn-icon" href="/henwen-manager" target="_blank" rel="noopener" title="Manager"><svg class="icon"><use href="#icon-book-open"></use></svg></a>
+      <a class="btn-icon" id="manager-link-btn" href="/henwen-manager" target="_blank" rel="noopener" title="Manager"><svg class="icon"><use href="#icon-book-open"></use></svg></a>
     </div>
   </header>
 
@@ -936,6 +1071,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <div class="dash-divider" data-divider-idx="2" onpointerdown="dashDividerStart(event,2)" title="Drag to resize"></div>
     <div class="dash-divider" data-divider-idx="3" onpointerdown="dashDividerStart(event,3)" title="Drag to resize"></div>
     <div class="dash-divider" data-divider-idx="4" onpointerdown="dashDividerStart(event,4)" title="Drag to resize"></div>
+    <div class="dash-divider" data-divider-idx="5" onpointerdown="dashDividerStart(event,5)" title="Drag to resize"></div>
     <!-- Shows which pane a dragged card will dock into (edge = split, center = swap). -->
     <div id="dash-drop-indicator" class="dash-drop-indicator" style="display:none"></div>
 
@@ -990,6 +1126,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
           </span>
           <button class="btn-icon" id="listen-btn" onclick="toggleListen()" title="Stream live audio from this node — expect ~1 second delay"><svg class="icon"><use href="#icon-headphones"></use></svg> Listen</button>
           <button class="btn-icon" id="record-btn" onclick="toggleRecord()" style="display:none" title="Record this node's audio to a file"><svg class="icon" style="color:var(--red,#f85149)"><use href="#icon-circle"></use></svg> Record</button>
+          <button class="btn-icon" id="myrec-btn" onclick="openMyRecordingsModal()" style="display:none" title="View, rename, download, or delete your saved recordings"><svg class="icon"><use href="#icon-folder-open"></use></svg></button>
           <button class="dash-hide-btn" onclick="toggleDashHide('connected',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
         </span>
       </div>
@@ -1061,11 +1198,25 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
             <span id="map-iss-status" style="font-size:0.68rem;color:var(--text2);white-space:nowrap"></span>
           </span>
           <select class="map-ctl-sel" id="map-tile-sel" onchange="changeTiles(this.value)">
-            <option value="dark">OSM Dark</option>
-            <option value="carto-dk">Dark (CartoDB)</option>
-            <option value="carto-lt">Light</option>
-            <option value="topo">Topography</option>
-            <option value="satellite">Satellite</option>
+            <optgroup label="Dark">
+              <option value="dark">OSM Dark</option>
+              <option value="carto-dk">Dark (CartoDB)</option>
+              <option value="esri-dark-gray">Dark Gray (Esri)</option>
+            </optgroup>
+            <optgroup label="Light">
+              <option value="carto-lt">Light</option>
+              <option value="carto-voyager">Voyager (CartoDB)</option>
+              <option value="esri-light-gray">Light Gray (Esri)</option>
+              <option value="esri-street">Street (Esri)</option>
+              <option value="osm-hot">Humanitarian (OSM)</option>
+              <option value="cyclosm">CyclOSM</option>
+            </optgroup>
+            <optgroup label="Terrain &amp; Satellite">
+              <option value="topo">Topography</option>
+              <option value="esri-topo">Topography (Esri)</option>
+              <option value="esri-natgeo">National Geographic</option>
+              <option value="satellite">Satellite</option>
+            </optgroup>
           </select>
         </div>
         <button class="dash-hide-btn" onclick="toggleDashHide('map',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
@@ -1112,6 +1263,26 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       <div class="fav-list" id="fav-list">
         <div class="empty-msg">Loading&hellip;</div>
       </div>
+    </div>
+
+    <!-- Chat: logged-in users only. Container always present (dash grid math
+         assumes every DASH_CARD_IDS entry is a real leaf) — anonymous
+         viewers see #chat-login-note instead of the log/composer, and no
+         message data is ever fetched until login is confirmed. -->
+    <div class="chat-card dash-card" data-dash-id="chat"
+         ondragover="dashDragOver(event)" ondragleave="dashDragLeave(event)" ondrop="dashDrop(event,'chat')">
+      <div class="card-header">
+        <span class="dash-header-grip" draggable="true" title="Drag to move"
+              ondragstart="dashDragStart(event,'chat')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
+        <span class="card-title">Chat</span>
+        <button class="dash-hide-btn" onclick="toggleDashHide('chat',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
+      </div>
+      <div class="chat-login-note" id="chat-login-note">Log in to join the chat.</div>
+      <div class="chat-list" id="chat-list" role="log" aria-live="polite" aria-relevant="additions" style="display:none"></div>
+      <form class="chat-composer" id="chat-composer" style="display:none" onsubmit="sendChatMessage(event)">
+        <input type="text" id="chat-input" maxlength="500" placeholder="Message&hellip;" autocomplete="off">
+        <button type="submit" class="sb-btn connect">Send</button>
+      </form>
     </div>
 
   </div>
@@ -1225,6 +1396,21 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     </div>
   </div>
 
+  <!-- My Recordings: self-service rename/download/delete for accounts that
+       can't reach Manager's admin+ gated Recordings page (see recording.py /
+       api_recordings_* in app.py). -->
+  <div id="myrec-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;align-items:center;justify-content:center">
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:22px 26px;width:560px;max-width:92vw;max-height:86vh;overflow-y:auto">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+        <div style="font-size:0.95rem;font-weight:700"><svg class="icon"><use href="#icon-folder-open"></use></svg> My Recordings</div>
+        <button onclick="closeMyRecordingsModal()" style="background:none;border:none;color:var(--text2);font-size:1.1rem;cursor:pointer;line-height:1;padding:2px 6px"><svg class="icon"><use href="#icon-x"></use></svg></button>
+      </div>
+      <div id="myrec-list" style="display:flex;flex-direction:column;gap:6px">
+        <div class="empty-msg" style="font-size:0.8rem">Loading&hellip;</div>
+      </div>
+    </div>
+  </div>
+
 
 </div>
 
@@ -1331,8 +1517,10 @@ function _handleSessionTimeout() {
   window._sessionTimeoutShown = true;
   /* Reset kiosk state */
   window._kioskRole = '';
+  window._kioskUsername = '';
   updateKioskUserBar(null, null);
   renderFavorites();
+  _chatUpdateVisibility();
   sbToast('Session expired — please log in again', false);
   /* Re-fetch a fresh CSRF token for the new (empty) session */
   fetch('/api/csrf-token').then(function(r) { return r.json(); })
@@ -1357,7 +1545,11 @@ var _clockTZ     = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 // takes effect when execution actually reaches that line.
 var _nets = [];
 
-function nowStr() {
+/* Shared by the header clock (nowStr(), always "now") and the chat panel
+   (an arbitrary message timestamp) so both honor the same admin-configured
+   Kiosk Settings clock format/timezone instead of two independent notions
+   of "local time". */
+function formatClockTime(date) {
   try {
     var parts = new Intl.DateTimeFormat('en-US', {
       timeZone: _clockTZ,
@@ -1365,7 +1557,7 @@ function nowStr() {
       minute:   '2-digit',
       second:   '2-digit',
       hour12:   _clockFormat === '12',
-    }).formatToParts(new Date());
+    }).formatToParts(date);
     var h = '', m = '', s = '', ap = '';
     for (var i = 0; i < parts.length; i++) {
       if (parts[i].type === 'hour')      h  = parts[i].value;
@@ -1375,10 +1567,10 @@ function nowStr() {
     }
     return h + ':' + m + ':' + s + (ap ? ' ' + ap : '');
   } catch(e) {
-    var n = new Date();
-    return String(n.getHours()).padStart(2,'0')+':'+String(n.getMinutes()).padStart(2,'0')+':'+String(n.getSeconds()).padStart(2,'0');
+    return String(date.getHours()).padStart(2,'0')+':'+String(date.getMinutes()).padStart(2,'0')+':'+String(date.getSeconds()).padStart(2,'0');
   }
 }
+function nowStr() { return formatClockTime(new Date()); }
 
 /* ── Clock ── */
 function tickClock() {
@@ -1389,11 +1581,16 @@ function tickClock() {
 }
 setInterval(tickClock, 1000); tickClock();
 
-/* Load clock format + timezone from kiosk settings */
+/* Load clock format + timezone + club logo from kiosk settings */
 fetch('/api/kiosk/settings').then(function(r){ return r.ok ? r.json() : null; }).then(function(d){
   if (!d) return;
   if (d.clock_format) _clockFormat = d.clock_format;
   if (d.timezone)     _clockTZ     = d.timezone;
+  if (d.logo_url) {
+    var logoImg = document.getElementById('club-logo-img');
+    logoImg.src = d.logo_url;
+    logoImg.style.display = '';
+  }
 }).catch(function(){});
 
 /* ── Fullscreen ── */
@@ -1444,11 +1641,19 @@ var _mapDirty           = false;  /* data changed while a popup was open */
 
 /* Tile layer definitions: darkFilter=true means keep OSM invert CSS */
 var _tileDefs = {
-  'dark':      { url:'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',           maxZoom:18, darkFilter:true  },
-  'carto-dk':  { url:'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',maxZoom:19, darkFilter:false },
-  'carto-lt':  { url:'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',maxZoom:19,darkFilter:false },
-  'topo':      { url:'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',              maxZoom:17, darkFilter:false },
-  'satellite': { url:'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', maxZoom:18, darkFilter:false },
+  'dark':            { url:'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',                    maxZoom:18, darkFilter:true  },
+  'carto-dk':        { url:'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',          maxZoom:19, darkFilter:false },
+  'esri-dark-gray':  { url:'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', maxZoom:16, darkFilter:false },
+  'carto-lt':        { url:'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',         maxZoom:19, darkFilter:false },
+  'carto-voyager':   { url:'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', maxZoom:20, darkFilter:false },
+  'esri-light-gray': { url:'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', maxZoom:16, darkFilter:false },
+  'esri-street':     { url:'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', maxZoom:19, darkFilter:false },
+  'osm-hot':         { url:'https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png',                  maxZoom:20, darkFilter:false },
+  'cyclosm':         { url:'https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png',      maxZoom:20, darkFilter:false },
+  'topo':            { url:'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',                       maxZoom:17, darkFilter:false },
+  'esri-topo':       { url:'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}', maxZoom:19, darkFilter:false },
+  'esri-natgeo':     { url:'https://server.arcgisonline.com/ArcGIS/rest/services/NatGeo_World_Map/MapServer/tile/{z}/{y}/{x}', maxZoom:16, darkFilter:false },
+  'satellite':       { url:'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', maxZoom:18, darkFilter:false },
 };
 
 function changeTiles(key) {
@@ -1502,17 +1707,49 @@ function radarRefreshTick() {
   if (_radarLayer && _map.hasLayer(_radarLayer)) _radarLayer.setUrl(radarUrlWithBust());
 }
 
+/* Remembers where the user left the map (center + zoom) across page loads —
+   without this, every reload re-ran the one-time auto-fit-to-bounds below,
+   snapping back to a low zoom (capped at 7) and shrinking every marker,
+   including APRS's zoom-banded dots, even if the user had zoomed in past
+   that. Persisted on 'moveend' (fires after any pan/zoom/flyTo settles),
+   not continuously, so this is one small write per interaction. */
+var MAP_VIEW_KEY = 'henwen-map-view';
+
+function _loadSavedMapView() {
+  try {
+    var v = JSON.parse(localStorage.getItem(MAP_VIEW_KEY) || 'null');
+    if (v && typeof v.lat === 'number' && typeof v.lng === 'number' && typeof v.zoom === 'number') return v;
+  } catch (e) {}
+  return null;
+}
+
+function _saveMapView() {
+  try {
+    var c = _map.getCenter();
+    localStorage.setItem(MAP_VIEW_KEY, JSON.stringify({lat: c.lat, lng: c.lng, zoom: _map.getZoom()}));
+  } catch (e) {}
+}
+
 function initMap() {
   if (_map) return;
+  var savedView = _loadSavedMapView();
   _map = L.map('map', {
     zoomControl: true, attributionControl: false,
-    center: [20, 0], zoom: 2, minZoom: 1,
+    center: savedView ? [savedView.lat, savedView.lng] : [20, 0],
+    zoom:   savedView ? savedView.zoom : 2,
+    minZoom: 1,
     /* Clamp panning to the range covered by the 3 world copies pins are
        drawn at (MAP_WORLD_OFFSETS, -360° to +360°), plus a little
        slack past the edge copy. */
     maxBounds: [[-90, -400], [90, 400]],
     maxBoundsViscosity: 1.0,
   });
+  /* A saved view means the user (or a prior auto-fit) already positioned
+     the map — skip the one-time auto-fit below so it doesn't override
+     that on every load. A first-ever visit has no saved view, so the
+     auto-fit still runs once and its result gets captured by the
+     'moveend' listener below, making it "sticky" from then on. */
+  if (savedView) _mapFitted = true;
 
   /* Load saved tile pref */
   var saved = localStorage.getItem('henwen-maptiles') || localStorage.getItem('asl3ez-maptiles') || 'dark';
@@ -1555,6 +1792,7 @@ function initMap() {
   if (issOn) issEnable();
 
   _map.on('zoomend', function() { updateMap(); });
+  _map.on('moveend', _saveMapView);
 
   /* While a pin popup is open, updateMap() defers instead of rendering —
      re-rendering removes every marker, which would close the popup a second
@@ -2888,12 +3126,23 @@ function recordKeyedHistory(allLinked) {
   });
 }
 
+/* Bucket boundaries are snapped to fixed multiples of KEYED_HISTORY_BUCKET_MS
+   (i.e. anchored to the wall clock) rather than counted back from the exact
+   `now` this particular render happened to run at. Poll cadence (2s) doesn't
+   evenly divide bucket width (5s), so an unanchored grid drifts by 2s
+   (mod 5s) between renders — a sample sitting near a boundary could land in
+   bucket i on one render and bucket i-1 on the next purely because the grid
+   itself moved, with no underlying activity change, producing a bar that
+   flickers between empty/filled or shifts which neighbor it fills into.
+   Anchoring means a given wall-clock second always belongs to the same
+   bucket on every render, so a bar only ever fills in once, permanently, the
+   first time a sample lands in its window — never later un-fills or moves. */
 function renderKeyedTimeline(localNode, node) {
   var buf = _keyedHistory[_keyedHistoryKey(localNode, node)] || [];
-  var now = Date.now();
+  var alignedNow = Math.ceil(Date.now() / KEYED_HISTORY_BUCKET_MS) * KEYED_HISTORY_BUCKET_MS;
   var bars = '';
   for (var i = KEYED_HISTORY_BUCKETS - 1; i >= 0; i--) {
-    var bucketEnd = now - i * KEYED_HISTORY_BUCKET_MS;
+    var bucketEnd = alignedNow - i * KEYED_HISTORY_BUCKET_MS;
     var bucketStart = bucketEnd - KEYED_HISTORY_BUCKET_MS;
     var seen = false, on = false;
     for (var j = 0; j < buf.length; j++) {
@@ -2906,6 +3155,76 @@ function renderKeyedTimeline(localNode, node) {
     bars += '<span class="nr-tl-bar' + (on ? ' on' : (seen ? '' : ' empty')) + '"></span>';
   }
   return '<div class="nr-timeline" title="Keyed activity, last 5 minutes (~5s per bar)">' + bars + '</div>';
+}
+
+/* ── Dynamic favicon ──
+   Badges the browser-tab icon with the same gray/green/red the Connected
+   Nodes dots use (.nr-dot / .nr-dot.connected / .nr-dot.keyed), so a kiosk
+   tab sitting in the background — another tab focused, or the browser
+   minimized — still shows at a glance whether anything's transmitting,
+   without needing the tab itself visible. Badge, not a full icon swap: a
+   small colored circle drawn in the corner of the real HenWen logo onto an
+   offscreen canvas, then re-encoded as a data: URL and swapped onto the
+   <link> — one-time canvas setup, and the colors are read from the active
+   theme's own --green/--danger custom properties (getComputedStyle) rather
+   than hardcoded, so it stays correct across every theme skin without
+   needing to know about them individually.
+   State priority mirrors the dot: any keyed connection anywhere wins (red)
+   over merely-connected (green) over nothing linked (gray) — a single
+   glanceable aggregate across every hosted node's connections, not one dot
+   per connection like the panel itself has room for. Redrawn only when the
+   aggregate state actually changes (module-level _faviconState), not on
+   every 2s poll — trivial CPU for one small canvas either way, but no
+   reason to re-encode and reassign the <link> every tick when nothing
+   changed. */
+var _faviconState = null;
+var _faviconLogo = null;
+var _faviconCanvas = null;
+
+function _faviconDotColor(state) {
+  var cs = getComputedStyle(document.documentElement);
+  if (state === 'keyed')     return cs.getPropertyValue('--danger').trim() || '#e04444';
+  if (state === 'connected') return cs.getPropertyValue('--green').trim()  || '#3aad4e';
+  return '#666';   /* nothing linked — same neutral gray family as the base .nr-dot */
+}
+
+function updateFaviconState(allLinked) {
+  var state = 'idle';
+  for (var i = 0; i < allLinked.length; i++) {
+    var c = allLinked[i];
+    var isConn = (c.connect_state || 'ESTABLISHED') === 'ESTABLISHED';
+    if (isConn && c.keyed) { state = 'keyed'; break; }   /* highest priority — stop scanning */
+    if (isConn) state = 'connected';
+  }
+  if (state === _faviconState) return;
+  _faviconState = state;
+  _drawFavicon(state);
+}
+
+function _drawFavicon(state) {
+  if (!_faviconLogo) {
+    /* First call: kick off the (one-time) logo load and bail — _drawFavicon
+       re-runs itself from the image's onload so the badge that triggered
+       this call still gets drawn once it's available, instead of silently
+       drawing nothing before the image is ready. */
+    var img = new Image();
+    img.onload = function() { _faviconLogo = img; _drawFavicon(_faviconState); };
+    img.src = '/static/logo-512.png';
+    return;
+  }
+  if (!_faviconCanvas) { _faviconCanvas = document.createElement('canvas'); _faviconCanvas.width = 64; _faviconCanvas.height = 64; }
+  var ctx = _faviconCanvas.getContext('2d');
+  ctx.clearRect(0, 0, 64, 64);
+  ctx.drawImage(_faviconLogo, 0, 0, 64, 64);
+  /* Badge circle, bottom-right — a dark ring first so the dot itself stays
+     legible over the logo's own colors at favicon size, same reason
+     .nr-dot/.fav-conn-dot use a box-shadow glow rather than sitting bare. */
+  ctx.beginPath(); ctx.arc(48, 48, 15, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fill();
+  ctx.beginPath(); ctx.arc(48, 48, 11, 0, Math.PI * 2);
+  ctx.fillStyle = _faviconDotColor(state); ctx.fill();
+  var link = document.getElementById('dyn-favicon');
+  if (link) { link.type = 'image/png'; link.href = _faviconCanvas.toDataURL('image/png'); }
 }
 
 /* ── Board data ──
@@ -3018,6 +3337,7 @@ async function refreshBoard() {
       }
     }
     recordKeyedHistory(allLinked);
+    updateFaviconState(allLinked);
     if (!allLinked.length) {
       nl.innerHTML = '<div class="empty-msg">No nodes linked</div>';
     } else {
@@ -3063,7 +3383,7 @@ async function refreshBoard() {
           idleBadge = '<span class="idle-badge">Permanent</span>';
         }
         var badges = modeBadge + idleBadge;
-        var dotClass = !isConn ? ' connecting' : (c.keyed ? ' keyed' : '');
+        var dotClass = !isConn ? ' connecting' : (c.keyed ? ' keyed' : ' connected');
         var isAdminRole = window._kioskRole === 'admin' || window._kioskRole === 'superuser' || window._kioskRole === 'owner';
         var dcBtn = (c.connector_managed && !isAdminRole)
           ? '<button class="sb-btn disconnect" data-label="X" disabled ' +
@@ -3362,6 +3682,130 @@ async function refreshActivity() {
   } catch(e) {}
 }
 
+/* ── Chat panel (logged-in users only) ──
+   _chatSinceId is a cursor, not a page offset: the first poll after login
+   fetches the most recent window (since_id omitted), every poll after that
+   only asks for rows newer than the last one rendered. Card container is
+   always in the DOM (see the HTML comment above .chat-card); only the
+   composer/log-vs-placeholder visibility and whether polling fetches
+   anything at all depend on window._kioskRole. */
+var _chatSinceId = 0;
+var _chatPollTimer = null;
+
+function _chatUpdateVisibility() {
+  var note = document.getElementById('chat-login-note');
+  var list = document.getElementById('chat-list');
+  var form = document.getElementById('chat-composer');
+  if (!note || !list || !form) return;
+  if (window._kioskRole) {
+    note.style.display = 'none';
+    list.style.display = '';
+    form.style.display = '';
+    if (!_chatPollTimer) {
+      _chatSinceId = 0;
+      refreshChat();
+      _chatPollTimer = setInterval(refreshChat, 5000);
+    }
+  } else {
+    note.style.display = '';
+    list.style.display = 'none';
+    form.style.display = 'none';
+    if (_chatPollTimer) { clearInterval(_chatPollTimer); _chatPollTimer = null; }
+    list.textContent = '';
+    _chatSinceId = 0;
+  }
+}
+
+async function refreshChat() {
+  if (!window._kioskRole) return;
+  try {
+    var url = '/api/chat/messages' + (_chatSinceId ? ('?since_id=' + _chatSinceId) : '');
+    var r = await apiFetch(url, {cache: 'no-store'});
+    if (!r.ok) return;
+    var data = await r.json();
+    var msgs = data.messages || [];
+    if (!msgs.length) return;
+    appendChatMessages(msgs);
+    _chatSinceId = msgs[msgs.length - 1].id;
+  } catch (e) {}
+}
+
+function appendChatMessages(msgs) {
+  var list = document.getElementById('chat-list');
+  if (!list) return;
+  /* Only auto-scroll if the viewer was already at (or near) the bottom —
+     otherwise someone scrolled up to read history shouldn't get yanked
+     back down by an unrelated new message. */
+  var atBottom = (list.scrollHeight - list.scrollTop - list.clientHeight) < 40;
+  msgs.forEach(function(m) {
+    /* Idempotent by id: sendChatMessage()'s optimistic self-append and the
+       5s refreshChat() poll can race (a poll issued with a stale since_id
+       can still see the just-sent row server-side and return it again) —
+       skip re-rendering a message id already in the DOM rather than rely
+       on caller-side bookkeeping to prevent it. */
+    if (list.querySelector('[data-msg-id="' + m.id + '"]')) return;
+    var row = document.createElement('div');
+    row.className = 'chat-row';
+    row.setAttribute('data-msg-id', m.id);
+    /* [HH:MM:SS AM/PM] Username: message — a fixed absolute time rather
+       than relTime()'s "2m ago", which was only ever computed once at
+       render time and never updated afterward, so it silently went stale
+       (a message would say "just now" forever once rendered). An absolute
+       clock reading has no such staleness problem. Uses the same
+       formatClockTime()/_clockTZ/_clockFormat the header clock uses, so
+       chat times track whatever format/timezone the admin has configured
+       for this board rather than a second, independent notion of "local". */
+    var ts = document.createElement('span');
+    ts.className = 'chat-ts';
+    ts.textContent = '[' + formatClockTime(new Date(m.ts * 1000)) + ']';
+    var user = document.createElement('span');
+    user.className = 'chat-user';
+    user.textContent = m.username + ':';            /* textContent only — message text is user-controlled */
+    var body = document.createElement('span');
+    body.className = 'chat-body';
+    body.textContent = m.message;
+    row.appendChild(ts);
+    row.appendChild(document.createTextNode(' '));
+    row.appendChild(user);
+    row.appendChild(document.createTextNode(' '));
+    row.appendChild(body);
+    list.appendChild(row);
+  });
+  if (atBottom) list.scrollTop = list.scrollHeight;
+}
+
+async function sendChatMessage(ev) {
+  ev.preventDefault();
+  var input = document.getElementById('chat-input');
+  if (!input) return;
+  var message = input.value.trim();
+  if (!message) return;
+  input.disabled = true;
+  try {
+    var r = await apiFetch('/api/chat/messages', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message: message})
+    });
+    if (r.ok) {
+      input.value = '';
+      var d = await r.json();
+      if (d.message) {
+        appendChatMessages([d.message]);   /* de-dupes by id itself now */
+        _chatSinceId = Math.max(_chatSinceId, d.message.id);
+      }
+    } else {
+      var err = await r.json().catch(function(){ return {}; });
+      sbToast(err.error || 'Message failed to send', false);
+    }
+  } catch (e) {
+    sbToast('Message failed to send', false);
+  } finally {
+    input.disabled = false;
+    input.focus();
+  }
+}
+
 /* ── Status-board connect / disconnect ── */
 var _sbToastTimer = null;
 function sbToast(msg, ok) {
@@ -3617,6 +4061,7 @@ async function kioskLogin() {
   }
   if (r.ok && d.ok) {
     window._kioskRole = d.role;
+    window._kioskUsername = d.username;
     window._kioskRestrictDisconnect = !!d.restrict_disconnect;
     /* session.clear() on the server invalidated the CSRF token from the meta tag;
        refresh _csrfToken so subsequent apiFetch calls don't get 400s. */
@@ -3627,6 +4072,9 @@ async function kioskLogin() {
     if (pl) pl.style.display = (d.role === 'admin' || d.role === 'superuser' || d.role === 'owner') ? '' : 'none';
     _txUpdateBtn();
     _searchUpdateBtn();
+    _recordUpdateBtn();
+    _chatUpdateVisibility();
+    _managerUpdateBtn();
     updateActiveUsersToggle();
     loadFavorites();
     if (_pendingAction) {
@@ -3649,13 +4097,29 @@ async function kioskLogout() {
     if (td.csrf_token) _csrfToken = td.csrf_token;
   } catch(e) { /* non-fatal — a page reload would also fix it */ }
   window._kioskRole = '';
+  window._kioskUsername = '';
   updateKioskUserBar(null, null);
   if (_tx.armed) disarmTx();
   _txUpdateBtn();
   _searchUpdateBtn();
+  _recordUpdateBtn();
+  closeMyRecordingsModal();
+  _chatUpdateVisibility();
+  _managerUpdateBtn();
   updateActiveUsersToggle();
   loadFavorites();
   sbToast('Logged out', true);
+}
+
+/* /henwen-manager itself redirects plain 'user' role accounts straight back
+   to the status board (see check_auth()'s admin+ gate) — hide the link for
+   them rather than let it round-trip to a page they can't reach. Logged-out
+   visitors and admin+ still see it (logged-out click bounces to /login, same
+   as before this existed). */
+function _managerUpdateBtn() {
+  var btn = document.getElementById('manager-link-btn');
+  if (!btn) return;
+  btn.style.display = (window._kioskRole === 'user') ? 'none' : '';
 }
 
 function updateKioskUserBar(username, role) {
@@ -3679,10 +4143,12 @@ async function checkKioskSession() {
   var d = await r.json();
   if (d.logged_in) {
     window._kioskRole = d.role;
+    window._kioskUsername = d.username;
     window._kioskRestrictDisconnect = !!d.restrict_disconnect;
     updateKioskUserBar(d.username, d.role);
   } else {
     window._kioskRole = '';
+    window._kioskUsername = '';
     window._kioskRestrictDisconnect = false;
     updateKioskUserBar(null, null);
   }
@@ -3696,6 +4162,8 @@ async function checkKioskSession() {
   _txUpdateBtn();
   _searchUpdateBtn();
   _recordUpdateBtn();
+  _chatUpdateVisibility();
+  _managerUpdateBtn();
 
   updateActiveUsersToggle();
 }
@@ -4149,14 +4617,24 @@ var _recordElapsedTimer = null;
 var _RECORD_ICON = '<svg class="icon" style="color:var(--red,#f85149)"><use href="#icon-circle"></use></svg>';
 
 async function _recordUpdateBtn() {
-  var btn = document.getElementById('record-btn');
+  var btn   = document.getElementById('record-btn');
+  var mrBtn = document.getElementById('myrec-btn');
   if (!btn) return;
-  if (!window._kioskRole) { btn.style.display = 'none'; return; }
+  if (!window._kioskRole) {
+    btn.style.display = 'none';
+    if (mrBtn) mrBtn.style.display = 'none';
+    return;
+  }
   try {
     var r = await apiFetch('/api/recording/permission');
     var d = await r.json();
-    btn.style.display = (r.ok && d.can_record) ? '' : 'none';
-  } catch (e) { btn.style.display = 'none'; }
+    var show = (r.ok && d.can_record) ? '' : 'none';
+    btn.style.display = show;
+    if (mrBtn) mrBtn.style.display = show;
+  } catch (e) {
+    btn.style.display = 'none';
+    if (mrBtn) mrBtn.style.display = 'none';
+  }
 }
 
 function _recordSetBtn(html, color, disabled) {
@@ -4283,11 +4761,123 @@ function _stopRecord(auto) {
       } else if (attempts < 30) {
         setTimeout(poll, 500);
       } else {
-        sbToast('Recording saved, but took too long to confirm — check it under Recordings in Manager', false);
+        sbToast('Recording saved, but took too long to confirm — check My Recordings', false);
       }
     }).catch(function() { if (attempts < 30) setTimeout(poll, 500); });
   }
   poll();
+}
+
+/* My Recordings: self-service popup so an account that can't reach
+   Manager's admin+ gated Recordings page (a plain 'user' recordist) can
+   still get back to a file it already saved — e.g. if the automatic
+   download in _stopRecord() above was blocked or missed. Shares the same
+   can_record-gated visibility as the Record button (see _recordUpdateBtn).
+   Lists only the caller's own recordings even for admin+, who already have
+   Manager's page for the full shared archive. */
+function openMyRecordingsModal() {
+  if (!window._kioskRole) { openKioskLogin(openMyRecordingsModal, []); return; }
+  document.getElementById('myrec-modal-overlay').style.display = 'flex';
+  loadMyRecordings();
+}
+
+function closeMyRecordingsModal() {
+  var el = document.getElementById('myrec-modal-overlay');
+  if (el) el.style.display = 'none';
+}
+
+function _myRecFormatDuration(sec) {
+  if (!sec) return '—';
+  sec = Math.round(sec);
+  var mm = Math.floor(sec / 60), ss = sec % 60;
+  return mm + ':' + (ss < 10 ? '0' : '') + ss;
+}
+
+function _myRecFormatBytes(n) {
+  if (!n) return '0 B';
+  var units = ['B', 'KB', 'MB', 'GB'];
+  var i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return n.toFixed(i === 0 ? 0 : 1) + ' ' + units[i];
+}
+
+async function loadMyRecordings() {
+  var box = document.getElementById('myrec-list');
+  box.innerHTML = '<div class="empty-msg" style="font-size:0.8rem">Loading&hellip;</div>';
+  var r;
+  try {
+    r = await apiFetch('/api/recordings', {cache: 'no-store'});
+  } catch (e) {
+    box.innerHTML = '<div class="empty-msg" style="font-size:0.8rem">Error loading recordings</div>';
+    return;
+  }
+  if (r.status === 401) { closeMyRecordingsModal(); openKioskLogin(openMyRecordingsModal, []); return; }
+  if (!r.ok) { box.innerHTML = '<div class="empty-msg" style="font-size:0.8rem">Error loading recordings</div>'; return; }
+  var d = await r.json();
+  /* /api/recordings returns every recording for admin+ — filter to just
+     the caller's own, matching what a plain 'user' role already gets
+     server-side, so this popup always means "my recordings" regardless
+     of role. */
+  var rows = (d.recordings || []).filter(function(x) { return x.username === window._kioskUsername; });
+  renderMyRecordings(rows);
+}
+
+function renderMyRecordings(rows) {
+  var box = document.getElementById('myrec-list');
+  if (!rows.length) {
+    box.innerHTML = '<div class="empty-msg" style="font-size:0.8rem">No saved recordings yet.</div>';
+    return;
+  }
+  box.innerHTML = rows.map(function(rec) {
+    var statusColor = rec.status === 'finished' ? 'var(--green)' : rec.status === 'recording' ? 'var(--accent)' : 'var(--red)';
+    var title = rec.label ? esc(rec.label) : ('Node ' + esc(rec.node));
+    var actions = '';
+    if (rec.status === 'finished') {
+      actions += '<button class="sb-btn neutral" onclick="_myRecRename(' + rec.id + ')" title="Rename">Rename</button>';
+      actions += '<a class="sb-btn monitor" style="text-decoration:none" href="/api/recording/' + rec.id +
+        '/download" title="Download"><svg class="icon"><use href="#icon-download"></use></svg></a>';
+    }
+    if (rec.status !== 'recording') {
+      actions += '<button class="sb-btn disconnect" onclick="_myRecDelete(' + rec.id + ')" title="Delete"><svg class="icon"><use href="#icon-x"></use></svg></button>';
+    }
+    return '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:6px">' +
+      '<div style="min-width:0;overflow:hidden">' +
+        '<div style="font-size:0.85rem;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + title + '</div>' +
+        '<div style="font-size:0.76rem;color:var(--text2)">' +
+          esc(rec.started_at || '') + ' &middot; ' + _myRecFormatDuration(rec.duration_sec) +
+          ' &middot; ' + _myRecFormatBytes(rec.size_bytes) +
+          ' &middot; <span style="color:' + statusColor + '">' + esc(rec.status) +
+          (rec.status !== 'recording' && rec.stop_reason ? ' (' + esc(rec.stop_reason) + ')' : '') + '</span>' +
+        '</div>' +
+      '</div>' +
+      '<div style="flex-shrink:0;display:flex;gap:4px">' + actions + '</div>' +
+    '</div>';
+  }).join('');
+}
+
+async function _myRecRename(id) {
+  var name = prompt('Name for this recording:');
+  if (name === null) return;
+  var r = await apiFetch('/api/recordings/' + id + '/rename', {
+    method:  'POST',
+    headers: {'Content-Type': 'application/json'},
+    body:    JSON.stringify({label: name.trim()}),
+  });
+  if (r.ok) { loadMyRecordings(); }
+  else {
+    var d = await r.json().catch(function() { return {}; });
+    sbToast(d.error || 'Could not rename recording', false);
+  }
+}
+
+async function _myRecDelete(id) {
+  if (!confirm('Delete this recording? This cannot be undone.')) return;
+  var r = await apiFetch('/api/recordings/' + id, {method: 'DELETE'});
+  if (r.ok) { loadMyRecordings(); }
+  else {
+    var d = await r.json().catch(function() { return {}; });
+    sbToast(d.error || 'Could not delete recording', false);
+  }
 }
 
 /* Node search (AllStar + EchoLink): gated to any logged-in role, no
@@ -5144,7 +5734,7 @@ window.addEventListener('resize', function() {
 
 /* ── Dashboard grid: resizable/movable/collapsible cards ──
    .content-area is a 12-column x 24-row grid built from `fr` tracks (see the
-   CSS comment above .content-area) so the six cards below always fill it
+   CSS comment above .content-area) so the seven cards below always fill it
    exactly, no scrolling, matching the pre-existing "fits the viewport"
    kiosk behavior. Desktop only — dashSupported() gates every entry point,
    and the >860px breakpoint is exactly where the mobile media query swaps
@@ -5152,18 +5742,18 @@ window.addEventListener('resize', function() {
    no-ops). Layout persists to localStorage per browser/device, same as the
    existing map tile-style and Radar/APRS toggle prefs.
 
-   Design: the six cards live at the leaves of a binary split tree (think
-   tmux panes / a tiling window manager), not in six fixed slots. Each
+   Design: the seven cards live at the leaves of a binary split tree (think
+   tmux panes / a tiling window manager), not in seven fixed slots. Each
    internal node is {dir:'row'|'col', ratio, a, b} — 'row' stacks its two
    children vertically, 'col' places them side by side, `ratio` is how much
    of the space `a` gets. A tree with N leaves has at most N-1 internal
-   nodes actually rendered as dividers (regardless of shape) — up to 5 for
-   these 6 cards — which is why 5 <div class="dash-divider"> elements in
+   nodes actually rendered as dividers (regardless of shape) — up to 6 for
+   these 7 cards — which is why 6 <div class="dash-divider"> elements in
    the HTML are always enough no matter how the tree is arranged or how
    many cards are currently hidden (fewer rendered splits just means some
    divider elements go unused for that render — see dashPositionDividers()'s
    `if (!dv)` case). dashApply() re-walks the tree and reassigns each used
-   one's position/orientation/target node every render. (If a 7th card is
+   one's position/orientation/target node every render. (If another card is
    ever added, add one more .dash-divider element and bump DASH_STORE_KEY —
    dashLoadSaved() rejects a saved tree that doesn't contain every current
    id, so a stale tree just falls back to DASH_DEFAULT_TREE rather than
@@ -5197,14 +5787,18 @@ window.addEventListener('resize', function() {
 var DASH_COLS = 12, DASH_ROWS = 24;
 var DASH_GAP = 10;             /* must match .content-area's CSS `gap` */
 var DASH_MIN_CS = 2, DASH_MIN_RS = 3;
-var DASH_CARD_IDS = ['node', 'history', 'connected', 'map', 'activity', 'favorites'];
+var DASH_CARD_IDS = ['node', 'history', 'connected', 'map', 'activity', 'favorites', 'chat'];
 var DASH_CARD_TITLES = {node: 'Node', history: 'Recent Connections', connected: 'Connected Nodes',
-  map: 'Network Map', activity: 'Latest Activity', favorites: 'Favorites'};
-var DASH_STORE_KEY = 'henwen-dash-layout-v4';
+  map: 'Network Map', activity: 'Latest Activity', favorites: 'Favorites', chat: 'Chat'};
+var DASH_STORE_KEY = 'henwen-dash-layout-v5';
 
 /* Ratios reproduce the original fixed 4-column layout's proportions, with
    Recent Connections split off underneath Node — see dashWalk()'s doc
-   comment for how a {dir,ratio} node maps to grid lines. */
+   comment for how a {dir,ratio} node maps to grid lines. Chat is split off
+   underneath Favorites (2/3 favorites, 1/3 chat) — both are the "personal,
+   opt-in" panels, as opposed to the four core status panels above, so
+   grouping them keeps the core view's proportions from being squeezed by a
+   7th competitor. */
 var DASH_DEFAULT_TREE = {
   type: 'split', dir: 'col', ratio: 0.25,
   a: {type: 'split', dir: 'row', ratio: 2 / 3,
@@ -5219,7 +5813,10 @@ var DASH_DEFAULT_TREE = {
         b: {type: 'leaf', id: 'activity'}
       }
     },
-    b: {type: 'leaf', id: 'favorites'}
+    b: {type: 'split', dir: 'row', ratio: 16 / 24,
+      a: {type: 'leaf', id: 'favorites'},
+      b: {type: 'leaf', id: 'chat'}
+    }
   }
 };
 

@@ -111,6 +111,10 @@ TTS_VOICES_DIR  = os.environ.get("TTS_VOICES_DIR",   "/var/lib/asterisk/henwen_t
 # In-browser recordings (recording.py) — same "not under /opt/HenWen, which
 # is root:root and unwritable by the asterisk user" reasoning as TTS_VOICES_DIR.
 RECORDINGS_DIR  = os.environ.get("RECORDINGS_DIR",   "/var/lib/asterisk/henwen_recordings")
+# Owner-uploaded kiosk club logo — same "not under /opt/HenWen" reasoning as
+# TTS_VOICES_DIR/RECORDINGS_DIR; served back out via a dedicated route
+# (api_kiosk_logo_file) rather than Flask's static folder for that reason.
+KIOSK_LOGO_DIR  = os.environ.get("KIOSK_LOGO_DIR",   "/var/lib/asterisk/henwen_kiosk_logo")
 # Resolved via the running interpreter's own directory, not PATH lookup —
 # under systemd, venv/bin isn't on PATH the way it is in an interactive
 # shell, so a bare "piper" subprocess call would fail with FileNotFoundError.
@@ -120,6 +124,14 @@ _DEFAULT_SERVICE_FILE_PATH = f"/etc/systemd/system/{SERVICE_NAME}.service"
 SERVICE_FILE_PATH = os.environ.get("SERVICE_FILE_PATH", _DEFAULT_SERVICE_FILE_PATH)
 SECURE_COOKIES       = os.environ.get("SECURE_COOKIES", "false").lower() == "true"
 SESSION_IDLE_TIMEOUT = int(os.environ.get("SESSION_IDLE_TIMEOUT", "1800"))  # 30 minutes
+
+# Kiosk chat panel (logged-in users only). Local, fixed ceilings rather than
+# a settings-table/UI, same "simple, hardcoded" posture as the NWS/APRS
+# staleness ceilings — storage cost is small enough (worst case ~5000 rows *
+# ~600 bytes/row, a few MB) that a configurable cap isn't worth the surface.
+CHAT_MESSAGE_MAX_LEN = 500
+CHAT_RETENTION_HOURS = 24
+CHAT_LOG_MAX_ROWS    = 5000
 
 # SECRET_KEY values that ship with the app/installer — used to warn the user
 # in the dashboard that they're still on the default and should change it.
@@ -718,6 +730,33 @@ def get_db():
         stop_reason  TEXT    NOT NULL DEFAULT ''
     )""")
     conn.commit()
+    # User-editable display name (Status Board "My Recordings" self-service
+    # popup — see api_recordings_rename()). Empty by default; falsy in the
+    # UI falls back to showing node/timestamp instead.
+    try:
+        conn.execute("ALTER TABLE recordings ADD COLUMN label TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+    except Exception:
+        pass  # column already exists
+    # Kiosk chat panel — logged-in users only (see check_auth()'s
+    # _USER_OR_ABOVE). Soft-delete only: deleted_at/deleted_by_user_id let a
+    # moderated message disappear from the live panel (WHERE deleted_at IS
+    # NULL) while the owner-only Chat Log still shows it, and who removed it —
+    # an admin action shouldn't be able to destroy the owner's own audit
+    # trail. user_id+username both stored (not just user_id) so a message
+    # still displays sensibly if the account is later deleted, matching the
+    # recordings table's precedent just above.
+    conn.execute("""CREATE TABLE IF NOT EXISTS chat_messages (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id           INTEGER NOT NULL,
+        username          TEXT    NOT NULL,
+        role              TEXT    NOT NULL,
+        message           TEXT    NOT NULL,
+        created_at        TEXT    NOT NULL DEFAULT (datetime('now')),
+        deleted_at        TEXT,
+        deleted_by_user_id INTEGER
+    )""")
+    conn.commit()
     # Kiosk-editable scheduled-net reminders — shared across all visitors (not
     # per-user like favorites), since a net schedule is repeater-wide info.
     # A row is either 'weekly' (repeats every week on `weekday`, 0=Monday..
@@ -866,7 +905,7 @@ def check_auth():
                         'api_aprs_stations', 'api_iss_tle',
                         'api_login', 'api_session', 'api_csrf_token',
                         'api_favorites', 'api_favorites_status',
-                        'api_kiosk_settings_get',
+                        'api_kiosk_settings_get', 'api_kiosk_logo_file',
                         'api_nets_list'}
     # Any logged-in user (superuser / admin / user) — live audio requires a
     # session (previously public, letting anyone on the network listen and
@@ -878,7 +917,9 @@ def check_auth():
                       'api_nets_create', 'api_nets_update', 'api_nets_delete',
                       'api_echolink_search', 'api_asl_search',
                       'api_tx_config', 'api_recording_permission',
-                      'api_recording_start', 'api_recordings_list', 'api_recording_download'}
+                      'api_recording_start', 'api_recordings_list', 'api_recording_download',
+                      'api_recordings_rename', 'api_recordings_delete',
+                      'api_chat_messages_get', 'api_chat_messages_post'}
 
     endpoint  = request.endpoint
     is_public = endpoint in _PUBLIC
@@ -945,8 +986,17 @@ def check_auth():
     # once rather than at each of the ~30 individual gates scattered through
     # the route functions. Public endpoints (including login/logout) already
     # returned above and are never touched by this.
+    #
+    # Chat is exempt: lockout is about node/RF control (connect, disconnect,
+    # TX, favorites, etc.), and chat posting has nothing to do with that
+    # surface — silencing conversation just because a node is locked isn't
+    # the intent. GET routes (the live panel, the owner-only log) are
+    # already exempt above via the method check; DELETE needs no exemption
+    # since it's owner-only already, and `role != 'owner'` below already
+    # lets the owner's own requests through regardless.
+    _LOCKOUT_EXEMPT = {'api_chat_messages_post'}
     if logged_in and role != 'owner' and request.method not in ('GET', 'HEAD', 'OPTIONS') \
-            and is_any_node_locked():
+            and endpoint not in _LOCKOUT_EXEMPT and is_any_node_locked():
         return jsonify({"error": "Locked by the node owner", "locked": True}), 423
 
     if endpoint in _USER_OR_ABOVE:
@@ -4389,6 +4439,41 @@ def api_backup_delete(name):
 
 # ── Kiosk Settings API ────────────────────────────────────────────────────────
 
+ALLOWED_LOGO_EXTS  = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+LOGO_MIME_TYPES    = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                       ".gif": "image/gif", ".webp": "image/webp"}
+MAX_LOGO_SIZE_BYTES = 3 * 1024 * 1024  # 3MB — plenty for a club logo, cheap to serve back out
+
+
+def _ensure_kiosk_logo_dir():
+    """Mirrors _ensure_sounds_dir()'s pattern — os.makedirs can fail (e.g.
+    permission), which call sites need caught and turned into a JSON error
+    rather than propagating as an unhandled exception."""
+    try:
+        os.makedirs(KIOSK_LOGO_DIR, exist_ok=True)
+        return None
+    except OSError as e:
+        log("ERROR", f"[Kiosk] Could not create KIOSK_LOGO_DIR ({KIOSK_LOGO_DIR}): {e}")
+        return jsonify({"error": f"Server cannot access its kiosk-logo directory: {e}"}), 500
+
+
+def _kiosk_logo_url():
+    filename = get_setting('kiosk_logo_filename', '')
+    if not filename:
+        return None
+    version = get_setting('kiosk_logo_version', '0') or '0'
+    return f"/api/kiosk/logo/file?v={version}"
+
+
+def _clear_kiosk_logo_files():
+    for ext in ALLOWED_LOGO_EXTS:
+        path = os.path.join(KIOSK_LOGO_DIR, f"kiosk-logo{ext}")
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 @app.route("/api/kiosk/settings")
 def api_kiosk_settings_get():
     return jsonify({
@@ -4400,6 +4485,8 @@ def api_kiosk_settings_get():
         # amateur-radio identifier by regulation, not a secret (same posture
         # as the club/author callsigns already named in this project).
         "aprs_is_callsign":    get_setting('aprs_is_callsign', ''),
+        "aprs_max_stations":   int(get_setting('aprs_max_stations', '100') or 100),
+        "logo_url":            _kiosk_logo_url(),
     })
 
 
@@ -4443,7 +4530,73 @@ def api_kiosk_settings_put():
             return jsonify({"error": "Enter a valid callsign (letters/digits, optional -SSID), "
                                       "e.g. N8GMZ or N8GMZ-15"}), 400
         set_setting('aprs_is_callsign', callsign)
+    if "aprs_max_stations" in data:
+        try:
+            val = int(data["aprs_max_stations"])
+            if not (1 <= val <= 1000):
+                return jsonify({"error": "aprs_max_stations must be 1–1000"}), 400
+            set_setting('aprs_max_stations', str(val))
+        except (TypeError, ValueError):
+            return jsonify({"error": "aprs_max_stations must be an integer"}), 400
     return jsonify({"ok": True})
+
+
+@app.route("/api/kiosk/logo", methods=["POST"])
+def api_kiosk_logo_upload():
+    if "file" not in request.files:
+        return jsonify({"error": "No file"}), 400
+    f   = request.files["file"]
+    ext = os.path.splitext(f.filename)[1].lower()
+    if ext not in ALLOWED_LOGO_EXTS:
+        return jsonify({"error": f"Unsupported type: {ext}. Use PNG, JPG, GIF, or WEBP."}), 400
+
+    f.seek(0, os.SEEK_END)
+    size = f.tell()
+    f.seek(0)
+    if size == 0:
+        return jsonify({"error": "Empty file"}), 400
+    if size > MAX_LOGO_SIZE_BYTES:
+        return jsonify({"error": f"File too large (max {MAX_LOGO_SIZE_BYTES // (1024*1024)}MB)"}), 400
+
+    err = _ensure_kiosk_logo_dir()
+    if err:
+        return err
+    _clear_kiosk_logo_files()
+    filename = f"kiosk-logo{ext}"
+    f.save(os.path.join(KIOSK_LOGO_DIR, filename))
+
+    version = int(get_setting('kiosk_logo_version', '0') or 0) + 1
+    set_setting('kiosk_logo_filename', filename)
+    set_setting('kiosk_logo_version', str(version))
+    log("INFO", f"[Kiosk] Club logo uploaded ({filename}, {size} bytes)")
+    return jsonify({"ok": True, "logo_url": _kiosk_logo_url()})
+
+
+@app.route("/api/kiosk/logo", methods=["DELETE"])
+def api_kiosk_logo_delete():
+    _clear_kiosk_logo_files()
+    set_setting('kiosk_logo_filename', '')
+    log("INFO", "[Kiosk] Club logo removed")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/kiosk/logo/file")
+def api_kiosk_logo_file():
+    """Serves the uploaded club logo. Public like the rest of the kiosk
+    board's own assets — the Status Board itself needs no login, so an image
+    it renders can't require one either. filename is entirely server-chosen
+    (kiosk-logo<ext>, from the fixed ALLOWED_LOGO_EXTS set), never taken from
+    the request, so there's no path-traversal surface here."""
+    filename = get_setting('kiosk_logo_filename', '')
+    if not filename:
+        return jsonify({"error": "No logo set"}), 404
+    path = os.path.join(KIOSK_LOGO_DIR, filename)
+    if not os.path.exists(path):
+        return jsonify({"error": "Logo file missing on disk"}), 404
+    ext = os.path.splitext(filename)[1].lower()
+    resp = send_file(path, mimetype=LOGO_MIME_TYPES.get(ext, "application/octet-stream"))
+    resp.headers['Cache-Control'] = 'public, max-age=86400'
+    return resp
 
 
 # ── Connection History API ─────────────────────────────────────────────────────
@@ -5341,7 +5494,8 @@ def api_aprs_stations():
     """Public, unauthenticated — same accessibility as the rest of the Status
     Board's map data. Returns APRS-IS stations from the shared in-process
     cache (see _aprs_poll_loop) within `radius` miles (1-100, default 25) of
-    the node's own geocoded location."""
+    the node's own geocoded location, capped to the closest `aprs_max_stations`
+    (Kiosk Setting, default 100) after sorting by distance."""
     try:
         radius = float(request.args.get("radius", 25))
     except (TypeError, ValueError):
@@ -5371,6 +5525,8 @@ def api_aprs_stations():
                 "age_sec":      int(now - s["ts"]),
             })
     stations.sort(key=lambda s: s["distance_mi"])
+    max_stations = int(get_setting('aprs_max_stations', '100') or 100)
+    stations = stations[:max_stations]
     return jsonify({
         "stations": stations,
         "center":   {"lat": center_lat, "lon": center_lon},
@@ -6986,12 +7142,12 @@ def api_recordings_list():
     db = get_db()
     if role in ('admin', 'superuser', 'owner'):
         rows = db.execute(
-            "SELECT id, node, username, started_at, ended_at, duration_sec, size_bytes, status, stop_reason "
+            "SELECT id, node, username, label, started_at, ended_at, duration_sec, size_bytes, status, stop_reason "
             "FROM recordings ORDER BY started_at DESC LIMIT 200"
         ).fetchall()
     else:
         rows = db.execute(
-            "SELECT id, node, username, started_at, ended_at, duration_sec, size_bytes, status, stop_reason "
+            "SELECT id, node, username, label, started_at, ended_at, duration_sec, size_bytes, status, stop_reason "
             "FROM recordings WHERE username=? ORDER BY started_at DESC LIMIT 200",
             (username,)
         ).fetchall()
@@ -7015,17 +7171,40 @@ def api_recording_download(rid):
     return send_file(path, as_attachment=True, download_name=row['filename'])
 
 
+@app.route('/api/recordings/<int:rid>/rename', methods=['POST'])
+def api_recordings_rename(rid):
+    """Sets the display label shown in the Status Board's "My Recordings"
+    popup and Manager's Recordings table. Same ownership rule as download —
+    the recording's own user, or admin+ — since a plain 'user' recordist
+    can't reach Manager to do this any other way."""
+    role = session.get('role', '')
+    username = session.get('username', '')
+    db = get_db()
+    row = db.execute("SELECT username FROM recordings WHERE id=?", (rid,)).fetchone()
+    if not row:
+        return jsonify({'error': 'Recording not found'}), 404
+    if row['username'] != username and role not in ('admin', 'superuser', 'owner'):
+        return jsonify({'error': 'Not your recording'}), 403
+    label = str((request.json or {}).get('label', '')).strip()[:200]
+    db.execute("UPDATE recordings SET label=? WHERE id=?", (label, rid))
+    db.commit()
+    return jsonify({'ok': True, 'label': label})
+
+
 @app.route('/api/recordings/<int:rid>', methods=['DELETE'])
 def api_recordings_delete(rid):
-    """Admin/superuser/owner only (the default check_auth() gate already
-    enforces this — this route is deliberately not in _USER_OR_ABOVE).
-    A regular approved recordist can create recordings but not manage the
-    shared archive, matching the requirements' silence on self-service
-    deletion."""
+    """The recording's own user (self-service cleanup — a plain 'user'
+    recordist can't reach Manager's admin+ gated Recordings page to do this
+    any other way) or admin/superuser/owner, who may delete any recording
+    same as before."""
+    role = session.get('role', '')
+    username = session.get('username', '')
     db = get_db()
     row = db.execute("SELECT * FROM recordings WHERE id=?", (rid,)).fetchone()
     if not row:
         return jsonify({'error': 'Recording not found'}), 404
+    if row['username'] != username and role not in ('admin', 'superuser', 'owner'):
+        return jsonify({'error': 'Not your recording'}), 403
     if row['status'] == 'recording':
         return jsonify({'error': 'Cannot delete a recording still in progress'}), 400
     path = os.path.join(RECORDINGS_DIR, row['filename'])
@@ -7038,6 +7217,179 @@ def api_recordings_delete(rid):
     db.commit()
     log('INFO', f"[RECORDING] #{rid} deleted by {session.get('username', '')}")
     return jsonify({'ok': True})
+
+
+# ---------------------------------------------------------------------------
+# Kiosk chat (logged-in users only — see check_auth()'s _USER_OR_ABOVE for
+# the read/post routes; the log/delete routes below are deliberately left
+# out of that set so they fall through to check_auth()'s admin+ default-deny,
+# then are tightened further to owner-only by the inline role check, the
+# same pattern api_stream_relay_config_get() uses.)
+# ---------------------------------------------------------------------------
+def _chat_row_to_dict(row):
+    """Adds an epoch `ts` alongside the raw `created_at` string — the
+    frontend's relTime() everywhere else in status.html takes epoch seconds,
+    not a SQLite datetime string, so this keeps the chat panel on that same
+    convention instead of parsing a non-ISO string client-side.
+
+    created_at is produced by SQLite's datetime('now'), which is UTC. A bare
+    datetime.strptime(...).timestamp() (the recordings janitor's _epoch()
+    idiom) instead treats that naive datetime as the SERVER'S LOCAL time —
+    on a box not configured for UTC (this one is America/New_York) that
+    silently shifts every ts into the future by the local UTC offset, which
+    made every message read as "just now" (relTime()'s `d < 5` check isn't
+    guarded against negative `d`, and a future ts makes Date.now()/1000 - ts
+    negative). Explicitly tagging the parsed value as UTC before calling
+    .timestamp() fixes the conversion regardless of server timezone."""
+    d = dict(row)
+    try:
+        d['ts'] = datetime.strptime(d['created_at'], '%Y-%m-%d %H:%M:%S') \
+            .replace(tzinfo=timezone.utc).timestamp()
+    except Exception:
+        d['ts'] = time.time()
+    return d
+
+
+@app.route('/api/chat/messages')
+def api_chat_messages_get():
+    """Live panel feed. Cursor-based (since_id) so polling only ever pulls
+    new rows. Deliberately never returns soft-deleted rows or who-deleted
+    metadata — that's the owner-only /api/chat/log's job. Cache-Control:
+    no-store since this runs on shared/kiosk hardware; a cached response
+    surviving a logout on a shared browser would leak message text to
+    whoever uses it next."""
+    since_id = request.args.get('since_id', 0, type=int) or 0
+    db = get_db()
+    if since_id > 0:
+        rows = db.execute(
+            "SELECT id, username, role, message, created_at FROM chat_messages "
+            "WHERE id > ? AND deleted_at IS NULL ORDER BY id ASC LIMIT 200",
+            (since_id,)
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT id, username, role, message, created_at FROM chat_messages "
+            "WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 200"
+        ).fetchall()
+        rows = list(reversed(rows))
+    resp = jsonify({'messages': [_chat_row_to_dict(r) for r in rows]})
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+@app.route('/api/chat/messages', methods=['POST'])
+@limiter.limit("10 per minute")
+def api_chat_messages_post():
+    data = request.json or {}
+    message = str(data.get('message', '')).strip()
+    if not message:
+        return jsonify({'error': 'Message cannot be empty'}), 400
+    if len(message) > CHAT_MESSAGE_MAX_LEN:
+        return jsonify({'error': f'Message too long (max {CHAT_MESSAGE_MAX_LEN} characters)'}), 400
+    username = session.get('username', '')
+    role     = session.get('role', '')
+    db = get_db()
+    user_row = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
+    if not user_row:
+        return jsonify({'error': 'Unknown account'}), 403
+    cur = db.execute(
+        "INSERT INTO chat_messages (user_id, username, role, message) VALUES (?,?,?,?)",
+        (user_row['id'], username, role, message)
+    )
+    db.commit()
+    row = db.execute(
+        "SELECT id, username, role, message, created_at FROM chat_messages WHERE id=?",
+        (cur.lastrowid,)
+    ).fetchone()
+    return jsonify({'message': _chat_row_to_dict(row)}), 201
+
+
+@app.route('/api/chat/log')
+def api_chat_log_get():
+    """Full history including soft-deleted rows and who deleted them —
+    owner-only, deliberately more restricted than the live panel (any
+    logged-in role) or recordings (admin+ browsable). Not in _USER_OR_ABOVE;
+    the inline check below is the real gate, matching api_stream_relay_config_get()."""
+    if session.get('role') != 'owner':
+        return jsonify({'error': 'Only the owner can view the chat log'}), 403
+    rows = get_db().execute(
+        "SELECT id, username, role, message, created_at, deleted_at, deleted_by_user_id "
+        "FROM chat_messages ORDER BY id DESC LIMIT ?", (CHAT_LOG_MAX_ROWS,)
+    ).fetchall()
+    resp = jsonify({'messages': [_chat_row_to_dict(r) for r in rows]})
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+@app.route('/api/chat/messages/<int:mid>', methods=['DELETE'])
+def api_chat_messages_delete(mid):
+    """Owner-only, soft delete. Role checked before the DB lookup so a
+    non-owner probing message ids gets a uniform 403 regardless of whether
+    the id exists."""
+    if session.get('role') != 'owner':
+        return jsonify({'error': 'Only the owner can delete chat messages'}), 403
+    db = get_db()
+    row = db.execute("SELECT id FROM chat_messages WHERE id=?", (mid,)).fetchone()
+    if not row:
+        return jsonify({'error': 'Message not found'}), 404
+    deleter = db.execute("SELECT id FROM users WHERE username=?",
+                         (session.get('username', ''),)).fetchone()
+    db.execute(
+        "UPDATE chat_messages SET deleted_at=datetime('now'), deleted_by_user_id=? WHERE id=?",
+        (deleter['id'] if deleter else None, mid)
+    )
+    db.commit()
+    log('INFO', f"[CHAT] message #{mid} deleted by {session.get('username', '')}")
+    return jsonify({'ok': True})
+
+
+def _chat_janitor_sweep(db, now):
+    """One prune pass: age-based (CHAT_RETENTION_HOURS) plus a hard row cap
+    (CHAT_LOG_MAX_ROWS, oldest first) — mirrors _nws_prune_expired_locally()'s
+    shape (a standalone db/now-taking function the loop calls each cycle, so
+    it's directly testable against a real sqlite fixture without touching
+    threading). No per-user/global byte-cap logic like recordings needs —
+    chat rows are small and uniform, a plain row-count cap is enough.
+    Returns (aged_count, over_cap_count).
+
+    `now` must represent UTC (e.g. datetime.now(timezone.utc)) — created_at
+    is SQLite's datetime('now'), which is UTC, and this function does a
+    plain string comparison against it with no timezone conversion of its
+    own. The caller is responsible for that, same reasoning as
+    _chat_row_to_dict()'s UTC tagging."""
+    cutoff = (now - timedelta(hours=CHAT_RETENTION_HOURS)).strftime('%Y-%m-%d %H:%M:%S')
+    aged = db.execute("DELETE FROM chat_messages WHERE created_at < ?", (cutoff,))
+    total = db.execute("SELECT COUNT(*) AS c FROM chat_messages").fetchone()['c']
+    over_cap = 0
+    if total > CHAT_LOG_MAX_ROWS:
+        over_cap = total - CHAT_LOG_MAX_ROWS
+        db.execute(
+            "DELETE FROM chat_messages WHERE id IN "
+            "(SELECT id FROM chat_messages ORDER BY id ASC LIMIT ?)",
+            (over_cap,)
+        )
+    db.commit()
+    return aged.rowcount, over_cap
+
+
+def _chat_janitor_loop():
+    while True:
+        time.sleep(300)
+        try:
+            # datetime.now(timezone.utc), not the naive datetime.now() this
+            # originally shipped with — the same server-local-vs-UTC bug
+            # _chat_row_to_dict() was fixed for earlier, just here it
+            # silently widened the retention window instead of mis-labeling
+            # "just now" (e.g. ~28-29h instead of 24h on America/New_York).
+            aged, over_cap = _chat_janitor_sweep(get_db(), datetime.now(timezone.utc))
+            if aged or over_cap:
+                log('INFO', f"[CHAT] janitor pruned {aged} aged + {over_cap} over-cap message(s)")
+        except Exception as e:
+            log('WARN', f"[CHAT] janitor sweep failed: {e}")
+
+
+def start_chat_janitor():
+    threading.Thread(target=_chat_janitor_loop, daemon=True).start()
 
 
 def _recording_janitor_loop():
@@ -11189,6 +11541,7 @@ if not os.environ.get("HENWEN_SKIP_STARTUP"):
     start_aprs_poller()
     start_iss_poller()
     start_recording_janitor()
+    start_chat_janitor()
     start_stream_relay()
 
 if __name__ == "__main__":

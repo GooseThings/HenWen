@@ -123,6 +123,12 @@ label { display: block; font-weight: 600; margin-bottom: 0.3rem; }
 .msg.error { color: var(--danger); font-weight: 700; }
 .msg.success { color: var(--ok); font-weight: 700; }
 
+.chat-log { max-height: 16rem; overflow-y: auto; border: 2px solid var(--border); border-radius: 8px;
+  padding: 0.6rem 0.9rem; margin-top: 0.75rem; background: var(--bg); }
+.chat-row { margin: 0 0 0.5rem; font-size: 0.95rem; }
+.chat-row:last-child { margin-bottom: 0; }
+.chat-ts { font-size: 0.85em; color: var(--fg2); }
+
 footer { margin-top: 2.5rem; padding-top: 1rem; border-top: 2px solid var(--border); color: var(--fg2); font-size: 0.9rem; }
 
 .sr-only {
@@ -221,6 +227,13 @@ footer { margin-top: 2.5rem; padding-top: 1rem; border-top: 2px solid var(--bord
     </div>
   </section>
 
+  <section aria-labelledby="h-chat" class="card">
+    <h2 id="h-chat" style="margin-top:0;border:none;padding-bottom:0">Chat</h2>
+    <div id="chat-area">
+      <p>Log in above to join the chat.</p>
+    </div>
+  </section>
+
 </main>
 
 <footer>
@@ -297,6 +310,7 @@ async function checkSession() {
     }
   } catch (e) {}
   loadFavorites();
+  loadChat();
 }
 
 async function doLogin(ev) {
@@ -319,6 +333,7 @@ async function doLogin(ev) {
       document.getElementById('login-password').value = '';
       updateAccountUI(d.username, d.role);
       loadFavorites();
+      loadChat();
       setLiveStatus('Logged in as ' + d.username + '.');
     } else {
       msg.className = 'msg error';
@@ -343,6 +358,7 @@ async function doLogout() {
   updateAccountUI(null, null);
   if (_listenActive) _stopListen();
   loadFavorites();
+  loadChat();
   setLiveStatus('Logged out.');
 }
 
@@ -355,6 +371,7 @@ function _requireLogin(actionMsg) {
   window._restrictDisconnect = false;
   updateAccountUI(null, null);
   loadFavorites();
+  loadChat();
   var msg = document.getElementById('login-msg');
   msg.className = 'msg error';
   msg.textContent = 'Please log in first' + (actionMsg ? ' to ' + actionMsg : '') + '.';
@@ -587,6 +604,145 @@ async function loadFavorites() {
 function favConnectClick(local, remote, btn) {
   if (btn) { btn.disabled = true; btn.textContent = '…'; }
   doConnect(local, remote, false, null).then(function() { loadFavorites(); });
+}
+
+/* ── Chat panel (logged-in users only) ──
+   Same login-gated read/post surface as the SPA's dash chat card, built
+   with plain DOM calls rather than innerHTML for message rows — the
+   message text is arbitrary user input and this page's esc()+innerHTML
+   idiom (see loadFavorites() above) is fine for admin-authored favorite
+   labels but not for that. */
+var _chatSinceId = 0;
+var _chatPollTimer = null;
+
+function _chatFormatTs(ts) {
+  /* Browser's own local time/locale (this page has no kiosk-configured
+     clock format like the main Status Board does — see formatClockTime()
+     in status.html) — an absolute reading, not a relative "X ago" that
+     would go stale once rendered and never updated again. */
+  try {
+    return new Date(ts * 1000).toLocaleTimeString(undefined,
+      {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+  } catch (e) { return ''; }
+}
+
+function _chatAppendRow(log, m) {
+  /* Idempotent by id — same refreshChat()-vs-sendChatMessage() race as the
+     main Status Board's appendChatMessages(); see the comment there. */
+  if (log.querySelector('[data-msg-id="' + m.id + '"]')) return;
+  var row = document.createElement('p');
+  row.className = 'chat-row';
+  row.setAttribute('data-msg-id', m.id);
+  var ts = document.createElement('span');
+  ts.className = 'chat-ts';
+  ts.textContent = '[' + _chatFormatTs(m.ts) + ']';
+  var who = document.createElement('strong');
+  who.textContent = m.username + ':';
+  row.appendChild(ts);
+  row.appendChild(document.createTextNode(' '));
+  row.appendChild(who);
+  row.appendChild(document.createTextNode(' '));
+  row.appendChild(document.createTextNode(m.message));
+  log.appendChild(row);
+}
+
+function loadChat() {
+  var area = document.getElementById('chat-area');
+  if (!area) return;
+  if (!window._role) {
+    if (_chatPollTimer) { clearInterval(_chatPollTimer); _chatPollTimer = null; }
+    _chatSinceId = 0;
+    area.innerHTML = '<p>Log in above to join the chat.</p>';
+    return;
+  }
+  if (_chatPollTimer) return;   /* already set up for this session */
+
+  area.innerHTML = '';
+  var log = document.createElement('div');
+  log.id = 'chat-log';
+  log.className = 'chat-log';
+  log.setAttribute('role', 'log');
+  log.setAttribute('aria-live', 'polite');
+  log.setAttribute('aria-relevant', 'additions');
+
+  var form = document.createElement('form');
+  form.onsubmit = sendChatMessage;
+  var field = document.createElement('div');
+  field.className = 'field';
+  var label = document.createElement('label');
+  label.setAttribute('for', 'chat-input');
+  label.textContent = 'Message';
+  var input = document.createElement('input');
+  input.type = 'text'; input.id = 'chat-input'; input.maxLength = 500; input.autocomplete = 'off';
+  field.appendChild(label);
+  field.appendChild(input);
+  var btn = document.createElement('button');
+  btn.type = 'submit'; btn.textContent = 'Send';
+  var status = document.createElement('p');
+  status.id = 'chat-msg'; status.className = 'msg'; status.setAttribute('role', 'status');
+  form.appendChild(field);
+  form.appendChild(btn);
+  form.appendChild(status);
+
+  area.appendChild(log);
+  area.appendChild(form);
+
+  _chatSinceId = 0;
+  refreshChat();
+  _chatPollTimer = setInterval(refreshChat, 5000);
+}
+
+async function refreshChat() {
+  if (!window._role) return;
+  var log = document.getElementById('chat-log');
+  if (!log) return;
+  var r;
+  try {
+    var url = '/api/chat/messages' + (_chatSinceId ? ('?since_id=' + _chatSinceId) : '');
+    r = await apiFetch(url, {cache: 'no-store'});
+  } catch (e) { return; }
+  if (!r.ok) return;
+  var d = await r.json();
+  var msgs = d.messages || [];
+  if (!msgs.length) return;
+  msgs.forEach(function(m) { _chatAppendRow(log, m); });
+  log.scrollTop = log.scrollHeight;
+  _chatSinceId = msgs[msgs.length - 1].id;
+}
+
+async function sendChatMessage(ev) {
+  if (ev) ev.preventDefault();
+  var input = document.getElementById('chat-input');
+  var msgEl = document.getElementById('chat-msg');
+  if (!input) return false;
+  var message = input.value.trim();
+  if (!message) return false;
+  input.disabled = true;
+  try {
+    var r = await apiFetch('/api/chat/messages', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message: message})
+    });
+    var d = await r.json();
+    if (r.ok) {
+      input.value = '';
+      if (msgEl) { msgEl.className = 'msg'; msgEl.textContent = 'Message sent.'; }
+      var log = document.getElementById('chat-log');
+      if (log && d.message) {
+        _chatAppendRow(log, d.message);
+        log.scrollTop = log.scrollHeight;
+        if (d.message.id > _chatSinceId) _chatSinceId = d.message.id;
+      }
+    } else if (msgEl) {
+      msgEl.className = 'msg error';
+      msgEl.textContent = d.error || 'Message failed to send.';
+    }
+  } catch (e) {
+    if (msgEl) { msgEl.className = 'msg error'; msgEl.textContent = 'Request error — try again.'; }
+  }
+  input.disabled = false;
+  input.focus();
+  return false;
 }
 
 /* ── NWS severe weather alerts ── */
