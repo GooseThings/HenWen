@@ -6,7 +6,7 @@ A browser-based web interface for managing and using your AllStarLink 3 node. Al
 
 ![Kiosk](HenWen-v2026.08.06.jpg)
 
-![Manager](manager-example.png)
+![Manager](HenWen-manager-v2026.08.06.jpg)
 
 **Key features:**
 
