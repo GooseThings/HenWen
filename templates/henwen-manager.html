@@ -4299,7 +4299,7 @@ function nwsAlertCard(a) {
           '<button class="btn btn-sm" onclick="nwsToggleAlert(' + a.id + ')">' + (silenced ? 'Unsilence' : 'Silence') + '</button>' +
           '<button class="btn btn-sm" onclick="nwsEditShow(' + a.id + ')">Edit</button>' +
           '<button class="btn btn-sm" style="color:var(--danger);border-color:var(--danger)" ' +
-            'onclick=\'nwsDeleteAlert(' + a.id + ', ' + JSON.stringify(a.name) + ')\'>Delete</button>' +
+            'onclick=\'nwsDeleteAlert(' + a.id + ', ' + esc(JSON.stringify(a.name)) + ')\'>Delete</button>' +
         '</div>' +
       '</div>' +
       '<div class="muted" style="font-style:italic;margin-bottom:6px">&ldquo;' + esc(a.tts_text || '') + '&rdquo;</div>' +
@@ -6149,7 +6149,7 @@ function annCard(a) {
         '<button class="btn btn-sm" onclick="annToggle(' + a.id + ')">' + (a.enabled ? 'Disable' : 'Enable') + '</button>' +
         '<button class="btn btn-sm" onclick="annTestPlay(' + a.id + ')">Test Play</button>' +
         '<button class="btn btn-sm" onclick="annEditShow(' + a.id + ', ' + isTts + ')">Edit</button>' +
-        '<button class="btn btn-sm" style="color:var(--danger);border-color:var(--danger)" onclick=\'annDelete(' + a.id + ', ' + JSON.stringify(a.name) + ')\'>Delete</button>' +
+        '<button class="btn btn-sm" style="color:var(--danger);border-color:var(--danger)" onclick=\'annDelete(' + a.id + ', ' + esc(JSON.stringify(a.name)) + ')\'>Delete</button>' +
       '</div>' +
       '<div id="' + editId + '" style="display:none;margin-top:14px;border-top:1px solid var(--border);padding-top:12px">' +
         annEditForm(a) +
@@ -6498,7 +6498,7 @@ function nidCard(c) {
         '<button class="btn btn-sm" onclick="nidToggle(' + c.id + ')">' + (c.enabled ? 'Disable' : 'Enable') + '</button>' +
         '<button class="btn btn-sm" onclick="nidTestPlay(' + c.id + ')">Test Play</button>' +
         '<button class="btn btn-sm" onclick="nidEditShow(' + c.id + ')">Edit</button>' +
-        '<button class="btn btn-sm" style="color:var(--danger);border-color:var(--danger)" onclick=\'nidDelete(' + c.id + ',' + JSON.stringify(c.name) + ')\'>Delete</button>' +
+        '<button class="btn btn-sm" style="color:var(--danger);border-color:var(--danger)" onclick=\'nidDelete(' + c.id + ',' + esc(JSON.stringify(c.name)) + ')\'>Delete</button>' +
       '</div>' +
       '<div id="nid-edit-' + c.id + '" style="display:none;margin-top:14px;border-top:1px solid var(--border);padding-top:12px">' +
         nidEditForm(c) +
@@ -6891,7 +6891,7 @@ function connCard(c) {
           : '') +
         '<button class="btn btn-sm" onclick="connSyncState(' + c.id + ')" title="Re-check actual Asterisk lstats and correct state if drifted">Sync State</button>' +
         '<button class="btn btn-sm" onclick="connEditShow(' + c.id + ')">Edit</button>' +
-        '<button class="btn btn-sm" style="color:var(--danger);border-color:var(--danger)" onclick=\'connDelete(' + c.id + ',' + JSON.stringify(c.name) + ')\'>Delete</button>' +
+        '<button class="btn btn-sm" style="color:var(--danger);border-color:var(--danger)" onclick=\'connDelete(' + c.id + ',' + esc(JSON.stringify(c.name)) + ')\'>Delete</button>' +
       '</div>' +
       editDiv +
     '</div>' +

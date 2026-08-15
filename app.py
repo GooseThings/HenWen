@@ -10493,9 +10493,9 @@ def _connector_do_connect(local: str, target: str, disconnect_first: bool = Fals
     """
     def _cmd(ami, ln=local, tn=target, disc=disconnect_first, skip=skip_permanent):
         if disc:
+            cached    = _ami_cache.get(ln) or {}
+            connected = list(cached.get("connected", []))
             if skip:
-                cached    = _ami_cache.get(ln) or {}
-                connected = list(cached.get("connected", []))
                 with _kiosk_temp_lock:
                     perm_peers = {pn for (l, pn), info in _kiosk_temp_conns.items()
                                  if l == ln and info.get('permanent')}
@@ -10503,11 +10503,26 @@ def _connector_do_connect(local: str, target: str, disconnect_first: bool = Fals
                 log("INFO", f"[CONNECTOR] Disconnecting {len(to_drop)} non-permanent "
                             f"node(s) on {ln} before scheduled connect to {tn} "
                             f"(preserving {len(connected) - len(to_drop)} permanent)")
-                for peer in to_drop:
-                    ami.rpt_cmd(ln, f"ilink 11 {peer}")
             else:
-                log("INFO", f"[CONNECTOR] Disconnecting all nodes on {ln} before scheduled connect to {tn}")
-                ami.rpt_cmd(ln, "ilink 6")
+                # Deliberately ilink 11 per-peer here, not a single bare
+                # "ilink 6" — ilink 6 is app_rpt's generic "disconnect all",
+                # and (like ilink 1, see _connector_do_disconnect's docstring)
+                # it does not reliably drop a link app_rpt considers
+                # permanent (rpt.conf startup connect=, or one made permanent
+                # outside this app's own _kiosk_temp_conns tracking). Only
+                # ilink 11 is documented to actually terminate a permanent
+                # link, so when the operator asked for *everything* dropped
+                # (skip_permanent unchecked), it has to be used for every
+                # connected peer, not just the ones we happen to know are
+                # permanent.
+                to_drop = connected
+                log("INFO", f"[CONNECTOR] Disconnecting all {len(to_drop)} node(s) on {ln} "
+                            f"before scheduled connect to {tn}")
+            for peer in to_drop:
+                result = ami.rpt_cmd(ln, f"ilink 11 {peer}")
+                if not result.get("success", True):
+                    log("WARN", f"[CONNECTOR] Disconnect of {peer} on {ln} before "
+                                f"connect to {tn} may have failed: {result.get('raw', '')[:120]}")
             time.sleep(0.3)
         return ami.rpt_cmd(ln, f"ilink 3 {tn}")
     return ami_send_command(_cmd)
