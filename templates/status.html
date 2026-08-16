@@ -533,9 +533,11 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .nr-tl-bar.on { height: 100%; background: var(--danger); box-shadow: 0 0 3px rgba(224,68,68,.7); }
 .nr-tl-bar.empty { background: transparent; }
 
-/* ── Activity panel: sits under Connected Nodes, right of the map, matching the map's height ── */
+/* ── Activity panel: sits under Connected Nodes, right of the map — Meshtastic
+   (below) splits this column's bottom half the same way Chat splits off
+   under Favorites, so span 11 became span 7 here to make room. ── */
 .activity-card {
-  grid-column: 7 / span 3; grid-row: 14 / span 11;
+  grid-column: 7 / span 3; grid-row: 14 / span 7;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
@@ -563,6 +565,23 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   letter-spacing: .04em; }
 .act-badge.local  { background: rgba(63,185,80,.15); color: var(--green); }
 .act-badge.global { background: rgba(88,166,255,.12); color: var(--accent); }
+
+/* ── Meshtastic panel: split off under Activity, same column ── */
+.meshtastic-card {
+  grid-column: 7 / span 3; grid-row: 21 / span 4;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+  display: flex; flex-direction: column; overflow: hidden; min-height: 0;
+}
+.mesh-channel-label { font-size: 0.65rem; color: var(--text2); font-family: var(--mono); }
+.mesh-list { flex: 1; overflow-y: auto; }
+.mesh-list::-webkit-scrollbar { width: 3px; }
+.mesh-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.mesh-row { padding: 6px 14px; border-bottom: 1px solid var(--border); }
+.mesh-row:last-child { border-bottom: none; }
+.mesh-top { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
+.mesh-node { font-size: 0.8rem; font-weight: 700; font-family: var(--mono); color: var(--accent); }
+.mesh-ts   { font-size: 0.65rem; color: var(--text2); margin-left: auto; }
+.mesh-text { font-size: 0.78rem; color: var(--text); word-wrap: break-word; margin-top: 1px; }
 
 /* ── Map ── */
 .map-card { grid-column: 4 / span 3; grid-row: 14 / span 11; min-height: 0;
@@ -649,6 +668,11 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .chat-row .chat-ts { font-size: 0.85em; color: var(--text2); }
 .chat-row .chat-user { font-weight: 700; color: var(--accent); }
 .chat-row .chat-body { color: var(--text); }
+.chat-row-alert { background: color-mix(in srgb, var(--warn) 12%, transparent); border-left: 3px solid var(--warn); padding-left: 8px; margin-left: -3px; }
+.chat-row-alert .chat-user { color: var(--warn); }
+.chat-date-divider { display: flex; align-items: center; gap: 8px; margin: 6px 0 2px;
+  font-size: 0.65rem; letter-spacing: .04em; color: var(--text2); text-align: center; }
+.chat-date-divider::before, .chat-date-divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
 .chat-login-note { padding: 14px; text-align: center; font-size: 0.78rem; color: var(--text2); }
 .chat-composer { display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--border); flex-shrink: 0; }
 .chat-composer input { flex: 1; font-size: 0.78rem; padding: 5px 8px; border-radius: 5px;
@@ -773,7 +797,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     display: flex; flex-direction: column; grid-template-columns: none;
     grid-template-rows: none; flex: none; min-height: 0;
   }
-  .node-card, .history-card, .connected-card, .map-card, .activity-card, .favorites-card, .chat-card {
+  .node-card, .history-card, .connected-card, .map-card, .activity-card, .favorites-card, .chat-card, .meshtastic-card {
     grid-column: auto; grid-row: auto;
   }
   .node-card    { order: 1; }
@@ -781,8 +805,9 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   .connected-card { order: 3; }
   .map-card     { order: 4; }
   .activity-card { order: 5; }
-  .favorites-card { order: 6; }
-  .chat-card    { order: 7; }
+  .meshtastic-card { order: 6; }
+  .favorites-card { order: 7; }
+  .chat-card    { order: 8; }
 
   /* Resizable/movable/collapsible cards are desktop-only (see dashSupported()
      in JS) — hide their controls entirely here rather than leave dead UI. */
@@ -793,7 +818,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   .node-card {
     min-height: 0; max-height: none; padding: 14px 12px;
   }
-  .connected-card, .activity-card, .favorites-card, .history-card, .chat-card { max-height: 320px; }
+  .connected-card, .activity-card, .favorites-card, .history-card, .chat-card, .meshtastic-card { max-height: 320px; }
   .map-card { height: 340px; flex-shrink: 0; }
 
   .node-number { font-variant-numeric: tabular-nums; font-size: 1.9rem; }
@@ -1072,6 +1097,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <div class="dash-divider" data-divider-idx="3" onpointerdown="dashDividerStart(event,3)" title="Drag to resize"></div>
     <div class="dash-divider" data-divider-idx="4" onpointerdown="dashDividerStart(event,4)" title="Drag to resize"></div>
     <div class="dash-divider" data-divider-idx="5" onpointerdown="dashDividerStart(event,5)" title="Drag to resize"></div>
+    <div class="dash-divider" data-divider-idx="6" onpointerdown="dashDividerStart(event,6)" title="Drag to resize"></div>
     <!-- Shows which pane a dragged card will dock into (edge = split, center = swap). -->
     <div id="dash-drop-indicator" class="dash-drop-indicator" style="display:none"></div>
 
@@ -1235,6 +1261,21 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <button class="dash-hide-btn" style="margin-left:auto" onclick="toggleDashHide('activity',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
       </div>
       <div class="activity-list" id="activity-list">
+        <div class="empty-msg">Loading&hellip;</div>
+      </div>
+    </div>
+
+    <!-- Meshtastic: public-channel MQTT text feed, config is Manager > Meshtastic (owner-only) -->
+    <div class="meshtastic-card dash-card" data-dash-id="meshtastic"
+         ondragover="dashDragOver(event)" ondragleave="dashDragLeave(event)" ondrop="dashDrop(event,'meshtastic')">
+      <div class="card-header">
+        <span class="dash-header-grip" draggable="true" title="Drag to move"
+              ondragstart="dashDragStart(event,'meshtastic')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
+        <span class="card-title">Meshtastic</span>
+        <span class="mesh-channel-label" id="mesh-channel-label"></span>
+        <button class="dash-hide-btn" style="margin-left:auto" onclick="toggleDashHide('meshtastic',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
+      </div>
+      <div class="mesh-list" id="mesh-list">
         <div class="empty-msg">Loading&hellip;</div>
       </div>
     </div>
@@ -3644,6 +3685,41 @@ function renderActivityList() {
   }).join('');
 }
 
+/* Meshtastic panel: newest-first list of decoded public-channel text
+   messages, backed by the shared in-process cache api_meshtastic_messages()
+   serves — see app.py's _meshtastic_poll_loop(). Polled independently of
+   refreshActivity() (different data source, different card) on its own
+   20s timer — cheap either way since the server is just reading a
+   deque, not making an external call per poll. */
+async function loadMeshtasticMessages() {
+  var el = document.getElementById('mesh-list');
+  if (!el) return;
+  try {
+    var r = await apiFetch('/api/meshtastic/messages', {cache: 'no-store'});
+    if (!r.ok) return;
+    var data = await r.json();
+    var labelEl = document.getElementById('mesh-channel-label');
+    if (labelEl) {
+      var topic = (data.root_topic || '').replace(/^\/+/, '');
+      labelEl.textContent = data.channel_name ? (topic ? (topic + '/#' + data.channel_name) : ('#' + data.channel_name)) : '';
+    }
+    var messages = data.messages || [];
+    if (!messages.length) {
+      el.innerHTML = '<div class="empty-msg">No messages yet</div>';
+      return;
+    }
+    el.innerHTML = messages.slice().reverse().map(function(m) {
+      return '<div class="mesh-row">' +
+        '<div class="mesh-top">' +
+          '<span class="mesh-node">' + esc(m.from_node) + '</span>' +
+          '<span class="mesh-ts">' + (m.ts ? relTime(m.ts) : '') + '</span>' +
+        '</div>' +
+        '<div class="mesh-text">' + esc(m.text) + '</div>' +
+      '</div>';
+    }).join('');
+  } catch (e) { /* transient network hiccup — next poll retries */ }
+}
+
 async function refreshActivity() {
   try {
     var r = await apiFetch('/api/status/activity', {cache: 'no-store'});
@@ -3691,6 +3767,7 @@ async function refreshActivity() {
    anything at all depend on window._kioskRole. */
 var _chatSinceId = 0;
 var _chatPollTimer = null;
+var _chatLastDateKey = null;   /* kiosk-tz Y-M-D of the last rendered message — drives the day-divider row */
 
 function _chatUpdateVisibility() {
   var note = document.getElementById('chat-login-note');
@@ -3713,7 +3790,23 @@ function _chatUpdateVisibility() {
     if (_chatPollTimer) { clearInterval(_chatPollTimer); _chatPollTimer = null; }
     list.textContent = '';
     _chatSinceId = 0;
+    _chatLastDateKey = null;
   }
+}
+
+/* Y-M-D of `date` in the kiosk-configured timezone (_clockTZ) — a pure
+   calendar key, reusing _kioskNowParts() rather than Date's own
+   getFullYear()/etc, which would read the *browser's* local timezone
+   instead of the admin-configured one the rest of the chat/clock UI uses. */
+function _chatDateKey(date) {
+  var p = _kioskNowParts(date);
+  return p.year + '-' + (p.month < 10 ? '0' : '') + p.month + '-' + (p.day < 10 ? '0' : '') + p.day;
+}
+
+function _chatDateLabel(date) {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: _clockTZ, weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
+  }).format(date);
 }
 
 async function refreshChat() {
@@ -3744,8 +3837,17 @@ function appendChatMessages(msgs) {
        skip re-rendering a message id already in the DOM rather than rely
        on caller-side bookkeeping to prevent it. */
     if (list.querySelector('[data-msg-id="' + m.id + '"]')) return;
+    var msgDate = new Date(m.ts * 1000);
+    var dateKey = _chatDateKey(msgDate);
+    if (dateKey !== _chatLastDateKey) {
+      var divider = document.createElement('div');
+      divider.className = 'chat-date-divider';
+      divider.textContent = _chatDateLabel(msgDate);
+      list.appendChild(divider);
+      _chatLastDateKey = dateKey;
+    }
     var row = document.createElement('div');
-    row.className = 'chat-row';
+    row.className = 'chat-row' + (m.role === 'system' ? ' chat-row-alert' : '');
     row.setAttribute('data-msg-id', m.id);
     /* [HH:MM:SS AM/PM] Username: message — a fixed absolute time rather
        than relTime()'s "2m ago", which was only ever computed once at
@@ -5787,10 +5889,11 @@ window.addEventListener('resize', function() {
 var DASH_COLS = 12, DASH_ROWS = 24;
 var DASH_GAP = 10;             /* must match .content-area's CSS `gap` */
 var DASH_MIN_CS = 2, DASH_MIN_RS = 3;
-var DASH_CARD_IDS = ['node', 'history', 'connected', 'map', 'activity', 'favorites', 'chat'];
+var DASH_CARD_IDS = ['node', 'history', 'connected', 'map', 'activity', 'favorites', 'chat', 'meshtastic'];
 var DASH_CARD_TITLES = {node: 'Node', history: 'Recent Connections', connected: 'Connected Nodes',
-  map: 'Network Map', activity: 'Latest Activity', favorites: 'Favorites', chat: 'Chat'};
-var DASH_STORE_KEY = 'henwen-dash-layout-v5';
+  map: 'Network Map', activity: 'Latest Activity', favorites: 'Favorites', chat: 'Chat',
+  meshtastic: 'Meshtastic'};
+var DASH_STORE_KEY = 'henwen-dash-layout-v6';
 
 /* Ratios reproduce the original fixed 4-column layout's proportions, with
    Recent Connections split off underneath Node — see dashWalk()'s doc
@@ -5798,7 +5901,9 @@ var DASH_STORE_KEY = 'henwen-dash-layout-v5';
    underneath Favorites (2/3 favorites, 1/3 chat) — both are the "personal,
    opt-in" panels, as opposed to the four core status panels above, so
    grouping them keeps the core view's proportions from being squeezed by a
-   7th competitor. */
+   7th competitor. Meshtastic is split off underneath Activity the same way
+   (7/11 activity, 4/11 meshtastic) — both are scrolling feeds of small
+   discrete entries, so pairing them keeps that same rhythm going. */
 var DASH_DEFAULT_TREE = {
   type: 'split', dir: 'col', ratio: 0.25,
   a: {type: 'split', dir: 'row', ratio: 2 / 3,
@@ -5810,7 +5915,10 @@ var DASH_DEFAULT_TREE = {
       a: {type: 'leaf', id: 'connected'},
       b: {type: 'split', dir: 'col', ratio: 0.5,
         a: {type: 'leaf', id: 'map'},
-        b: {type: 'leaf', id: 'activity'}
+        b: {type: 'split', dir: 'row', ratio: 7 / 11,
+          a: {type: 'leaf', id: 'activity'},
+          b: {type: 'leaf', id: 'meshtastic'}
+        }
       }
     },
     b: {type: 'split', dir: 'row', ratio: 16 / 24,
@@ -6280,6 +6388,7 @@ refreshBoard();
 refreshWeather();
 refreshNwsAlerts();
 refreshActivity();
+loadMeshtasticMessages();
 initHistLimit();
 refreshHistory();
 initFavSort();
@@ -6295,6 +6404,7 @@ setInterval(boardWatchdog,   2000);    /* catches a refreshBoard() request that 
                                           instead of erroring out promptly — see the
                                           comment above markServerUnreachable() */
 setInterval(refreshActivity, 15000);   /* activity every 15s */
+setInterval(loadMeshtasticMessages, 20000);   /* meshtastic panel every 20s */
 setInterval(refreshHistory,  30000);   /* connection history every 30s */
 setInterval(refreshWeather,  600000);  /* weather every 10min */
 setInterval(refreshNwsAlerts, 60000);  /* NWS alert ticker every 60s — well under the

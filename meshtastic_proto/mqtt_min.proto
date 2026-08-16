@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+// Hand-trimmed subset of meshtastic/protobufs' meshtastic/mqtt.proto —
+// see mesh_min.proto's header comment for why this is trimmed rather than
+// the full upstream file. Only ServiceEnvelope is kept (MapReport, the
+// other top-level message in the real file, is for the unencrypted map
+// layer HenWen doesn't consume here).
+
+package meshtastic;
+
+import "meshtastic_proto/mesh_min.proto";
+
+message ServiceEnvelope {
+  // The encrypted MeshPacket as published to <root_topic>/2/e/<channel>/<node_id>.
+  MeshPacket packet = 1;
+  string channel_id = 2;
+  string gateway_id = 3;
+}

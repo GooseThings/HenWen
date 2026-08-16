@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+// Hand-trimmed subset of meshtastic/protobufs' meshtastic/mesh.proto,
+// keeping only the fields HenWen's Meshtastic MQTT panel actually reads.
+// Field numbers/types copied verbatim from the real upstream message
+// (verified 2026-08-13 against github.com/meshtastic/firmware's protobufs
+// submodule) so this stays wire-compatible with real traffic even though
+// most of the real message's ~20 fields are omitted here. Protobuf3
+// silently skips any field number present on the wire that isn't declared
+// in the reader's schema, so omitting fields is safe — it just means
+// HenWen can't read them, not that parsing breaks.
+//
+// If a future feature needs more (e.g. decoding NODEINFO_APP for friendly
+// node names instead of raw hex IDs), swap this file and mqtt_min.proto
+// for the real upstream mesh.proto/mqtt.proto rather than extending this
+// by hand — same `package meshtastic;` name, so nothing else needs to change.
+
+package meshtastic;
+
+import "meshtastic_proto/portnums.proto";
+
+message Data {
+  PortNum portnum = 1;
+  bytes payload = 2;
+}
+
+message MeshPacket {
+  fixed32 from = 1;
+  fixed32 to = 2;
+  uint32 channel = 3;
+  // Field 4 (`decoded`, plaintext Data) intentionally omitted: messages on
+  // the encrypted MQTT topic always arrive with `encrypted` set, never
+  // `decoded` — see mqtt_min.proto's ServiceEnvelope comment.
+  bytes encrypted = 5;
+  fixed32 id = 6;
+}

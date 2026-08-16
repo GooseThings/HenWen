@@ -81,6 +81,17 @@ try:
 except ImportError:
     aprslib = None
 
+# meshtastic_mqtt.py (decode logic, standalone module — see its own
+# docstring) and paho-mqtt (the MQTT client library) back the Meshtastic
+# MQTT panel. Same "fails cleanly at poller-start time" optionality as
+# aprslib above, not a hard crash at import time.
+try:
+    import paho.mqtt.client as mqtt_client
+    import meshtastic_mqtt
+except ImportError:
+    mqtt_client = None
+    meshtastic_mqtt = None
+
 app = Flask(__name__)
 
 # ---------------------------------------------------------------------------
@@ -628,6 +639,29 @@ def get_db():
     _alert_cols = {r[1] for r in conn.execute("PRAGMA table_info(alert_config)").fetchall()}
     if 'on_dns_stuck' not in _alert_cols:
         conn.execute("ALTER TABLE alert_config ADD COLUMN on_dns_stuck INTEGER NOT NULL DEFAULT 1")
+    # provider (single select) -> ntfy_enabled/pushover_enabled/discord_enabled
+    # (independent toggles, so an install can fan an alert out to more than
+    # one destination at once -- e.g. Pushover for the owner's phone AND
+    # Discord for the club). The old `provider` column is left in place
+    # (harmless, unused going forward) rather than dropped, matching this
+    # project's general no-migration-framework/ALTER-only approach.
+    if 'ntfy_enabled' not in _alert_cols:
+        conn.execute("ALTER TABLE alert_config ADD COLUMN ntfy_enabled INTEGER NOT NULL DEFAULT 0")
+        conn.execute("ALTER TABLE alert_config ADD COLUMN pushover_enabled INTEGER NOT NULL DEFAULT 0")
+        conn.execute("ALTER TABLE alert_config ADD COLUMN discord_enabled INTEGER NOT NULL DEFAULT 0")
+        # One-time backfill from the old single-select column so an existing
+        # install's alerts keep working after upgrade without the owner
+        # having to re-open Manager > Alerts and re-save.
+        conn.execute("""UPDATE alert_config SET
+            ntfy_enabled     = CASE WHEN provider='ntfy'     THEN 1 ELSE 0 END,
+            pushover_enabled = CASE WHEN provider='pushover' THEN 1 ELSE 0 END
+            WHERE id=1""")
+    if 'chat_enabled' not in _alert_cols:
+        # Posts the alert straight into chat_messages (see "Kiosk chat
+        # relay" in _send_alert()) -- a fourth destination alongside
+        # ntfy/Pushover/Discord, no credentials to configure since it's
+        # local to this install.
+        conn.execute("ALTER TABLE alert_config ADD COLUMN chat_enabled INTEGER NOT NULL DEFAULT 0")
     conn.commit()
     # Singleton config for the NWS severe weather auto-announcement poller —
     # separate from alert_config (that's push notifications; this is
@@ -703,6 +737,27 @@ def get_db():
         # build_youtube_output_args() in stream_relay.py. Not hardcoded
         # to any one club's URL since other installs use this too.
         conn.execute("ALTER TABLE stream_relay_config ADD COLUMN overlay_website TEXT NOT NULL DEFAULT ''")
+    conn.commit()
+    # Singleton config for the Meshtastic MQTT panel (meshtastic_mqtt.py) —
+    # root topic / channel name / PSK, owner-only. Broker host/port/creds
+    # are NOT here: they're hardcoded to the public mqtt.meshtastic.org
+    # broker (see _meshtastic_poll_loop()), not owner-configurable.
+    conn.execute("""CREATE TABLE IF NOT EXISTS meshtastic_config (
+        id           INTEGER PRIMARY KEY CHECK (id = 1),
+        root_topic   TEXT NOT NULL DEFAULT '/msh/US/MI',
+        channel_name TEXT NOT NULL DEFAULT 'Michigan',
+        psk          TEXT NOT NULL DEFAULT 'MA=='
+    )""")
+    conn.commit()
+    # Singleton config for the Discord chat relay — one-way mirror of the
+    # kiosk Chat panel out to a Discord channel via an Incoming Webhook (no
+    # bot token/OAuth). webhook_url is a real secret (holding it lets anyone
+    # post into the owner's Discord channel), unlike the Meshtastic PSK above.
+    conn.execute("""CREATE TABLE IF NOT EXISTS discord_relay_config (
+        id          INTEGER PRIMARY KEY CHECK (id = 1),
+        enabled     INTEGER NOT NULL DEFAULT 0,
+        webhook_url TEXT    NOT NULL DEFAULT ''
+    )""")
     conn.commit()
     # Per-node lockout: presence of a row means that node is locked by its
     # Owner. Only one lockout state per node, so `node` is the primary key
@@ -902,7 +957,7 @@ def check_auth():
                         'status_board', 'status_board_redirect', 'status_board_accessible',
                         'api_status_board', 'api_status_weather', 'api_status_activity',
                         'api_status_history', 'api_status_nws_alerts',
-                        'api_aprs_stations', 'api_iss_tle',
+                        'api_aprs_stations', 'api_iss_tle', 'api_meshtastic_messages',
                         'api_login', 'api_session', 'api_csrf_token',
                         'api_favorites', 'api_favorites_status',
                         'api_kiosk_settings_get', 'api_kiosk_logo_file',
@@ -2337,43 +2392,103 @@ def _get_alert_config():
         return None
 
 
-def _send_alert(title, message, priority="default"):
-    """Dispatch a push notification via ntfy or Pushover."""
+def _post_json_with_dns_backstop(url, payload, headers=None, timeout=6):
+    """POST JSON with the same DNS-timeout backstop _fetch_node_stats() uses
+    -- urlopen(timeout=...) alone doesn't reliably bound DNS resolution time
+    (confirmed live in that function's poller). Shared by the Discord alert
+    branch below and the Discord chat relay (_discord_relay_post())."""
+    req_headers = {"Content-Type": "application/json", "User-Agent": "HenWen/1.0"}
+    if headers:
+        req_headers.update(headers)
+    req = urlreq.Request(url, data=json.dumps(payload).encode(), method="POST", headers=req_headers)
+    old_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(8)
     try:
-        cfg = _get_alert_config()
-        if not cfg or not cfg["enabled"]:
-            return
-        if cfg["provider"] == "ntfy":
-            if not cfg["ntfy_topic"]:
-                return
-            url     = f"https://ntfy.sh/{cfg['ntfy_topic']}"
-            headers = {"Title": title}
-            if priority == "high":
-                headers["Priority"] = "high"
-            req = urlreq.Request(url, data=message.encode("utf-8"),
-                                 headers=headers, method="POST")
-            with urlreq.urlopen(req, timeout=8) as resp:
-                log("INFO", f"[ALERTS] ntfy sent: {title!r} -> HTTP {resp.status}")
-        elif cfg["provider"] == "pushover":
-            if not cfg["pushover_token"] or not cfg["pushover_user"]:
-                return
-            body = urlparse.urlencode({
-                "token":    cfg["pushover_token"],
-                "user":     cfg["pushover_user"],
-                "title":    title,
-                "message":  message,
-                "priority": 1 if priority == "high" else 0,
-            }).encode("utf-8")
-            req = urlreq.Request(
-                "https://api.pushover.net/1/messages.json",
-                data=body,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-                method="POST"
+        with urlreq.urlopen(req, timeout=timeout) as resp:
+            resp.read()
+    finally:
+        socket.setdefaulttimeout(old_timeout)
+
+
+ALERT_CHAT_USERNAME = "HenWen Alert"
+
+
+def _send_alert(title, message, priority="default"):
+    """Dispatch a push notification to every enabled provider. ntfy/Pushover/
+    Discord are independent toggles, not mutually exclusive, so more than one
+    can fire for the same event -- each gets its own try/except rather than
+    one wrapping the whole function, so one provider's failure (bad token,
+    network hiccup) can't silently swallow the others."""
+    cfg = _get_alert_config()
+    if not cfg or not cfg["enabled"]:
+        return
+    if cfg["ntfy_enabled"]:
+        try:
+            if cfg["ntfy_topic"]:
+                url     = f"https://ntfy.sh/{cfg['ntfy_topic']}"
+                headers = {"Title": title}
+                if priority == "high":
+                    headers["Priority"] = "high"
+                req = urlreq.Request(url, data=message.encode("utf-8"),
+                                     headers=headers, method="POST")
+                with urlreq.urlopen(req, timeout=8) as resp:
+                    log("INFO", f"[ALERTS] ntfy sent: {title!r} -> HTTP {resp.status}")
+        except Exception as e:
+            log("ERROR", f"[ALERTS] ntfy send error: {e}")
+    if cfg["pushover_enabled"]:
+        try:
+            if cfg["pushover_token"] and cfg["pushover_user"]:
+                body = urlparse.urlencode({
+                    "token":    cfg["pushover_token"],
+                    "user":     cfg["pushover_user"],
+                    "title":    title,
+                    "message":  message,
+                    "priority": 1 if priority == "high" else 0,
+                }).encode("utf-8")
+                req = urlreq.Request(
+                    "https://api.pushover.net/1/messages.json",
+                    data=body,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    method="POST"
+                )
+                with urlreq.urlopen(req, timeout=8) as resp:
+                    log("INFO", f"[ALERTS] pushover sent: {title!r} -> HTTP {resp.status}")
+        except Exception as e:
+            log("ERROR", f"[ALERTS] pushover send error: {e}")
+    if cfg["discord_enabled"]:
+        try:
+            # Reuses the same webhook already configured for the chat relay
+            # (Manager > Discord Relay) rather than a second, duplicate
+            # webhook field here -- one Discord destination per install.
+            discord_cfg = _get_discord_relay_config()
+            webhook_url = discord_cfg["webhook_url"] if discord_cfg else ""
+            if not webhook_url:
+                log("WARN", "[ALERTS] Discord alert enabled but no webhook URL saved in Manager > Discord Relay")
+            else:
+                payload = {"content": f"**{title}**\n{message}", "allowed_mentions": {"parse": []}}
+                _post_json_with_dns_backstop(webhook_url, payload)
+                log("INFO", f"[ALERTS] discord sent: {title!r}")
+        except Exception as e:
+            log("ERROR", f"[ALERTS] discord send error: {e}")
+    if cfg["chat_enabled"]:
+        try:
+            # Inserted straight into chat_messages rather than going through
+            # api_chat_messages_post() -- that route also enqueues onto the
+            # Discord chat relay queue, which would double-post this same
+            # alert to Discord when both chat_enabled and discord_enabled
+            # are on (the branch above already delivers it there directly).
+            # user_id=0 is a reserved sentinel: no real user row ever gets
+            # id 0 (AUTOINCREMENT starts at 1), and chat_messages.user_id has
+            # no FK constraint, so this can't collide with or reference a
+            # real account.
+            db = get_db()
+            db.execute(
+                "INSERT INTO chat_messages (user_id, username, role, message) VALUES (0, ?, 'system', ?)",
+                (ALERT_CHAT_USERNAME, f"{title}: {message}")
             )
-            with urlreq.urlopen(req, timeout=8) as resp:
-                log("INFO", f"[ALERTS] pushover sent: {title!r} -> HTTP {resp.status}")
-    except Exception as e:
-        log("ERROR", f"[ALERTS] _send_alert error: {e}")
+            db.commit()
+        except Exception as e:
+            log("ERROR", f"[ALERTS] chat post error: {e}")
 
 
 def _check_alerts(ami_ok, cpu_temp):
@@ -2802,6 +2917,147 @@ def _aprs_poll_loop():
 
 def start_aprs_poller():
     t = threading.Thread(target=_aprs_poll_loop, name="aprs-poller", daemon=True)
+    t.start()
+
+
+# ── Meshtastic MQTT — public-channel mesh-radio feed panel ──────────────────
+# One persistent connection to the public mqtt.meshtastic.org broker
+# (hardcoded host/port/creds — see meshtastic_mqtt.py's module docstring for
+# the protocol background), subscribed to the owner's configured
+# root-topic/channel. Same "one shared in-process cache, many cheap reads"
+# shape as the APRS/global-activity pollers above: however many kiosk
+# viewers have the panel open, it's still one upstream connection and one
+# cache read per poll. Only decoded TEXT_MESSAGE_APP messages are kept —
+# position/telemetry/nodeinfo packets (the bulk of real traffic) are
+# discarded at decode time by meshtastic_mqtt.decode_service_envelope()
+# itself, not filtered here.
+MESHTASTIC_MQTT_HOST = "mqtt.meshtastic.org"
+MESHTASTIC_MQTT_PORT = 1883
+MESHTASTIC_MQTT_USERNAME = "meshdev"
+MESHTASTIC_MQTT_PASSWORD = "large4cats"
+MESHTASTIC_CACHE_MAX = 50
+
+_meshtastic_cache = deque(maxlen=MESHTASTIC_CACHE_MAX)   # newest last; each {"from_node","text","ts"}
+_meshtastic_lock = threading.Lock()
+# Raw-vs-decoded counters, reset and logged every ~30s by _meshtastic_poll_loop
+# -- decode_service_envelope() returning None (wrong portnum, invalid UTF-8,
+# or a garbage decrypt from a mismatched PSK) is silent by design, since most
+# real traffic is legitimately non-text and logging every one would flood
+# journalctl. That silence also makes "the channel is just quiet" and "we're
+# receiving traffic but failing to decode it (e.g. wrong PSK)" indistinguishable
+# from the logs alone -- these counters exist to tell those two apart.
+_meshtastic_raw_count = 0
+_meshtastic_decoded_count = 0
+
+
+def _meshtastic_on_message(psk, msg):
+    global _meshtastic_raw_count, _meshtastic_decoded_count
+    with _meshtastic_lock:
+        _meshtastic_raw_count += 1
+    try:
+        result = meshtastic_mqtt.decode_service_envelope(msg.payload, psk)
+    except Exception as e:
+        log("WARN", f"[MESHTASTIC] Decode error (not fatal, skipping message): {e}")
+        return
+    if result is None:
+        return
+    result["ts"] = time.time()
+    with _meshtastic_lock:
+        _meshtastic_decoded_count += 1
+        _meshtastic_cache.append(result)
+
+
+def _meshtastic_poll_loop():
+    global _meshtastic_raw_count, _meshtastic_decoded_count
+    if mqtt_client is None or meshtastic_mqtt is None:
+        log("WARN", "[MESHTASTIC] paho-mqtt not installed — Meshtastic panel disabled")
+        return
+
+    backoff = 0
+    while True:
+        # Re-read root topic/channel/PSK every reconnect cycle, same reason
+        # as _aprs_poll_loop() re-reading its callsign: these are Manager
+        # settings an owner can save at any time, not env vars fixed at
+        # process start.
+        cfg = _get_meshtastic_config() or MESHTASTIC_CONFIG_DEFAULTS
+        root_topic = (cfg.get("root_topic") or "").strip().lstrip("/")
+        channel_name = (cfg.get("channel_name") or "").strip()
+        psk = (cfg.get("psk") or "").strip()
+        if not (root_topic and channel_name and psk):
+            time.sleep(60)
+            continue
+
+        topic = f"{root_topic}/2/e/{channel_name}/#"
+        client = mqtt_client.Client()
+        client.username_pw_set(MESHTASTIC_MQTT_USERNAME, MESHTASTIC_MQTT_PASSWORD)
+        client.on_message = lambda c, u, msg, _psk=psk: _meshtastic_on_message(_psk, msg)
+        disconnected = threading.Event()
+        client.on_disconnect = lambda c, u, rc: disconnected.set()
+        # Subscribe from on_connect rather than once, inline, before
+        # loop_start() — so that EVERY connect re-subscribes, including one
+        # paho's own loop_forever() reconnects internally after a transient
+        # drop, which happens without this thread's knowledge or involvement.
+        # clean_session defaults to True, so the broker hands out a fresh,
+        # subscription-less session on every reconnect; a one-time
+        # subscribe() call before loop_start() only covers the very first
+        # connection — any later automatic reconnect would otherwise leave
+        # the client connected but silently deaf forever, with no error and
+        # no visible disconnect (this is suspected to be exactly what
+        # happened to a real deployment: an 18-hour-old connection with zero
+        # messages received, confirmed via `ss -ti` showing only a handful of
+        # handshake bytes ever received on the socket, while a throwaway
+        # script using otherwise-identical connect/subscribe code received
+        # messages immediately). on_subscribe logs the broker's SUBACK so a
+        # silently-un-acked subscription is visible in the logs too.
+        def _on_connect(c, u, flags, rc):
+            log("INFO", f"[MESHTASTIC] Connected to {MESHTASTIC_MQTT_HOST} "
+                         f"(rc={rc}), subscribing to {topic!r}")
+            c.subscribe(topic)
+        client.on_connect = _on_connect
+        client.on_subscribe = lambda c, u, mid, granted_qos: log(
+            "INFO", f"[MESHTASTIC] Subscription to {topic!r} acked by broker "
+                     f"(granted_qos={granted_qos})")
+
+        try:
+            client.connect(MESHTASTIC_MQTT_HOST, MESHTASTIC_MQTT_PORT, keepalive=60)
+            client.loop_start()
+            backoff = 0
+            # Block here, waking periodically to notice either a genuine
+            # disconnect or a config change saved mid-connection — the
+            # latter is what makes a saved topic/channel/PSK edit take
+            # effect within ~30s instead of only on the next incidental
+            # drop (paho's own auto-reconnect inside loop_start() would
+            # otherwise just silently keep reconnecting with the old
+            # topic/key forever).
+            while not disconnected.is_set():
+                disconnected.wait(30)
+                if disconnected.is_set():
+                    break
+                with _meshtastic_lock:
+                    raw, decoded = _meshtastic_raw_count, _meshtastic_decoded_count
+                    _meshtastic_raw_count = 0
+                    _meshtastic_decoded_count = 0
+                if raw:
+                    log("INFO", f"[MESHTASTIC] {raw} MQTT message(s) received on {topic!r} in the "
+                                 f"last ~30s, {decoded} decoded as text")
+                if (_get_meshtastic_config() or MESHTASTIC_CONFIG_DEFAULTS) != cfg:
+                    log("INFO", "[MESHTASTIC] Config changed — reconnecting")
+                    break
+        except Exception as e:
+            backoff = min(backoff + 1, 6)
+            sleep_s = min(30 * (2 ** backoff), 900)
+            log("WARN", f"[MESHTASTIC] Connection error ({e}) — retrying in {sleep_s:.0f}s")
+            client.loop_stop()
+            time.sleep(sleep_s)
+            continue
+
+        client.loop_stop()
+        client.disconnect()
+        time.sleep(2)
+
+
+def start_meshtastic_poller():
+    t = threading.Thread(target=_meshtastic_poll_loop, name="meshtastic-poller", daemon=True)
     t.start()
 
 
@@ -4696,8 +4952,9 @@ def api_alerts_get_config():
     if cfg is None:
         # Return defaults before any config is saved
         return jsonify({
-            "enabled": 0, "provider": "ntfy", "ntfy_topic": "",
-            "pushover_token": "", "pushover_user": "",
+            "enabled": 0,
+            "ntfy_enabled": 0, "pushover_enabled": 0, "discord_enabled": 0, "chat_enabled": 0,
+            "ntfy_topic": "", "pushover_token": "", "pushover_user": "",
             "on_ami_disconnect": 1, "on_ami_reconnect": 0,
             "on_cpu_temp_high": 1, "cpu_temp_threshold": 80,
             "on_node_connect": 0, "on_node_disconnect": 0, "watch_nodes": "",
@@ -4712,13 +4969,17 @@ def api_alerts_save_config():
     db   = get_db()
     db.execute(
         """INSERT OR REPLACE INTO alert_config
-           (id, enabled, provider, ntfy_topic, pushover_token, pushover_user,
+           (id, enabled, ntfy_enabled, pushover_enabled, discord_enabled, chat_enabled,
+            ntfy_topic, pushover_token, pushover_user,
             on_ami_disconnect, on_ami_reconnect, on_cpu_temp_high, cpu_temp_threshold,
             on_node_connect, on_node_disconnect, watch_nodes, on_dns_stuck)
-           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             1 if data.get("enabled")           else 0,
-            str(data.get("provider",           "ntfy")),
+            1 if data.get("ntfy_enabled")       else 0,
+            1 if data.get("pushover_enabled")   else 0,
+            1 if data.get("discord_enabled")    else 0,
+            1 if data.get("chat_enabled")       else 0,
             str(data.get("ntfy_topic",         "")),
             str(data.get("pushover_token",     "")),
             str(data.get("pushover_user",      "")),
@@ -7250,6 +7511,50 @@ def _chat_row_to_dict(row):
     return d
 
 
+# Discord chat relay — one-way mirror of the Chat panel out to a Discord
+# channel via an Incoming Webhook (no bot token/OAuth). A bounded queue +
+# one dedicated worker thread, not a thread per message: chat is already
+# rate-limited to 10/min/user (see api_chat_messages_post()'s @limiter.limit
+# below), but a queue keeps worker count fixed and centralizes retry/backoff
+# in one place rather than one-off threads each doing their own thing. If
+# the queue fills (a sustained Discord outage), the newest message is
+# dropped and logged rather than blocking the chat POST or growing
+# unbounded — a Discord hiccup must never be visible to someone using chat.
+_discord_relay_queue = _queue_mod.Queue(maxsize=50)
+
+
+def _discord_relay_build_payload(username, message):
+    """`allowed_mentions: {"parse": []}` is not cosmetic: without it, a kiosk
+    user typing "@everyone" in chat would ping the entire linked Discord
+    server through the webhook. Discord honors a webhook payload's own
+    allowed_mentions over the message content, so this fully suppresses
+    role/user/@everyone pings regardless of what's typed."""
+    return {
+        "content": f"**{username}**: {message}",
+        "allowed_mentions": {"parse": []},
+    }
+
+
+def _discord_relay_post(webhook_url, username, message):
+    _post_json_with_dns_backstop(webhook_url, _discord_relay_build_payload(username, message))
+
+
+def _discord_relay_worker():
+    while True:
+        username, message = _discord_relay_queue.get()
+        try:
+            cfg = _get_discord_relay_config()
+            if not cfg or not cfg['enabled'] or not cfg['webhook_url']:
+                continue
+            _discord_relay_post(cfg['webhook_url'], username, message)
+        except Exception as e:
+            log("WARN", f"[DISCORD-RELAY] Post failed (not fatal, dropping message): {e}")
+
+
+def start_discord_relay_worker():
+    threading.Thread(target=_discord_relay_worker, name="discord-relay-worker", daemon=True).start()
+
+
 @app.route('/api/chat/messages')
 def api_chat_messages_get():
     """Live panel feed. Cursor-based (since_id) so polling only ever pulls
@@ -7297,6 +7602,10 @@ def api_chat_messages_post():
         (user_row['id'], username, role, message)
     )
     db.commit()
+    try:
+        _discord_relay_queue.put_nowait((username, message))
+    except _queue_mod.Full:
+        log("WARN", "[DISCORD-RELAY] Queue full, dropping message")
     row = db.execute(
         "SELECT id, username, role, message, created_at FROM chat_messages WHERE id=?",
         (cur.lastrowid,)
@@ -9652,8 +9961,26 @@ STREAM_RELAY_CONFIG_DEFAULTS = {
 }
 
 
+MESHTASTIC_CONFIG_DEFAULTS = {
+    "root_topic": "/msh/US/MI", "channel_name": "Michigan", "psk": "MA==",
+}
+
+
 def _get_recording_config():
     row = get_db().execute("SELECT * FROM recording_config WHERE id=1").fetchone()
+    return dict(row) if row else None
+
+
+def _get_meshtastic_config():
+    row = get_db().execute("SELECT * FROM meshtastic_config WHERE id=1").fetchone()
+    return dict(row) if row else None
+
+
+DISCORD_RELAY_CONFIG_DEFAULTS = {"enabled": 0, "webhook_url": ""}
+
+
+def _get_discord_relay_config():
+    row = get_db().execute("SELECT * FROM discord_relay_config WHERE id=1").fetchone()
     return dict(row) if row else None
 
 
@@ -9811,6 +10138,96 @@ def api_stream_relay_config_save():
     )
     db.commit()
     log("INFO", f"[STREAM-RELAY] Config saved by {session.get('username', '')}")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/meshtastic/config")
+def api_meshtastic_config_get():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can view Meshtastic settings"}), 403
+    cfg = _get_meshtastic_config()
+    return jsonify(dict(cfg) if cfg else MESHTASTIC_CONFIG_DEFAULTS)
+
+
+@app.route("/api/meshtastic/config", methods=["POST", "PUT"])
+def api_meshtastic_config_save():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can change Meshtastic settings"}), 403
+    data = request.json or {}
+
+    # Leading "/" stripped silently rather than rejected -- "/msh/US/MI"
+    # typed conversationally (the way the owner wrote it) is an easy habit,
+    # but MQTT topics don't start with "/"; a leading slash would just
+    # produce a topic with an empty first level instead of erroring.
+    root_topic = str(data.get("root_topic", "")).strip().lstrip("/")
+    channel_name = str(data.get("channel_name", "")).strip()
+    psk = str(data.get("psk", "")).strip()
+
+    if not root_topic:
+        return jsonify({"error": "Root topic is required"}), 400
+    if not channel_name:
+        return jsonify({"error": "Channel name is required"}), 400
+    if meshtastic_mqtt is not None:
+        try:
+            meshtastic_mqtt.derive_key(psk)
+        except meshtastic_mqtt.InvalidPSK as e:
+            return jsonify({"error": f"Invalid PSK: {e}"}), 400
+    elif not psk:
+        return jsonify({"error": "PSK is required"}), 400
+
+    db = get_db()
+    db.execute(
+        """INSERT OR REPLACE INTO meshtastic_config (id, root_topic, channel_name, psk)
+           VALUES (1, ?, ?, ?)""",
+        (root_topic, channel_name, psk)
+    )
+    db.commit()
+    log("INFO", f"[MESHTASTIC] Config saved by {session.get('username', '')}")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/meshtastic/messages")
+def api_meshtastic_messages():
+    with _meshtastic_lock:
+        messages = list(_meshtastic_cache)
+    cfg = _get_meshtastic_config() or MESHTASTIC_CONFIG_DEFAULTS
+    return jsonify({
+        "messages": messages,
+        "channel_name": cfg["channel_name"],
+        "root_topic": cfg["root_topic"],
+    })
+
+
+@app.route("/api/discord-relay/config")
+def api_discord_relay_config_get():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can view Discord relay settings"}), 403
+    cfg = _get_discord_relay_config()
+    return jsonify(dict(cfg) if cfg else DISCORD_RELAY_CONFIG_DEFAULTS)
+
+
+@app.route("/api/discord-relay/config", methods=["POST", "PUT"])
+def api_discord_relay_config_save():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can change Discord relay settings"}), 403
+    data = request.json or {}
+    enabled = bool(data.get("enabled"))
+    webhook_url = str(data.get("webhook_url", "")).strip()
+
+    if enabled and not webhook_url:
+        return jsonify({"error": "Webhook URL is required to enable the relay"}), 400
+    if webhook_url and not webhook_url.startswith("https://discord.com/api/webhooks/") \
+            and not webhook_url.startswith("https://discordapp.com/api/webhooks/"):
+        return jsonify({"error": "That doesn't look like a Discord webhook URL"}), 400
+
+    db = get_db()
+    db.execute(
+        """INSERT OR REPLACE INTO discord_relay_config (id, enabled, webhook_url)
+           VALUES (1, ?, ?)""",
+        (int(enabled), webhook_url)
+    )
+    db.commit()
+    log("INFO", f"[DISCORD-RELAY] Config saved by {session.get('username', '')}")
     return jsonify({"ok": True})
 
 
@@ -11555,8 +11972,10 @@ if not os.environ.get("HENWEN_SKIP_STARTUP"):
     start_release_poller()
     start_aprs_poller()
     start_iss_poller()
+    start_meshtastic_poller()
     start_recording_janitor()
     start_chat_janitor()
+    start_discord_relay_worker()
     start_stream_relay()
 
 if __name__ == "__main__":
