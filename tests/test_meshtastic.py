@@ -203,3 +203,61 @@ class TestMeshtasticMessagesRoute:
         resp = client.get("/api/meshtastic/messages")
         assert resp.status_code == 200
         assert resp.get_json() == {"messages": [], "channel_name": "Michigan", "root_topic": "/msh/US/MI"}
+
+
+class TestMeshtasticPersistence:
+    """A HenWen restart clears _meshtastic_cache (in-process only) -- these
+    cover the meshtastic_messages table that reseeds it, so real decoded
+    messages survive a restart instead of the panel going blank."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self, fresh_db):
+        app._meshtastic_cache.clear()
+        app._meshtastic_raw_count = 0
+        app._meshtastic_decoded_count = 0
+        yield
+        app._meshtastic_cache.clear()
+
+    def test_on_message_persists_to_db(self, fresh_db):
+        msg = app._meshtastic_cache
+        assert len(msg) == 0
+
+        class _FakeMsg:
+            payload = _build_envelope("AQ==", portnums_pb2.PortNum.TEXT_MESSAGE_APP, b"hello mesh")
+
+        app._meshtastic_on_message("AQ==", _FakeMsg())
+
+        rows = app.get_db().execute("SELECT from_node, text FROM meshtastic_messages").fetchall()
+        assert len(rows) == 1
+        assert rows[0]["text"] == "hello mesh"
+        assert len(app._meshtastic_cache) == 1
+
+    def test_persisted_rows_pruned_to_cache_max(self, fresh_db, monkeypatch):
+        monkeypatch.setattr(app, "MESHTASTIC_CACHE_MAX", 3)
+        for i in range(5):
+
+            class _FakeMsg:
+                payload = _build_envelope("AQ==", portnums_pb2.PortNum.TEXT_MESSAGE_APP,
+                                           f"msg {i}".encode(), packet_id=1000 + i)
+
+            app._meshtastic_on_message("AQ==", _FakeMsg())
+
+        rows = app.get_db().execute("SELECT text FROM meshtastic_messages ORDER BY id").fetchall()
+        assert [r["text"] for r in rows] == ["msg 2", "msg 3", "msg 4"]
+
+    def test_start_meshtastic_poller_reseeds_cache_from_db(self, fresh_db, monkeypatch):
+        db = app.get_db()
+        db.execute("INSERT INTO meshtastic_messages (from_node, text, ts) VALUES (?, ?, ?)",
+                   ("!aabbccdd", "reseeded message", 1234.0))
+        db.commit()
+
+        # Stub out the actual network poll loop -- only the reseed-then-launch
+        # behavior of start_meshtastic_poller() is under test here.
+        monkeypatch.setattr(app.threading, "Thread", lambda **kw: type(
+            "T", (), {"start": lambda self: None})())
+
+        app.start_meshtastic_poller()
+
+        assert list(app._meshtastic_cache) == [
+            {"from_node": "!aabbccdd", "text": "reseeded message", "ts": 1234.0}
+        ]

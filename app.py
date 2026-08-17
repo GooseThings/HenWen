@@ -749,6 +749,19 @@ def get_db():
         psk          TEXT NOT NULL DEFAULT 'MA=='
     )""")
     conn.commit()
+    # Persisted mirror of _meshtastic_cache -- the in-process deque is still
+    # the hot read path (api_meshtastic_messages() reads it, not this table),
+    # this exists purely so start_meshtastic_poller() can reseed that cache
+    # at startup instead of a HenWen restart silently discarding whatever
+    # history was on-screen. Pruned to MESHTASTIC_CACHE_MAX rows on every
+    # insert, so it never holds more than the cache itself would.
+    conn.execute("""CREATE TABLE IF NOT EXISTS meshtastic_messages (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        from_node TEXT NOT NULL,
+        text      TEXT NOT NULL,
+        ts        REAL NOT NULL
+    )""")
+    conn.commit()
     # Singleton config for the Discord chat relay — one-way mirror of the
     # kiosk Chat panel out to a Discord channel via an Incoming Webhook (no
     # bot token/OAuth). webhook_url is a real secret (holding it lets anyone
@@ -2965,6 +2978,22 @@ def _meshtastic_on_message(psk, msg):
     with _meshtastic_lock:
         _meshtastic_decoded_count += 1
         _meshtastic_cache.append(result)
+    try:
+        db = get_db()
+        db.execute(
+            "INSERT INTO meshtastic_messages (from_node, text, ts) VALUES (?, ?, ?)",
+            (result["from_node"], result["text"], result["ts"])
+        )
+        # Keep only the newest MESHTASTIC_CACHE_MAX rows -- this table is a
+        # restart-survival mirror of the cache, not a growing history log.
+        db.execute(
+            """DELETE FROM meshtastic_messages WHERE id NOT IN (
+                   SELECT id FROM meshtastic_messages ORDER BY id DESC LIMIT ?)""",
+            (MESHTASTIC_CACHE_MAX,)
+        )
+        db.commit()
+    except Exception as e:
+        log("WARN", f"[MESHTASTIC] Failed to persist message (not fatal): {e}")
 
 
 def _meshtastic_poll_loop():
@@ -3057,6 +3086,20 @@ def _meshtastic_poll_loop():
 
 
 def start_meshtastic_poller():
+    # Reseed the in-process cache from meshtastic_messages before the poller
+    # even connects, so a HenWen restart doesn't blank the kiosk panel --
+    # this is a one-shot reload, not something the poll loop itself repeats.
+    try:
+        rows = get_db().execute(
+            "SELECT from_node, text, ts FROM meshtastic_messages ORDER BY id ASC"
+        ).fetchall()
+        with _meshtastic_lock:
+            for r in rows:
+                _meshtastic_cache.append({"from_node": r["from_node"], "text": r["text"], "ts": r["ts"]})
+        if rows:
+            log("INFO", f"[MESHTASTIC] Reloaded {len(rows)} persisted message(s) into cache")
+    except Exception as e:
+        log("WARN", f"[MESHTASTIC] Failed to reload persisted messages (not fatal): {e}")
     t = threading.Thread(target=_meshtastic_poll_loop, name="meshtastic-poller", daemon=True)
     t.start()
 
