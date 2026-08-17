@@ -38,6 +38,7 @@ import sqlite3
 import threading
 import tempfile
 import math
+import queue as _queue_mod
 import sys
 import pwd
 import grp
@@ -778,6 +779,18 @@ def get_db():
     # bot token/OAuth). webhook_url is a real secret (holding it lets anyone
     # post into the owner's Discord channel), unlike the Meshtastic PSK above.
     conn.execute("""CREATE TABLE IF NOT EXISTS discord_relay_config (
+        id          INTEGER PRIMARY KEY CHECK (id = 1),
+        enabled     INTEGER NOT NULL DEFAULT 0,
+        webhook_url TEXT    NOT NULL DEFAULT ''
+    )""")
+    conn.commit()
+    # Singleton config for the Meshtastic Discord relay -- a second, fully
+    # independent one-way mirror (Meshtastic panel -> Discord), deliberately
+    # NOT sharing discord_relay_config's webhook: a mesh-radio feed is a
+    # different audience/destination than repeater chat, unlike the NWS
+    # alert Discord toggle which intentionally reuses the chat relay's
+    # webhook. See _meshtastic_on_message() and start_meshtastic_discord_relay_worker().
+    conn.execute("""CREATE TABLE IF NOT EXISTS meshtastic_discord_relay_config (
         id          INTEGER PRIMARY KEY CHECK (id = 1),
         enabled     INTEGER NOT NULL DEFAULT 0,
         webhook_url TEXT    NOT NULL DEFAULT ''
@@ -3033,6 +3046,12 @@ def _meshtastic_on_message(psk, msg):
     with _meshtastic_lock:
         _meshtastic_decoded_count += 1
         _meshtastic_cache.append(result)
+        name_info = _meshtastic_names_cache.get(result["from_node"])
+    display_name = name_info["short_name"] if name_info and name_info["short_name"] else result["from_node"]
+    try:
+        _meshtastic_discord_relay_queue.put_nowait((display_name, result["text"]))
+    except _queue_mod.Full:
+        log("WARN", "[MESHTASTIC-DISCORD-RELAY] Queue full, dropping message")
     try:
         db = get_db()
         db.execute(
@@ -3049,6 +3068,47 @@ def _meshtastic_on_message(psk, msg):
         db.commit()
     except Exception as e:
         log("WARN", f"[MESHTASTIC] Failed to persist message (not fatal): {e}")
+
+
+# Meshtastic Discord relay -- one-way mirror of decoded Meshtastic text
+# messages out to a Discord channel via an Incoming Webhook, architecturally
+# identical to the Chat panel's own relay (bounded queue + one dedicated
+# worker thread, see _discord_relay_queue/_discord_relay_worker above) but
+# fully independent: its own config table/webhook, since a mesh-radio feed
+# is a different destination than repeater chat. Enqueued directly from
+# _meshtastic_on_message() above, not from a Flask request route.
+_meshtastic_discord_relay_queue = _queue_mod.Queue(maxsize=50)
+
+
+def _meshtastic_discord_relay_build_payload(display_name, text):
+    """allowed_mentions suppression matters even more here than for the chat
+    relay: this text comes straight from unauthenticated public mesh radios,
+    not logged-in HenWen users, so it's the only thing standing between a
+    stray "@everyone" on the mesh and pinging the whole Discord server."""
+    return {
+        "content": f"**{display_name}**: {text}",
+        "allowed_mentions": {"parse": []},
+    }
+
+
+def _meshtastic_discord_relay_post(webhook_url, display_name, text):
+    _post_json_with_dns_backstop(webhook_url, _meshtastic_discord_relay_build_payload(display_name, text))
+
+
+def _meshtastic_discord_relay_worker():
+    while True:
+        display_name, text = _meshtastic_discord_relay_queue.get()
+        try:
+            cfg = _get_meshtastic_discord_relay_config()
+            if not cfg or not cfg['enabled'] or not cfg['webhook_url']:
+                continue
+            _meshtastic_discord_relay_post(cfg['webhook_url'], display_name, text)
+        except Exception as e:
+            log("WARN", f"[MESHTASTIC-DISCORD-RELAY] Post failed (not fatal, dropping message): {e}")
+
+
+def start_meshtastic_discord_relay_worker():
+    threading.Thread(target=_meshtastic_discord_relay_worker, name="meshtastic-discord-relay-worker", daemon=True).start()
 
 
 def _meshtastic_poll_loop():
@@ -6550,8 +6610,6 @@ def api_tx_diagnostics():
 # client queue is seeded with the cached init segment on join, then receives
 # whole ~200 ms Clusters (see _drain_webm).
 # ---------------------------------------------------------------------------
-import queue as _queue_mod
-
 _WEBM_CLUSTER_ID = b'\x1f\x43\xb6\x75'   # EBML ID of a Matroska/WebM Cluster
 
 
@@ -10095,6 +10153,14 @@ def _get_discord_relay_config():
     return dict(row) if row else None
 
 
+MESHTASTIC_DISCORD_RELAY_CONFIG_DEFAULTS = {"enabled": 0, "webhook_url": ""}
+
+
+def _get_meshtastic_discord_relay_config():
+    row = get_db().execute("SELECT * FROM meshtastic_discord_relay_config WHERE id=1").fetchone()
+    return dict(row) if row else None
+
+
 def _get_stream_relay_config():
     row = get_db().execute("SELECT * FROM stream_relay_config WHERE id=1").fetchone()
     return dict(row) if row else None
@@ -10348,6 +10414,39 @@ def api_discord_relay_config_save():
     )
     db.commit()
     log("INFO", f"[DISCORD-RELAY] Config saved by {session.get('username', '')}")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/meshtastic-discord-relay/config")
+def api_meshtastic_discord_relay_config_get():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can view Meshtastic Discord relay settings"}), 403
+    cfg = _get_meshtastic_discord_relay_config()
+    return jsonify(dict(cfg) if cfg else MESHTASTIC_DISCORD_RELAY_CONFIG_DEFAULTS)
+
+
+@app.route("/api/meshtastic-discord-relay/config", methods=["POST", "PUT"])
+def api_meshtastic_discord_relay_config_save():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can change Meshtastic Discord relay settings"}), 403
+    data = request.json or {}
+    enabled = bool(data.get("enabled"))
+    webhook_url = str(data.get("webhook_url", "")).strip()
+
+    if enabled and not webhook_url:
+        return jsonify({"error": "Webhook URL is required to enable the relay"}), 400
+    if webhook_url and not webhook_url.startswith("https://discord.com/api/webhooks/") \
+            and not webhook_url.startswith("https://discordapp.com/api/webhooks/"):
+        return jsonify({"error": "That doesn't look like a Discord webhook URL"}), 400
+
+    db = get_db()
+    db.execute(
+        """INSERT OR REPLACE INTO meshtastic_discord_relay_config (id, enabled, webhook_url)
+           VALUES (1, ?, ?)""",
+        (int(enabled), webhook_url)
+    )
+    db.commit()
+    log("INFO", f"[MESHTASTIC-DISCORD-RELAY] Config saved by {session.get('username', '')}")
     return jsonify({"ok": True})
 
 
@@ -12096,6 +12195,7 @@ if not os.environ.get("HENWEN_SKIP_STARTUP"):
     start_recording_janitor()
     start_chat_janitor()
     start_discord_relay_worker()
+    start_meshtastic_discord_relay_worker()
     start_stream_relay()
 
 if __name__ == "__main__":
