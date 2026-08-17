@@ -762,6 +762,17 @@ def get_db():
         ts        REAL NOT NULL
     )""")
     conn.commit()
+    # Node-id -> friendly-name lookup for the Meshtastic panel, built from
+    # NODEINFO_APP packets a node broadcasts periodically alongside its text
+    # traffic. One row per node ever seen (upserted, not append-only, since
+    # a name is current state, not history) -- see _remember_meshtastic_node_name().
+    conn.execute("""CREATE TABLE IF NOT EXISTS meshtastic_node_names (
+        node_id    TEXT PRIMARY KEY,
+        short_name TEXT NOT NULL DEFAULT '',
+        long_name  TEXT NOT NULL DEFAULT '',
+        ts         REAL NOT NULL
+    )""")
+    conn.commit()
     # Singleton config for the Discord chat relay — one-way mirror of the
     # kiosk Chat panel out to a Discord channel via an Incoming Webhook (no
     # bot token/OAuth). webhook_url is a real secret (holding it lets anyone
@@ -2940,10 +2951,13 @@ def start_aprs_poller():
 # root-topic/channel. Same "one shared in-process cache, many cheap reads"
 # shape as the APRS/global-activity pollers above: however many kiosk
 # viewers have the panel open, it's still one upstream connection and one
-# cache read per poll. Only decoded TEXT_MESSAGE_APP messages are kept —
-# position/telemetry/nodeinfo packets (the bulk of real traffic) are
-# discarded at decode time by meshtastic_mqtt.decode_service_envelope()
-# itself, not filtered here.
+# cache read per poll. Only decoded TEXT_MESSAGE_APP messages are kept in
+# _meshtastic_cache — position/telemetry packets (the bulk of real traffic)
+# are discarded at decode time by meshtastic_mqtt.decode_service_envelope()
+# itself, not filtered here. NODEINFO_APP packets are the one exception:
+# decode_nodeinfo() pulls a node's self-announced short/long name out of
+# them into _meshtastic_names_cache below, purely so messages can show a
+# friendly name instead of the raw "!xxxxxxxx" node id.
 MESHTASTIC_MQTT_HOST = "mqtt.meshtastic.org"
 MESHTASTIC_MQTT_PORT = 1883
 MESHTASTIC_MQTT_USERNAME = "meshdev"
@@ -2951,6 +2965,7 @@ MESHTASTIC_MQTT_PASSWORD = "large4cats"
 MESHTASTIC_CACHE_MAX = 50
 
 _meshtastic_cache = deque(maxlen=MESHTASTIC_CACHE_MAX)   # newest last; each {"from_node","text","ts"}
+_meshtastic_names_cache = {}   # node_id ("!xxxxxxxx") -> {"short_name","long_name","ts"}
 _meshtastic_lock = threading.Lock()
 # Raw-vs-decoded counters, reset and logged every ~30s by _meshtastic_poll_loop
 # -- decode_service_envelope() returning None (wrong portnum, invalid UTF-8,
@@ -2963,10 +2978,50 @@ _meshtastic_raw_count = 0
 _meshtastic_decoded_count = 0
 
 
+def _remember_meshtastic_node_name(nodeinfo):
+    node_id = nodeinfo["node_id"]
+    ts = time.time()
+    with _meshtastic_lock:
+        _meshtastic_names_cache[node_id] = {
+            "short_name": nodeinfo["short_name"],
+            "long_name": nodeinfo["long_name"],
+            "ts": ts,
+        }
+    try:
+        db = get_db()
+        db.execute(
+            """INSERT INTO meshtastic_node_names (node_id, short_name, long_name, ts)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(node_id) DO UPDATE SET
+                   short_name=excluded.short_name, long_name=excluded.long_name, ts=excluded.ts""",
+            (node_id, nodeinfo["short_name"], nodeinfo["long_name"], ts)
+        )
+        db.commit()
+    except Exception as e:
+        log("WARN", f"[MESHTASTIC] Failed to persist node name (not fatal): {e}")
+
+
 def _meshtastic_on_message(psk, msg):
     global _meshtastic_raw_count, _meshtastic_decoded_count
     with _meshtastic_lock:
         _meshtastic_raw_count += 1
+
+    # A given MQTT payload is either a text message or a NODEINFO_APP name
+    # announcement, never both, and there's no way to tell which without
+    # decrypting -- so every non-text packet (the bulk of real traffic:
+    # position/telemetry/etc.) costs two failed decode attempts below
+    # instead of one. Both are a single small AES-CTR block plus a tiny
+    # protobuf parse, cheap enough at this message rate (at most a few per
+    # second) to not be worth a shared-decrypt-then-dispatch refactor.
+    try:
+        nodeinfo = meshtastic_mqtt.decode_nodeinfo(msg.payload, psk)
+    except Exception as e:
+        log("WARN", f"[MESHTASTIC] Nodeinfo decode error (not fatal, skipping message): {e}")
+        nodeinfo = None
+    if nodeinfo is not None:
+        _remember_meshtastic_node_name(nodeinfo)
+        return
+
     try:
         result = meshtastic_mqtt.decode_service_envelope(msg.payload, psk)
     except Exception as e:
@@ -3100,6 +3155,19 @@ def start_meshtastic_poller():
             log("INFO", f"[MESHTASTIC] Reloaded {len(rows)} persisted message(s) into cache")
     except Exception as e:
         log("WARN", f"[MESHTASTIC] Failed to reload persisted messages (not fatal): {e}")
+    try:
+        name_rows = get_db().execute(
+            "SELECT node_id, short_name, long_name, ts FROM meshtastic_node_names"
+        ).fetchall()
+        with _meshtastic_lock:
+            for r in name_rows:
+                _meshtastic_names_cache[r["node_id"]] = {
+                    "short_name": r["short_name"], "long_name": r["long_name"], "ts": r["ts"]
+                }
+        if name_rows:
+            log("INFO", f"[MESHTASTIC] Reloaded {len(name_rows)} persisted node name(s) into cache")
+    except Exception as e:
+        log("WARN", f"[MESHTASTIC] Failed to reload persisted node names (not fatal): {e}")
     t = threading.Thread(target=_meshtastic_poll_loop, name="meshtastic-poller", daemon=True)
     t.start()
 
@@ -10232,7 +10300,16 @@ def api_meshtastic_config_save():
 @app.route("/api/meshtastic/messages")
 def api_meshtastic_messages():
     with _meshtastic_lock:
-        messages = list(_meshtastic_cache)
+        messages = [dict(m) for m in _meshtastic_cache]
+        names = dict(_meshtastic_names_cache)
+    # Enriched here rather than at decode time -- a name learned from a
+    # NODEINFO_APP packet after a text message already landed in the cache
+    # should still backfill onto that older message on the next poll,
+    # instead of only ever applying to messages received afterward.
+    for m in messages:
+        info = names.get(m["from_node"])
+        m["short_name"] = info["short_name"] if info else ""
+        m["long_name"] = info["long_name"] if info else ""
     cfg = _get_meshtastic_config() or MESHTASTIC_CONFIG_DEFAULTS
     return jsonify({
         "messages": messages,

@@ -10,8 +10,14 @@ syntax = "proto3";
 // in the reader's schema, so omitting fields is safe — it just means
 // HenWen can't read them, not that parsing breaks.
 //
-// If a future feature needs more (e.g. decoding NODEINFO_APP for friendly
-// node names instead of raw hex IDs), swap this file and mqtt_min.proto
+// User (NODEINFO_APP payload) added 2026-08-17 for friendly node names in
+// the Meshtastic panel -- field numbers verified against upstream
+// meshtastic/protobufs' mesh.proto. Only long_name/short_name are kept;
+// the other ~6 real User fields (macaddr, hw_model, role, public_key, ...)
+// are irrelevant here and safely skipped by protobuf's unknown-field
+// handling, same as every other field this schema omits.
+//
+// If a future feature needs still more, swap this file and mqtt_min.proto
 // for the real upstream mesh.proto/mqtt.proto rather than extending this
 // by hand — same `package meshtastic;` name, so nothing else needs to change.
 
@@ -33,4 +39,9 @@ message MeshPacket {
   // `decoded` — see mqtt_min.proto's ServiceEnvelope comment.
   bytes encrypted = 5;
   fixed32 id = 6;
+}
+
+message User {
+  string long_name = 2;
+  string short_name = 3;
 }

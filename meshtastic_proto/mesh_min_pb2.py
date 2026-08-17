@@ -14,7 +14,7 @@ _sym_db = _symbol_database.Default()
 from meshtastic_proto import portnums_pb2 as meshtastic__proto_dot_portnums__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1fmeshtastic_proto/mesh_min.proto\x12\nmeshtastic\x1a\x1fmeshtastic_proto/portnums.proto\"=\n\x04\x44\x61ta\x12$\n\x07portnum\x18\x01 \x01(\x0e\x32\x13.meshtastic.PortNum\x12\x0f\n\x07payload\x18\x02 \x01(\x0c\"V\n\nMeshPacket\x12\x0c\n\x04\x66rom\x18\x01 \x01(\x07\x12\n\n\x02to\x18\x02 \x01(\x07\x12\x0f\n\x07\x63hannel\x18\x03 \x01(\r\x12\x11\n\tencrypted\x18\x05 \x01(\x0c\x12\n\n\x02id\x18\x06 \x01(\x07\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1fmeshtastic_proto/mesh_min.proto\x12\nmeshtastic\x1a\x1fmeshtastic_proto/portnums.proto\"=\n\x04\x44\x61ta\x12$\n\x07portnum\x18\x01 \x01(\x0e\x32\x13.meshtastic.PortNum\x12\x0f\n\x07payload\x18\x02 \x01(\x0c\"V\n\nMeshPacket\x12\x0c\n\x04\x66rom\x18\x01 \x01(\x07\x12\n\n\x02to\x18\x02 \x01(\x07\x12\x0f\n\x07\x63hannel\x18\x03 \x01(\r\x12\x11\n\tencrypted\x18\x05 \x01(\x0c\x12\n\n\x02id\x18\x06 \x01(\x07\"-\n\x04User\x12\x11\n\tlong_name\x18\x02 \x01(\t\x12\x12\n\nshort_name\x18\x03 \x01(\tb\x06proto3')
 
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, globals())
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'meshtastic_proto.mesh_min_pb2', globals())
@@ -25,4 +25,6 @@ if _descriptor._USE_C_DESCRIPTORS == False:
   _DATA._serialized_end=141
   _MESHPACKET._serialized_start=143
   _MESHPACKET._serialized_end=229
+  _USER._serialized_start=231
+  _USER._serialized_end=276
 # @@protoc_insertion_point(module_scope)
