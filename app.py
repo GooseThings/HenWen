@@ -72,6 +72,11 @@ import recording
 # independence story as recording.py, and independent of recording.py
 # itself too. Driven entirely through the Relay class below.
 import stream_relay
+# irc_relay.py (two-way IRC chat relay) — same independence story, driven
+# entirely through the IRCClient class below. No pip dependency involved
+# (stdlib socket/ssl only), so unlike aprslib/paho-mqtt this import needs
+# no try/except guard.
+import irc_relay
 
 # aprslib is optional — shelled-out-style guard so a checkout that hasn't
 # picked up the dependency yet (or an admin who edited requirements.txt)
@@ -802,6 +807,22 @@ def get_db():
         id          INTEGER PRIMARY KEY CHECK (id = 1),
         enabled     INTEGER NOT NULL DEFAULT 0,
         webhook_url TEXT    NOT NULL DEFAULT ''
+    )""")
+    conn.commit()
+    # Singleton config for the two-way IRC chat relay -- see irc_relay.py and
+    # the "IRC chat relay" section below for the full architecture. Stored
+    # plaintext (nickserv_password included) matching discord_relay_config's
+    # precedent -- this app has no secrets-encryption layer to plug into.
+    conn.execute("""CREATE TABLE IF NOT EXISTS irc_relay_config (
+        id                INTEGER PRIMARY KEY CHECK (id = 1),
+        enabled           INTEGER NOT NULL DEFAULT 0,
+        host              TEXT    NOT NULL DEFAULT '',
+        port              INTEGER NOT NULL DEFAULT 6697,
+        use_tls           INTEGER NOT NULL DEFAULT 1,
+        channel           TEXT    NOT NULL DEFAULT '',
+        channel_key       TEXT    NOT NULL DEFAULT '',
+        nick              TEXT    NOT NULL DEFAULT '',
+        nickserv_password TEXT    NOT NULL DEFAULT ''
     )""")
     conn.commit()
     # Per-node lockout: presence of a row means that node is locked by its
@@ -7729,6 +7750,121 @@ def start_discord_relay_worker():
     threading.Thread(target=_discord_relay_worker, name="discord-relay-worker", daemon=True).start()
 
 
+# IRC chat relay — a two-way bridge between the Chat panel and one IRC
+# channel, via irc_relay.py's hand-rolled IRCClient. Unlike the Discord
+# relay above (a fire-and-forget webhook, necessarily one-way), IRC is a
+# real persistent bidirectional connection, so there's no reason to
+# withhold inbound relay the way a webhook forces for Discord.
+#
+# Outbound (kiosk chat -> IRC): api_chat_messages_post() enqueues onto
+# _irc_relay_queue right alongside the existing _discord_relay_queue
+# enqueue, same bounded/drop-newest-on-full semantics -- an IRC outage
+# must never be visible to someone typing in kiosk chat, same reasoning
+# as the Discord relay.
+#
+# Inbound (IRC -> kiosk chat): _irc_relay_on_message() is handed to
+# IRCClient.read_loop() as a callback and inserts directly into
+# chat_messages with role='irc' and the reserved user_id=0 sentinel (same
+# sentinel the NWS/system alert path uses -- chat_messages.user_id has no
+# FK constraint). This deliberately bypasses api_chat_messages_post(), the
+# same way system alerts do, so an inbound IRC message never gets
+# re-enqueued onto _irc_relay_queue and echoed straight back out.
+_irc_relay_queue = _queue_mod.Queue(maxsize=50)
+
+# Holds the live IRCClient (or None when disconnected), read by both the
+# send worker and the status route. A dict wrapper (not a bare module
+# global) so those readers don't need a `global` statement; _irc_relay_lock
+# guards both the swap in _irc_relay_loop() and every read.
+_irc_relay_client_ref = {"client": None}
+_irc_relay_lock = threading.Lock()
+
+
+def _irc_relay_on_message(nick, text):
+    try:
+        db = get_db()
+        db.execute(
+            "INSERT INTO chat_messages (user_id, username, role, message) VALUES (0, ?, 'irc', ?)",
+            (nick, text)
+        )
+        db.commit()
+    except Exception as e:
+        log("WARN", f"[IRC-RELAY] Failed to persist inbound message (not fatal): {e}")
+
+
+def _irc_relay_send_worker():
+    """Drains _irc_relay_queue onto whichever IRCClient is currently live.
+    Runs on its own thread, separate from the reconnect loop, so a send
+    can never delay that loop noticing a PING or a dead connection."""
+    while True:
+        username, message = _irc_relay_queue.get()
+        with _irc_relay_lock:
+            client = _irc_relay_client_ref["client"]
+        if client is None or not client.alive:
+            continue  # not connected right now -- drop rather than buffer across reconnects
+        try:
+            client.send_message(f"<{username}> {message}")
+        except Exception as e:
+            log("WARN", f"[IRC-RELAY] Send failed (not fatal, dropping message): {e}")
+
+
+def _irc_relay_loop():
+    """Reconnect/backoff state machine -- mirrors _meshtastic_poll_loop's
+    shape (app.py's Meshtastic MQTT poller): re-reads irc_relay_config at
+    the top of every reconnect cycle so a saved Manager edit takes effect
+    on the next natural reconnect without a HenWen restart, no-ops until
+    the required fields are present, exponential backoff capped the same
+    way. irc_relay.IRCClient itself stays "dumb" -- this loop is the only
+    place that decides when to retry."""
+    backoff = 0
+    while True:
+        cfg = _get_irc_relay_config() or IRC_RELAY_CONFIG_DEFAULTS
+        if not (cfg.get("enabled") and cfg.get("host") and cfg.get("channel") and cfg.get("nick")):
+            time.sleep(60)
+            continue
+        client = None
+        try:
+            client = irc_relay.IRCClient(
+                host=cfg["host"], port=cfg["port"], use_tls=bool(cfg["use_tls"]),
+                nick=cfg["nick"], channel=cfg["channel"], channel_key=cfg.get("channel_key", ""),
+                nickserv_password=cfg.get("nickserv_password", ""),
+                log_fn=lambda msg: log("INFO", f"[IRC-RELAY] {msg}"),
+            )
+            client.connect()
+            if cfg.get("nickserv_password"):
+                client.identify()
+                # Give NickServ a moment to process IDENTIFY before joining --
+                # some networks reject a JOIN to a registered/moderated
+                # channel that arrives before identification completes.
+                time.sleep(2)
+            client.join()
+            backoff = 0
+            with _irc_relay_lock:
+                _irc_relay_client_ref["client"] = client
+            log("INFO", f"[IRC-RELAY] Connected to {cfg['host']}:{cfg['port']} "
+                        f"as {cfg['nick']}, joined {cfg['channel']}")
+            client.read_loop(on_message=_irc_relay_on_message)  # blocks until disconnect
+        except Exception as e:
+            backoff = min(backoff + 1, 6)
+            sleep_s = min(30 * (2 ** backoff), 900)
+            log("WARN", f"[IRC-RELAY] Connection error ({e}) — retrying in {sleep_s:.0f}s")
+            with _irc_relay_lock:
+                _irc_relay_client_ref["client"] = None
+            if client is not None:
+                client.close()  # release the socket -- a bare `client = ...` reassignment
+                                 # on the next loop iteration would otherwise leak it
+            time.sleep(sleep_s)
+            continue
+        with _irc_relay_lock:
+            _irc_relay_client_ref["client"] = None
+        client.close()
+        time.sleep(2)
+
+
+def start_irc_relay():
+    threading.Thread(target=_irc_relay_loop, name="irc-relay", daemon=True).start()
+    threading.Thread(target=_irc_relay_send_worker, name="irc-relay-sender", daemon=True).start()
+
+
 @app.route('/api/chat/messages')
 def api_chat_messages_get():
     """Live panel feed. Cursor-based (since_id) so polling only ever pulls
@@ -7780,6 +7916,10 @@ def api_chat_messages_post():
         _discord_relay_queue.put_nowait((username, message))
     except _queue_mod.Full:
         log("WARN", "[DISCORD-RELAY] Queue full, dropping message")
+    try:
+        _irc_relay_queue.put_nowait((username, message))
+    except _queue_mod.Full:
+        log("WARN", "[IRC-RELAY] Queue full, dropping message")
     row = db.execute(
         "SELECT id, username, role, message, created_at FROM chat_messages WHERE id=?",
         (cur.lastrowid,)
@@ -10166,6 +10306,17 @@ def _get_meshtastic_discord_relay_config():
     return dict(row) if row else None
 
 
+IRC_RELAY_CONFIG_DEFAULTS = {
+    "enabled": 0, "host": "", "port": 6697, "use_tls": 1,
+    "channel": "", "channel_key": "", "nick": "", "nickserv_password": "",
+}
+
+
+def _get_irc_relay_config():
+    row = get_db().execute("SELECT * FROM irc_relay_config WHERE id=1").fetchone()
+    return dict(row) if row else None
+
+
 def _get_stream_relay_config():
     row = get_db().execute("SELECT * FROM stream_relay_config WHERE id=1").fetchone()
     return dict(row) if row else None
@@ -10453,6 +10604,59 @@ def api_meshtastic_discord_relay_config_save():
     db.commit()
     log("INFO", f"[MESHTASTIC-DISCORD-RELAY] Config saved by {session.get('username', '')}")
     return jsonify({"ok": True})
+
+
+@app.route("/api/irc-relay/config")
+def api_irc_relay_config_get():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can view IRC relay settings"}), 403
+    cfg = _get_irc_relay_config()
+    return jsonify(dict(cfg) if cfg else IRC_RELAY_CONFIG_DEFAULTS)
+
+
+@app.route("/api/irc-relay/config", methods=["POST", "PUT"])
+def api_irc_relay_config_save():
+    """Owner-only. host/nickserv_password stored plaintext, matching
+    discord_relay_config.webhook_url -- this app has no secrets-encryption
+    layer to plug into."""
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can change IRC relay settings"}), 403
+    data = request.json or {}
+    enabled            = bool(data.get("enabled"))
+    host               = str(data.get("host", "")).strip()
+    use_tls            = bool(data.get("use_tls", True))
+    channel            = str(data.get("channel", "")).strip()
+    channel_key        = str(data.get("channel_key", "")).strip()
+    nick               = str(data.get("nick", "")).strip()
+    nickserv_password  = str(data.get("nickserv_password", "")).strip()
+    try:
+        port = int(data.get("port", 6697))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Port must be a number"}), 400
+    if channel and not channel.startswith("#"):
+        channel = "#" + channel
+    if enabled and not (host and port and channel and nick):
+        return jsonify({"error": "Host, port, channel, and nick are required to enable the relay"}), 400
+
+    db = get_db()
+    db.execute(
+        """INSERT OR REPLACE INTO irc_relay_config
+           (id, enabled, host, port, use_tls, channel, channel_key, nick, nickserv_password)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (int(enabled), host, port, int(use_tls), channel, channel_key, nick, nickserv_password)
+    )
+    db.commit()
+    log("INFO", f"[IRC-RELAY] Config saved by {session.get('username', '')}")
+    return jsonify({"ok": True})
+
+
+@app.route('/api/irc-relay/status')
+def api_irc_relay_status():
+    if session.get('role') != 'owner':
+        return jsonify({'error': 'Only the owner can view IRC relay status'}), 403
+    with _irc_relay_lock:
+        connected = _irc_relay_client_ref["client"] is not None
+    return jsonify({'connected': connected})
 
 
 # ---------------------------------------------------------------------------
@@ -12202,6 +12406,7 @@ if not os.environ.get("HENWEN_SKIP_STARTUP"):
     start_discord_relay_worker()
     start_meshtastic_discord_relay_worker()
     start_stream_relay()
+    start_irc_relay()
 
 if __name__ == "__main__":
     log("INFO", "Starting in direct-run mode (not via gunicorn)")
