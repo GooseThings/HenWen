@@ -670,6 +670,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .chat-row .chat-body { color: var(--text); }
 .chat-row-alert { background: color-mix(in srgb, var(--warn) 12%, transparent); border-left: 3px solid var(--warn); padding-left: 8px; margin-left: -3px; }
 .chat-row-alert .chat-user { color: var(--warn); }
+.chat-row-irc { background: color-mix(in srgb, var(--green) 12%, transparent); border-left: 3px solid var(--green); padding-left: 8px; margin-left: -3px; }
+.chat-row-irc .chat-user { color: var(--green); }
 .chat-date-divider { display: flex; align-items: center; gap: 8px; margin: 6px 0 2px;
   font-size: 0.65rem; letter-spacing: .04em; color: var(--text2); text-align: center; }
 .chat-date-divider::before, .chat-date-divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
@@ -3852,7 +3854,7 @@ function appendChatMessages(msgs) {
       _chatLastDateKey = dateKey;
     }
     var row = document.createElement('div');
-    row.className = 'chat-row' + (m.role === 'system' ? ' chat-row-alert' : '');
+    row.className = 'chat-row' + (m.role === 'system' ? ' chat-row-alert' : m.role === 'irc' ? ' chat-row-irc' : '');
     row.setAttribute('data-msg-id', m.id);
     /* [HH:MM:SS AM/PM] Username: message — a fixed absolute time rather
        than relTime()'s "2m ago", which was only ever computed once at
