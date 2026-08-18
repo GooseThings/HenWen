@@ -668,6 +668,11 @@ def get_db():
         # ntfy/Pushover/Discord, no credentials to configure since it's
         # local to this install.
         conn.execute("ALTER TABLE alert_config ADD COLUMN chat_enabled INTEGER NOT NULL DEFAULT 0")
+    if 'irc_enabled' not in _alert_cols:
+        # A fifth destination: sends directly to the live IRC relay
+        # connection (Manager > IRC Relay) rather than through
+        # _irc_relay_queue -- see _send_alert()'s irc_enabled branch for why.
+        conn.execute("ALTER TABLE alert_config ADD COLUMN irc_enabled INTEGER NOT NULL DEFAULT 0")
     conn.commit()
     # Singleton config for the NWS severe weather auto-announcement poller —
     # separate from alert_config (that's push notifications; this is
@@ -2547,6 +2552,24 @@ def _send_alert(title, message, priority="default"):
             db.commit()
         except Exception as e:
             log("ERROR", f"[ALERTS] chat post error: {e}")
+    if cfg["irc_enabled"]:
+        try:
+            # Sent directly to the live IRCClient rather than via
+            # _irc_relay_queue -- that queue's messages get the
+            # '<username> message' chat-bracket format
+            # api_chat_messages_post() uses, which isn't right for a system
+            # alert, and queuing would silently drop the alert on a
+            # disconnected relay the same as an ordinary chat message
+            # instead of logging it as the notable miss that it is.
+            with _irc_relay_lock:
+                client = _irc_relay_client_ref["client"]
+            if client is None or not client.alive:
+                log("WARN", "[ALERTS] IRC alert enabled but the relay isn't currently connected")
+            else:
+                client.send_message(f"[ALERT] {title}: {message}")
+                log("INFO", f"[ALERTS] irc sent: {title!r}")
+        except Exception as e:
+            log("ERROR", f"[ALERTS] irc send error: {e}")
 
 
 def _check_alerts(ami_ok, cpu_temp):
@@ -5146,6 +5169,7 @@ def api_alerts_get_config():
         return jsonify({
             "enabled": 0,
             "ntfy_enabled": 0, "pushover_enabled": 0, "discord_enabled": 0, "chat_enabled": 0,
+            "irc_enabled": 0,
             "ntfy_topic": "", "pushover_token": "", "pushover_user": "",
             "on_ami_disconnect": 1, "on_ami_reconnect": 0,
             "on_cpu_temp_high": 1, "cpu_temp_threshold": 80,
@@ -5161,17 +5185,18 @@ def api_alerts_save_config():
     db   = get_db()
     db.execute(
         """INSERT OR REPLACE INTO alert_config
-           (id, enabled, ntfy_enabled, pushover_enabled, discord_enabled, chat_enabled,
+           (id, enabled, ntfy_enabled, pushover_enabled, discord_enabled, chat_enabled, irc_enabled,
             ntfy_topic, pushover_token, pushover_user,
             on_ami_disconnect, on_ami_reconnect, on_cpu_temp_high, cpu_temp_threshold,
             on_node_connect, on_node_disconnect, watch_nodes, on_dns_stuck)
-           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             1 if data.get("enabled")           else 0,
             1 if data.get("ntfy_enabled")       else 0,
             1 if data.get("pushover_enabled")   else 0,
             1 if data.get("discord_enabled")    else 0,
             1 if data.get("chat_enabled")       else 0,
+            1 if data.get("irc_enabled")        else 0,
             str(data.get("ntfy_topic",         "")),
             str(data.get("pushover_token",     "")),
             str(data.get("pushover_user",      "")),

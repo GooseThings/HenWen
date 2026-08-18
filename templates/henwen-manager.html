@@ -1146,7 +1146,8 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
             <label style="margin-right:18px;font-size:0.85rem"><input type="checkbox" id="al-ntfy-enabled" onchange="alToggleProviders()" style="margin-right:4px">ntfy.sh (free, no account)</label>
             <label style="margin-right:18px;font-size:0.85rem"><input type="checkbox" id="al-pushover-enabled" onchange="alToggleProviders()" style="margin-right:4px">Pushover</label>
             <label style="margin-right:18px;font-size:0.85rem"><input type="checkbox" id="al-discord-enabled" onchange="alToggleProviders()" style="margin-right:4px">Discord</label>
-            <label style="font-size:0.85rem"><input type="checkbox" id="al-chat-enabled" onchange="alToggleProviders()" style="margin-right:4px">Kiosk Chat</label>
+            <label style="margin-right:18px;font-size:0.85rem"><input type="checkbox" id="al-chat-enabled" onchange="alToggleProviders()" style="margin-right:4px">Kiosk Chat</label>
+            <label style="font-size:0.85rem"><input type="checkbox" id="al-irc-enabled" onchange="alToggleProviders()" style="margin-right:4px">IRC</label>
           </div>
 
           <div id="al-ntfy-fields" style="display:none;margin-bottom:12px">
@@ -1174,6 +1175,10 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
 
           <div id="al-chat-fields" style="display:none;margin-bottom:12px">
             <div style="font-size:0.75rem;color:var(--text2)">Posts as "HenWen Alert" in the Status Board's Chat panel, visible to anyone logged in. No config needed here.</div>
+          </div>
+
+          <div id="al-irc-fields" style="display:none;margin-bottom:12px">
+            <div style="font-size:0.75rem;color:var(--text2)">Sent to the channel configured in <a href="#" onclick="showPage('irc-relay');return false;">Manager &gt; IRC Relay</a> — set that up and make sure it's connected first. Only sent while the relay is actually connected; not queued for later.</div>
           </div>
 
           <div style="font-size:0.82rem;font-weight:600;margin-bottom:8px">Notify When</div>
@@ -4127,6 +4132,7 @@ async function alLoad() {
   document.getElementById('al-pushover-enabled').checked = !!d.pushover_enabled;
   document.getElementById('al-discord-enabled').checked  = !!d.discord_enabled;
   document.getElementById('al-chat-enabled').checked      = !!d.chat_enabled;
+  document.getElementById('al-irc-enabled').checked       = !!d.irc_enabled;
   document.getElementById('al-ntfy-topic').value  = d.ntfy_topic    || '';
   document.getElementById('al-po-token').value    = d.pushover_token || '';
   document.getElementById('al-po-user').value     = d.pushover_user  || '';
@@ -4150,6 +4156,7 @@ function alToggleProviders() {
   document.getElementById('al-pushover-fields').style.display = document.getElementById('al-pushover-enabled').checked ? '' : 'none';
   document.getElementById('al-discord-fields').style.display  = document.getElementById('al-discord-enabled').checked  ? '' : 'none';
   document.getElementById('al-chat-fields').style.display      = document.getElementById('al-chat-enabled').checked     ? '' : 'none';
+  document.getElementById('al-irc-fields').style.display       = document.getElementById('al-irc-enabled').checked      ? '' : 'none';
 }
 
 function alToggleWatchNodes() {
@@ -4164,6 +4171,7 @@ async function alSave() {
     pushover_enabled:    document.getElementById('al-pushover-enabled').checked ? 1 : 0,
     discord_enabled:     document.getElementById('al-discord-enabled').checked  ? 1 : 0,
     chat_enabled:        document.getElementById('al-chat-enabled').checked     ? 1 : 0,
+    irc_enabled:         document.getElementById('al-irc-enabled').checked      ? 1 : 0,
     ntfy_topic:         document.getElementById('al-ntfy-topic').value.trim(),
     pushover_token:     document.getElementById('al-po-token').value.trim(),
     pushover_user:      document.getElementById('al-po-user').value.trim(),
