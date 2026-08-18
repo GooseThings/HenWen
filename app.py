@@ -1829,7 +1829,15 @@ def _poll_loop():
                                 _kiosk_temp_conns.pop((node_str, peer), None)
                             _link_prunes.append((node_str, peer))
                             _forget_keyed(peer)
-                        _prev_connected_map[node_str] = est_set
+                        # Keep tracking a peer as "open" for as long as it stays in
+                        # all_set, even on a cycle where link_connect_state briefly
+                        # reports something other than ESTABLISHED (a normal blip
+                        # during teardown/renegotiation). Resetting this to est_set
+                        # unconditionally would drop the peer from prev_est on that
+                        # blip without firing a close (still in all_set that cycle),
+                        # and then the close would be silently lost forever once the
+                        # peer actually disappears, since prev_est no longer has it.
+                        _prev_connected_map[node_str] = (prev_est | est_set) & all_set
 
                         # Kiosk idle-timeout: update last_active when local or peer is keyed.
                         # Skip entries that are genuinely permanent (ilink 12/13) OR have had
