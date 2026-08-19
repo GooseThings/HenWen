@@ -7832,6 +7832,12 @@ def _irc_relay_send_worker():
             log("WARN", f"[IRC-RELAY] Send failed (not fatal, dropping message): {e}")
 
 
+# A connection that dies before staying up this long is treated as a
+# failed attempt for backoff purposes, not a clean disconnect -- see
+# _irc_relay_loop()'s post-read_loop() handling below.
+IRC_RELAY_FLAP_THRESHOLD_SEC = 30
+
+
 def _irc_relay_loop():
     """Reconnect/backoff state machine -- mirrors _meshtastic_poll_loop's
     shape (app.py's Meshtastic MQTT poller): re-reads irc_relay_config at
@@ -7839,7 +7845,17 @@ def _irc_relay_loop():
     on the next natural reconnect without a HenWen restart, no-ops until
     the required fields are present, exponential backoff capped the same
     way. irc_relay.IRCClient itself stays "dumb" -- this loop is the only
-    place that decides when to retry."""
+    place that decides when to retry.
+
+    read_loop() returns (rather than raising) on a server-initiated
+    disconnect (ERROR, idle timeout, closed socket) -- that's not caught
+    by the except block below, so without extra handling a server that
+    keeps kicking the client right after JOIN (ping-timeout mismatch,
+    duplicate-connection policy, reconnect-too-fast throttling) would
+    reconnect every ~2s forever with backoff pinned at 0, hammering the
+    server and spamming the channel with join/quit lines. Connection
+    uptime is tracked so a fast flap gets the same exponential backoff a
+    connect()/join() failure would."""
     backoff = 0
     while True:
         cfg = _get_irc_relay_config() or IRC_RELAY_CONFIG_DEFAULTS
@@ -7847,6 +7863,7 @@ def _irc_relay_loop():
             time.sleep(60)
             continue
         client = None
+        connected_at = None
         try:
             client = irc_relay.IRCClient(
                 host=cfg["host"], port=cfg["port"], use_tls=bool(cfg["use_tls"]),
@@ -7862,6 +7879,7 @@ def _irc_relay_loop():
                 # channel that arrives before identification completes.
                 time.sleep(2)
             client.join()
+            connected_at = time.time()
             backoff = 0
             with _irc_relay_lock:
                 _irc_relay_client_ref["client"] = client
@@ -7882,7 +7900,15 @@ def _irc_relay_loop():
         with _irc_relay_lock:
             _irc_relay_client_ref["client"] = None
         client.close()
-        time.sleep(2)
+        uptime = time.time() - connected_at if connected_at else 0
+        if uptime < IRC_RELAY_FLAP_THRESHOLD_SEC:
+            backoff = min(backoff + 1, 6)
+            sleep_s = min(30 * (2 ** backoff), 900)
+            log("WARN", f"[IRC-RELAY] Disconnected after only {uptime:.0f}s — "
+                        f"backing off, retrying in {sleep_s:.0f}s")
+            time.sleep(sleep_s)
+        else:
+            time.sleep(2)
 
 
 def start_irc_relay():
