@@ -83,9 +83,14 @@ def _build_nonce(packet_id: int, from_node: int) -> bytes:
 def _decrypt_packet_data(raw_bytes: bytes, psk_b64: str):
     """Shared envelope-parse + AES-CTR-decrypt + Data-parse step behind both
     decode_service_envelope() (text messages) and decode_nodeinfo() (name
-    lookups) — returns (from_node: int, data: mesh_min_pb2.Data), or None on
-    any failure (wrong/malformed PSK, not actually encrypted, or corrupt
-    data). Doesn't look at `data.portnum` itself — that's each caller's job.
+    lookups) — returns (from_node: int, packet_id: int, data:
+    mesh_min_pb2.Data), or None on any failure (wrong/malformed PSK, not
+    actually encrypted, or corrupt data). Doesn't look at `data.portnum`
+    itself — that's each caller's job. packet_id is the originating node's
+    packet id, which stays identical across every relay hop and every MQTT
+    gateway that uplinks the same over-the-air packet — decode_service_envelope()
+    surfaces it so a caller can dedup the same message arriving more than
+    once from different gateways.
     """
     try:
         key = derive_key(psk_b64)
@@ -104,7 +109,8 @@ def _decrypt_packet_data(raw_bytes: bytes, psk_b64: str):
         return None  # no ciphertext (e.g. an already-plaintext admin message) — not our concern
 
     from_node = getattr(packet, "from")
-    nonce = _build_nonce(getattr(packet, "id"), from_node)
+    packet_id = getattr(packet, "id")
+    nonce = _build_nonce(packet_id, from_node)
     decryptor = Cipher(algorithms.AES(key), modes.CTR(nonce)).decryptor()
     try:
         plaintext = decryptor.update(encrypted) + decryptor.finalize()
@@ -117,17 +123,21 @@ def _decrypt_packet_data(raw_bytes: bytes, psk_b64: str):
     except DecodeError:
         return None
 
-    return from_node, data
+    return from_node, packet_id, data
 
 
 def decode_service_envelope(raw_bytes: bytes, psk_b64: str) -> dict | None:
     """Decode one MQTT message payload into
-    `{"from_node": "!xxxxxxxx", "text": str, "ts": None}`, or None if it
-    isn't a decodable public-channel text message (wrong/malformed PSK,
-    not a text message, not actually encrypted, or corrupt data).
+    `{"from_node": "!xxxxxxxx", "packet_id": int, "text": str, "ts": None}`,
+    or None if it isn't a decodable public-channel text message
+    (wrong/malformed PSK, not a text message, not actually encrypted, or
+    corrupt data).
 
     `ts` is left for the caller to fill in (wall-clock receipt time isn't
-    this function's concern — it's a pure decode step).
+    this function's concern — it's a pure decode step). `packet_id` is the
+    originating node's packet id (see _decrypt_packet_data's docstring) —
+    exposed so a caller can dedup the same over-the-air packet arriving
+    more than once, once per MQTT gateway node that happened to hear it.
 
     Channel-PSK encryption here is unauthenticated (no MAC/auth tag,
     unlike the PKI direct-message path) — a wrong key doesn't reliably
@@ -138,7 +148,7 @@ def decode_service_envelope(raw_bytes: bytes, psk_b64: str) -> dict | None:
     decrypted = _decrypt_packet_data(raw_bytes, psk_b64)
     if decrypted is None:
         return None
-    from_node, data = decrypted
+    from_node, packet_id, data = decrypted
 
     if data.portnum != _TEXT_MESSAGE_APP:
         return None
@@ -152,6 +162,7 @@ def decode_service_envelope(raw_bytes: bytes, psk_b64: str) -> dict | None:
 
     return {
         "from_node": f"!{from_node:08x}",
+        "packet_id": packet_id,
         "text": text,
         "ts": None,
     }
@@ -169,7 +180,7 @@ def decode_nodeinfo(raw_bytes: bytes, psk_b64: str) -> dict | None:
     decrypted = _decrypt_packet_data(raw_bytes, psk_b64)
     if decrypted is None:
         return None
-    from_node, data = decrypted
+    from_node, _packet_id, data = decrypted
 
     if data.portnum != _NODEINFO_APP:
         return None

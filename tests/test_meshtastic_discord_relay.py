@@ -200,6 +200,18 @@ class TestMeshtasticOnMessageEnqueuesDiscordRelay:
 
         assert app._meshtastic_discord_relay_queue.empty()
 
+    def test_duplicate_packet_is_not_re_enqueued(self, fresh_db):
+        # Same over-the-air packet uplinked by a second MQTT gateway --
+        # must not double-post to Discord.
+        class _FakeMsg:
+            payload = _build_envelope("AQ==", portnums_pb2.PortNum.TEXT_MESSAGE_APP, b"hello mesh",
+                                       packet_id=999, from_node=0xAABBCC11)
+
+        app._meshtastic_on_message("AQ==", _FakeMsg())
+        app._meshtastic_on_message("AQ==", _FakeMsg())
+
+        assert app._meshtastic_discord_relay_queue.qsize() == 1
+
     def test_full_queue_drops_message_instead_of_raising(self, fresh_db, monkeypatch):
         monkeypatch.setattr(app, "_meshtastic_discord_relay_queue", _queue_mod.Queue(maxsize=1))
         app._meshtastic_discord_relay_queue.put_nowait(("someone", "already queued"))
