@@ -1019,7 +1019,7 @@ def check_auth():
     _PUBLIC          = {'login', 'logout', 'static', None,
                         'status_board', 'status_board_redirect', 'status_board_accessible',
                         'api_status_board', 'api_status_weather', 'api_status_activity',
-                        'api_status_history', 'api_status_nws_alerts',
+                        'api_status_nws_alerts',
                         'api_aprs_stations', 'api_iss_tle', 'api_meshtastic_messages',
                         'api_login', 'api_session', 'api_csrf_token',
                         'api_favorites', 'api_favorites_status',
@@ -5122,43 +5122,6 @@ def api_conn_history_clear():
     return jsonify({"ok": True})
 
 
-@app.route("/api/status/history")
-def api_status_history():
-    """
-    Condensed recent connection history for the Status Board (kiosk).
-    Scoped to this server's own hosted node(s) only, completed
-    connections only (still-live ones belong in the Connected Nodes
-    panel, not here). Row count is caller-selectable (5/10/25/50,
-    default 5) via ?limit=. The full searchable/paginated history
-    (any node, live or not, clear button) lives in the Manager's
-    Conn. History tab via /api/connection-history.
-    """
-    content = read_conf_file(RPT_CONF_PATH)
-    nodes   = get_node_numbers(content) if content else []
-    if not nodes:
-        return jsonify({"rows": []})
-
-    try:
-        limit = int(request.args.get("limit", 5))
-    except (TypeError, ValueError):
-        limit = 5
-    if limit not in (5, 10, 25, 50):
-        limit = 5
-
-    db     = get_db()
-    marks  = ",".join("?" * len(nodes))
-    rows   = db.execute(
-        f"SELECT peer_node, peer_callsign, peer_location, direction, "
-        f"connected_at, disconnected_at, duration_seconds FROM connection_history "
-        f"WHERE local_node IN ({marks}) AND disconnected_at IS NOT NULL "
-        f"ORDER BY connected_at DESC LIMIT {limit}",
-        [str(n) for n in nodes]
-    ).fetchall()
-    resp = jsonify({"rows": [dict(r) for r in rows]})
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
-
-
 # ── Alerts API ─────────────────────────────────────────────────────────────────
 
 @app.route("/api/alerts/config")
@@ -7827,6 +7790,12 @@ def _irc_relay_send_worker():
             log("WARN", f"[IRC-RELAY] Send failed (not fatal, dropping message): {e}")
 
 
+# A connection that dies before staying up this long is treated as a
+# failed attempt for backoff purposes, not a clean disconnect -- see
+# _irc_relay_loop()'s post-read_loop() handling below.
+IRC_RELAY_FLAP_THRESHOLD_SEC = 30
+
+
 def _irc_relay_loop():
     """Reconnect/backoff state machine -- mirrors _meshtastic_poll_loop's
     shape (app.py's Meshtastic MQTT poller): re-reads irc_relay_config at
@@ -7834,7 +7803,17 @@ def _irc_relay_loop():
     on the next natural reconnect without a HenWen restart, no-ops until
     the required fields are present, exponential backoff capped the same
     way. irc_relay.IRCClient itself stays "dumb" -- this loop is the only
-    place that decides when to retry."""
+    place that decides when to retry.
+
+    read_loop() returns (rather than raising) on a server-initiated
+    disconnect (ERROR, idle timeout, closed socket) -- that's not caught
+    by the except block below, so without extra handling a server that
+    keeps kicking the client right after JOIN (ping-timeout mismatch,
+    duplicate-connection policy, reconnect-too-fast throttling) would
+    reconnect every ~2s forever with backoff pinned at 0, hammering the
+    server and spamming the channel with join/quit lines. Connection
+    uptime is tracked so a fast flap gets the same exponential backoff a
+    connect()/join() failure would."""
     backoff = 0
     while True:
         cfg = _get_irc_relay_config() or IRC_RELAY_CONFIG_DEFAULTS
@@ -7842,6 +7821,7 @@ def _irc_relay_loop():
             time.sleep(60)
             continue
         client = None
+        connected_at = None
         try:
             client = irc_relay.IRCClient(
                 host=cfg["host"], port=cfg["port"], use_tls=bool(cfg["use_tls"]),
@@ -7857,6 +7837,7 @@ def _irc_relay_loop():
                 # channel that arrives before identification completes.
                 time.sleep(2)
             client.join()
+            connected_at = time.time()
             backoff = 0
             with _irc_relay_lock:
                 _irc_relay_client_ref["client"] = client
@@ -7877,7 +7858,15 @@ def _irc_relay_loop():
         with _irc_relay_lock:
             _irc_relay_client_ref["client"] = None
         client.close()
-        time.sleep(2)
+        uptime = time.time() - connected_at if connected_at else 0
+        if uptime < IRC_RELAY_FLAP_THRESHOLD_SEC:
+            backoff = min(backoff + 1, 6)
+            sleep_s = min(30 * (2 ** backoff), 900)
+            log("WARN", f"[IRC-RELAY] Disconnected after only {uptime:.0f}s — "
+                        f"backing off, retrying in {sleep_s:.0f}s")
+            time.sleep(sleep_s)
+        else:
+            time.sleep(2)
 
 
 def start_irc_relay():
