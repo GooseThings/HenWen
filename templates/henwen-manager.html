@@ -687,15 +687,11 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     {% for node in nodes %}
     <button class="nav-item" onclick="showPage('node-{{ node }}')">Node {{ node }}</button>
     {% endfor %}
+    {% for tmpl in templates %}
+    <button class="nav-item" onclick="showPage('template-{{ tmpl }}')">{{ 'Global Settings' if tmpl == 'node-main' else tmpl }}</button>
+    {% endfor %}
     <button class="nav-item" id="nav-raw-editor" onclick="showPage('raw-editor')">Raw Editor</button>
     <button class="nav-item" onclick="showPage('backups')">Backups</button>
-
-    {% if templates %}
-    <div class="nav-section">Global Templates</div>
-    {% for tmpl in templates %}
-    <button class="nav-item" onclick="showPage('template-{{ tmpl }}')">{{ tmpl }}</button>
-    {% endfor %}
-    {% endif %}
 
     {% if macros or schedules %}
     <div class="nav-section">Macros &amp; Scheduling</div>
@@ -961,7 +957,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
   <!-- Global template pages -->
   {% for tmpl in templates %}
   <section class="page" id="page-template-{{ tmpl }}">
-    <div class="page-title">Global: {{ tmpl }}</div>
+    <div class="page-title">{{ 'Global Settings' if tmpl == 'node-main' else 'Global: ' ~ tmpl }}</div>
     <div class="page-sub">
       Editing stanza <span class="mono">[{{ tmpl }}](!)</span> &mdash; changes here apply to
       every node using this template.
