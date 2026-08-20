@@ -7176,11 +7176,27 @@ def _start_broadcast(node):
     # to match input, which was measured to silently undo the limiting on a
     # fully-clipped test signal (peak stayed pinned at full scale). Verified
     # against a synthetic clipped-tone fixture pushed through this exact
-    # chain incl. the Opus round-trip: 0 clipped samples, peak ~90% FS, and
-    # the filter's gaussian-window smoothing added only ~5ms of onset delay
-    # — negligible against the stream's ~0.75s live-edge target. If this
-    # sounds like it's pumping/over-processing on your traffic, the first
-    # things to relax are m (max gain) down or f (frame length) up.
+    # chain incl. the Opus round-trip: 0 clipped samples, peak ~90% FS,
+    # unchanged from the f=200:g=15 values this replaced.
+    #
+    # f (frame length) and g (Gaussian smoothing window, in frames) were
+    # originally 200/15 — a claimed "~5ms of onset delay" in an earlier
+    # version of this comment was wrong: dynaudnorm's Gaussian window can't
+    # emit a frame until it has g frames of lookahead, so f=200:g=15 was a
+    # measured ~3.0s of pure algorithmic delay before ANY encoded audio left
+    # ffmpeg — added to every listener's live-edge latency on top of the
+    # jitter buffer/cluster/client cushion, and never caught by ear because
+    # nothing in this pipeline had been benchmarked for time-to-first-byte.
+    # Reproduced locally: synthetic PCM fed into this exact ffmpeg command
+    # through a real FIFO at 20ms cadence, timing first stdout bytes
+    # (scratchpad audiotest/test_latency.py). f=100:g=5 cuts that to ~0.7s
+    # while keeping the same clip-safety result above; it also settles a
+    # step change in level within ~3-4 windows (~300-400ms) instead of not
+    # visibly reacting at all within a typical single transmission, so it's
+    # closer to functioning AGC too, not just faster. g must stay odd (ffmpeg
+    # requirement). If this sounds like it's pumping/over-processing on your
+    # traffic, the first things to try are g up (smoother, slower) before m
+    # (max gain) down or f up — both of the latter reintroduce latency.
     ffmpeg_cmd = [
         'ffmpeg', '-loglevel', 'warning',
         '-probesize', '32',
@@ -7188,7 +7204,7 @@ def _start_broadcast(node):
         '-fflags', '+nobuffer',
         '-f', 's16le', '-ar', '8000', '-ac', '1', '-channel_layout', 'mono',
         '-i', fifo_out_path,
-        '-af', 'dynaudnorm=f=200:g=15:p=0.95:m=6,'
+        '-af', 'dynaudnorm=f=100:g=5:p=0.95:m=6,'
                'alimiter=limit=0.85:attack=5:release=50:level=false',
         '-ar', '48000',        # resample to Opus native rate before encoding
         '-c:a', 'libopus', '-b:a', '24k',
