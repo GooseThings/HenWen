@@ -720,7 +720,6 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     <button class="nav-item" id="nav-stream-relay" onclick="showPage('stream-relay')">Stream Relay</button>
     <button class="nav-item" id="nav-meshtastic" onclick="showPage('meshtastic')">Meshtastic</button>
     <button class="nav-item" id="nav-discord-relay" onclick="showPage('discord-relay')">Discord Relay</button>
-    <button class="nav-item" id="nav-irc-relay" onclick="showPage('irc-relay')">IRC Relay</button>
     <button class="nav-item" id="nav-chat-log" onclick="showPage('chat-log')">Chat Log</button>
   </nav>
   <div class="sidebar-footer">
@@ -1146,8 +1145,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
             <label style="margin-right:18px;font-size:0.85rem"><input type="checkbox" id="al-ntfy-enabled" onchange="alToggleProviders()" style="margin-right:4px">ntfy.sh (free, no account)</label>
             <label style="margin-right:18px;font-size:0.85rem"><input type="checkbox" id="al-pushover-enabled" onchange="alToggleProviders()" style="margin-right:4px">Pushover</label>
             <label style="margin-right:18px;font-size:0.85rem"><input type="checkbox" id="al-discord-enabled" onchange="alToggleProviders()" style="margin-right:4px">Discord</label>
-            <label style="margin-right:18px;font-size:0.85rem"><input type="checkbox" id="al-chat-enabled" onchange="alToggleProviders()" style="margin-right:4px">Kiosk Chat</label>
-            <label style="font-size:0.85rem"><input type="checkbox" id="al-irc-enabled" onchange="alToggleProviders()" style="margin-right:4px">IRC</label>
+            <label style="font-size:0.85rem"><input type="checkbox" id="al-chat-enabled" onchange="alToggleProviders()" style="margin-right:4px">Kiosk Chat</label>
           </div>
 
           <div id="al-ntfy-fields" style="display:none;margin-bottom:12px">
@@ -1175,10 +1173,6 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
 
           <div id="al-chat-fields" style="display:none;margin-bottom:12px">
             <div style="font-size:0.75rem;color:var(--text2)">Posts as "HenWen Alert" in the Status Board's Chat panel, visible to anyone logged in. No config needed here.</div>
-          </div>
-
-          <div id="al-irc-fields" style="display:none;margin-bottom:12px">
-            <div style="font-size:0.75rem;color:var(--text2)">Sent to the channel configured in <a href="#" onclick="showPage('irc-relay');return false;">Manager &gt; IRC Relay</a> — set that up and make sure it's connected first. Only sent while the relay is actually connected; not queued for later.</div>
           </div>
 
           <div style="font-size:0.82rem;font-weight:600;margin-bottom:8px">Notify When</div>
@@ -1371,18 +1365,18 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
             <input type="number" id="ks-pin-min" class="form-control" style="width:90px"
                    min="1" max="480" value="60">
             <span style="font-size:0.82rem;color:var(--text-muted)">
-              How long activity pins remain visible on the Map (1–480 min).
+              How long activity pins remain visible on the Network Map (1–480 min).
             </span>
           </div>
         </div>
         <div class="form-group" style="margin-top:24px;padding-top:16px;border-top:1px solid var(--border)">
-          <div style="font-weight:600;margin-bottom:8px">APRS-IS (Map)</div>
+          <div style="font-weight:600;margin-bottom:8px">APRS-IS (Network Map)</div>
           <label class="form-label">APRS-IS Callsign</label>
           <div style="display:flex;gap:8px;align-items:center">
             <input type="text" id="ks-aprs-callsign" class="form-control" style="width:140px;text-transform:uppercase"
                    maxlength="12" placeholder="e.g. N8GMZ-15">
             <span style="font-size:0.82rem;color:var(--text-muted)">
-              Powers the optional "APRS" layer on the kiosk's Map. Log into APRS-IS
+              Powers the optional "APRS" layer on the kiosk's Network Map. Log into APRS-IS
               (receive-only) as this callsign to pull nearby station positions — leave blank to
               keep that layer off. Only a licensed amateur's own callsign, please.<br>
               Takes effect on the connection's next reconnect, or immediately after a HenWen restart.
@@ -1393,7 +1387,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
             <input type="number" id="ks-aprs-max-stations" class="form-control" style="width:90px"
                    min="1" max="1000" value="100">
             <span style="font-size:0.82rem;color:var(--text-muted)">
-              Caps how many nearby stations are drawn on the Map and listed in Latest
+              Caps how many nearby stations are drawn on the Network Map and listed in Latest
               Activity, closest first (1–1000).
             </span>
           </div>
@@ -1669,57 +1663,6 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     </div>
     <button class="btn btn-primary" onclick="discordRelaySave()">Save</button>
     <div id="discord-relay-status" style="margin-top:8px;font-size:0.82rem"></div>
-  </section>
-
-  <!-- IRC Relay (owner only) -->
-  <section class="page" id="page-irc-relay">
-    <div class="page-title">IRC Relay</div>
-    <div class="page-sub">Owner-only. Two-way bridge between the Status Board's Chat panel and an IRC channel — messages posted in either place appear in the other.</div>
-    <div class="card" style="max-width:620px">
-      <div class="card-body">
-        <div style="display:grid;grid-template-columns:1fr;gap:14px">
-          <div>
-            <label class="toggle-label" style="display:flex;align-items:center;gap:8px">
-              <input type="checkbox" id="irc-relay-enabled"> Enable IRC relay
-            </label>
-          </div>
-          <div>
-            <label class="toggle-label" style="display:block;margin-bottom:3px">Server host</label>
-            <input type="text" id="irc-relay-host" class="val-input" placeholder="irc.geekshed.net" style="width:100%">
-          </div>
-          <div style="display:flex;gap:14px">
-            <div style="flex:1">
-              <label class="toggle-label" style="display:block;margin-bottom:3px">Port</label>
-              <input type="number" id="irc-relay-port" class="val-input" placeholder="6697" style="width:100%">
-            </div>
-            <div style="flex:1;display:flex;align-items:flex-end;padding-bottom:8px">
-              <label class="toggle-label" style="display:flex;align-items:center;gap:8px">
-                <input type="checkbox" id="irc-relay-tls"> Use TLS
-              </label>
-            </div>
-          </div>
-          <div>
-            <label class="toggle-label" style="display:block;margin-bottom:3px">Channel</label>
-            <input type="text" id="irc-relay-channel" class="val-input" placeholder="#Node643930" style="width:100%">
-          </div>
-          <div>
-            <label class="toggle-label" style="display:block;margin-bottom:3px">Channel key (if required)</label>
-            <input type="password" id="irc-relay-channel-key" class="val-input" style="width:100%">
-          </div>
-          <div>
-            <label class="toggle-label" style="display:block;margin-bottom:3px">Bot nickname</label>
-            <input type="text" id="irc-relay-nick" class="val-input" placeholder="HenWen" style="width:100%">
-          </div>
-          <div>
-            <label class="toggle-label" style="display:block;margin-bottom:3px">NickServ password (optional)</label>
-            <input type="password" id="irc-relay-nickserv-password" class="val-input" style="width:100%">
-            <div style="font-size:0.75rem;color:var(--text2);margin-top:3px">Leave blank to skip identifying with NickServ.</div>
-          </div>
-        </div>
-      </div>
-    </div>
-    <button class="btn btn-primary" onclick="ircRelaySave()">Save</button>
-    <div id="irc-relay-status" style="margin-top:8px;font-size:0.82rem"></div>
   </section>
 
   <!-- Chat Log (owner only) -->
@@ -3018,7 +2961,6 @@ function showPage(id) {
   astStopAutoRefresh();
   stopDiagPolling();
   stopRelayStatusPolling();
-  stopIrcRelayStatusPolling();
 
   var page = document.getElementById('page-' + id);
   if (page) page.classList.add('active');
@@ -3046,7 +2988,6 @@ function showPage(id) {
   else if (id === 'stream-relay')       relayLoad();
   else if (id === 'meshtastic')         meshtasticLoad();
   else if (id === 'discord-relay')      discordRelayLoad();
-  else if (id === 'irc-relay')          ircRelayLoad();
   else if (id === 'chat-log')           chatLogLoad();
   else if (id === 'dtmf')             { populateDtmfNodeSelect(); }
   else if (id === 'node-id')          { loadIdConfigs(); populateIdNodeSelect(); }
@@ -4132,7 +4073,6 @@ async function alLoad() {
   document.getElementById('al-pushover-enabled').checked = !!d.pushover_enabled;
   document.getElementById('al-discord-enabled').checked  = !!d.discord_enabled;
   document.getElementById('al-chat-enabled').checked      = !!d.chat_enabled;
-  document.getElementById('al-irc-enabled').checked       = !!d.irc_enabled;
   document.getElementById('al-ntfy-topic').value  = d.ntfy_topic    || '';
   document.getElementById('al-po-token').value    = d.pushover_token || '';
   document.getElementById('al-po-user').value     = d.pushover_user  || '';
@@ -4156,7 +4096,6 @@ function alToggleProviders() {
   document.getElementById('al-pushover-fields').style.display = document.getElementById('al-pushover-enabled').checked ? '' : 'none';
   document.getElementById('al-discord-fields').style.display  = document.getElementById('al-discord-enabled').checked  ? '' : 'none';
   document.getElementById('al-chat-fields').style.display      = document.getElementById('al-chat-enabled').checked     ? '' : 'none';
-  document.getElementById('al-irc-fields').style.display       = document.getElementById('al-irc-enabled').checked      ? '' : 'none';
 }
 
 function alToggleWatchNodes() {
@@ -4171,7 +4110,6 @@ async function alSave() {
     pushover_enabled:    document.getElementById('al-pushover-enabled').checked ? 1 : 0,
     discord_enabled:     document.getElementById('al-discord-enabled').checked  ? 1 : 0,
     chat_enabled:        document.getElementById('al-chat-enabled').checked     ? 1 : 0,
-    irc_enabled:         document.getElementById('al-irc-enabled').checked      ? 1 : 0,
     ntfy_topic:         document.getElementById('al-ntfy-topic').value.trim(),
     pushover_token:     document.getElementById('al-po-token').value.trim(),
     pushover_user:      document.getElementById('al-po-user').value.trim(),
@@ -6016,65 +5954,6 @@ async function discordRelaySave() {
   setTimeout(function(){ st.textContent = ''; }, 3000);
 }
 
-async function ircRelayLoad() {
-  var r = await api('/api/irc-relay/config');
-  var d = r.ok ? r.data : {};
-  document.getElementById('irc-relay-enabled').checked = !!d.enabled;
-  document.getElementById('irc-relay-host').value   = d.host || '';
-  document.getElementById('irc-relay-port').value   = d.port || 6697;
-  document.getElementById('irc-relay-tls').checked  = d.use_tls === undefined ? true : !!d.use_tls;
-  document.getElementById('irc-relay-channel').value = d.channel || '';
-  document.getElementById('irc-relay-channel-key').value = d.channel_key || '';
-  document.getElementById('irc-relay-nick').value = d.nick || '';
-  document.getElementById('irc-relay-nickserv-password').value = d.nickserv_password || '';
-  ircRelayLoadStatus();
-}
-
-var _ircRelayStatusTimer = null;
-
-async function ircRelayLoadStatus() {
-  var st = document.getElementById('irc-relay-status');
-  var r = await api('/api/irc-relay/status');
-  if (r.ok && st) {
-    st.innerHTML = r.data.connected
-      ? '<span style="color:var(--green)">&#9679; Connected</span>'
-      : '<span style="color:var(--text2)">&#9679; Not connected</span>';
-  }
-
-  /* Poll while the IRC Relay page is open, same pattern as the Stream
-     Relay page's relayLoadStatus()/stopRelayStatusPolling(). */
-  if (_ircRelayStatusTimer) clearTimeout(_ircRelayStatusTimer);
-  if (document.getElementById('page-irc-relay').classList.contains('active')) {
-    _ircRelayStatusTimer = setTimeout(ircRelayLoadStatus, 5000);
-  }
-}
-
-function stopIrcRelayStatusPolling() {
-  if (_ircRelayStatusTimer) { clearTimeout(_ircRelayStatusTimer); _ircRelayStatusTimer = null; }
-}
-
-async function ircRelaySave() {
-  var st = document.getElementById('irc-relay-status');
-  var payload = {
-    enabled:            document.getElementById('irc-relay-enabled').checked,
-    host:                document.getElementById('irc-relay-host').value.trim(),
-    port:                document.getElementById('irc-relay-port').value,
-    use_tls:             document.getElementById('irc-relay-tls').checked,
-    channel:             document.getElementById('irc-relay-channel').value.trim(),
-    channel_key:         document.getElementById('irc-relay-channel-key').value,
-    nick:                document.getElementById('irc-relay-nick').value.trim(),
-    nickserv_password:   document.getElementById('irc-relay-nickserv-password').value,
-  };
-  var r = await api('/api/irc-relay/config', {
-    method:  'PUT',
-    headers: {'Content-Type': 'application/json'},
-    body:    JSON.stringify(payload),
-  });
-  if (r.ok) { st.textContent = 'Saved.'; st.style.color = 'var(--success)'; }
-  else       { st.textContent = (r.data && r.data.error) || 'Error'; st.style.color = 'var(--danger)'; }
-  setTimeout(function(){ st.textContent = ''; }, 3000);
-}
-
 /* ── Role-based nav visibility ─────────────────────────────────────────────── */
 window._henwenRole = '';
 async function applyRoleNav() {
@@ -6119,8 +5998,6 @@ async function applyRoleNav() {
      role==='owner' check on /api/discord-relay/config. */
   var discordRelayNavBtn = document.getElementById('nav-discord-relay');
   if (discordRelayNavBtn) discordRelayNavBtn.style.display = isOwnerRole ? '' : 'none';
-  var ircRelayNavBtn = document.getElementById('nav-irc-relay');
-  if (ircRelayNavBtn) ircRelayNavBtn.style.display = isOwnerRole ? '' : 'none';
   /* Chat Log is owner-only too — matches the backend's explicit
      role==='owner' check on /api/chat/log and the DELETE route. */
   var chatLogNavBtn = document.getElementById('nav-chat-log');
