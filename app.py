@@ -7202,6 +7202,18 @@ def _start_broadcast(node):
                                # on the speech band instead of an empty 4–8 kHz range
         '-frame_duration', '20',
         '-application', 'audio',
+        '-flush_packets', '1',  # force ffmpeg to flush its own output-side I/O
+                                 # buffer after every packet instead of only
+                                 # when that buffer fills. At this stream's
+                                 # bitrate (~24 kbps, i.e. ~600 bytes per
+                                 # 200ms Cluster) the buffer would otherwise
+                                 # take dozens of Clusters — several seconds
+                                 # of real audio — to fill on its own, adding
+                                 # exactly that much silent, invisible extra
+                                 # delay before _read_loop ever sees the
+                                 # bytes. This has no effect on the encoded
+                                 # audio itself, only on when already-encoded
+                                 # bytes leave the process.
         '-f', 'webm',
         '-cluster_time_limit', '200',
         'pipe:1',
