@@ -96,7 +96,7 @@ class TestDecodeServiceEnvelope:
         raw = _build_envelope("MA==", self.TEXT, "Hello Michigan mesh!".encode("utf-8"),
                                packet_id=42, from_node=0xAABBCC11)
         result = meshtastic_mqtt.decode_service_envelope(raw, "MA==")
-        assert result == {"from_node": "!aabbcc11", "text": "Hello Michigan mesh!", "ts": None}
+        assert result == {"from_node": "!aabbcc11", "packet_id": 42, "text": "Hello Michigan mesh!", "ts": None}
 
     def test_wrong_psk_does_not_return_a_fake_message(self):
         raw = _build_envelope("MA==", self.TEXT, b"Hello Michigan mesh!")
@@ -269,6 +269,44 @@ class TestMeshtasticPersistence:
         assert rows[0]["text"] == "hello mesh"
         assert len(app._meshtastic_cache) == 1
 
+    def test_duplicate_packet_from_a_second_gateway_is_squashed(self, fresh_db):
+        # Same over-the-air packet, uplinked to MQTT by two different
+        # gateway nodes that both happened to hear it -- byte-identical
+        # ciphertext, so it decrypts to the same (from_node, packet_id)
+        # pair each time.
+        class _FakeMsg:
+            payload = _build_envelope("AQ==", portnums_pb2.PortNum.TEXT_MESSAGE_APP,
+                                       b"hello mesh", packet_id=777, from_node=0xAABBCC11)
+
+        app._meshtastic_on_message("AQ==", _FakeMsg())
+        app._meshtastic_on_message("AQ==", _FakeMsg())
+
+        assert len(app._meshtastic_cache) == 1
+        rows = app.get_db().execute("SELECT text FROM meshtastic_messages").fetchall()
+        assert len(rows) == 1
+
+    def test_same_text_different_packet_id_is_not_squashed(self, fresh_db):
+        # A genuine second send of identical words gets its own fresh
+        # packet_id from the sending node -- must not be treated as a dup.
+        for packet_id in (1, 2):
+            class _FakeMsg:
+                payload = _build_envelope("AQ==", portnums_pb2.PortNum.TEXT_MESSAGE_APP,
+                                           b"hello mesh", packet_id=packet_id, from_node=0xAABBCC11)
+            app._meshtastic_on_message("AQ==", _FakeMsg())
+
+        assert len(app._meshtastic_cache) == 2
+
+    def test_same_packet_id_different_sender_is_not_squashed(self, fresh_db):
+        # packet_id alone isn't unique network-wide -- only (from_node,
+        # packet_id) together identifies one original transmission.
+        for from_node in (0xAABBCC11, 0xDDEEFF22):
+            class _FakeMsg:
+                payload = _build_envelope("AQ==", portnums_pb2.PortNum.TEXT_MESSAGE_APP,
+                                           b"hello mesh", packet_id=555, from_node=from_node)
+            app._meshtastic_on_message("AQ==", _FakeMsg())
+
+        assert len(app._meshtastic_cache) == 2
+
     def test_persisted_rows_pruned_to_cache_max(self, fresh_db, monkeypatch):
         monkeypatch.setattr(app, "MESHTASTIC_CACHE_MAX", 3)
         for i in range(5):
@@ -296,7 +334,7 @@ class TestMeshtasticPersistence:
         app.start_meshtastic_poller()
 
         assert list(app._meshtastic_cache) == [
-            {"from_node": "!aabbccdd", "text": "reseeded message", "ts": 1234.0}
+            {"from_node": "!aabbccdd", "text": "reseeded message", "ts": 1234.0, "packet_id": 0}
         ]
 
     def test_nodeinfo_message_updates_name_cache_not_message_cache(self, fresh_db):

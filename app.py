@@ -760,8 +760,16 @@ def get_db():
         id        INTEGER PRIMARY KEY AUTOINCREMENT,
         from_node TEXT NOT NULL,
         text      TEXT NOT NULL,
-        ts        REAL NOT NULL
+        ts        REAL NOT NULL,
+        packet_id INTEGER NOT NULL DEFAULT 0
     )""")
+    if 'packet_id' not in {r[1] for r in conn.execute("PRAGMA table_info(meshtastic_messages)").fetchall()}:
+        # The originating node's packet id -- identical across every relay
+        # hop and every MQTT gateway that uplinks the same over-the-air
+        # packet, so it's what _meshtastic_on_message() dedups on. Existing
+        # rows default to 0, which just means they're never matched as a
+        # duplicate of anything (harmless -- they're already displayed).
+        conn.execute("ALTER TABLE meshtastic_messages ADD COLUMN packet_id INTEGER NOT NULL DEFAULT 0")
     conn.commit()
     # Node-id -> friendly-name lookup for the Meshtastic panel, built from
     # NODEINFO_APP packets a node broadcasts periodically alongside its text
@@ -2977,7 +2985,7 @@ MESHTASTIC_MQTT_USERNAME = "meshdev"
 MESHTASTIC_MQTT_PASSWORD = "large4cats"
 MESHTASTIC_CACHE_MAX = 50
 
-_meshtastic_cache = deque(maxlen=MESHTASTIC_CACHE_MAX)   # newest last; each {"from_node","text","ts"}
+_meshtastic_cache = deque(maxlen=MESHTASTIC_CACHE_MAX)   # newest last; each {"from_node","packet_id","text","ts"}
 _meshtastic_names_cache = {}   # node_id ("!xxxxxxxx") -> {"short_name","long_name","ts"}
 _meshtastic_lock = threading.Lock()
 # Raw-vs-decoded counters, reset and logged every ~30s by _meshtastic_poll_loop
@@ -2989,6 +2997,7 @@ _meshtastic_lock = threading.Lock()
 # from the logs alone -- these counters exist to tell those two apart.
 _meshtastic_raw_count = 0
 _meshtastic_decoded_count = 0
+_meshtastic_dup_count = 0
 
 
 def _remember_meshtastic_node_name(nodeinfo):
@@ -3015,7 +3024,7 @@ def _remember_meshtastic_node_name(nodeinfo):
 
 
 def _meshtastic_on_message(psk, msg):
-    global _meshtastic_raw_count, _meshtastic_decoded_count
+    global _meshtastic_raw_count, _meshtastic_decoded_count, _meshtastic_dup_count
     with _meshtastic_lock:
         _meshtastic_raw_count += 1
 
@@ -3045,8 +3054,28 @@ def _meshtastic_on_message(psk, msg):
     result["ts"] = time.time()
     with _meshtastic_lock:
         _meshtastic_decoded_count += 1
-        _meshtastic_cache.append(result)
-        name_info = _meshtastic_names_cache.get(result["from_node"])
+        # A node's original transmission is routinely heard -- and uplinked
+        # to MQTT -- by more than one gateway node in range, each publishing
+        # its own byte-identical copy of the same over-the-air packet. Every
+        # copy decrypts to the same (from_node, packet_id) pair (packet_id
+        # is assigned once by the originating node and never changes across
+        # relay hops), which is what makes it a safe dedup key -- unlike
+        # text content alone, it doesn't collide with a genuine second
+        # send of the same words (that gets its own fresh packet_id). Only
+        # checked against what's still in the display cache (recent
+        # duplicates arrive within seconds of each other via different
+        # gateways; anything older has already scrolled off-screen anyway).
+        is_dup = any(
+            c["from_node"] == result["from_node"] and c.get("packet_id") == result["packet_id"]
+            for c in _meshtastic_cache
+        )
+        if is_dup:
+            _meshtastic_dup_count += 1
+        else:
+            _meshtastic_cache.append(result)
+            name_info = _meshtastic_names_cache.get(result["from_node"])
+    if is_dup:
+        return
     display_name = name_info["short_name"] if name_info and name_info["short_name"] else result["from_node"]
     try:
         _meshtastic_discord_relay_queue.put_nowait((display_name, result["text"]))
@@ -3055,8 +3084,8 @@ def _meshtastic_on_message(psk, msg):
     try:
         db = get_db()
         db.execute(
-            "INSERT INTO meshtastic_messages (from_node, text, ts) VALUES (?, ?, ?)",
-            (result["from_node"], result["text"], result["ts"])
+            "INSERT INTO meshtastic_messages (from_node, text, ts, packet_id) VALUES (?, ?, ?, ?)",
+            (result["from_node"], result["text"], result["ts"], result["packet_id"])
         )
         # Keep only the newest MESHTASTIC_CACHE_MAX rows -- this table is a
         # restart-survival mirror of the cache, not a growing history log.
@@ -3112,7 +3141,7 @@ def start_meshtastic_discord_relay_worker():
 
 
 def _meshtastic_poll_loop():
-    global _meshtastic_raw_count, _meshtastic_decoded_count
+    global _meshtastic_raw_count, _meshtastic_decoded_count, _meshtastic_dup_count
     if mqtt_client is None or meshtastic_mqtt is None:
         log("WARN", "[MESHTASTIC] paho-mqtt not installed — Meshtastic panel disabled")
         return
@@ -3178,12 +3207,14 @@ def _meshtastic_poll_loop():
                 if disconnected.is_set():
                     break
                 with _meshtastic_lock:
-                    raw, decoded = _meshtastic_raw_count, _meshtastic_decoded_count
+                    raw, decoded, dups = _meshtastic_raw_count, _meshtastic_decoded_count, _meshtastic_dup_count
                     _meshtastic_raw_count = 0
                     _meshtastic_decoded_count = 0
+                    _meshtastic_dup_count = 0
                 if raw:
                     log("INFO", f"[MESHTASTIC] {raw} MQTT message(s) received on {topic!r} in the "
-                                 f"last ~30s, {decoded} decoded as text")
+                                 f"last ~30s, {decoded} decoded as text ({dups} of those squashed as "
+                                 f"duplicates already shown)")
                 if (_get_meshtastic_config() or MESHTASTIC_CONFIG_DEFAULTS) != cfg:
                     log("INFO", "[MESHTASTIC] Config changed — reconnecting")
                     break
@@ -3206,11 +3237,14 @@ def start_meshtastic_poller():
     # this is a one-shot reload, not something the poll loop itself repeats.
     try:
         rows = get_db().execute(
-            "SELECT from_node, text, ts FROM meshtastic_messages ORDER BY id ASC"
+            "SELECT from_node, text, ts, packet_id FROM meshtastic_messages ORDER BY id ASC"
         ).fetchall()
         with _meshtastic_lock:
             for r in rows:
-                _meshtastic_cache.append({"from_node": r["from_node"], "text": r["text"], "ts": r["ts"]})
+                _meshtastic_cache.append({
+                    "from_node": r["from_node"], "text": r["text"], "ts": r["ts"],
+                    "packet_id": r["packet_id"],
+                })
         if rows:
             log("INFO", f"[MESHTASTIC] Reloaded {len(rows)} persisted message(s) into cache")
     except Exception as e:
