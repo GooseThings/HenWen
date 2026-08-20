@@ -1,5 +1,16 @@
 # Changelog
 
+## v2026.08.20
+
+- **Added: two-way IRC relay for the kiosk Chat panel.** Bridges the Status Board's Chat panel to one IRC channel — messages typed in kiosk chat relay out to IRC, and messages typed in the channel appear in kiosk chat with a distinct green `irc`-role styling. Configurable from Manager > IRC Relay (host/port/TLS/channel/nick/optional NickServ password), with a live connected/disconnected indicator and exponential reconnect backoff.
+- **Added: IRC as an Alerts destination**, alongside the existing ntfy/Pushover/Discord/Kiosk Chat toggles.
+- **Added: independent Discord relay for the Meshtastic panel**, plus restart persistence (messages now survive a HenWen restart instead of the panel going blank) and sender friendly names (from `NODEINFO_APP` packets) in place of raw node ids.
+- **Changed: Manager sidebar reorganized into logical sections** (Main, Diagnostics, rpt.conf Editor, Automation, Audio, Integrations, Kiosk, Administration) instead of one flat list plus a catch-all "Tools" section; Global Templates folded into the rpt.conf Editor section and the `node-main` template page renamed to "Global Settings".
+- **Removed: the kiosk Recent Connections panel.** The condensed peer/callsign/duration list on the Status Board is gone; the Node card now fills the full column. The Manager's own Conn. History tab (any node, live or not, with a Clear button) is unaffected.
+- **Fixed: duplicate Meshtastic messages relayed by multiple MQTT gateways** were showing up twice in the panel; now deduped by packet id.
+- **Fixed: lost disconnect events in connection history tracking.**
+- **Fixed: header button height mismatch on the kiosk board.**
+
 ## v2026.08.15
 
 - **Added: kiosk Chat panel.** Logged-in users can post short messages that all viewers of the Status Board see live; alert-driven system messages (see the Discord relay / alerts config) render with a distinct warning-colored border and username so they don't read as an ordinary chat line.
