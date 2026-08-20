@@ -7176,11 +7176,35 @@ def _start_broadcast(node):
     # to match input, which was measured to silently undo the limiting on a
     # fully-clipped test signal (peak stayed pinned at full scale). Verified
     # against a synthetic clipped-tone fixture pushed through this exact
-    # chain incl. the Opus round-trip: 0 clipped samples, peak ~90% FS, and
-    # the filter's gaussian-window smoothing added only ~5ms of onset delay
-    # — negligible against the stream's ~0.75s live-edge target. If this
-    # sounds like it's pumping/over-processing on your traffic, the first
-    # things to relax are m (max gain) down or f (frame length) up.
+    # chain incl. the Opus round-trip: 0 clipped samples, peak ~90% FS,
+    # unchanged from the f=200:g=15 values this replaced.
+    #
+    # f (frame length, ms) and g (Gaussian smoothing window, in frames) were
+    # originally 200/15 — a claimed "~5ms of onset delay" in an earlier
+    # version of this comment was wrong: dynaudnorm's Gaussian window can't
+    # emit a frame until it has g frames of lookahead, so f=200:g=15 was a
+    # measured ~3.0s of pure algorithmic delay before ANY encoded audio left
+    # ffmpeg — added to every listener's live-edge latency on top of the
+    # jitter buffer/cluster/client cushion, and never caught by ear because
+    # nothing in this pipeline had been benchmarked for time-to-first-byte.
+    # Reproduced locally: synthetic PCM fed into this exact ffmpeg command
+    # through a real FIFO at 20ms cadence, timing first stdout bytes
+    # (scratchpad audiotest/test_latency.py, not part of the tree).
+    #
+    # The lookahead is g frames of f ms each, i.e. proportional to f*g, not
+    # to g alone — an f=100:g=5 first pass cut it to ~0.7s, but re-measuring
+    # at f=50:g=5 (same g, half the frame length) landed the SAME gradual
+    # ~250ms multi-step transient settle (dynaudnorm's smoothing shape is
+    # governed by frame *count* g, not their duration) at under half the
+    # latency: ~0.4s. That's the version actually running below — a ~2.9s
+    # cut from the original, verified against the same clip-safety fixture
+    # above (unchanged) plus a synthetic quiet/loud/quiet step test (RMS
+    # measured in 50ms windows) confirming the level change still ramps
+    # smoothly over ~5 windows rather than snapping in one, which is what
+    # would risk audible pumping. g must stay odd (ffmpeg requirement). If
+    # this sounds like it's pumping/over-processing on your traffic, the
+    # first things to try are g up (smoother, slower) before m (max gain)
+    # down or f up — both of the latter reintroduce latency for the same g.
     ffmpeg_cmd = [
         'ffmpeg', '-loglevel', 'warning',
         '-probesize', '32',
@@ -7188,7 +7212,7 @@ def _start_broadcast(node):
         '-fflags', '+nobuffer',
         '-f', 's16le', '-ar', '8000', '-ac', '1', '-channel_layout', 'mono',
         '-i', fifo_out_path,
-        '-af', 'dynaudnorm=f=200:g=15:p=0.95:m=6,'
+        '-af', 'dynaudnorm=f=50:g=5:p=0.95:m=6,'
                'alimiter=limit=0.85:attack=5:release=50:level=false',
         '-ar', '48000',        # resample to Opus native rate before encoding
         '-c:a', 'libopus', '-b:a', '24k',
@@ -7202,6 +7226,18 @@ def _start_broadcast(node):
                                # on the speech band instead of an empty 4–8 kHz range
         '-frame_duration', '20',
         '-application', 'audio',
+        '-flush_packets', '1',  # force ffmpeg to flush its own output-side I/O
+                                 # buffer after every packet instead of only
+                                 # when that buffer fills. At this stream's
+                                 # bitrate (~24 kbps, i.e. ~600 bytes per
+                                 # 200ms Cluster) the buffer would otherwise
+                                 # take dozens of Clusters — several seconds
+                                 # of real audio — to fill on its own, adding
+                                 # exactly that much silent, invisible extra
+                                 # delay before _read_loop ever sees the
+                                 # bytes. This has no effect on the encoded
+                                 # audio itself, only on when already-encoded
+                                 # bytes leave the process.
         '-f', 'webm',
         '-cluster_time_limit', '200',
         'pipe:1',
