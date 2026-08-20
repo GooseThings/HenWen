@@ -674,12 +674,21 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     <div class="nav-section">Main</div>
     <button class="nav-item active" onclick="showPage('dashboard')">Dashboard</button>
     <button class="nav-item" onclick="showPage('node-control')">Node Control</button>
+    <button class="nav-item" onclick="showPage('dtmf')">DTMF Control</button>
+
+    <div class="nav-section">Diagnostics</div>
+    <button class="nav-item" onclick="showPage('conn-history')">Conn. History</button>
+    <button class="nav-item" onclick="showPage('ami-diag')">AMI Diagnostics</button>
+    <button class="nav-item" onclick="showPage('tx-diag')">TX Diagnostics</button>
+    <button class="nav-item" id="nav-ast-console" onclick="showPage('ast-console')">Asterisk Console</button>
 
     <div class="nav-section">rpt.conf Editor</div>
     <button class="nav-item" onclick="showPage('general')">General Settings</button>
     {% for node in nodes %}
     <button class="nav-item" onclick="showPage('node-{{ node }}')">Node {{ node }}</button>
     {% endfor %}
+    <button class="nav-item" id="nav-raw-editor" onclick="showPage('raw-editor')">Raw Editor</button>
+    <button class="nav-item" onclick="showPage('backups')">Backups</button>
 
     {% if templates %}
     <div class="nav-section">Global Templates</div>
@@ -698,29 +707,30 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     {% endfor %}
     {% endif %}
 
-    <div class="nav-section">Tools</div>
-    <a class="nav-item" href="/" target="_blank" style="text-decoration:none">Kiosk &#8599;</a>
-    <button class="nav-item" onclick="showPage('dtmf')">DTMF Control</button>
-    <button class="nav-item" id="nav-node-id" onclick="showPage('node-id')">Node ID</button>
+    <div class="nav-section">Automation</div>
     <button class="nav-item" onclick="showPage('announcements')">Announcements</button>
-    <button class="nav-item" onclick="showPage('smart-connector')">Smart Connector</button>
-    <button class="nav-item" id="nav-raw-editor" onclick="showPage('raw-editor')">Raw Editor</button>
-    <button class="nav-item" onclick="showPage('backups')">Backups</button>
-    <button class="nav-item" onclick="showPage('conn-history')">Conn. History</button>
+    <button class="nav-item" id="nav-node-id" onclick="showPage('node-id')">Node ID</button>
     <button class="nav-item" onclick="showPage('alerts')">Alerts</button>
     <button class="nav-item" onclick="showPage('nws-alerts')">Weather Alerts</button>
-    <button class="nav-item" onclick="showPage('ami-diag')">AMI Diagnostics</button>
-    <button class="nav-item" onclick="showPage('tx-diag')">TX Diagnostics</button>
-    <button class="nav-item" id="nav-ast-console" onclick="showPage('ast-console')">Asterisk Console</button>
-    <button class="nav-item" onclick="showPage('kiosk-settings')">Kiosk Settings</button>
-    <button class="nav-item" onclick="showPage('settings')">Settings</button>
-    <button class="nav-item" onclick="showPage('user-mgmt')">User Management</button>
+    <button class="nav-item" onclick="showPage('smart-connector')">Smart Connector</button>
+
+    <div class="nav-section">Audio</div>
     <button class="nav-item" onclick="showPage('recordings')">Recordings</button>
     <button class="nav-item" id="nav-recording-settings" onclick="showPage('recording-settings')">Recording Settings</button>
     <button class="nav-item" id="nav-stream-relay" onclick="showPage('stream-relay')">Stream Relay</button>
+
+    <div class="nav-section">Integrations</div>
     <button class="nav-item" id="nav-meshtastic" onclick="showPage('meshtastic')">Meshtastic</button>
     <button class="nav-item" id="nav-discord-relay" onclick="showPage('discord-relay')">Discord Relay</button>
+
+    <div class="nav-section">Kiosk</div>
+    <a class="nav-item" href="/" target="_blank" style="text-decoration:none">Kiosk &#8599;</a>
+    <button class="nav-item" onclick="showPage('kiosk-settings')">Kiosk Settings</button>
     <button class="nav-item" id="nav-chat-log" onclick="showPage('chat-log')">Chat Log</button>
+
+    <div class="nav-section">Administration</div>
+    <button class="nav-item" onclick="showPage('user-mgmt')">User Management</button>
+    <button class="nav-item" onclick="showPage('settings')">System Settings</button>
   </nav>
   <div class="sidebar-footer">
     <div class="sidebar-footer-row">
@@ -2295,7 +2305,7 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
 
   <!-- Settings -->
   <section class="page" id="page-settings">
-    <div class="page-title">Settings</div>
+    <div class="page-title">System Settings</div>
     <div class="page-sub">App-level configuration for HenWen itself.</div>
 
     <div class="card">
