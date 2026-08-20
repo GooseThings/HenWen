@@ -27,6 +27,7 @@ class TestAlertsConfigRoute:
         assert body["pushover_enabled"] == 0
         assert body["discord_enabled"] == 0
         assert body["chat_enabled"] == 0
+        assert body["irc_enabled"] == 0
 
     def test_save_can_enable_multiple_providers_at_once(self, client, create_user):
         create_user("owner1", role="owner")
@@ -34,7 +35,7 @@ class TestAlertsConfigRoute:
         resp = client.post("/api/alerts/config", json={
             "enabled": True,
             "ntfy_enabled": True, "pushover_enabled": True, "discord_enabled": True,
-            "chat_enabled": True,
+            "chat_enabled": True, "irc_enabled": True,
             "ntfy_topic": "my-topic",
             "pushover_token": "tok", "pushover_user": "usr",
         })
@@ -44,6 +45,7 @@ class TestAlertsConfigRoute:
         assert cfg["pushover_enabled"] == 1
         assert cfg["discord_enabled"] == 1
         assert cfg["chat_enabled"] == 1
+        assert cfg["irc_enabled"] == 1
 
     def test_save_can_enable_just_discord(self, client, create_user):
         create_user("owner1", role="owner")
@@ -174,3 +176,61 @@ class TestSendAlertChatDestination:
         assert row["message"] == "AMI Offline: Connection to Asterisk lost"
         # Straight DB insert, not the enqueueing api_chat_messages_post() path.
         assert app._discord_relay_queue.empty()
+        assert app._irc_relay_queue.empty()
+
+
+class _FakeIrcClient:
+    def __init__(self, alive=True):
+        self.alive = alive
+        self.sent = []
+
+    def send_message(self, text):
+        self.sent.append(text)
+
+
+class TestSendAlertIrcDestination:
+    """irc_enabled sends directly to whatever IRCClient is currently live
+    (app._irc_relay_client_ref), not through _irc_relay_queue -- see
+    _send_alert()'s irc_enabled branch for why (queue messages get the
+    chat '<username>' bracket format, which isn't right for an alert)."""
+
+    def test_sends_to_connected_client(self, client, create_user):
+        create_user("owner1", role="owner")
+        db = app.get_db()
+        db.execute(
+            "INSERT OR REPLACE INTO alert_config (id, enabled, irc_enabled) VALUES (1, 1, 1)"
+        )
+        db.commit()
+        fake = _FakeIrcClient()
+        app._irc_relay_client_ref["client"] = fake
+        try:
+            app._send_alert("AMI Offline", "Connection to Asterisk lost")
+        finally:
+            app._irc_relay_client_ref["client"] = None
+        assert fake.sent == ["[ALERT] AMI Offline: Connection to Asterisk lost"]
+        assert app._irc_relay_queue.empty()
+
+    def test_disconnected_relay_logs_warning_not_exception(self, client, create_user):
+        create_user("owner1", role="owner")
+        db = app.get_db()
+        db.execute(
+            "INSERT OR REPLACE INTO alert_config (id, enabled, irc_enabled) VALUES (1, 1, 1)"
+        )
+        db.commit()
+        app._irc_relay_client_ref["client"] = None
+        app._send_alert("AMI Offline", "Connection to Asterisk lost")  # must not raise
+
+    def test_dead_client_treated_as_disconnected(self, client, create_user):
+        create_user("owner1", role="owner")
+        db = app.get_db()
+        db.execute(
+            "INSERT OR REPLACE INTO alert_config (id, enabled, irc_enabled) VALUES (1, 1, 1)"
+        )
+        db.commit()
+        fake = _FakeIrcClient(alive=False)
+        app._irc_relay_client_ref["client"] = fake
+        try:
+            app._send_alert("AMI Offline", "Connection to Asterisk lost")
+        finally:
+            app._irc_relay_client_ref["client"] = None
+        assert fake.sent == []
