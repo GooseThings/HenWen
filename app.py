@@ -7179,7 +7179,7 @@ def _start_broadcast(node):
     # chain incl. the Opus round-trip: 0 clipped samples, peak ~90% FS,
     # unchanged from the f=200:g=15 values this replaced.
     #
-    # f (frame length) and g (Gaussian smoothing window, in frames) were
+    # f (frame length, ms) and g (Gaussian smoothing window, in frames) were
     # originally 200/15 — a claimed "~5ms of onset delay" in an earlier
     # version of this comment was wrong: dynaudnorm's Gaussian window can't
     # emit a frame until it has g frames of lookahead, so f=200:g=15 was a
@@ -7189,14 +7189,22 @@ def _start_broadcast(node):
     # nothing in this pipeline had been benchmarked for time-to-first-byte.
     # Reproduced locally: synthetic PCM fed into this exact ffmpeg command
     # through a real FIFO at 20ms cadence, timing first stdout bytes
-    # (scratchpad audiotest/test_latency.py). f=100:g=5 cuts that to ~0.7s
-    # while keeping the same clip-safety result above; it also settles a
-    # step change in level within ~3-4 windows (~300-400ms) instead of not
-    # visibly reacting at all within a typical single transmission, so it's
-    # closer to functioning AGC too, not just faster. g must stay odd (ffmpeg
-    # requirement). If this sounds like it's pumping/over-processing on your
-    # traffic, the first things to try are g up (smoother, slower) before m
-    # (max gain) down or f up — both of the latter reintroduce latency.
+    # (scratchpad audiotest/test_latency.py, not part of the tree).
+    #
+    # The lookahead is g frames of f ms each, i.e. proportional to f*g, not
+    # to g alone — an f=100:g=5 first pass cut it to ~0.7s, but re-measuring
+    # at f=50:g=5 (same g, half the frame length) landed the SAME gradual
+    # ~250ms multi-step transient settle (dynaudnorm's smoothing shape is
+    # governed by frame *count* g, not their duration) at under half the
+    # latency: ~0.4s. That's the version actually running below — a ~2.9s
+    # cut from the original, verified against the same clip-safety fixture
+    # above (unchanged) plus a synthetic quiet/loud/quiet step test (RMS
+    # measured in 50ms windows) confirming the level change still ramps
+    # smoothly over ~5 windows rather than snapping in one, which is what
+    # would risk audible pumping. g must stay odd (ffmpeg requirement). If
+    # this sounds like it's pumping/over-processing on your traffic, the
+    # first things to try are g up (smoother, slower) before m (max gain)
+    # down or f up — both of the latter reintroduce latency for the same g.
     ffmpeg_cmd = [
         'ffmpeg', '-loglevel', 'warning',
         '-probesize', '32',
@@ -7204,7 +7212,7 @@ def _start_broadcast(node):
         '-fflags', '+nobuffer',
         '-f', 's16le', '-ar', '8000', '-ac', '1', '-channel_layout', 'mono',
         '-i', fifo_out_path,
-        '-af', 'dynaudnorm=f=100:g=5:p=0.95:m=6,'
+        '-af', 'dynaudnorm=f=50:g=5:p=0.95:m=6,'
                'alimiter=limit=0.85:attack=5:release=50:level=false',
         '-ar', '48000',        # resample to Opus native rate before encoding
         '-c:a', 'libopus', '-b:a', '24k',
