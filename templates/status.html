@@ -3709,9 +3709,14 @@ async function loadMeshtasticMessages() {
       return;
     }
     el.innerHTML = messages.slice().reverse().map(function(m) {
+      /* Friendly name (from a NODEINFO_APP packet) when known, raw node id
+         as a fallback — the id always stays available via the title
+         tooltip since it's the one thing guaranteed unique per node. */
+      var label = m.short_name || m.from_node;
+      var title = m.long_name ? (m.long_name + ' (' + m.from_node + ')') : m.from_node;
       return '<div class="mesh-row">' +
         '<div class="mesh-top">' +
-          '<span class="mesh-node">' + esc(m.from_node) + '</span>' +
+          '<span class="mesh-node" title="' + esc(title) + '">' + esc(label) + '</span>' +
           '<span class="mesh-ts">' + (m.ts ? relTime(m.ts) : '') + '</span>' +
         '</div>' +
         '<div class="mesh-text">' + esc(m.text) + '</div>' +

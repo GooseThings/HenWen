@@ -38,6 +38,7 @@ import sqlite3
 import threading
 import tempfile
 import math
+import queue as _queue_mod
 import sys
 import pwd
 import grp
@@ -749,11 +750,55 @@ def get_db():
         psk          TEXT NOT NULL DEFAULT 'MA=='
     )""")
     conn.commit()
+    # Persisted mirror of _meshtastic_cache -- the in-process deque is still
+    # the hot read path (api_meshtastic_messages() reads it, not this table),
+    # this exists purely so start_meshtastic_poller() can reseed that cache
+    # at startup instead of a HenWen restart silently discarding whatever
+    # history was on-screen. Pruned to MESHTASTIC_CACHE_MAX rows on every
+    # insert, so it never holds more than the cache itself would.
+    conn.execute("""CREATE TABLE IF NOT EXISTS meshtastic_messages (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        from_node TEXT NOT NULL,
+        text      TEXT NOT NULL,
+        ts        REAL NOT NULL,
+        packet_id INTEGER NOT NULL DEFAULT 0
+    )""")
+    if 'packet_id' not in {r[1] for r in conn.execute("PRAGMA table_info(meshtastic_messages)").fetchall()}:
+        # The originating node's packet id -- identical across every relay
+        # hop and every MQTT gateway that uplinks the same over-the-air
+        # packet, so it's what _meshtastic_on_message() dedups on. Existing
+        # rows default to 0, which just means they're never matched as a
+        # duplicate of anything (harmless -- they're already displayed).
+        conn.execute("ALTER TABLE meshtastic_messages ADD COLUMN packet_id INTEGER NOT NULL DEFAULT 0")
+    conn.commit()
+    # Node-id -> friendly-name lookup for the Meshtastic panel, built from
+    # NODEINFO_APP packets a node broadcasts periodically alongside its text
+    # traffic. One row per node ever seen (upserted, not append-only, since
+    # a name is current state, not history) -- see _remember_meshtastic_node_name().
+    conn.execute("""CREATE TABLE IF NOT EXISTS meshtastic_node_names (
+        node_id    TEXT PRIMARY KEY,
+        short_name TEXT NOT NULL DEFAULT '',
+        long_name  TEXT NOT NULL DEFAULT '',
+        ts         REAL NOT NULL
+    )""")
+    conn.commit()
     # Singleton config for the Discord chat relay — one-way mirror of the
     # kiosk Chat panel out to a Discord channel via an Incoming Webhook (no
     # bot token/OAuth). webhook_url is a real secret (holding it lets anyone
     # post into the owner's Discord channel), unlike the Meshtastic PSK above.
     conn.execute("""CREATE TABLE IF NOT EXISTS discord_relay_config (
+        id          INTEGER PRIMARY KEY CHECK (id = 1),
+        enabled     INTEGER NOT NULL DEFAULT 0,
+        webhook_url TEXT    NOT NULL DEFAULT ''
+    )""")
+    conn.commit()
+    # Singleton config for the Meshtastic Discord relay -- a second, fully
+    # independent one-way mirror (Meshtastic panel -> Discord), deliberately
+    # NOT sharing discord_relay_config's webhook: a mesh-radio feed is a
+    # different audience/destination than repeater chat, unlike the NWS
+    # alert Discord toggle which intentionally reuses the chat relay's
+    # webhook. See _meshtastic_on_message() and start_meshtastic_discord_relay_worker().
+    conn.execute("""CREATE TABLE IF NOT EXISTS meshtastic_discord_relay_config (
         id          INTEGER PRIMARY KEY CHECK (id = 1),
         enabled     INTEGER NOT NULL DEFAULT 0,
         webhook_url TEXT    NOT NULL DEFAULT ''
@@ -2935,17 +2980,21 @@ def start_aprs_poller():
 # root-topic/channel. Same "one shared in-process cache, many cheap reads"
 # shape as the APRS/global-activity pollers above: however many kiosk
 # viewers have the panel open, it's still one upstream connection and one
-# cache read per poll. Only decoded TEXT_MESSAGE_APP messages are kept —
-# position/telemetry/nodeinfo packets (the bulk of real traffic) are
-# discarded at decode time by meshtastic_mqtt.decode_service_envelope()
-# itself, not filtered here.
+# cache read per poll. Only decoded TEXT_MESSAGE_APP messages are kept in
+# _meshtastic_cache — position/telemetry packets (the bulk of real traffic)
+# are discarded at decode time by meshtastic_mqtt.decode_service_envelope()
+# itself, not filtered here. NODEINFO_APP packets are the one exception:
+# decode_nodeinfo() pulls a node's self-announced short/long name out of
+# them into _meshtastic_names_cache below, purely so messages can show a
+# friendly name instead of the raw "!xxxxxxxx" node id.
 MESHTASTIC_MQTT_HOST = "mqtt.meshtastic.org"
 MESHTASTIC_MQTT_PORT = 1883
 MESHTASTIC_MQTT_USERNAME = "meshdev"
 MESHTASTIC_MQTT_PASSWORD = "large4cats"
 MESHTASTIC_CACHE_MAX = 50
 
-_meshtastic_cache = deque(maxlen=MESHTASTIC_CACHE_MAX)   # newest last; each {"from_node","text","ts"}
+_meshtastic_cache = deque(maxlen=MESHTASTIC_CACHE_MAX)   # newest last; each {"from_node","packet_id","text","ts"}
+_meshtastic_names_cache = {}   # node_id ("!xxxxxxxx") -> {"short_name","long_name","ts"}
 _meshtastic_lock = threading.Lock()
 # Raw-vs-decoded counters, reset and logged every ~30s by _meshtastic_poll_loop
 # -- decode_service_envelope() returning None (wrong portnum, invalid UTF-8,
@@ -2956,12 +3005,53 @@ _meshtastic_lock = threading.Lock()
 # from the logs alone -- these counters exist to tell those two apart.
 _meshtastic_raw_count = 0
 _meshtastic_decoded_count = 0
+_meshtastic_dup_count = 0
+
+
+def _remember_meshtastic_node_name(nodeinfo):
+    node_id = nodeinfo["node_id"]
+    ts = time.time()
+    with _meshtastic_lock:
+        _meshtastic_names_cache[node_id] = {
+            "short_name": nodeinfo["short_name"],
+            "long_name": nodeinfo["long_name"],
+            "ts": ts,
+        }
+    try:
+        db = get_db()
+        db.execute(
+            """INSERT INTO meshtastic_node_names (node_id, short_name, long_name, ts)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(node_id) DO UPDATE SET
+                   short_name=excluded.short_name, long_name=excluded.long_name, ts=excluded.ts""",
+            (node_id, nodeinfo["short_name"], nodeinfo["long_name"], ts)
+        )
+        db.commit()
+    except Exception as e:
+        log("WARN", f"[MESHTASTIC] Failed to persist node name (not fatal): {e}")
 
 
 def _meshtastic_on_message(psk, msg):
-    global _meshtastic_raw_count, _meshtastic_decoded_count
+    global _meshtastic_raw_count, _meshtastic_decoded_count, _meshtastic_dup_count
     with _meshtastic_lock:
         _meshtastic_raw_count += 1
+
+    # A given MQTT payload is either a text message or a NODEINFO_APP name
+    # announcement, never both, and there's no way to tell which without
+    # decrypting -- so every non-text packet (the bulk of real traffic:
+    # position/telemetry/etc.) costs two failed decode attempts below
+    # instead of one. Both are a single small AES-CTR block plus a tiny
+    # protobuf parse, cheap enough at this message rate (at most a few per
+    # second) to not be worth a shared-decrypt-then-dispatch refactor.
+    try:
+        nodeinfo = meshtastic_mqtt.decode_nodeinfo(msg.payload, psk)
+    except Exception as e:
+        log("WARN", f"[MESHTASTIC] Nodeinfo decode error (not fatal, skipping message): {e}")
+        nodeinfo = None
+    if nodeinfo is not None:
+        _remember_meshtastic_node_name(nodeinfo)
+        return
+
     try:
         result = meshtastic_mqtt.decode_service_envelope(msg.payload, psk)
     except Exception as e:
@@ -2972,11 +3062,94 @@ def _meshtastic_on_message(psk, msg):
     result["ts"] = time.time()
     with _meshtastic_lock:
         _meshtastic_decoded_count += 1
-        _meshtastic_cache.append(result)
+        # A node's original transmission is routinely heard -- and uplinked
+        # to MQTT -- by more than one gateway node in range, each publishing
+        # its own byte-identical copy of the same over-the-air packet. Every
+        # copy decrypts to the same (from_node, packet_id) pair (packet_id
+        # is assigned once by the originating node and never changes across
+        # relay hops), which is what makes it a safe dedup key -- unlike
+        # text content alone, it doesn't collide with a genuine second
+        # send of the same words (that gets its own fresh packet_id). Only
+        # checked against what's still in the display cache (recent
+        # duplicates arrive within seconds of each other via different
+        # gateways; anything older has already scrolled off-screen anyway).
+        is_dup = any(
+            c["from_node"] == result["from_node"] and c.get("packet_id") == result["packet_id"]
+            for c in _meshtastic_cache
+        )
+        if is_dup:
+            _meshtastic_dup_count += 1
+        else:
+            _meshtastic_cache.append(result)
+            name_info = _meshtastic_names_cache.get(result["from_node"])
+    if is_dup:
+        return
+    display_name = name_info["short_name"] if name_info and name_info["short_name"] else result["from_node"]
+    try:
+        _meshtastic_discord_relay_queue.put_nowait((display_name, result["text"]))
+    except _queue_mod.Full:
+        log("WARN", "[MESHTASTIC-DISCORD-RELAY] Queue full, dropping message")
+    try:
+        db = get_db()
+        db.execute(
+            "INSERT INTO meshtastic_messages (from_node, text, ts, packet_id) VALUES (?, ?, ?, ?)",
+            (result["from_node"], result["text"], result["ts"], result["packet_id"])
+        )
+        # Keep only the newest MESHTASTIC_CACHE_MAX rows -- this table is a
+        # restart-survival mirror of the cache, not a growing history log.
+        db.execute(
+            """DELETE FROM meshtastic_messages WHERE id NOT IN (
+                   SELECT id FROM meshtastic_messages ORDER BY id DESC LIMIT ?)""",
+            (MESHTASTIC_CACHE_MAX,)
+        )
+        db.commit()
+    except Exception as e:
+        log("WARN", f"[MESHTASTIC] Failed to persist message (not fatal): {e}")
+
+
+# Meshtastic Discord relay -- one-way mirror of decoded Meshtastic text
+# messages out to a Discord channel via an Incoming Webhook, architecturally
+# identical to the Chat panel's own relay (bounded queue + one dedicated
+# worker thread, see _discord_relay_queue/_discord_relay_worker above) but
+# fully independent: its own config table/webhook, since a mesh-radio feed
+# is a different destination than repeater chat. Enqueued directly from
+# _meshtastic_on_message() above, not from a Flask request route.
+_meshtastic_discord_relay_queue = _queue_mod.Queue(maxsize=50)
+
+
+def _meshtastic_discord_relay_build_payload(display_name, text):
+    """allowed_mentions suppression matters even more here than for the chat
+    relay: this text comes straight from unauthenticated public mesh radios,
+    not logged-in HenWen users, so it's the only thing standing between a
+    stray "@everyone" on the mesh and pinging the whole Discord server."""
+    return {
+        "content": f"**{display_name}**: {text}",
+        "allowed_mentions": {"parse": []},
+    }
+
+
+def _meshtastic_discord_relay_post(webhook_url, display_name, text):
+    _post_json_with_dns_backstop(webhook_url, _meshtastic_discord_relay_build_payload(display_name, text))
+
+
+def _meshtastic_discord_relay_worker():
+    while True:
+        display_name, text = _meshtastic_discord_relay_queue.get()
+        try:
+            cfg = _get_meshtastic_discord_relay_config()
+            if not cfg or not cfg['enabled'] or not cfg['webhook_url']:
+                continue
+            _meshtastic_discord_relay_post(cfg['webhook_url'], display_name, text)
+        except Exception as e:
+            log("WARN", f"[MESHTASTIC-DISCORD-RELAY] Post failed (not fatal, dropping message): {e}")
+
+
+def start_meshtastic_discord_relay_worker():
+    threading.Thread(target=_meshtastic_discord_relay_worker, name="meshtastic-discord-relay-worker", daemon=True).start()
 
 
 def _meshtastic_poll_loop():
-    global _meshtastic_raw_count, _meshtastic_decoded_count
+    global _meshtastic_raw_count, _meshtastic_decoded_count, _meshtastic_dup_count
     if mqtt_client is None or meshtastic_mqtt is None:
         log("WARN", "[MESHTASTIC] paho-mqtt not installed — Meshtastic panel disabled")
         return
@@ -3042,12 +3215,14 @@ def _meshtastic_poll_loop():
                 if disconnected.is_set():
                     break
                 with _meshtastic_lock:
-                    raw, decoded = _meshtastic_raw_count, _meshtastic_decoded_count
+                    raw, decoded, dups = _meshtastic_raw_count, _meshtastic_decoded_count, _meshtastic_dup_count
                     _meshtastic_raw_count = 0
                     _meshtastic_decoded_count = 0
+                    _meshtastic_dup_count = 0
                 if raw:
                     log("INFO", f"[MESHTASTIC] {raw} MQTT message(s) received on {topic!r} in the "
-                                 f"last ~30s, {decoded} decoded as text")
+                                 f"last ~30s, {decoded} decoded as text ({dups} of those squashed as "
+                                 f"duplicates already shown)")
                 if (_get_meshtastic_config() or MESHTASTIC_CONFIG_DEFAULTS) != cfg:
                     log("INFO", "[MESHTASTIC] Config changed — reconnecting")
                     break
@@ -3065,6 +3240,36 @@ def _meshtastic_poll_loop():
 
 
 def start_meshtastic_poller():
+    # Reseed the in-process cache from meshtastic_messages before the poller
+    # even connects, so a HenWen restart doesn't blank the kiosk panel --
+    # this is a one-shot reload, not something the poll loop itself repeats.
+    try:
+        rows = get_db().execute(
+            "SELECT from_node, text, ts, packet_id FROM meshtastic_messages ORDER BY id ASC"
+        ).fetchall()
+        with _meshtastic_lock:
+            for r in rows:
+                _meshtastic_cache.append({
+                    "from_node": r["from_node"], "text": r["text"], "ts": r["ts"],
+                    "packet_id": r["packet_id"],
+                })
+        if rows:
+            log("INFO", f"[MESHTASTIC] Reloaded {len(rows)} persisted message(s) into cache")
+    except Exception as e:
+        log("WARN", f"[MESHTASTIC] Failed to reload persisted messages (not fatal): {e}")
+    try:
+        name_rows = get_db().execute(
+            "SELECT node_id, short_name, long_name, ts FROM meshtastic_node_names"
+        ).fetchall()
+        with _meshtastic_lock:
+            for r in name_rows:
+                _meshtastic_names_cache[r["node_id"]] = {
+                    "short_name": r["short_name"], "long_name": r["long_name"], "ts": r["ts"]
+                }
+        if name_rows:
+            log("INFO", f"[MESHTASTIC] Reloaded {len(name_rows)} persisted node name(s) into cache")
+    except Exception as e:
+        log("WARN", f"[MESHTASTIC] Failed to reload persisted node names (not fatal): {e}")
     t = threading.Thread(target=_meshtastic_poll_loop, name="meshtastic-poller", daemon=True)
     t.start()
 
@@ -6447,8 +6652,6 @@ def api_tx_diagnostics():
 # client queue is seeded with the cached init segment on join, then receives
 # whole ~200 ms Clusters (see _drain_webm).
 # ---------------------------------------------------------------------------
-import queue as _queue_mod
-
 _WEBM_CLUSTER_ID = b'\x1f\x43\xb6\x75'   # EBML ID of a Matroska/WebM Cluster
 
 
@@ -9992,6 +10195,14 @@ def _get_discord_relay_config():
     return dict(row) if row else None
 
 
+MESHTASTIC_DISCORD_RELAY_CONFIG_DEFAULTS = {"enabled": 0, "webhook_url": ""}
+
+
+def _get_meshtastic_discord_relay_config():
+    row = get_db().execute("SELECT * FROM meshtastic_discord_relay_config WHERE id=1").fetchone()
+    return dict(row) if row else None
+
+
 def _get_stream_relay_config():
     row = get_db().execute("SELECT * FROM stream_relay_config WHERE id=1").fetchone()
     return dict(row) if row else None
@@ -10197,7 +10408,16 @@ def api_meshtastic_config_save():
 @app.route("/api/meshtastic/messages")
 def api_meshtastic_messages():
     with _meshtastic_lock:
-        messages = list(_meshtastic_cache)
+        messages = [dict(m) for m in _meshtastic_cache]
+        names = dict(_meshtastic_names_cache)
+    # Enriched here rather than at decode time -- a name learned from a
+    # NODEINFO_APP packet after a text message already landed in the cache
+    # should still backfill onto that older message on the next poll,
+    # instead of only ever applying to messages received afterward.
+    for m in messages:
+        info = names.get(m["from_node"])
+        m["short_name"] = info["short_name"] if info else ""
+        m["long_name"] = info["long_name"] if info else ""
     cfg = _get_meshtastic_config() or MESHTASTIC_CONFIG_DEFAULTS
     return jsonify({
         "messages": messages,
@@ -10236,6 +10456,39 @@ def api_discord_relay_config_save():
     )
     db.commit()
     log("INFO", f"[DISCORD-RELAY] Config saved by {session.get('username', '')}")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/meshtastic-discord-relay/config")
+def api_meshtastic_discord_relay_config_get():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can view Meshtastic Discord relay settings"}), 403
+    cfg = _get_meshtastic_discord_relay_config()
+    return jsonify(dict(cfg) if cfg else MESHTASTIC_DISCORD_RELAY_CONFIG_DEFAULTS)
+
+
+@app.route("/api/meshtastic-discord-relay/config", methods=["POST", "PUT"])
+def api_meshtastic_discord_relay_config_save():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can change Meshtastic Discord relay settings"}), 403
+    data = request.json or {}
+    enabled = bool(data.get("enabled"))
+    webhook_url = str(data.get("webhook_url", "")).strip()
+
+    if enabled and not webhook_url:
+        return jsonify({"error": "Webhook URL is required to enable the relay"}), 400
+    if webhook_url and not webhook_url.startswith("https://discord.com/api/webhooks/") \
+            and not webhook_url.startswith("https://discordapp.com/api/webhooks/"):
+        return jsonify({"error": "That doesn't look like a Discord webhook URL"}), 400
+
+    db = get_db()
+    db.execute(
+        """INSERT OR REPLACE INTO meshtastic_discord_relay_config (id, enabled, webhook_url)
+           VALUES (1, ?, ?)""",
+        (int(enabled), webhook_url)
+    )
+    db.commit()
+    log("INFO", f"[MESHTASTIC-DISCORD-RELAY] Config saved by {session.get('username', '')}")
     return jsonify({"ok": True})
 
 
@@ -11984,6 +12237,7 @@ if not os.environ.get("HENWEN_SKIP_STARTUP"):
     start_recording_janitor()
     start_chat_janitor()
     start_discord_relay_worker()
+    start_meshtastic_discord_relay_worker()
     start_stream_relay()
 
 if __name__ == "__main__":

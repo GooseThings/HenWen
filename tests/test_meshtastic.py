@@ -40,6 +40,13 @@ def _build_envelope(psk_b64, portnum, payload_bytes, packet_id=123456, from_node
     return env.SerializeToString()
 
 
+def _build_user_payload(short_name="", long_name=""):
+    user = mesh_min_pb2.User()
+    user.short_name = short_name
+    user.long_name = long_name
+    return user.SerializeToString()
+
+
 class TestDeriveKey:
     def test_preset_index_1_reproduces_default_key_unmodified(self):
         assert meshtastic_mqtt.derive_key("AQ==") == meshtastic_mqtt.DEFAULT_PSK
@@ -89,7 +96,7 @@ class TestDecodeServiceEnvelope:
         raw = _build_envelope("MA==", self.TEXT, "Hello Michigan mesh!".encode("utf-8"),
                                packet_id=42, from_node=0xAABBCC11)
         result = meshtastic_mqtt.decode_service_envelope(raw, "MA==")
-        assert result == {"from_node": "!aabbcc11", "text": "Hello Michigan mesh!", "ts": None}
+        assert result == {"from_node": "!aabbcc11", "packet_id": 42, "text": "Hello Michigan mesh!", "ts": None}
 
     def test_wrong_psk_does_not_return_a_fake_message(self):
         raw = _build_envelope("MA==", self.TEXT, b"Hello Michigan mesh!")
@@ -123,6 +130,34 @@ class TestDecodeServiceEnvelope:
     def test_invalid_psk_in_config_returns_none_not_an_exception(self):
         raw = _build_envelope("MA==", self.TEXT, b"hello")
         assert meshtastic_mqtt.decode_service_envelope(raw, "not-base64!!!") is None
+
+
+class TestDecodeNodeinfo:
+    NODEINFO = portnums_pb2.PortNum.Value("NODEINFO_APP")
+    TEXT = portnums_pb2.PortNum.Value("TEXT_MESSAGE_APP")
+
+    def test_decodes_short_and_long_name(self):
+        raw = _build_envelope("MA==", self.NODEINFO,
+                               _build_user_payload(short_name="N8G", long_name="N8GMZ Repeater"),
+                               from_node=0xAABBCC11)
+        result = meshtastic_mqtt.decode_nodeinfo(raw, "MA==")
+        assert result == {"node_id": "!aabbcc11", "short_name": "N8G", "long_name": "N8GMZ Repeater"}
+
+    def test_text_message_is_not_decoded_as_nodeinfo(self):
+        raw = _build_envelope("MA==", self.TEXT, b"hello mesh")
+        assert meshtastic_mqtt.decode_nodeinfo(raw, "MA==") is None
+
+    def test_all_empty_names_is_discarded(self):
+        raw = _build_envelope("MA==", self.NODEINFO, _build_user_payload())
+        assert meshtastic_mqtt.decode_nodeinfo(raw, "MA==") is None
+
+    def test_wrong_psk_does_not_return_a_fake_name(self):
+        raw = _build_envelope("MA==", self.NODEINFO,
+                               _build_user_payload(short_name="N8G", long_name="N8GMZ Repeater"))
+        assert meshtastic_mqtt.decode_nodeinfo(raw, "AQ==") is None
+
+    def test_garbage_bytes_return_none_not_an_exception(self):
+        assert meshtastic_mqtt.decode_nodeinfo(b"\x00\x01\x02not-a-protobuf", "MA==") is None
 
 
 def _login(client, username):
@@ -203,3 +238,171 @@ class TestMeshtasticMessagesRoute:
         resp = client.get("/api/meshtastic/messages")
         assert resp.status_code == 200
         assert resp.get_json() == {"messages": [], "channel_name": "Michigan", "root_topic": "/msh/US/MI"}
+
+
+class TestMeshtasticPersistence:
+    """A HenWen restart clears _meshtastic_cache (in-process only) -- these
+    cover the meshtastic_messages table that reseeds it, so real decoded
+    messages survive a restart instead of the panel going blank."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self, fresh_db):
+        app._meshtastic_cache.clear()
+        app._meshtastic_names_cache.clear()
+        app._meshtastic_raw_count = 0
+        app._meshtastic_decoded_count = 0
+        yield
+        app._meshtastic_cache.clear()
+        app._meshtastic_names_cache.clear()
+
+    def test_on_message_persists_to_db(self, fresh_db):
+        msg = app._meshtastic_cache
+        assert len(msg) == 0
+
+        class _FakeMsg:
+            payload = _build_envelope("AQ==", portnums_pb2.PortNum.TEXT_MESSAGE_APP, b"hello mesh")
+
+        app._meshtastic_on_message("AQ==", _FakeMsg())
+
+        rows = app.get_db().execute("SELECT from_node, text FROM meshtastic_messages").fetchall()
+        assert len(rows) == 1
+        assert rows[0]["text"] == "hello mesh"
+        assert len(app._meshtastic_cache) == 1
+
+    def test_duplicate_packet_from_a_second_gateway_is_squashed(self, fresh_db):
+        # Same over-the-air packet, uplinked to MQTT by two different
+        # gateway nodes that both happened to hear it -- byte-identical
+        # ciphertext, so it decrypts to the same (from_node, packet_id)
+        # pair each time.
+        class _FakeMsg:
+            payload = _build_envelope("AQ==", portnums_pb2.PortNum.TEXT_MESSAGE_APP,
+                                       b"hello mesh", packet_id=777, from_node=0xAABBCC11)
+
+        app._meshtastic_on_message("AQ==", _FakeMsg())
+        app._meshtastic_on_message("AQ==", _FakeMsg())
+
+        assert len(app._meshtastic_cache) == 1
+        rows = app.get_db().execute("SELECT text FROM meshtastic_messages").fetchall()
+        assert len(rows) == 1
+
+    def test_same_text_different_packet_id_is_not_squashed(self, fresh_db):
+        # A genuine second send of identical words gets its own fresh
+        # packet_id from the sending node -- must not be treated as a dup.
+        for packet_id in (1, 2):
+            class _FakeMsg:
+                payload = _build_envelope("AQ==", portnums_pb2.PortNum.TEXT_MESSAGE_APP,
+                                           b"hello mesh", packet_id=packet_id, from_node=0xAABBCC11)
+            app._meshtastic_on_message("AQ==", _FakeMsg())
+
+        assert len(app._meshtastic_cache) == 2
+
+    def test_same_packet_id_different_sender_is_not_squashed(self, fresh_db):
+        # packet_id alone isn't unique network-wide -- only (from_node,
+        # packet_id) together identifies one original transmission.
+        for from_node in (0xAABBCC11, 0xDDEEFF22):
+            class _FakeMsg:
+                payload = _build_envelope("AQ==", portnums_pb2.PortNum.TEXT_MESSAGE_APP,
+                                           b"hello mesh", packet_id=555, from_node=from_node)
+            app._meshtastic_on_message("AQ==", _FakeMsg())
+
+        assert len(app._meshtastic_cache) == 2
+
+    def test_persisted_rows_pruned_to_cache_max(self, fresh_db, monkeypatch):
+        monkeypatch.setattr(app, "MESHTASTIC_CACHE_MAX", 3)
+        for i in range(5):
+
+            class _FakeMsg:
+                payload = _build_envelope("AQ==", portnums_pb2.PortNum.TEXT_MESSAGE_APP,
+                                           f"msg {i}".encode(), packet_id=1000 + i)
+
+            app._meshtastic_on_message("AQ==", _FakeMsg())
+
+        rows = app.get_db().execute("SELECT text FROM meshtastic_messages ORDER BY id").fetchall()
+        assert [r["text"] for r in rows] == ["msg 2", "msg 3", "msg 4"]
+
+    def test_start_meshtastic_poller_reseeds_cache_from_db(self, fresh_db, monkeypatch):
+        db = app.get_db()
+        db.execute("INSERT INTO meshtastic_messages (from_node, text, ts) VALUES (?, ?, ?)",
+                   ("!aabbccdd", "reseeded message", 1234.0))
+        db.commit()
+
+        # Stub out the actual network poll loop -- only the reseed-then-launch
+        # behavior of start_meshtastic_poller() is under test here.
+        monkeypatch.setattr(app.threading, "Thread", lambda **kw: type(
+            "T", (), {"start": lambda self: None})())
+
+        app.start_meshtastic_poller()
+
+        assert list(app._meshtastic_cache) == [
+            {"from_node": "!aabbccdd", "text": "reseeded message", "ts": 1234.0, "packet_id": 0}
+        ]
+
+    def test_nodeinfo_message_updates_name_cache_not_message_cache(self, fresh_db):
+        NODEINFO = portnums_pb2.PortNum.Value("NODEINFO_APP")
+
+        class _FakeMsg:
+            payload = _build_envelope("AQ==", NODEINFO,
+                                       _build_user_payload(short_name="N8G", long_name="N8GMZ Repeater"),
+                                       from_node=0xAABBCC11)
+
+        app._meshtastic_on_message("AQ==", _FakeMsg())
+
+        assert len(app._meshtastic_cache) == 0
+        assert app._meshtastic_names_cache["!aabbcc11"]["short_name"] == "N8G"
+        assert app._meshtastic_names_cache["!aabbcc11"]["long_name"] == "N8GMZ Repeater"
+
+        rows = app.get_db().execute(
+            "SELECT short_name, long_name FROM meshtastic_node_names WHERE node_id=?", ("!aabbcc11",)
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["short_name"] == "N8G"
+
+    def test_nodeinfo_upserts_on_repeat_announcement(self, fresh_db):
+        NODEINFO = portnums_pb2.PortNum.Value("NODEINFO_APP")
+
+        for name in ("Old Name", "New Name"):
+            class _FakeMsg:
+                payload = _build_envelope("AQ==", NODEINFO,
+                                           _build_user_payload(short_name="N8G", long_name=name),
+                                           from_node=0xAABBCC11)
+            app._meshtastic_on_message("AQ==", _FakeMsg())
+
+        rows = app.get_db().execute("SELECT long_name FROM meshtastic_node_names").fetchall()
+        assert len(rows) == 1
+        assert rows[0]["long_name"] == "New Name"
+
+    def test_start_meshtastic_poller_reseeds_names_cache_from_db(self, fresh_db, monkeypatch):
+        db = app.get_db()
+        db.execute(
+            "INSERT INTO meshtastic_node_names (node_id, short_name, long_name, ts) VALUES (?, ?, ?, ?)",
+            ("!aabbccdd", "N8G", "N8GMZ Repeater", 1234.0)
+        )
+        db.commit()
+        monkeypatch.setattr(app.threading, "Thread", lambda **kw: type(
+            "T", (), {"start": lambda self: None})())
+
+        app.start_meshtastic_poller()
+
+        assert app._meshtastic_names_cache["!aabbccdd"]["short_name"] == "N8G"
+        assert app._meshtastic_names_cache["!aabbccdd"]["long_name"] == "N8GMZ Repeater"
+
+    def test_messages_route_enriches_with_known_name(self, client, create_user):
+        create_user("owner1", role="owner")
+        app._meshtastic_cache.append({"from_node": "!aabbcc11", "text": "hello", "ts": 111.0})
+        app._meshtastic_names_cache["!aabbcc11"] = {
+            "short_name": "N8G", "long_name": "N8GMZ Repeater", "ts": 111.0
+        }
+        resp = client.get("/api/meshtastic/messages")
+        assert resp.status_code == 200
+        msgs = resp.get_json()["messages"]
+        assert len(msgs) == 1
+        assert msgs[0]["short_name"] == "N8G"
+        assert msgs[0]["long_name"] == "N8GMZ Repeater"
+
+    def test_messages_route_blank_name_for_unknown_node(self, client, create_user):
+        create_user("owner1", role="owner")
+        app._meshtastic_cache.append({"from_node": "!deadbeef", "text": "hello", "ts": 111.0})
+        resp = client.get("/api/meshtastic/messages")
+        msgs = resp.get_json()["messages"]
+        assert msgs[0]["short_name"] == ""
+        assert msgs[0]["long_name"] == ""

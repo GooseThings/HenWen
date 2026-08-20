@@ -1618,6 +1618,27 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     </div>
     <button class="btn btn-primary" onclick="meshtasticSave()">Save</button>
     <div id="mesh-status" style="margin-top:8px;font-size:0.82rem"></div>
+
+    <div class="page-title" style="margin-top:28px">Discord Relay</div>
+    <div class="page-sub">One-way mirror of the Meshtastic panel out to a Discord channel via its own Incoming Webhook — separate from the Chat panel's Discord relay, since this is a different audience/destination.</div>
+    <div class="card" style="max-width:620px">
+      <div class="card-body">
+        <div style="display:grid;grid-template-columns:1fr;gap:14px">
+          <div>
+            <label class="toggle-label" style="display:flex;align-items:center;gap:8px">
+              <input type="checkbox" id="mesh-discord-relay-enabled"> Relay Meshtastic messages to Discord
+            </label>
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Webhook URL</label>
+            <input type="password" id="mesh-discord-relay-webhook" class="val-input" placeholder="https://discord.com/api/webhooks/..." style="width:100%">
+            <div style="font-size:0.75rem;color:var(--text2);margin-top:3px">From the target Discord channel's Settings → Integrations → Webhooks → New Webhook. This URL lets anyone holding it post into that channel, so treat it like a password.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <button class="btn btn-primary" onclick="meshDiscordRelaySave()">Save</button>
+    <div id="mesh-discord-relay-status" style="margin-top:8px;font-size:0.82rem"></div>
   </section>
 
   <!-- Discord Relay (owner only) -->
@@ -5867,6 +5888,30 @@ async function meshtasticLoad() {
   document.getElementById('mesh-root-topic').value   = d.root_topic || '';
   document.getElementById('mesh-channel-name').value = d.channel_name || '';
   document.getElementById('mesh-psk').value          = d.psk || '';
+  meshDiscordRelayLoad();
+}
+
+async function meshDiscordRelayLoad() {
+  var r = await api('/api/meshtastic-discord-relay/config');
+  var d = r.ok ? r.data : {};
+  document.getElementById('mesh-discord-relay-enabled').checked = !!d.enabled;
+  document.getElementById('mesh-discord-relay-webhook').value   = d.webhook_url || '';
+}
+
+async function meshDiscordRelaySave() {
+  var st = document.getElementById('mesh-discord-relay-status');
+  var payload = {
+    enabled:     document.getElementById('mesh-discord-relay-enabled').checked,
+    webhook_url: document.getElementById('mesh-discord-relay-webhook').value.trim(),
+  };
+  var r = await api('/api/meshtastic-discord-relay/config', {
+    method:  'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body:    JSON.stringify(payload),
+  });
+  if (r.ok) { st.textContent = 'Saved.'; st.style.color = 'var(--success)'; }
+  else       { st.textContent = (r.data && r.data.error) || 'Error'; st.style.color = 'var(--danger)'; }
+  setTimeout(function(){ st.textContent = ''; }, 3000);
 }
 
 async function meshtasticSave() {
