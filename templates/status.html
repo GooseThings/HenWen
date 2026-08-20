@@ -280,7 +280,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .nws-alert-item.nws-sev-advisory strong { color: var(--warn); }
 @keyframes nws-scroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
 
-/* ── Content area: Node info | Recent Connections | Connected/Map | Favorites/Chat | Latest Activity ──
+/* ── Content area: Node info | Connected/Map | Favorites/Chat | Latest Activity ──
    A 12-col x 24-row grid built from `fr` tracks, not fixed px, so it always
    fills exactly the space .content-area has (same "fits the viewport, never
    scrolls" behavior the old fixed 4-column grid had) regardless of screen
@@ -297,36 +297,17 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
 .connected-card { grid-column: 4 / span 6; grid-row: 1 / span 13; }
 
-/* ── Node status card: left column, top half (Recent Connections is its own
-   card sharing this column — see .history-card) ── */
+/* ── Node status card: left column, full height ── */
 .node-card {
-  grid-column: 1 / span 3; grid-row: 1 / span 16;
+  grid-column: 1 / span 3; grid-row: 1 / span 24;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   padding: 16px 12px; display: flex; flex-direction: column;
   gap: 8px; overflow: hidden; min-height: 0;
 }
 #node-info { display: flex; flex-direction: column; align-items: center; gap: 8px; flex-shrink: 0; }
 
-/* ── Recent Connections: left column, bottom half, under the Node card ── */
-.history-card {
-  grid-column: 1 / span 3; grid-row: 17 / span 8;
-  background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
-  display: flex; flex-direction: column; overflow: hidden; min-height: 0;
-}
-/* No justify-content:flex-end — combined with overflow-y:auto it's a classic
-   flexbox trap: once rows overflow, the browser clips the start of the
-   content instead of leaving it scrollable, so the newest row would render
-   cut off behind .card-header. Rows just stack from the top. */
-.history-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; }
-.history-list::-webkit-scrollbar { width: 3px; }
-.history-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
-.hist-row { padding: 6px 2px; border-bottom: 1px solid var(--border); }
-.hist-row:last-child { border-bottom: none; }
-.hist-top { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+/* .hist-num is also reused by the node search results list (renderAslResults()) */
 .hist-num { font-size: 0.85rem; font-weight: 700; font-family: var(--mono); color: var(--accent); text-decoration: none; }
-.hist-call { font-size: 0.72rem; font-weight: 600; color: var(--text); text-decoration: none; }
-.hist-call:hover { text-decoration: underline; }
-.hist-meta { display: flex; justify-content: space-between; gap: 6px; font-size: 0.68rem; color: var(--text2); margin-top: 1px; }
 .node-number { font-size: 2.4rem; font-weight: 700; line-height: 1; color: var(--accent); text-decoration: none; }
 .el-badge { display: inline-block; font-size: 0.6rem; font-weight: 700; letter-spacing: .02em;
   padding: 1px 4px; border-radius: 3px; background: rgba(88,166,255,.15); color: var(--accent);
@@ -797,17 +778,16 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     display: flex; flex-direction: column; grid-template-columns: none;
     grid-template-rows: none; flex: none; min-height: 0;
   }
-  .node-card, .history-card, .connected-card, .map-card, .activity-card, .favorites-card, .chat-card, .meshtastic-card {
+  .node-card, .connected-card, .map-card, .activity-card, .favorites-card, .chat-card, .meshtastic-card {
     grid-column: auto; grid-row: auto;
   }
   .node-card    { order: 1; }
-  .history-card { order: 2; }
-  .connected-card { order: 3; }
-  .map-card     { order: 4; }
-  .activity-card { order: 5; }
-  .meshtastic-card { order: 6; }
-  .favorites-card { order: 7; }
-  .chat-card    { order: 8; }
+  .connected-card { order: 2; }
+  .map-card     { order: 3; }
+  .activity-card { order: 4; }
+  .meshtastic-card { order: 5; }
+  .favorites-card { order: 6; }
+  .chat-card    { order: 7; }
 
   /* Resizable/movable/collapsible cards are desktop-only (see dashSupported()
      in JS) — hide their controls entirely here rather than leave dead UI. */
@@ -818,7 +798,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   .node-card {
     min-height: 0; max-height: none; padding: 14px 12px;
   }
-  .connected-card, .activity-card, .favorites-card, .history-card, .chat-card, .meshtastic-card { max-height: 320px; }
+  .connected-card, .activity-card, .favorites-card, .chat-card, .meshtastic-card { max-height: 320px; }
   .map-card { height: 340px; flex-shrink: 0; }
 
   .node-number { font-variant-numeric: tabular-nums; font-size: 1.9rem; }
@@ -1097,7 +1077,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <div class="dash-divider" data-divider-idx="3" onpointerdown="dashDividerStart(event,3)" title="Drag to resize"></div>
     <div class="dash-divider" data-divider-idx="4" onpointerdown="dashDividerStart(event,4)" title="Drag to resize"></div>
     <div class="dash-divider" data-divider-idx="5" onpointerdown="dashDividerStart(event,5)" title="Drag to resize"></div>
-    <div class="dash-divider" data-divider-idx="6" onpointerdown="dashDividerStart(event,6)" title="Drag to resize"></div>
     <!-- Shows which pane a dragged card will dock into (edge = split, center = swap). -->
     <div id="dash-drop-indicator" class="dash-drop-indicator" style="display:none"></div>
 
@@ -1112,26 +1091,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       </div>
       <div id="node-info">
         <div style="color:var(--text2);font-size:.9rem">Loading&hellip;</div>
-      </div>
-    </div>
-
-    <!-- Recent Connections -->
-    <div class="history-card dash-card" data-dash-id="history"
-         ondragover="dashDragOver(event)" ondragleave="dashDragLeave(event)" ondrop="dashDrop(event,'history')">
-      <div class="card-header">
-        <span class="dash-header-grip" draggable="true" title="Drag to move"
-              ondragstart="dashDragStart(event,'history')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
-        <span class="card-title">Recent Connections</span>
-        <select id="hist-limit-sel" class="fav-sort-select" style="margin-left:auto" onchange="onHistLimitChange()" title="How many recent connections to show">
-          <option value="5">5</option>
-          <option value="10">10</option>
-          <option value="25">25</option>
-          <option value="50">50</option>
-        </select>
-        <button class="dash-hide-btn" onclick="toggleDashHide('history',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
-      </div>
-      <div class="history-list" id="history-list">
-        <div class="empty-msg" style="font-size:.75rem">Loading&hellip;</div>
       </div>
     </div>
 
@@ -3466,7 +3425,8 @@ async function refreshBoard() {
   } catch(e) { markServerUnreachable(); }
 }
 
-/* ── Recent connection history (condensed, in the Node card) ── */
+/* Generic "Xh Ym"/"Xm"/"Xs" duration formatter — shared by the APRS station
+   list, Connected Nodes elapsed time, and the active-users idle panel. */
 function _histDuration(sec) {
   sec = Math.round(sec);
   var h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60;
@@ -3554,52 +3514,6 @@ function updateActiveUsersToggle() {
     auToggle.onclick = null;
     hideActiveUsersPanel();
   }
-}
-
-var _histLimit = 5;
-
-function initHistLimit() {
-  try {
-    var saved = parseInt(localStorage.getItem('henwen_hist_limit'), 10);
-    if ([5, 10, 25, 50].indexOf(saved) !== -1) _histLimit = saved;
-  } catch(e) {}
-  var sel = document.getElementById('hist-limit-sel');
-  if (sel) sel.value = String(_histLimit);
-}
-
-function onHistLimitChange() {
-  var sel = document.getElementById('hist-limit-sel');
-  _histLimit = sel ? parseInt(sel.value, 10) : 5;
-  try { localStorage.setItem('henwen_hist_limit', String(_histLimit)); } catch(e) {}
-  refreshHistory();
-}
-
-async function refreshHistory() {
-  try {
-    var r = await apiFetch('/api/status/history?limit=' + _histLimit, {cache: 'no-store'});
-    if (!r.ok) return;
-    var data = await r.json();
-    var rows = data.rows || [];
-    var hl = document.getElementById('history-list');
-    if (!hl) return;
-    if (!rows.length) {
-      hl.innerHTML = '<div class="empty-msg" style="font-size:.75rem">No connections yet</div>';
-      return;
-    }
-    hl.innerHTML = rows.map(function(row) {
-      var status = '<span>' + _histDuration(row.duration_seconds || 0) + '</span>';
-      return '<div class="hist-row">' +
-        '<div class="hist-top">' +
-          nodeLink(row.peer_node, 'hist-num') +
-          callsignLink(row.peer_callsign, 'hist-call') +
-        '</div>' +
-        '<div class="hist-meta">' +
-          '<span>' + relTime(row.connected_at) + '</span>' +
-          status +
-        '</div>' +
-      '</div>';
-    }).join('');
-  } catch(e) {}
 }
 
 /* ── Activity feed + map ──
@@ -5894,27 +5808,24 @@ window.addEventListener('resize', function() {
 var DASH_COLS = 12, DASH_ROWS = 24;
 var DASH_GAP = 10;             /* must match .content-area's CSS `gap` */
 var DASH_MIN_CS = 2, DASH_MIN_RS = 3;
-var DASH_CARD_IDS = ['node', 'history', 'connected', 'map', 'activity', 'favorites', 'chat', 'meshtastic'];
-var DASH_CARD_TITLES = {node: 'Node', history: 'Recent Connections', connected: 'Connected Nodes',
+var DASH_CARD_IDS = ['node', 'connected', 'map', 'activity', 'favorites', 'chat', 'meshtastic'];
+var DASH_CARD_TITLES = {node: 'Node', connected: 'Connected Nodes',
   map: 'Network Map', activity: 'Latest Activity', favorites: 'Favorites', chat: 'Chat',
   meshtastic: 'Meshtastic'};
-var DASH_STORE_KEY = 'henwen-dash-layout-v6';
+var DASH_STORE_KEY = 'henwen-dash-layout-v7';
 
-/* Ratios reproduce the original fixed 4-column layout's proportions, with
-   Recent Connections split off underneath Node — see dashWalk()'s doc
-   comment for how a {dir,ratio} node maps to grid lines. Chat is split off
-   underneath Favorites (2/3 favorites, 1/3 chat) — both are the "personal,
-   opt-in" panels, as opposed to the four core status panels above, so
-   grouping them keeps the core view's proportions from being squeezed by a
-   7th competitor. Meshtastic is split off underneath Activity the same way
-   (7/11 activity, 4/11 meshtastic) — both are scrolling feeds of small
-   discrete entries, so pairing them keeps that same rhythm going. */
+/* Ratios reproduce the original fixed 4-column layout's proportions — see
+   dashWalk()'s doc comment for how a {dir,ratio} node maps to grid lines.
+   Chat is split off underneath Favorites (2/3 favorites, 1/3 chat) — both
+   are the "personal, opt-in" panels, as opposed to the four core status
+   panels above, so grouping them keeps the core view's proportions from
+   being squeezed by a 7th competitor. Meshtastic is split off underneath
+   Activity the same way (7/11 activity, 4/11 meshtastic) — both are
+   scrolling feeds of small discrete entries, so pairing them keeps that
+   same rhythm going. */
 var DASH_DEFAULT_TREE = {
   type: 'split', dir: 'col', ratio: 0.25,
-  a: {type: 'split', dir: 'row', ratio: 2 / 3,
-    a: {type: 'leaf', id: 'node'},
-    b: {type: 'leaf', id: 'history'}
-  },
+  a: {type: 'leaf', id: 'node'},
   b: {type: 'split', dir: 'col', ratio: 2 / 3,
     a: {type: 'split', dir: 'row', ratio: 13 / 24,
       a: {type: 'leaf', id: 'connected'},
@@ -6056,7 +5967,7 @@ function dashLoadSaved() {
     var seen = {};
     /* Every current card id must appear exactly once — not just "every leaf
        present is a known id" — so a tree saved by an older/different set of
-       cards (e.g. before this one added 'history') gets rejected outright
+       cards (e.g. from before 'history' was removed) gets rejected outright
        rather than rendering some cards from the stale tree and others from
        DASH_DEFAULT_TREE's positions, which could overlap. */
     if (!dashValidTree(parsed.tree, seen)) return null;
@@ -6394,8 +6305,6 @@ refreshWeather();
 refreshNwsAlerts();
 refreshActivity();
 loadMeshtasticMessages();
-initHistLimit();
-refreshHistory();
 initFavSort();
 loadFavorites();
 checkKioskSession();
@@ -6410,7 +6319,6 @@ setInterval(boardWatchdog,   2000);    /* catches a refreshBoard() request that 
                                           comment above markServerUnreachable() */
 setInterval(refreshActivity, 15000);   /* activity every 15s */
 setInterval(loadMeshtasticMessages, 20000);   /* meshtastic panel every 20s */
-setInterval(refreshHistory,  30000);   /* connection history every 30s */
 setInterval(refreshWeather,  600000);  /* weather every 10min */
 setInterval(refreshNwsAlerts, 60000);  /* NWS alert ticker every 60s — well under the
                                           poller's own 120s cadence, just catches up

@@ -248,7 +248,7 @@ Features: live node status, connected node list with a per-connection keyed-acti
 - **APRS** needs a licensed amateur's own callsign saved once under **Manager → Kiosk Settings** — the layer stays off until one is set, and `aprslib` (installed automatically) must be present.
 - **ISS** and **Radar** need no setup — just toggle them on from the map.
 
-On desktop, the whole panel layout (Node, Recent Connections, Connected Nodes, Network Map, Latest Activity, Favorites) can be dragged into any arrangement, resized, collapsed, or hidden via the layout-edit toggle in the Node panel's toolbar — saved per browser. Mobile keeps a fixed stacked layout.
+On desktop, the whole panel layout (Node, Connected Nodes, Network Map, Latest Activity, Favorites) can be dragged into any arrangement, resized, collapsed, or hidden via the layout-edit toggle in the Node panel's toolbar — saved per browser. Mobile keeps a fixed stacked layout.
 
 Owner, Superuser, and Admin accounts can connect/disconnect nodes directly from the Status Board. Kiosk (User) accounts see a login prompt and are limited to one active connection at a time; an individual User account can also be marked **Restrict disconnect** in User Management, letting it listen, TX, and make the first connection but never disconnect one.
 

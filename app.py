@@ -1001,7 +1001,7 @@ def check_auth():
     _PUBLIC          = {'login', 'logout', 'static', None,
                         'status_board', 'status_board_redirect', 'status_board_accessible',
                         'api_status_board', 'api_status_weather', 'api_status_activity',
-                        'api_status_history', 'api_status_nws_alerts',
+                        'api_status_nws_alerts',
                         'api_aprs_stations', 'api_iss_tle', 'api_meshtastic_messages',
                         'api_login', 'api_session', 'api_csrf_token',
                         'api_favorites', 'api_favorites_status',
@@ -5118,43 +5118,6 @@ def api_conn_history_clear():
     db.commit()
     log("INFO", "[API] Connection history cleared")
     return jsonify({"ok": True})
-
-
-@app.route("/api/status/history")
-def api_status_history():
-    """
-    Condensed recent connection history for the Status Board (kiosk).
-    Scoped to this server's own hosted node(s) only, completed
-    connections only (still-live ones belong in the Connected Nodes
-    panel, not here). Row count is caller-selectable (5/10/25/50,
-    default 5) via ?limit=. The full searchable/paginated history
-    (any node, live or not, clear button) lives in the Manager's
-    Conn. History tab via /api/connection-history.
-    """
-    content = read_conf_file(RPT_CONF_PATH)
-    nodes   = get_node_numbers(content) if content else []
-    if not nodes:
-        return jsonify({"rows": []})
-
-    try:
-        limit = int(request.args.get("limit", 5))
-    except (TypeError, ValueError):
-        limit = 5
-    if limit not in (5, 10, 25, 50):
-        limit = 5
-
-    db     = get_db()
-    marks  = ",".join("?" * len(nodes))
-    rows   = db.execute(
-        f"SELECT peer_node, peer_callsign, peer_location, direction, "
-        f"connected_at, disconnected_at, duration_seconds FROM connection_history "
-        f"WHERE local_node IN ({marks}) AND disconnected_at IS NOT NULL "
-        f"ORDER BY connected_at DESC LIMIT {limit}",
-        [str(n) for n in nodes]
-    ).fetchall()
-    resp = jsonify({"rows": [dict(r) for r in rows]})
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
 
 
 # ── Alerts API ─────────────────────────────────────────────────────────────────
