@@ -18,6 +18,7 @@ def _login(client, username):
         sess["username"]     = username
         sess["role"]         = row["role"]
         sess["user_id"]      = row["id"]
+        sess["password_epoch"] = row["password_epoch"]
         sess["idle_timeout"] = app.SESSION_IDLE_TIMEOUT
         sess["sid"]          = "test-sid-" + username
 

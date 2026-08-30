@@ -883,6 +883,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <path d="M12 18h.01" />
     <path d="M16 18h.01" />
   </symbol>
+  <symbol id="icon-user" viewBox="0 0 24 24">
+    <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" />
+    <circle cx="12" cy="7" r="4" />
+  </symbol>
   <symbol id="icon-door-open" viewBox="0 0 24 24">
     <path d="M11 20H2" />
     <path d="M11 4.562v16.157a1 1 0 0 0 1.242.97L19 20V5.562a2 2 0 0 0-1.515-1.94l-4-1A2 2 0 0 0 11 4.561z" />
@@ -1022,6 +1026,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       <button class="btn-icon" id="node-search-btn" onclick="openSearchModal()" title="Search the AllStar and EchoLink directories for nodes to connect to" style="display:none"><svg class="icon"><use href="#icon-search"></use></svg></button>
       <button class="btn-icon" id="net-cal-btn" onclick="openNetModal()" title="Net Schedule — scheduled net reminders"><svg class="icon"><use href="#icon-calendar-days"></use></svg></button>
       <div id="kiosk-user-bar" style="display:none;align-items:center;gap:6px;font-size:0.75rem;flex-shrink:0">
+        <button class="btn-icon" onclick="openAccountModal()" title="Change your password or set up two-factor authentication"><svg class="icon"><use href="#icon-user"></use></svg></button>
         <button class="btn-icon" onclick="kioskLogout()" title="Logout"><svg class="icon"><use href="#icon-door-open"></use></svg></button>
       </div>
       <button class="btn-icon" id="kiosk-login-btn" onclick="openKioskLogin()" style="display:none">Login</button>
@@ -1303,18 +1308,31 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   <!-- Kiosk login modal -->
   <div id="kiosk-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;align-items:center;justify-content:center">
     <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:28px 32px;min-width:280px;max-width:340px">
-      <div style="font-size:0.68rem;letter-spacing:.12em;text-transform:uppercase;color:var(--text2);margin-bottom:12px">Authentication Required</div>
-      <input id="kl-user" type="text" placeholder="Username" autocomplete="username"
-             style="width:100%;box-sizing:border-box;margin-bottom:8px;padding:7px 10px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-size:0.88rem"
-             onkeydown="if(event.key==='Enter')document.getElementById('kl-pass').focus()">
-      <input id="kl-pass" type="password" placeholder="Password" autocomplete="current-password"
-             style="width:100%;box-sizing:border-box;margin-bottom:12px;padding:7px 10px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-size:0.88rem"
-             onkeydown="if(event.key==='Enter')kioskLogin()">
-      <div style="display:flex;gap:8px">
-        <button onclick="kioskLogin()" style="flex:1;padding:7px;background:var(--accent);border:none;border-radius:5px;color:var(--bg);font-weight:600;cursor:pointer;font-size:0.88rem">Login</button>
-        <button onclick="closeKioskModal()" style="padding:7px 14px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text2);cursor:pointer;font-size:0.88rem">Cancel</button>
+      <div id="kl-creds-view">
+        <div style="font-size:0.68rem;letter-spacing:.12em;text-transform:uppercase;color:var(--text2);margin-bottom:12px">Authentication Required</div>
+        <input id="kl-user" type="text" placeholder="Username" autocomplete="username"
+               style="width:100%;box-sizing:border-box;margin-bottom:8px;padding:7px 10px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-size:0.88rem"
+               onkeydown="if(event.key==='Enter')document.getElementById('kl-pass').focus()">
+        <input id="kl-pass" type="password" placeholder="Password" autocomplete="current-password"
+               style="width:100%;box-sizing:border-box;margin-bottom:12px;padding:7px 10px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-size:0.88rem"
+               onkeydown="if(event.key==='Enter')kioskLogin()">
+        <div style="display:flex;gap:8px">
+          <button onclick="kioskLogin()" style="flex:1;padding:7px;background:var(--accent);border:none;border-radius:5px;color:var(--bg);font-weight:600;cursor:pointer;font-size:0.88rem">Login</button>
+          <button onclick="closeKioskModal()" style="padding:7px 14px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text2);cursor:pointer;font-size:0.88rem">Cancel</button>
+        </div>
+        <div id="kl-error" style="margin-top:8px;font-size:0.8rem;color:var(--red);min-height:1em"></div>
       </div>
-      <div id="kl-error" style="margin-top:8px;font-size:0.8rem;color:var(--red);min-height:1em"></div>
+      <div id="kl-2fa-view" style="display:none">
+        <div style="font-size:0.68rem;letter-spacing:.12em;text-transform:uppercase;color:var(--text2);margin-bottom:12px">Verification Code</div>
+        <input id="kl-2fa-code" type="text" inputmode="numeric" placeholder="6-digit code (or a recovery code)" autocomplete="one-time-code"
+               style="width:100%;box-sizing:border-box;margin-bottom:12px;padding:7px 10px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-size:0.88rem"
+               onkeydown="if(event.key==='Enter')kioskLogin2fa()">
+        <div style="display:flex;gap:8px">
+          <button onclick="kioskLogin2fa()" style="flex:1;padding:7px;background:var(--accent);border:none;border-radius:5px;color:var(--bg);font-weight:600;cursor:pointer;font-size:0.88rem">Verify</button>
+          <button onclick="closeKioskModal()" style="padding:7px 14px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text2);cursor:pointer;font-size:0.88rem">Cancel</button>
+        </div>
+        <div id="kl-2fa-error" style="margin-top:8px;font-size:0.8rem;color:var(--red);min-height:1em"></div>
+      </div>
     </div>
   </div>
 
@@ -1413,6 +1431,66 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     </div>
   </div>
 
+  <!-- Account: self-service password change + 2FA for every logged-in role
+       (not just admin+, which already has this in Manager > Settings) --
+       same "popup for accounts that can't reach Manager" reasoning as My
+       Recordings above. -->
+  <div id="account-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;align-items:center;justify-content:center">
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:22px 26px;width:420px;max-width:92vw;max-height:86vh;overflow-y:auto">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+        <div style="font-size:0.95rem;font-weight:700"><svg class="icon"><use href="#icon-user"></use></svg> My Account</div>
+        <button onclick="closeAccountModal()" style="background:none;border:none;color:var(--text2);font-size:1.1rem;cursor:pointer;line-height:1;padding:2px 6px"><svg class="icon"><use href="#icon-x"></use></svg></button>
+      </div>
+
+      <div style="font-size:0.8rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--text2);margin-bottom:8px">Change Password</div>
+      <input type="password" id="acct-cur-pw" placeholder="Current password" autocomplete="current-password" style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:7px 10px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-size:0.85rem">
+      <input type="password" id="acct-new-pw" placeholder="New password (min 8 characters)" autocomplete="new-password" style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:7px 10px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-size:0.85rem">
+      <input type="password" id="acct-new-pw2" placeholder="Confirm new password" autocomplete="new-password" style="width:100%;box-sizing:border-box;margin-bottom:8px;padding:7px 10px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-size:0.85rem">
+      <button onclick="acctChangePassword()" style="padding:7px 14px;background:var(--accent);border:none;border-radius:5px;color:var(--bg);font-weight:600;cursor:pointer;font-size:0.85rem">Update Password</button>
+      <div id="acct-pw-result" style="margin-top:8px;font-size:0.8rem;min-height:1em"></div>
+
+      <div style="border-top:1px solid var(--border);margin:18px 0 14px"></div>
+
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <span style="font-size:0.8rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--text2)">Two-Factor Authentication</span>
+        <span id="acct-mfa-badge" style="font-size:0.78rem;color:var(--text2)">Loading&hellip;</span>
+      </div>
+
+      <div id="acct-mfa-disabled-view" style="display:none">
+        <button onclick="acctMfaStartSetup()" style="padding:7px 14px;background:var(--accent);border:none;border-radius:5px;color:var(--bg);font-weight:600;cursor:pointer;font-size:0.85rem">Enable 2FA</button>
+      </div>
+
+      <div id="acct-mfa-setup-view" style="display:none">
+        <div id="acct-mfa-qr-box" style="text-align:center;margin-bottom:10px"></div>
+        <div style="font-size:0.75rem;color:var(--text2);margin-bottom:4px">Or enter this key manually:</div>
+        <code id="acct-mfa-secret" style="display:block;word-break:break-all;background:var(--bg3);padding:6px 8px;border-radius:4px;font-size:0.78rem;margin-bottom:10px"></code>
+        <input type="text" id="acct-mfa-confirm-code" inputmode="numeric" placeholder="6-digit code" style="width:140px;box-sizing:border-box;margin-bottom:8px;padding:7px 10px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-size:0.85rem">
+        <div>
+          <button onclick="acctMfaConfirmSetup()" style="padding:7px 14px;background:var(--accent);border:none;border-radius:5px;color:var(--bg);font-weight:600;cursor:pointer;font-size:0.85rem">Confirm &amp; Enable</button>
+          <button onclick="acctMfaCancelSetup()" style="padding:7px 14px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text2);cursor:pointer;font-size:0.85rem">Cancel</button>
+        </div>
+        <div id="acct-mfa-setup-result" style="margin-top:8px;font-size:0.8rem"></div>
+      </div>
+
+      <div id="acct-mfa-recovery-view" style="display:none">
+        <div style="background:rgba(255,179,0,.1);border:1px solid rgba(255,179,0,.3);color:var(--warn,#e3a008);border-radius:5px;padding:8px 10px;font-size:0.78rem;margin-bottom:10px;line-height:1.5">Save these recovery codes now &mdash; each works once, and this is the only time they're shown.</div>
+        <pre id="acct-mfa-recovery-codes" style="background:var(--bg3);padding:10px;border-radius:5px;font-size:0.82rem;line-height:1.6"></pre>
+        <button onclick="acctMfaAcknowledgeRecoveryCodes()" style="padding:7px 14px;background:var(--accent);border:none;border-radius:5px;color:var(--bg);font-weight:600;cursor:pointer;font-size:0.85rem">I've saved these codes</button>
+      </div>
+
+      <div id="acct-mfa-enabled-view" style="display:none">
+        <button onclick="acctMfaShowRegenerateForm()" style="padding:6px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text);cursor:pointer;font-size:0.8rem">Regenerate Codes</button>
+        <button onclick="acctMfaShowDisableForm()" style="padding:6px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--red,#f85149);cursor:pointer;font-size:0.8rem">Disable 2FA</button>
+        <div id="acct-mfa-password-confirm-box" style="display:none;margin-top:10px">
+          <div id="acct-mfa-password-confirm-label" style="font-size:0.78rem;color:var(--text2);margin-bottom:4px"></div>
+          <input type="password" id="acct-mfa-password-confirm" autocomplete="current-password" style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:7px 10px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-size:0.85rem">
+          <button id="acct-mfa-password-confirm-btn" style="padding:6px 12px;background:var(--accent);border:none;border-radius:5px;color:var(--bg);font-weight:600;cursor:pointer;font-size:0.8rem">Confirm</button>
+          <button onclick="acctMfaHidePasswordConfirm()" style="padding:6px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text2);cursor:pointer;font-size:0.8rem">Cancel</button>
+        </div>
+        <div id="acct-mfa-enabled-result" style="margin-top:8px;font-size:0.8rem"></div>
+      </div>
+    </div>
+  </div>
 
 </div>
 
@@ -4058,12 +4136,43 @@ function openKioskLogin(pendingFn, pendingArgs) {
   document.getElementById('kl-user').value  = '';
   document.getElementById('kl-pass').value  = '';
   document.getElementById('kl-error').textContent = '';
+  document.getElementById('kl-2fa-code').value = '';
+  document.getElementById('kl-2fa-error').textContent = '';
+  document.getElementById('kl-creds-view').style.display = '';
+  document.getElementById('kl-2fa-view').style.display = 'none';
   setTimeout(function(){ document.getElementById('kl-user').focus(); }, 50);
 }
 
 function closeKioskModal() {
   document.getElementById('kiosk-modal-overlay').style.display = 'none';
   _pendingAction = null;
+}
+
+/* Shared by kioskLogin() (password-only accounts) and kioskLogin2fa()
+   (accounts with 2FA enabled, after the code is verified) -- everything
+   that has to happen once the server has actually established a session. */
+function _kioskLoginComplete(d) {
+  window._kioskRole = d.role;
+  window._kioskUsername = d.username;
+  window._kioskRestrictDisconnect = !!d.restrict_disconnect;
+  /* session.clear() on the server invalidated the CSRF token from the meta tag;
+     refresh _csrfToken so subsequent apiFetch calls don't get 400s. */
+  if (d.csrf_token) _csrfToken = d.csrf_token;
+  closeKioskModal();
+  updateKioskUserBar(d.username, d.role);
+  var pl = document.getElementById('perm-label');
+  if (pl) pl.style.display = (d.role === 'admin' || d.role === 'superuser' || d.role === 'owner') ? '' : 'none';
+  _txUpdateBtn();
+  _searchUpdateBtn();
+  _recordUpdateBtn();
+  _chatUpdateVisibility();
+  _managerUpdateBtn();
+  updateActiveUsersToggle();
+  loadFavorites();
+  if (_pendingAction) {
+    _pendingAction.fn.apply(null, _pendingAction.args);
+    _pendingAction = null;
+  }
 }
 
 async function kioskLogin() {
@@ -4083,29 +4192,38 @@ async function kioskLogin() {
     return;
   }
   if (r.ok && d.ok) {
-    window._kioskRole = d.role;
-    window._kioskUsername = d.username;
-    window._kioskRestrictDisconnect = !!d.restrict_disconnect;
-    /* session.clear() on the server invalidated the CSRF token from the meta tag;
-       refresh _csrfToken so subsequent apiFetch calls don't get 400s. */
+    _kioskLoginComplete(d);
+  } else if (r.ok && d.mfa_required) {
     if (d.csrf_token) _csrfToken = d.csrf_token;
-    closeKioskModal();
-    updateKioskUserBar(d.username, d.role);
-    var pl = document.getElementById('perm-label');
-    if (pl) pl.style.display = (d.role === 'admin' || d.role === 'superuser' || d.role === 'owner') ? '' : 'none';
-    _txUpdateBtn();
-    _searchUpdateBtn();
-    _recordUpdateBtn();
-    _chatUpdateVisibility();
-    _managerUpdateBtn();
-    updateActiveUsersToggle();
-    loadFavorites();
-    if (_pendingAction) {
-      _pendingAction.fn.apply(null, _pendingAction.args);
-      _pendingAction = null;
-    }
+    document.getElementById('kl-creds-view').style.display = 'none';
+    document.getElementById('kl-2fa-view').style.display = '';
+    document.getElementById('kl-2fa-code').value = '';
+    document.getElementById('kl-2fa-error').textContent = '';
+    setTimeout(function(){ document.getElementById('kl-2fa-code').focus(); }, 50);
   } else {
     document.getElementById('kl-error').textContent = d.error || ('Login failed (HTTP ' + r.status + ')');
+  }
+}
+
+async function kioskLogin2fa() {
+  var code = document.getElementById('kl-2fa-code').value.trim();
+  document.getElementById('kl-2fa-error').textContent = '';
+  var r, d;
+  try {
+    r = await apiFetch('/api/login/2fa', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({code: code})
+    });
+    d = await r.json();
+  } catch(e) {
+    document.getElementById('kl-2fa-error').textContent = 'Request error — try reloading the page';
+    return;
+  }
+  if (r.ok && d.ok) {
+    _kioskLoginComplete(d);
+  } else {
+    document.getElementById('kl-2fa-error').textContent = d.error || ('Verification failed (HTTP ' + r.status + ')');
   }
 }
 
@@ -4901,6 +5019,167 @@ async function _myRecDelete(id) {
     var d = await r.json().catch(function() { return {}; });
     sbToast(d.error || 'Could not delete recording', false);
   }
+}
+
+/* Account: self-service password change + 2FA, gated to any logged-in
+   role (unlike My Recordings above, not just can_record) -- Manager >
+   Settings already has this for admin+, but a plain 'user'/kiosk account
+   has no way to reach Manager at all, so without this popup it could
+   never change its own password or enroll in 2FA. */
+function openAccountModal() {
+  if (!window._kioskRole) { openKioskLogin(openAccountModal, []); return; }
+  document.getElementById('acct-pw-result').textContent = '';
+  document.getElementById('acct-cur-pw').value = '';
+  document.getElementById('acct-new-pw').value = '';
+  document.getElementById('acct-new-pw2').value = '';
+  document.getElementById('account-modal-overlay').style.display = 'flex';
+  acctMfaLoadStatus();
+}
+
+function closeAccountModal() {
+  var el = document.getElementById('account-modal-overlay');
+  if (el) el.style.display = 'none';
+}
+
+async function acctChangePassword() {
+  var cur = document.getElementById('acct-cur-pw').value;
+  var np  = document.getElementById('acct-new-pw').value;
+  var np2 = document.getElementById('acct-new-pw2').value;
+  var out = document.getElementById('acct-pw-result');
+  if (!cur || !np || !np2) { out.style.color = 'var(--red)'; out.textContent = 'Fill in all three fields.'; return; }
+  if (np !== np2) { out.style.color = 'var(--red)'; out.textContent = 'New passwords do not match.'; return; }
+  var r = await apiFetch('/api/auth/change-password', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({current_password: cur, new_password: np})
+  });
+  var d = await r.json().catch(function() { return {}; });
+  if (r.ok) {
+    out.style.color = 'var(--green)';
+    out.textContent = d.message || 'Password updated.';
+    document.getElementById('acct-cur-pw').value = '';
+    document.getElementById('acct-new-pw').value = '';
+    document.getElementById('acct-new-pw2').value = '';
+  } else {
+    out.style.color = 'var(--red)';
+    out.textContent = d.error || 'Failed.';
+  }
+}
+
+function _acctMfaShowView(id) {
+  ['acct-mfa-disabled-view', 'acct-mfa-setup-view', 'acct-mfa-recovery-view', 'acct-mfa-enabled-view'].forEach(function(v) {
+    document.getElementById(v).style.display = (v === id) ? '' : 'none';
+  });
+}
+
+async function acctMfaLoadStatus() {
+  var badge = document.getElementById('acct-mfa-badge');
+  badge.textContent = 'Loading…';
+  var r = await apiFetch('/api/mfa/status');
+  var d = await r.json().catch(function() { return {}; });
+  if (!r.ok) { badge.textContent = ''; return; }
+  if (d.enabled) {
+    badge.textContent = 'Enabled';
+    badge.style.color = 'var(--green)';
+    _acctMfaShowView('acct-mfa-enabled-view');
+    acctMfaHidePasswordConfirm();
+  } else {
+    badge.textContent = 'Disabled';
+    badge.style.color = 'var(--text2)';
+    _acctMfaShowView('acct-mfa-disabled-view');
+  }
+}
+
+async function acctMfaStartSetup() {
+  var r = await apiFetch('/api/mfa/setup', {method: 'POST'});
+  var d = await r.json().catch(function() { return {}; });
+  if (!r.ok) { sbToast(d.error || '2FA setup failed', false); return; }
+  document.getElementById('acct-mfa-secret').textContent = d.secret;
+  document.getElementById('acct-mfa-qr-box').innerHTML = d.qr_svg
+    ? '<img src="' + d.qr_svg + '" alt="2FA QR code" style="width:150px;height:150px;background:#fff;border-radius:4px;padding:6px">'
+    : '';
+  document.getElementById('acct-mfa-confirm-code').value = '';
+  document.getElementById('acct-mfa-setup-result').textContent = '';
+  _acctMfaShowView('acct-mfa-setup-view');
+}
+
+function acctMfaCancelSetup() {
+  acctMfaLoadStatus();
+}
+
+async function acctMfaConfirmSetup() {
+  var code = document.getElementById('acct-mfa-confirm-code').value.trim();
+  var out  = document.getElementById('acct-mfa-setup-result');
+  var r = await apiFetch('/api/mfa/confirm', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({code: code})
+  });
+  var d = await r.json().catch(function() { return {}; });
+  if (!r.ok) { out.style.color = 'var(--red)'; out.textContent = d.error || 'Failed.'; return; }
+  document.getElementById('acct-mfa-recovery-codes').textContent = d.recovery_codes.join('\n');
+  _acctMfaShowView('acct-mfa-recovery-view');
+  // The account is already 2FA-protected server-side at this point -- flip
+  // the badge now rather than leaving it stale ("Disabled") until the user
+  // dismisses the recovery-codes view.
+  var badge = document.getElementById('acct-mfa-badge');
+  badge.textContent = 'Enabled';
+  badge.style.color = 'var(--green)';
+}
+
+function acctMfaAcknowledgeRecoveryCodes() {
+  acctMfaLoadStatus();
+}
+
+function acctMfaShowRegenerateForm() {
+  document.getElementById('acct-mfa-password-confirm-label').textContent =
+    'Confirm your current password to regenerate recovery codes';
+  document.getElementById('acct-mfa-password-confirm').value = '';
+  document.getElementById('acct-mfa-password-confirm-box').style.display = '';
+  document.getElementById('acct-mfa-enabled-result').textContent = '';
+  document.getElementById('acct-mfa-password-confirm-btn').onclick = acctMfaDoRegenerate;
+}
+
+function acctMfaShowDisableForm() {
+  document.getElementById('acct-mfa-password-confirm-label').textContent =
+    'Confirm your current password to disable 2FA';
+  document.getElementById('acct-mfa-password-confirm').value = '';
+  document.getElementById('acct-mfa-password-confirm-box').style.display = '';
+  document.getElementById('acct-mfa-enabled-result').textContent = '';
+  document.getElementById('acct-mfa-password-confirm-btn').onclick = acctMfaDoDisable;
+}
+
+function acctMfaHidePasswordConfirm() {
+  var box = document.getElementById('acct-mfa-password-confirm-box');
+  if (box) box.style.display = 'none';
+}
+
+async function acctMfaDoRegenerate() {
+  var pw  = document.getElementById('acct-mfa-password-confirm').value;
+  var out = document.getElementById('acct-mfa-enabled-result');
+  var r = await apiFetch('/api/mfa/recovery-codes/regenerate', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({password: pw})
+  });
+  var d = await r.json().catch(function() { return {}; });
+  if (!r.ok) { out.style.color = 'var(--red)'; out.textContent = d.error || 'Failed.'; return; }
+  acctMfaHidePasswordConfirm();
+  document.getElementById('acct-mfa-recovery-codes').textContent = d.recovery_codes.join('\n');
+  _acctMfaShowView('acct-mfa-recovery-view');
+}
+
+async function acctMfaDoDisable() {
+  var pw  = document.getElementById('acct-mfa-password-confirm').value;
+  var out = document.getElementById('acct-mfa-enabled-result');
+  var r = await apiFetch('/api/mfa/disable', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({password: pw})
+  });
+  var d = await r.json().catch(function() { return {}; });
+  if (!r.ok) { out.style.color = 'var(--red)'; out.textContent = d.error || 'Failed.'; return; }
+  acctMfaLoadStatus();
 }
 
 /* Node search (AllStar + EchoLink): gated to any logged-in role, no

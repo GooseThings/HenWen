@@ -1223,6 +1223,10 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
             <label class="switch"><input type="checkbox" id="al-disk-high"><span class="slider"></span></label>
           </div>
           <div class="toggle-row">
+            <div class="toggle-info"><div class="toggle-key">Password Reset Requested</div><div class="toggle-desc">A user asks for a password reset from the login page — approve it in Manager &gt; User Management</div></div>
+            <label class="switch"><input type="checkbox" id="al-pwreset"><span class="slider"></span></label>
+          </div>
+          <div class="toggle-row">
             <div class="toggle-info"><div class="toggle-key">Node Connect</div><div class="toggle-desc">A node links to this server</div></div>
             <label class="switch"><input type="checkbox" id="al-node-conn" onchange="alToggleWatchNodes()"><span class="slider"></span></label>
           </div>
@@ -2643,6 +2647,59 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
     </div>
 
     <div class="card">
+      <div class="card-header">
+        <h2>Two-Factor Authentication</h2>
+        <span id="mfa-status-badge" class="muted">Loading...</span>
+      </div>
+      <div class="card-body">
+        <p class="muted" style="margin-bottom:14px">Require a code from an authenticator app (or a recovery code) in addition to your password when signing in to this account.</p>
+
+        <div id="mfa-disabled-view" style="display:none">
+          <button class="btn btn-primary" onclick="mfaStartSetup()">Enable 2FA</button>
+        </div>
+
+        <div id="mfa-setup-view" style="display:none">
+          <div class="form-row" style="align-items:flex-start;gap:20px">
+            <div id="mfa-qr-box" style="flex:0 0 auto"></div>
+            <div style="flex:1;min-width:220px">
+              <p class="muted" style="margin-bottom:8px">Scan this with an authenticator app (Google Authenticator, Aegis, 1Password, etc.), or enter the key manually:</p>
+              <code id="mfa-secret" style="display:block;word-break:break-all;background:var(--bg3);padding:8px 10px;border-radius:4px;margin-bottom:12px"></code>
+              <label class="form-label">Enter the 6-digit code to confirm</label>
+              <input type="text" id="mfa-confirm-code" inputmode="numeric" placeholder="000000" style="max-width:160px">
+              <div class="btn-row" style="margin-top:10px">
+                <button class="btn btn-primary" onclick="mfaConfirmSetup()">Confirm &amp; Enable</button>
+                <button class="btn" onclick="mfaCancelSetup()">Cancel</button>
+              </div>
+            </div>
+          </div>
+          <div id="mfa-setup-result" style="margin-top:12px"></div>
+        </div>
+
+        <div id="mfa-recovery-view" style="display:none">
+          <div class="alert alert-warn" style="margin-bottom:12px">Save these recovery codes now &mdash; each works once, and this is the only time they're shown. Use one to sign in if you lose access to your authenticator app.</div>
+          <pre id="mfa-recovery-codes" style="background:var(--bg3);padding:12px;border-radius:4px;font-size:0.9rem;line-height:1.7"></pre>
+          <button class="btn btn-primary" onclick="mfaAcknowledgeRecoveryCodes()">I've saved these codes</button>
+        </div>
+
+        <div id="mfa-enabled-view" style="display:none">
+          <div class="btn-row">
+            <button class="btn" onclick="mfaShowRegenerateForm()">Regenerate Recovery Codes</button>
+            <button class="btn btn-warn" onclick="mfaShowDisableForm()">Disable 2FA</button>
+          </div>
+          <div id="mfa-password-confirm-box" style="display:none;margin-top:14px;max-width:340px">
+            <label class="form-label" id="mfa-password-confirm-label">Confirm your current password</label>
+            <input type="password" id="mfa-password-confirm" autocomplete="current-password">
+            <div class="btn-row" style="margin-top:10px">
+              <button class="btn btn-primary" id="mfa-password-confirm-btn">Confirm</button>
+              <button class="btn" onclick="mfaHidePasswordConfirm()">Cancel</button>
+            </div>
+          </div>
+          <div id="mfa-enabled-result" style="margin-top:12px"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
       <div class="card-header"><h2>Flask Secret Key</h2></div>
       <div class="card-body">
         <p class="muted" style="margin-bottom:14px">
@@ -2759,6 +2816,94 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
   <section class="page" id="page-user-mgmt">
     <div class="page-title">User Management</div>
     <div class="page-sub">Create and manage user accounts. Roles: <strong>owner</strong> (full access + node lockout), <strong>superuser</strong> (full access), <strong>admin</strong> (manager access, no raw editor), <strong>user</strong> (Kiosk only).</div>
+
+    <div class="card" id="pw-reset-card" style="display:none">
+      <div class="card-header"><h2>Pending Password Reset Requests</h2></div>
+      <div class="card-body" style="padding:0">
+        <table class="tbl" id="pw-reset-table">
+          <thead><tr><th>Username</th><th>Requested</th><th>Actions</th></tr></thead>
+          <tbody id="pw-reset-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card" id="pw-reset-link-card" style="display:none;max-width:700px">
+      <div class="card-header"><h2>Reset Approved</h2></div>
+      <div class="card-body">
+        <div style="font-size:0.85rem;margin-bottom:8px">One-time link for <strong id="pw-reset-link-user"></strong> — give it to them yourself (in person, over the repeater, chat, whatever you'd normally use). It works once and expires in <span id="pw-reset-link-ttl"></span> minutes.</div>
+        <div style="display:flex;gap:8px">
+          <input id="pw-reset-link-url" type="text" readonly class="val-input" style="flex:1;font-size:0.8rem" onclick="this.select()">
+          <button class="btn btn-sm" onclick="pwResetCopyLink()">Copy</button>
+        </div>
+        <div id="pw-reset-link-status" style="margin-top:6px;font-size:0.8rem;color:var(--text2)"></div>
+      </div>
+    </div>
+
+    <div class="card" id="inv-card">
+      <div class="card-header">
+        <h2>Pending Invites</h2>
+        <button class="btn btn-primary btn-sm" onclick="showCreateInviteForm()">+ Invite</button>
+      </div>
+      <div class="card-body" style="padding:0">
+        <table class="tbl" id="inv-table">
+          <thead><tr><th>Role</th><th>Created By</th><th>Expires</th><th>Actions</th></tr></thead>
+          <tbody id="inv-tbody"><tr><td colspan="4" class="muted" style="padding:14px">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card" id="inv-form-card" style="display:none">
+      <div class="card-header">
+        <h2>New Invite</h2>
+        <button class="btn btn-sm" onclick="hideInviteForm()">Cancel</button>
+      </div>
+      <div class="card-body">
+        <p class="hint" style="font-size:0.82rem;color:var(--text2);margin-bottom:12px">The invitee picks their own username and password when they open the link — nobody here will know it.</p>
+        <div class="form-row" style="margin-bottom:14px">
+          <div>
+            <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:4px">Role</label>
+            <select id="inv-role" onchange="onInvRoleChange()" style="width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg3);color:var(--text);font-size:0.88rem">
+              <option value="owner">owner — Full access + node lockout (locks out everyone else)</option>
+              <option value="superuser">superuser — Full access including raw editor</option>
+              <option value="admin">admin — Manager access, no raw editor</option>
+              <option value="user">user — Kiosk + connect/disconnect only</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row" id="inv-restrict-disc-row" style="margin-bottom:14px;display:none">
+          <div>
+            <label style="display:inline-flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:0.86rem">
+              <input type="checkbox" id="inv-restrict-disconnect" style="width:auto;margin-top:3px">
+              <span>Restrict disconnect — this user can listen, TX, and make the first connection if none is
+                active, but can never disconnect a node</span>
+            </label>
+          </div>
+        </div>
+        <div class="form-row" id="inv-can-record-row" style="margin-bottom:14px;display:none">
+          <div>
+            <label style="display:inline-flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:0.86rem">
+              <input type="checkbox" id="inv-can-record" style="width:auto;margin-top:3px">
+              <span>Can record — shows a Record button next to Listen on the Status Board for this account</span>
+            </label>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-primary" onclick="createInvite()">Create Invite</button>
+          <button class="btn" onclick="hideInviteForm()">Cancel</button>
+        </div>
+        <div id="inv-form-status" style="margin-top:8px;font-size:0.82rem"></div>
+      </div>
+    </div>
+    <div class="card" id="inv-link-card" style="display:none;max-width:700px">
+      <div class="card-header"><h2>Invite Created</h2></div>
+      <div class="card-body">
+        <div style="font-size:0.85rem;margin-bottom:8px">One-time link for a new <strong id="inv-link-role"></strong> account — give it to them yourself (in person, over the repeater, chat, whatever you'd normally use). It works once and expires in <span id="inv-link-ttl"></span> hours.</div>
+        <div style="display:flex;gap:8px">
+          <input id="inv-link-url" type="text" readonly class="val-input" style="flex:1;font-size:0.8rem" onclick="this.select()">
+          <button class="btn btn-sm" onclick="invCopyLink()">Copy</button>
+        </div>
+        <div id="inv-link-status" style="margin-top:6px;font-size:0.8rem;color:var(--text2)"></div>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-header">
         <h2>Users</h2>
@@ -3056,8 +3201,8 @@ function showPage(id) {
   else if (id === 'kiosk-settings')   ksLoad();
   else if (id === 'ami-diag')         loadSysInfo();
   else if (id === 'ast-console')  astFetchLog();
-  else if (id === 'settings')       { loadSecretKeyStatus(); loadPortsStatus(); syncThemePicker(); }
-  else if (id === 'user-mgmt')      loadUsers();
+  else if (id === 'settings')       { loadSecretKeyStatus(); loadPortsStatus(); syncThemePicker(); mfaLoadStatus(); }
+  else if (id === 'user-mgmt')      { loadUsers(); pwResetLoad(); invitesLoad(); }
   else if (id === 'recordings')         recordingsLoad();
   else if (id === 'recording-settings') recLoad();
   else if (id === 'stream-relay')       relayLoad();
@@ -4160,6 +4305,7 @@ async function alLoad() {
   document.getElementById('al-dns-stuck').checked = !!d.on_dns_stuck;
   document.getElementById('al-disk-high').checked = !!d.on_disk_high;
   document.getElementById('al-disk-thr').value    = d.disk_pct_threshold || 90;
+  document.getElementById('al-pwreset').checked   = !!d.on_password_reset_request;
   document.getElementById('al-node-conn').checked = !!d.on_node_connect;
   document.getElementById('al-node-dc').checked   = !!d.on_node_disconnect;
   document.getElementById('al-watch-nodes').value = d.watch_nodes || '';
@@ -4201,6 +4347,7 @@ async function alSave() {
     on_dns_stuck:       document.getElementById('al-dns-stuck').checked ? 1 : 0,
     on_disk_high:       document.getElementById('al-disk-high').checked ? 1 : 0,
     disk_pct_threshold: parseInt(document.getElementById('al-disk-thr').value) || 90,
+    on_password_reset_request: document.getElementById('al-pwreset').checked ? 1 : 0,
     on_node_connect:    document.getElementById('al-node-conn').checked ? 1 : 0,
     on_node_disconnect: document.getElementById('al-node-dc').checked   ? 1 : 0,
     watch_nodes:        document.getElementById('al-watch-nodes').value.trim(),
@@ -5402,6 +5549,130 @@ async function changePassword() {
   } else {
     out.innerHTML = '<div class="alert alert-danger">' + esc(r.data.error || 'Failed.') + '</div>';
   }
+}
+
+/* ── Two-Factor Authentication (self-service, own account) ────────────────── */
+function _mfaShowView(id) {
+  ['mfa-disabled-view', 'mfa-setup-view', 'mfa-recovery-view', 'mfa-enabled-view'].forEach(function(v) {
+    document.getElementById(v).style.display = (v === id) ? '' : 'none';
+  });
+}
+
+async function mfaLoadStatus() {
+  var badge = document.getElementById('mfa-status-badge');
+  badge.textContent = 'Loading...';
+  var r = await api('/api/mfa/status');
+  if (!r.ok) { badge.textContent = ''; return; }
+  if (r.data.enabled) {
+    badge.textContent = 'Enabled';
+    badge.style.color = 'var(--green)';
+    _mfaShowView('mfa-enabled-view');
+    mfaHidePasswordConfirm();
+  } else {
+    badge.textContent = 'Disabled';
+    badge.style.color = 'var(--text2)';
+    _mfaShowView('mfa-disabled-view');
+  }
+}
+
+async function mfaStartSetup() {
+  var r = await api('/api/mfa/setup', {method: 'POST'});
+  if (!r.ok) { log('2FA setup failed: ' + (r.data && r.data.error || r.status), 'ERROR'); return; }
+  document.getElementById('mfa-secret').textContent = r.data.secret;
+  document.getElementById('mfa-qr-box').innerHTML = r.data.qr_svg
+    ? '<img src="' + r.data.qr_svg + '" alt="2FA QR code" style="width:160px;height:160px;background:#fff;border-radius:4px;padding:6px">'
+    : '';
+  document.getElementById('mfa-confirm-code').value = '';
+  document.getElementById('mfa-setup-result').innerHTML = '';
+  _mfaShowView('mfa-setup-view');
+}
+
+function mfaCancelSetup() {
+  mfaLoadStatus();
+}
+
+async function mfaConfirmSetup() {
+  var code = document.getElementById('mfa-confirm-code').value.trim();
+  var out  = document.getElementById('mfa-setup-result');
+  var r = await api('/api/mfa/confirm', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({code: code})
+  });
+  if (!r.ok) {
+    out.innerHTML = '<div class="alert alert-danger">' + esc(r.data.error || 'Failed.') + '</div>';
+    return;
+  }
+  document.getElementById('mfa-recovery-codes').textContent = r.data.recovery_codes.join('\n');
+  _mfaShowView('mfa-recovery-view');
+  // The account is already 2FA-protected server-side at this point -- flip
+  // the badge now rather than leaving it stale ("Disabled") until the user
+  // dismisses the recovery-codes view.
+  var badge = document.getElementById('mfa-status-badge');
+  badge.textContent = 'Enabled';
+  badge.style.color = 'var(--green)';
+  log('Two-factor authentication enabled.', 'OK');
+}
+
+function mfaAcknowledgeRecoveryCodes() {
+  mfaLoadStatus();
+}
+
+function mfaShowRegenerateForm() {
+  document.getElementById('mfa-password-confirm-label').textContent =
+    'Confirm your current password to regenerate recovery codes';
+  document.getElementById('mfa-password-confirm').value = '';
+  document.getElementById('mfa-password-confirm-box').style.display = '';
+  document.getElementById('mfa-enabled-result').innerHTML = '';
+  document.getElementById('mfa-password-confirm-btn').onclick = mfaDoRegenerate;
+}
+
+function mfaShowDisableForm() {
+  document.getElementById('mfa-password-confirm-label').textContent =
+    'Confirm your current password to disable 2FA';
+  document.getElementById('mfa-password-confirm').value = '';
+  document.getElementById('mfa-password-confirm-box').style.display = '';
+  document.getElementById('mfa-enabled-result').innerHTML = '';
+  document.getElementById('mfa-password-confirm-btn').onclick = mfaDoDisable;
+}
+
+function mfaHidePasswordConfirm() {
+  var box = document.getElementById('mfa-password-confirm-box');
+  if (box) box.style.display = 'none';
+}
+
+async function mfaDoRegenerate() {
+  var pw  = document.getElementById('mfa-password-confirm').value;
+  var out = document.getElementById('mfa-enabled-result');
+  var r = await api('/api/mfa/recovery-codes/regenerate', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({password: pw})
+  });
+  if (!r.ok) {
+    out.innerHTML = '<div class="alert alert-danger">' + esc(r.data.error || 'Failed.') + '</div>';
+    return;
+  }
+  mfaHidePasswordConfirm();
+  document.getElementById('mfa-recovery-codes').textContent = r.data.recovery_codes.join('\n');
+  _mfaShowView('mfa-recovery-view');
+  log('2FA recovery codes regenerated.', 'OK');
+}
+
+async function mfaDoDisable() {
+  var pw  = document.getElementById('mfa-password-confirm').value;
+  var out = document.getElementById('mfa-enabled-result');
+  var r = await api('/api/mfa/disable', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({password: pw})
+  });
+  if (!r.ok) {
+    out.innerHTML = '<div class="alert alert-danger">' + esc(r.data.error || 'Failed.') + '</div>';
+    return;
+  }
+  log('Two-factor authentication disabled.', 'OK');
+  mfaLoadStatus();
 }
 
 async function loadSecretKeyStatus() {
@@ -7400,6 +7671,166 @@ async function uploadAnnouncement() {
   }
 }
 
+/* ── Password Reset Requests ─────────────────────────────────────────────── */
+async function pwResetLoad() {
+  var r = await api('/api/users/password-reset-requests');
+  var card  = document.getElementById('pw-reset-card');
+  var tbody = document.getElementById('pw-reset-tbody');
+  if (!r.ok) { card.style.display = 'none'; return; }
+  var reqs = r.data.requests || [];
+  if (!reqs.length) { card.style.display = 'none'; return; }
+  card.style.display = '';
+  tbody.innerHTML = reqs.map(function(req) {
+    var when = new Date(req.requested_at * 1000).toLocaleString();
+    return '<tr>'
+      + '<td style="font-weight:600">' + esc(req.username) + '</td>'
+      + '<td style="color:var(--text2);font-size:0.82rem">' + esc(when) + '</td>'
+      + '<td><div class="btn-row">'
+      + '<button class="btn btn-primary btn-sm" onclick="pwResetApprove(' + req.id + ',\'' + esc(req.username) + '\')">Approve</button>'
+      + '<button class="btn btn-warn btn-sm" onclick="pwResetDeny(' + req.id + ',\'' + esc(req.username) + '\')">Deny</button>'
+      + '</div></td>'
+      + '</tr>';
+  }).join('');
+}
+
+async function pwResetApprove(id, username) {
+  var r = await api('/api/users/password-reset-requests/' + id + '/approve', {method: 'POST'});
+  if (!r.ok) { log('Approve failed: ' + (r.data && r.data.error || r.status), 'ERROR'); return; }
+  document.getElementById('pw-reset-link-user').textContent = username;
+  document.getElementById('pw-reset-link-ttl').textContent  = r.data.expires_in_min;
+  document.getElementById('pw-reset-link-url').value        = r.data.reset_url;
+  document.getElementById('pw-reset-link-status').textContent = '';
+  document.getElementById('pw-reset-link-card').style.display = '';
+  document.getElementById('pw-reset-link-card').scrollIntoView({behavior:'smooth'});
+  log('Password reset approved for "' + username + '".', 'OK');
+  pwResetLoad();
+}
+
+async function pwResetDeny(id, username) {
+  if (!confirm('Deny the password reset request for "' + username + '"?')) return;
+  var r = await api('/api/users/password-reset-requests/' + id + '/deny', {method: 'POST'});
+  if (r.ok) { log('Password reset denied for "' + username + '".', 'OK'); pwResetLoad(); }
+  else log('Deny failed: ' + (r.data && r.data.error || r.status), 'ERROR');
+}
+
+function pwResetCopyLink() {
+  var input  = document.getElementById('pw-reset-link-url');
+  var status = document.getElementById('pw-reset-link-status');
+  input.select();
+  var done = function() { status.textContent = 'Copied.'; setTimeout(function(){ status.textContent = ''; }, 2500); };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(input.value).then(done, function() { document.execCommand('copy'); done(); });
+  } else {
+    document.execCommand('copy');
+    done();
+  }
+}
+
+/* ── Invites ──────────────────────────────────────────────────────────────── */
+async function invitesLoad() {
+  var r = await api('/api/invites');
+  var tbody = document.getElementById('inv-tbody');
+  if (!r.ok) { tbody.innerHTML = '<tr><td colspan="4" class="muted" style="padding:14px">Error loading invites.</td></tr>'; return; }
+  var invites = r.data.invites || [];
+  if (!invites.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="muted" style="padding:14px">No pending invites.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = invites.map(function(inv) {
+    var roleColor = inv.role === 'owner'     ? 'rgba(255,179,0,.18);color:var(--warn)'
+                  : inv.role === 'superuser' ? 'rgba(248,81,73,.15);color:var(--red)'
+                  : inv.role === 'admin'     ? 'rgba(88,166,255,.12);color:var(--accent)'
+                  :                            'rgba(63,185,80,.1);color:var(--green)';
+    var roleBadge = '<span style="background:' + roleColor + ';padding:1px 7px;border-radius:3px;font-size:0.75rem;font-weight:600">' + esc(inv.role) + '</span>';
+    var expires = new Date(inv.expires_at * 1000).toLocaleString();
+    return '<tr>'
+      + '<td>' + roleBadge + '</td>'
+      + '<td style="color:var(--text2);font-size:0.82rem">' + esc(inv.created_by) + '</td>'
+      + '<td style="color:var(--text2);font-size:0.82rem">' + expires + '</td>'
+      + '<td><div class="btn-row">'
+      + '<button class="btn btn-warn btn-sm" onclick="revokeInvite(' + inv.id + ')">Revoke</button>'
+      + '</div></td>'
+      + '</tr>';
+  }).join('');
+}
+
+function restrictInviteRoleOptions() {
+  var myRank = ROLE_RANK[window._henwenRole] || 0;
+  document.querySelectorAll('#inv-role option').forEach(function(opt) {
+    var hide = (ROLE_RANK[opt.value] || 0) > myRank;
+    opt.disabled = hide;
+    opt.style.display = hide ? 'none' : '';
+  });
+}
+
+function onInvRoleChange() {
+  var role = document.getElementById('inv-role').value;
+  document.getElementById('inv-restrict-disc-row').style.display = (role === 'user') ? '' : 'none';
+  document.getElementById('inv-can-record-row').style.display = (window._henwenRole === 'owner') ? '' : 'none';
+}
+
+function showCreateInviteForm() {
+  document.getElementById('inv-form-card').style.display = '';
+  restrictInviteRoleOptions();
+  document.getElementById('inv-role').value = 'user';
+  document.getElementById('inv-restrict-disconnect').checked = false;
+  document.getElementById('inv-can-record').checked = false;
+  document.getElementById('inv-form-status').textContent = '';
+  document.getElementById('inv-link-card').style.display = 'none';
+  onInvRoleChange();
+  document.getElementById('inv-form-card').scrollIntoView({behavior:'smooth'});
+}
+
+function hideInviteForm() {
+  document.getElementById('inv-form-card').style.display = 'none';
+}
+
+async function createInvite() {
+  var st = document.getElementById('inv-form-status');
+  var payload = {
+    role: document.getElementById('inv-role').value,
+    restrict_disconnect: document.getElementById('inv-restrict-disconnect').checked
+  };
+  if (window._henwenRole === 'owner') payload.can_record = document.getElementById('inv-can-record').checked;
+
+  var r = await api('/api/invites', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)
+  });
+  if (!r.ok) { st.style.color = 'var(--red)'; st.textContent = (r.data && r.data.error) || ('Error ' + r.status); return; }
+
+  document.getElementById('inv-link-role').textContent = payload.role;
+  document.getElementById('inv-link-ttl').textContent   = r.data.expires_in_hours;
+  document.getElementById('inv-link-url').value         = r.data.invite_url;
+  document.getElementById('inv-link-status').textContent = '';
+  document.getElementById('inv-link-card').style.display = '';
+  hideInviteForm();
+  document.getElementById('inv-link-card').scrollIntoView({behavior:'smooth'});
+  log('Invite created (role=' + payload.role + ').', 'OK');
+  invitesLoad();
+}
+
+async function revokeInvite(id) {
+  if (!confirm('Revoke this invite? The link will stop working.')) return;
+  var r = await api('/api/invites/' + id + '/revoke', {method: 'POST'});
+  if (r.ok) { log('Invite revoked.', 'OK'); invitesLoad(); }
+  else log('Revoke failed: ' + (r.data && r.data.error || r.status), 'ERROR');
+}
+
+function invCopyLink() {
+  var input  = document.getElementById('inv-link-url');
+  var status = document.getElementById('inv-link-status');
+  input.select();
+  var done = function() { status.textContent = 'Copied.'; setTimeout(function(){ status.textContent = ''; }, 2500); };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(input.value).then(done, function() { document.execCommand('copy'); done(); });
+  } else {
+    document.execCommand('copy');
+    done();
+  }
+}
+
 /* ── User Management ─────────────────────────────────────────────────────── */
 async function loadUsers() {
   var r = await api('/api/users');
@@ -7425,6 +7856,10 @@ async function loadUsers() {
       roleBadge += ' <span style="background:rgba(63,185,80,.15);color:var(--green);padding:1px 7px;' +
         'border-radius:3px;font-size:0.72rem;font-weight:600" title="Can start recordings from the Status Board">can-record</span>';
     }
+    if (u.totp_enabled) {
+      roleBadge += ' <span style="background:rgba(88,166,255,.12);color:var(--accent);padding:1px 7px;' +
+        'border-radius:3px;font-size:0.72rem;font-weight:600" title="Two-factor authentication is enabled on this account">2FA</span>';
+    }
     var created = u.created_at ? new Date(u.created_at + 'Z').toLocaleDateString() : '—';
     var timeoutDisplay = u.session_idle_timeout === null || u.session_idle_timeout === undefined
       ? '<span style="color:var(--text2);font-size:0.82rem">30 min (default)</span>'
@@ -7438,6 +7873,7 @@ async function loadUsers() {
       + '<td style="color:var(--text2);font-size:0.82rem">' + created + '</td>'
       + '<td><div class="btn-row">'
       + '<button class="btn btn-sm" onclick="editUser(' + u.id + ',\'' + esc(u.username) + '\',\'' + esc(u.role) + '\',' + (u.session_idle_timeout === null || u.session_idle_timeout === undefined ? 'null' : u.session_idle_timeout) + ',' + (u.restrict_disconnect ? 'true' : 'false') + ',' + (u.can_record ? 'true' : 'false') + ')">Edit</button>'
+      + (u.totp_enabled ? '<button class="btn btn-sm" onclick="resetUserMfa(' + u.id + ',\'' + esc(u.username) + '\')">Reset 2FA</button>' : '')
       + '<button class="btn btn-warn btn-sm" onclick="deleteUser(' + u.id + ',\'' + esc(u.username) + '\')">Delete</button>'
       + '</div></td>'
       + '</tr>';
@@ -7568,6 +8004,14 @@ async function deleteUser(id, username) {
   var r = await api('/api/users/' + id, {method: 'DELETE'});
   if (r.ok) { log('User "' + username + '" deleted.', 'OK'); loadUsers(); }
   else log('Delete failed: ' + (r.data && r.data.error || r.status), 'ERROR');
+}
+
+async function resetUserMfa(id, username) {
+  if (!confirm('Reset two-factor authentication for "' + username + '"? They will be able to sign in ' +
+               'with just their password again, and can re-enroll from their own account.')) return;
+  var r = await api('/api/users/' + id + '/mfa/reset', {method: 'POST'});
+  if (r.ok) { log('2FA reset for "' + username + '".', 'OK'); loadUsers(); }
+  else log('Reset failed: ' + (r.data && r.data.error || r.status), 'ERROR');
 }
 </script>
 </body>
