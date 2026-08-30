@@ -1223,6 +1223,10 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
             <label class="switch"><input type="checkbox" id="al-disk-high"><span class="slider"></span></label>
           </div>
           <div class="toggle-row">
+            <div class="toggle-info"><div class="toggle-key">Password Reset Requested</div><div class="toggle-desc">A user asks for a password reset from the login page — approve it in Manager &gt; User Management</div></div>
+            <label class="switch"><input type="checkbox" id="al-pwreset"><span class="slider"></span></label>
+          </div>
+          <div class="toggle-row">
             <div class="toggle-info"><div class="toggle-key">Node Connect</div><div class="toggle-desc">A node links to this server</div></div>
             <label class="switch"><input type="checkbox" id="al-node-conn" onchange="alToggleWatchNodes()"><span class="slider"></span></label>
           </div>
@@ -2759,6 +2763,28 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
   <section class="page" id="page-user-mgmt">
     <div class="page-title">User Management</div>
     <div class="page-sub">Create and manage user accounts. Roles: <strong>owner</strong> (full access + node lockout), <strong>superuser</strong> (full access), <strong>admin</strong> (manager access, no raw editor), <strong>user</strong> (Kiosk only).</div>
+
+    <div class="card" id="pw-reset-card" style="display:none">
+      <div class="card-header"><h2>Pending Password Reset Requests</h2></div>
+      <div class="card-body" style="padding:0">
+        <table class="tbl" id="pw-reset-table">
+          <thead><tr><th>Username</th><th>Requested</th><th>Actions</th></tr></thead>
+          <tbody id="pw-reset-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card" id="pw-reset-link-card" style="display:none;max-width:700px">
+      <div class="card-header"><h2>Reset Approved</h2></div>
+      <div class="card-body">
+        <div style="font-size:0.85rem;margin-bottom:8px">One-time link for <strong id="pw-reset-link-user"></strong> — give it to them yourself (in person, over the repeater, chat, whatever you'd normally use). It works once and expires in <span id="pw-reset-link-ttl"></span> minutes.</div>
+        <div style="display:flex;gap:8px">
+          <input id="pw-reset-link-url" type="text" readonly class="val-input" style="flex:1;font-size:0.8rem" onclick="this.select()">
+          <button class="btn btn-sm" onclick="pwResetCopyLink()">Copy</button>
+        </div>
+        <div id="pw-reset-link-status" style="margin-top:6px;font-size:0.8rem;color:var(--text2)"></div>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-header">
         <h2>Users</h2>
@@ -3057,7 +3083,7 @@ function showPage(id) {
   else if (id === 'ami-diag')         loadSysInfo();
   else if (id === 'ast-console')  astFetchLog();
   else if (id === 'settings')       { loadSecretKeyStatus(); loadPortsStatus(); syncThemePicker(); }
-  else if (id === 'user-mgmt')      loadUsers();
+  else if (id === 'user-mgmt')      { loadUsers(); pwResetLoad(); }
   else if (id === 'recordings')         recordingsLoad();
   else if (id === 'recording-settings') recLoad();
   else if (id === 'stream-relay')       relayLoad();
@@ -4160,6 +4186,7 @@ async function alLoad() {
   document.getElementById('al-dns-stuck').checked = !!d.on_dns_stuck;
   document.getElementById('al-disk-high').checked = !!d.on_disk_high;
   document.getElementById('al-disk-thr').value    = d.disk_pct_threshold || 90;
+  document.getElementById('al-pwreset').checked   = !!d.on_password_reset_request;
   document.getElementById('al-node-conn').checked = !!d.on_node_connect;
   document.getElementById('al-node-dc').checked   = !!d.on_node_disconnect;
   document.getElementById('al-watch-nodes').value = d.watch_nodes || '';
@@ -4201,6 +4228,7 @@ async function alSave() {
     on_dns_stuck:       document.getElementById('al-dns-stuck').checked ? 1 : 0,
     on_disk_high:       document.getElementById('al-disk-high').checked ? 1 : 0,
     disk_pct_threshold: parseInt(document.getElementById('al-disk-thr').value) || 90,
+    on_password_reset_request: document.getElementById('al-pwreset').checked ? 1 : 0,
     on_node_connect:    document.getElementById('al-node-conn').checked ? 1 : 0,
     on_node_disconnect: document.getElementById('al-node-dc').checked   ? 1 : 0,
     watch_nodes:        document.getElementById('al-watch-nodes').value.trim(),
@@ -7397,6 +7425,61 @@ async function uploadAnnouncement() {
     loadAnnouncements();
   } catch(e) {
     res.innerHTML = '<span style="color:var(--danger)">Error: ' + esc(String(e)) + '</span>';
+  }
+}
+
+/* ── Password Reset Requests ─────────────────────────────────────────────── */
+async function pwResetLoad() {
+  var r = await api('/api/users/password-reset-requests');
+  var card  = document.getElementById('pw-reset-card');
+  var tbody = document.getElementById('pw-reset-tbody');
+  if (!r.ok) { card.style.display = 'none'; return; }
+  var reqs = r.data.requests || [];
+  if (!reqs.length) { card.style.display = 'none'; return; }
+  card.style.display = '';
+  tbody.innerHTML = reqs.map(function(req) {
+    var when = new Date(req.requested_at * 1000).toLocaleString();
+    return '<tr>'
+      + '<td style="font-weight:600">' + esc(req.username) + '</td>'
+      + '<td style="color:var(--text2);font-size:0.82rem">' + esc(when) + '</td>'
+      + '<td><div class="btn-row">'
+      + '<button class="btn btn-primary btn-sm" onclick="pwResetApprove(' + req.id + ',\'' + esc(req.username) + '\')">Approve</button>'
+      + '<button class="btn btn-warn btn-sm" onclick="pwResetDeny(' + req.id + ',\'' + esc(req.username) + '\')">Deny</button>'
+      + '</div></td>'
+      + '</tr>';
+  }).join('');
+}
+
+async function pwResetApprove(id, username) {
+  var r = await api('/api/users/password-reset-requests/' + id + '/approve', {method: 'POST'});
+  if (!r.ok) { log('Approve failed: ' + (r.data && r.data.error || r.status), 'ERROR'); return; }
+  document.getElementById('pw-reset-link-user').textContent = username;
+  document.getElementById('pw-reset-link-ttl').textContent  = r.data.expires_in_min;
+  document.getElementById('pw-reset-link-url').value        = r.data.reset_url;
+  document.getElementById('pw-reset-link-status').textContent = '';
+  document.getElementById('pw-reset-link-card').style.display = '';
+  document.getElementById('pw-reset-link-card').scrollIntoView({behavior:'smooth'});
+  log('Password reset approved for "' + username + '".', 'OK');
+  pwResetLoad();
+}
+
+async function pwResetDeny(id, username) {
+  if (!confirm('Deny the password reset request for "' + username + '"?')) return;
+  var r = await api('/api/users/password-reset-requests/' + id + '/deny', {method: 'POST'});
+  if (r.ok) { log('Password reset denied for "' + username + '".', 'OK'); pwResetLoad(); }
+  else log('Deny failed: ' + (r.data && r.data.error || r.status), 'ERROR');
+}
+
+function pwResetCopyLink() {
+  var input  = document.getElementById('pw-reset-link-url');
+  var status = document.getElementById('pw-reset-link-status');
+  input.select();
+  var done = function() { status.textContent = 'Copied.'; setTimeout(function(){ status.textContent = ''; }, 2500); };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(input.value).then(done, function() { document.execCommand('copy'); done(); });
+  } else {
+    document.execCommand('copy');
+    done();
   }
 }
 

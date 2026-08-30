@@ -43,6 +43,8 @@ import sys
 import pwd
 import grp
 import secrets
+import hashlib
+import hmac
 import traceback
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -141,6 +143,12 @@ _DEFAULT_SERVICE_FILE_PATH = f"/etc/systemd/system/{SERVICE_NAME}.service"
 SERVICE_FILE_PATH = os.environ.get("SERVICE_FILE_PATH", _DEFAULT_SERVICE_FILE_PATH)
 SECURE_COOKIES       = os.environ.get("SECURE_COOKIES", "false").lower() == "true"
 SESSION_IDLE_TIMEOUT = int(os.environ.get("SESSION_IDLE_TIMEOUT", "1800"))  # 30 minutes
+
+# Self-service password reset (login.html "Forgot password?" -> Manager >
+# Users approval -> one-time link) — fixed ceilings, same "simple, hardcoded"
+# posture as the NWS/APRS staleness ceilings rather than more Settings sprawl.
+PASSWORD_RESET_REQUEST_TTL = 24 * 3600   # an unapproved request stops being actionable after this
+PASSWORD_RESET_TOKEN_TTL   = 30 * 60     # an approved one-time link expires this long after approval
 
 # Kiosk chat panel (logged-in users only). Local, fixed ceilings rather than
 # a settings-table/UI, same "simple, hardcoded" posture as the NWS/APRS
@@ -678,6 +686,11 @@ def get_db():
         # see _check_alerts()'s disk-usage branch.
         conn.execute("ALTER TABLE alert_config ADD COLUMN on_disk_high INTEGER NOT NULL DEFAULT 1")
         conn.execute("ALTER TABLE alert_config ADD COLUMN disk_pct_threshold INTEGER NOT NULL DEFAULT 90")
+    if 'on_password_reset_request' not in _alert_cols:
+        # Not a poll-loop condition like the others above -- fired inline by
+        # api_forgot_password() the moment a reset is requested, since that's
+        # already an event, not a value to sample.
+        conn.execute("ALTER TABLE alert_config ADD COLUMN on_password_reset_request INTEGER NOT NULL DEFAULT 1")
     conn.commit()
     # Singleton config for the NWS severe weather auto-announcement poller —
     # separate from alert_config (that's push notifications; this is
@@ -966,6 +979,27 @@ def get_db():
     except Exception:
         pass  # column already exists
 
+    # Self-service "Forgot password?" flow (login.html) — a logged-out user
+    # requests a reset, which pings the owner via whatever's configured in
+    # alert_config (see _send_alert()'s on_password_reset_request branch),
+    # and an admin+ approves it from Manager > Users, which mints a one-time
+    # token the admin relays to the user out-of-band (in person, over the
+    # repeater, chat, whatever they'd already use) -- there's no email/SMS
+    # infra in this app to deliver it automatically. Only the token's hash is
+    # stored, same reasoning as a password hash: the plaintext token is a
+    # bearer credential good for exactly one password change.
+    conn.execute("""CREATE TABLE IF NOT EXISTS password_reset_requests (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        username         TEXT    NOT NULL,
+        requested_at     REAL    NOT NULL,
+        status           TEXT    NOT NULL DEFAULT 'pending',
+        token_hash       TEXT,
+        token_expires_at REAL,
+        resolved_by      TEXT,
+        resolved_at      REAL
+    )""")
+    conn.commit()
+
     # Seed kiosk defaults
     for _k, _v in [
         ('kiosk_idle_timeout_sec', '600'),
@@ -1037,7 +1071,8 @@ def check_auth():
                         'api_login', 'api_session', 'api_csrf_token',
                         'api_favorites', 'api_favorites_status',
                         'api_kiosk_settings_get', 'api_kiosk_logo_file',
-                        'api_nets_list'}
+                        'api_nets_list',
+                        'forgot_password', 'reset_password_page'}
     # Any logged-in user (superuser / admin / user) — live audio requires a
     # session (previously public, letting anyone on the network listen and
     # spawn server-side encoder/relay processes with no authentication).
@@ -1275,6 +1310,104 @@ def api_csrf_token():
     """Return a fresh CSRF token for the current session (GET, so no CSRF check needed).
     Used by the kiosk after logout to refresh _csrfToken without reloading the page."""
     return jsonify({"csrf_token": generate_csrf()})
+
+
+# ── Self-service password reset ─────────────────────────────────────────────
+# login.html's "Forgot password?" link starts this: a logged-out user
+# requests a reset here, an admin+ approves it from Manager > Users
+# (api_password_reset_request_approve below), and the one-time link that
+# mints gets relayed to the user out-of-band -- in person, over the
+# repeater, chat, whatever they'd already use. See password_reset_requests'
+# CREATE TABLE comment in get_db() for why there's no automatic (email/SMS)
+# delivery to route around that last, human step.
+
+def _prune_password_reset_requests(db):
+    """Garbage-collect rows that can no longer be acted on: unapproved
+    requests older than PASSWORD_RESET_REQUEST_TTL, and any row of any
+    status old enough it's just audit clutter. Called inline wherever the
+    table is touched rather than by a dedicated poller -- this table sees at
+    most a handful of rows at a time, nowhere near needing one."""
+    now = time.time()
+    db.execute("DELETE FROM password_reset_requests WHERE status='pending' AND requested_at < ?",
+               (now - PASSWORD_RESET_REQUEST_TTL,))
+    db.execute("DELETE FROM password_reset_requests WHERE status != 'pending' AND requested_at < ?",
+               (now - 7 * 86400,))
+    db.commit()
+
+
+@app.route("/forgot-password", methods=["GET", "POST"])
+@limiter.limit("5 per minute; 20 per hour")
+def forgot_password():
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        db = get_db()
+        _prune_password_reset_requests(db)
+        user = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
+        if user:
+            existing = db.execute(
+                "SELECT id FROM password_reset_requests WHERE username=? AND status='pending'",
+                (username,)).fetchone()
+            if not existing:
+                db.execute(
+                    "INSERT INTO password_reset_requests (username, requested_at, status) VALUES (?,?,'pending')",
+                    (username, time.time()))
+                db.commit()
+                log("INFO", f"[AUTH] Password reset requested for '{username}'")
+                cfg = _get_alert_config()
+                if cfg and cfg["enabled"] and cfg["on_password_reset_request"]:
+                    _send_alert("HenWen: Password Reset Requested",
+                                f"'{username}' asked for a password reset. Review it in Manager > Users.",
+                                "high")
+        # Identical response whether or not the account exists -- otherwise
+        # this becomes a username-enumeration oracle.
+        return render_template("password-reset.html", stage="sent")
+    return render_template("password-reset.html", stage="request")
+
+
+def _get_valid_reset_request(db, token):
+    """Look up a pending, unexpired, approved reset request by plaintext
+    token (only the hash is ever stored). Returns the row or None."""
+    if not token:
+        return None
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    req = db.execute(
+        "SELECT * FROM password_reset_requests WHERE token_hash=? AND status='approved'",
+        (token_hash,)).fetchone()
+    if req and req["token_expires_at"] < time.time():
+        return None
+    return req
+
+
+@app.route("/reset-password", methods=["GET", "POST"])
+@limiter.limit("20 per minute; 100 per hour")
+def reset_password_page():
+    token = request.values.get("token", "")
+    db = get_db()
+    _prune_password_reset_requests(db)
+    req = _get_valid_reset_request(db, token)
+
+    if request.method == "POST":
+        if not req:
+            return render_template("password-reset.html", stage="invalid")
+        new_pw  = request.form.get("new_password", "")
+        confirm = request.form.get("confirm_password", "")
+        if len(new_pw) < 8:
+            return render_template("password-reset.html", stage="reset", token=token,
+                                   error="Password must be at least 8 characters.")
+        if new_pw != confirm:
+            return render_template("password-reset.html", stage="reset", token=token,
+                                   error="Passwords do not match.")
+        db.execute("UPDATE users SET password_hash=? WHERE username=?",
+                   (generate_password_hash(new_pw), req["username"]))
+        db.execute("UPDATE password_reset_requests SET status='used', resolved_at=? WHERE id=?",
+                   (time.time(), req["id"]))
+        db.commit()
+        log("INFO", f"[AUTH] Password reset completed for '{req['username']}'")
+        return render_template("password-reset.html", stage="done")
+
+    if not req:
+        return render_template("password-reset.html", stage="invalid")
+    return render_template("password-reset.html", stage="reset", token=token)
 
 
 @app.route("/api/session")
@@ -5202,6 +5335,7 @@ def api_alerts_get_config():
             "on_node_connect": 0, "on_node_disconnect": 0, "watch_nodes": "",
             "on_dns_stuck": 1,
             "on_disk_high": 1, "disk_pct_threshold": 90,
+            "on_password_reset_request": 1,
         })
     return jsonify(dict(cfg))
 
@@ -5216,8 +5350,8 @@ def api_alerts_save_config():
             ntfy_topic, pushover_token, pushover_user,
             on_ami_disconnect, on_ami_reconnect, on_cpu_temp_high, cpu_temp_threshold,
             on_node_connect, on_node_disconnect, watch_nodes, on_dns_stuck,
-            on_disk_high, disk_pct_threshold)
-           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            on_disk_high, disk_pct_threshold, on_password_reset_request)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             1 if data.get("enabled")           else 0,
             1 if data.get("ntfy_enabled")       else 0,
@@ -5238,6 +5372,7 @@ def api_alerts_save_config():
             1 if data.get("on_dns_stuck")      else 0,
             1 if data.get("on_disk_high")      else 0,
             int(data.get("disk_pct_threshold", 90)),
+            1 if data.get("on_password_reset_request") else 0,
         )
     )
     db.commit()
@@ -5401,6 +5536,88 @@ def api_users_delete(uid):
     db.commit()
     log("INFO", f"[USERS] Deleted user '{user['username']}' (id={uid})")
     return jsonify({"ok": True})
+
+
+# ── Password reset requests (Manager > Users) ───────────────────────────────
+# The admin+ side of the self-service flow above -- see the "Self-service
+# password reset" section near forgot_password()/reset_password_page().
+
+@app.route("/api/users/password-reset-requests")
+def api_password_reset_requests_list():
+    db = get_db()
+    _prune_password_reset_requests(db)
+    caller_role = session.get('role', '')
+    rows = db.execute(
+        """SELECT prr.id, prr.username, prr.requested_at, u.role AS user_role
+           FROM password_reset_requests prr
+           JOIN users u ON u.username = prr.username
+           WHERE prr.status='pending'
+           ORDER BY prr.requested_at""").fetchall()
+    # Same visibility rule as the rest of User Management: an admin can only
+    # see/act on requests for accounts it's allowed to manage.
+    out = []
+    for r in rows:
+        if ROLE_RANK.get(r["user_role"], 0) > ROLE_RANK.get(caller_role, -1):
+            continue
+        if caller_role == 'admin' and r["user_role"] in ('owner', 'superuser', 'admin'):
+            continue
+        out.append({"id": r["id"], "username": r["username"], "requested_at": r["requested_at"]})
+    return jsonify({"requests": out})
+
+
+def _resolve_password_reset_request(uid, approve):
+    db          = get_db()
+    caller_role = session.get('role', '')
+    req = db.execute("SELECT * FROM password_reset_requests WHERE id=? AND status='pending'",
+                     (uid,)).fetchone()
+    if not req:
+        return jsonify({"error": "Request not found or already resolved"}), 404
+    user = db.execute("SELECT role FROM users WHERE username=?", (req["username"],)).fetchone()
+    if not user:
+        db.execute("DELETE FROM password_reset_requests WHERE id=?", (uid,))
+        db.commit()
+        return jsonify({"error": "That account no longer exists"}), 404
+    # Identical rank gating to api_users_update()'s password field -- an
+    # admin approving a reset is functionally equivalent to setting that
+    # account's password directly, so it needs the same ceiling.
+    if ROLE_RANK.get(user["role"], 0) > ROLE_RANK.get(caller_role, -1):
+        return jsonify({"error": "You cannot manage an account ranked above your own"}), 403
+    if caller_role == 'admin' and user["role"] in ('owner', 'superuser', 'admin'):
+        return jsonify({"error": "Admins can only manage user accounts"}), 403
+
+    if approve:
+        token      = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        expires_at = time.time() + PASSWORD_RESET_TOKEN_TTL
+        db.execute(
+            """UPDATE password_reset_requests
+               SET status='approved', token_hash=?, token_expires_at=?, resolved_by=?, resolved_at=?
+               WHERE id=?""",
+            (token_hash, expires_at, session.get('username', ''), time.time(), uid))
+        db.commit()
+        log("INFO", f"[AUTH] Password reset approved for '{req['username']}' by '{session.get('username','')}'")
+        return jsonify({
+            "ok": True,
+            "reset_url": url_for('reset_password_page', token=token, _external=True),
+            "expires_in_min": PASSWORD_RESET_TOKEN_TTL // 60,
+        })
+    else:
+        db.execute(
+            "UPDATE password_reset_requests SET status='denied', resolved_by=?, resolved_at=? WHERE id=?",
+            (session.get('username', ''), time.time(), uid))
+        db.commit()
+        log("INFO", f"[AUTH] Password reset denied for '{req['username']}' by '{session.get('username','')}'")
+        return jsonify({"ok": True})
+
+
+@app.route("/api/users/password-reset-requests/<int:uid>/approve", methods=["POST"])
+def api_password_reset_request_approve(uid):
+    return _resolve_password_reset_request(uid, approve=True)
+
+
+@app.route("/api/users/password-reset-requests/<int:uid>/deny", methods=["POST"])
+def api_password_reset_request_deny(uid):
+    return _resolve_password_reset_request(uid, approve=False)
 
 
 # ── Favorites API ─────────────────────────────────────────────────────────────
