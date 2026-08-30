@@ -5119,6 +5119,12 @@ async function acctMfaConfirmSetup() {
   if (!r.ok) { out.style.color = 'var(--red)'; out.textContent = d.error || 'Failed.'; return; }
   document.getElementById('acct-mfa-recovery-codes').textContent = d.recovery_codes.join('\n');
   _acctMfaShowView('acct-mfa-recovery-view');
+  // The account is already 2FA-protected server-side at this point -- flip
+  // the badge now rather than leaving it stale ("Disabled") until the user
+  // dismisses the recovery-codes view.
+  var badge = document.getElementById('acct-mfa-badge');
+  badge.textContent = 'Enabled';
+  badge.style.color = 'var(--green)';
 }
 
 function acctMfaAcknowledgeRecoveryCodes() {

@@ -5605,6 +5605,12 @@ async function mfaConfirmSetup() {
   }
   document.getElementById('mfa-recovery-codes').textContent = r.data.recovery_codes.join('\n');
   _mfaShowView('mfa-recovery-view');
+  // The account is already 2FA-protected server-side at this point -- flip
+  // the badge now rather than leaving it stale ("Disabled") until the user
+  // dismisses the recovery-codes view.
+  var badge = document.getElementById('mfa-status-badge');
+  badge.textContent = 'Enabled';
+  badge.style.color = 'var(--green)';
   log('Two-factor authentication enabled.', 'OK');
 }
 
