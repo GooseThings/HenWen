@@ -2785,6 +2785,72 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
       </div>
     </div>
 
+    <div class="card" id="inv-card">
+      <div class="card-header">
+        <h2>Pending Invites</h2>
+        <button class="btn btn-primary btn-sm" onclick="showCreateInviteForm()">+ Invite</button>
+      </div>
+      <div class="card-body" style="padding:0">
+        <table class="tbl" id="inv-table">
+          <thead><tr><th>Role</th><th>Created By</th><th>Expires</th><th>Actions</th></tr></thead>
+          <tbody id="inv-tbody"><tr><td colspan="4" class="muted" style="padding:14px">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card" id="inv-form-card" style="display:none">
+      <div class="card-header">
+        <h2>New Invite</h2>
+        <button class="btn btn-sm" onclick="hideInviteForm()">Cancel</button>
+      </div>
+      <div class="card-body">
+        <p class="hint" style="font-size:0.82rem;color:var(--text2);margin-bottom:12px">The invitee picks their own username and password when they open the link — nobody here will know it.</p>
+        <div class="form-row" style="margin-bottom:14px">
+          <div>
+            <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:4px">Role</label>
+            <select id="inv-role" onchange="onInvRoleChange()" style="width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg3);color:var(--text);font-size:0.88rem">
+              <option value="owner">owner — Full access + node lockout (locks out everyone else)</option>
+              <option value="superuser">superuser — Full access including raw editor</option>
+              <option value="admin">admin — Manager access, no raw editor</option>
+              <option value="user">user — Kiosk + connect/disconnect only</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row" id="inv-restrict-disc-row" style="margin-bottom:14px;display:none">
+          <div>
+            <label style="display:inline-flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:0.86rem">
+              <input type="checkbox" id="inv-restrict-disconnect" style="width:auto;margin-top:3px">
+              <span>Restrict disconnect — this user can listen, TX, and make the first connection if none is
+                active, but can never disconnect a node</span>
+            </label>
+          </div>
+        </div>
+        <div class="form-row" id="inv-can-record-row" style="margin-bottom:14px;display:none">
+          <div>
+            <label style="display:inline-flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:0.86rem">
+              <input type="checkbox" id="inv-can-record" style="width:auto;margin-top:3px">
+              <span>Can record — shows a Record button next to Listen on the Status Board for this account</span>
+            </label>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-primary" onclick="createInvite()">Create Invite</button>
+          <button class="btn" onclick="hideInviteForm()">Cancel</button>
+        </div>
+        <div id="inv-form-status" style="margin-top:8px;font-size:0.82rem"></div>
+      </div>
+    </div>
+    <div class="card" id="inv-link-card" style="display:none;max-width:700px">
+      <div class="card-header"><h2>Invite Created</h2></div>
+      <div class="card-body">
+        <div style="font-size:0.85rem;margin-bottom:8px">One-time link for a new <strong id="inv-link-role"></strong> account — give it to them yourself (in person, over the repeater, chat, whatever you'd normally use). It works once and expires in <span id="inv-link-ttl"></span> hours.</div>
+        <div style="display:flex;gap:8px">
+          <input id="inv-link-url" type="text" readonly class="val-input" style="flex:1;font-size:0.8rem" onclick="this.select()">
+          <button class="btn btn-sm" onclick="invCopyLink()">Copy</button>
+        </div>
+        <div id="inv-link-status" style="margin-top:6px;font-size:0.8rem;color:var(--text2)"></div>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-header">
         <h2>Users</h2>
@@ -3083,7 +3149,7 @@ function showPage(id) {
   else if (id === 'ami-diag')         loadSysInfo();
   else if (id === 'ast-console')  astFetchLog();
   else if (id === 'settings')       { loadSecretKeyStatus(); loadPortsStatus(); syncThemePicker(); }
-  else if (id === 'user-mgmt')      { loadUsers(); pwResetLoad(); }
+  else if (id === 'user-mgmt')      { loadUsers(); pwResetLoad(); invitesLoad(); }
   else if (id === 'recordings')         recordingsLoad();
   else if (id === 'recording-settings') recLoad();
   else if (id === 'stream-relay')       relayLoad();
@@ -7473,6 +7539,111 @@ async function pwResetDeny(id, username) {
 function pwResetCopyLink() {
   var input  = document.getElementById('pw-reset-link-url');
   var status = document.getElementById('pw-reset-link-status');
+  input.select();
+  var done = function() { status.textContent = 'Copied.'; setTimeout(function(){ status.textContent = ''; }, 2500); };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(input.value).then(done, function() { document.execCommand('copy'); done(); });
+  } else {
+    document.execCommand('copy');
+    done();
+  }
+}
+
+/* ── Invites ──────────────────────────────────────────────────────────────── */
+async function invitesLoad() {
+  var r = await api('/api/invites');
+  var tbody = document.getElementById('inv-tbody');
+  if (!r.ok) { tbody.innerHTML = '<tr><td colspan="4" class="muted" style="padding:14px">Error loading invites.</td></tr>'; return; }
+  var invites = r.data.invites || [];
+  if (!invites.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="muted" style="padding:14px">No pending invites.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = invites.map(function(inv) {
+    var roleColor = inv.role === 'owner'     ? 'rgba(255,179,0,.18);color:var(--warn)'
+                  : inv.role === 'superuser' ? 'rgba(248,81,73,.15);color:var(--red)'
+                  : inv.role === 'admin'     ? 'rgba(88,166,255,.12);color:var(--accent)'
+                  :                            'rgba(63,185,80,.1);color:var(--green)';
+    var roleBadge = '<span style="background:' + roleColor + ';padding:1px 7px;border-radius:3px;font-size:0.75rem;font-weight:600">' + esc(inv.role) + '</span>';
+    var expires = new Date(inv.expires_at * 1000).toLocaleString();
+    return '<tr>'
+      + '<td>' + roleBadge + '</td>'
+      + '<td style="color:var(--text2);font-size:0.82rem">' + esc(inv.created_by) + '</td>'
+      + '<td style="color:var(--text2);font-size:0.82rem">' + expires + '</td>'
+      + '<td><div class="btn-row">'
+      + '<button class="btn btn-warn btn-sm" onclick="revokeInvite(' + inv.id + ')">Revoke</button>'
+      + '</div></td>'
+      + '</tr>';
+  }).join('');
+}
+
+function restrictInviteRoleOptions() {
+  var myRank = ROLE_RANK[window._henwenRole] || 0;
+  document.querySelectorAll('#inv-role option').forEach(function(opt) {
+    var hide = (ROLE_RANK[opt.value] || 0) > myRank;
+    opt.disabled = hide;
+    opt.style.display = hide ? 'none' : '';
+  });
+}
+
+function onInvRoleChange() {
+  var role = document.getElementById('inv-role').value;
+  document.getElementById('inv-restrict-disc-row').style.display = (role === 'user') ? '' : 'none';
+  document.getElementById('inv-can-record-row').style.display = (window._henwenRole === 'owner') ? '' : 'none';
+}
+
+function showCreateInviteForm() {
+  document.getElementById('inv-form-card').style.display = '';
+  restrictInviteRoleOptions();
+  document.getElementById('inv-role').value = 'user';
+  document.getElementById('inv-restrict-disconnect').checked = false;
+  document.getElementById('inv-can-record').checked = false;
+  document.getElementById('inv-form-status').textContent = '';
+  document.getElementById('inv-link-card').style.display = 'none';
+  onInvRoleChange();
+  document.getElementById('inv-form-card').scrollIntoView({behavior:'smooth'});
+}
+
+function hideInviteForm() {
+  document.getElementById('inv-form-card').style.display = 'none';
+}
+
+async function createInvite() {
+  var st = document.getElementById('inv-form-status');
+  var payload = {
+    role: document.getElementById('inv-role').value,
+    restrict_disconnect: document.getElementById('inv-restrict-disconnect').checked
+  };
+  if (window._henwenRole === 'owner') payload.can_record = document.getElementById('inv-can-record').checked;
+
+  var r = await api('/api/invites', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)
+  });
+  if (!r.ok) { st.style.color = 'var(--red)'; st.textContent = (r.data && r.data.error) || ('Error ' + r.status); return; }
+
+  document.getElementById('inv-link-role').textContent = payload.role;
+  document.getElementById('inv-link-ttl').textContent   = r.data.expires_in_hours;
+  document.getElementById('inv-link-url').value         = r.data.invite_url;
+  document.getElementById('inv-link-status').textContent = '';
+  document.getElementById('inv-link-card').style.display = '';
+  hideInviteForm();
+  document.getElementById('inv-link-card').scrollIntoView({behavior:'smooth'});
+  log('Invite created (role=' + payload.role + ').', 'OK');
+  invitesLoad();
+}
+
+async function revokeInvite(id) {
+  if (!confirm('Revoke this invite? The link will stop working.')) return;
+  var r = await api('/api/invites/' + id + '/revoke', {method: 'POST'});
+  if (r.ok) { log('Invite revoked.', 'OK'); invitesLoad(); }
+  else log('Revoke failed: ' + (r.data && r.data.error || r.status), 'ERROR');
+}
+
+function invCopyLink() {
+  var input  = document.getElementById('inv-link-url');
+  var status = document.getElementById('inv-link-status');
   input.select();
   var done = function() { status.textContent = 'Copied.'; setTimeout(function(){ status.textContent = ''; }, 2500); };
   if (navigator.clipboard && navigator.clipboard.writeText) {

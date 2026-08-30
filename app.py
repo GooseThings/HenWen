@@ -150,6 +150,12 @@ SESSION_IDLE_TIMEOUT = int(os.environ.get("SESSION_IDLE_TIMEOUT", "1800"))  # 30
 PASSWORD_RESET_REQUEST_TTL = 24 * 3600   # an unapproved request stops being actionable after this
 PASSWORD_RESET_TOKEN_TTL   = 30 * 60     # an approved one-time link expires this long after approval
 
+# User invite links (Manager > Users -> one-time link -> /accept-invite) —
+# admin+ picks the role up front so the invitee never hands their password
+# to anyone; one TTL suffices here since (unlike password reset) there's no
+# separate approval step, the invite link itself *is* the approval.
+INVITE_TOKEN_TTL = 24 * 3600
+
 # Kiosk chat panel (logged-in users only). Local, fixed ceilings rather than
 # a settings-table/UI, same "simple, hardcoded" posture as the NWS/APRS
 # staleness ceilings — storage cost is small enough (worst case ~5000 rows *
@@ -1000,6 +1006,27 @@ def get_db():
     )""")
     conn.commit()
 
+    # User invite links (Manager > Users "+ Invite") — an admin+ picks a role
+    # (and, for role='user', restrict_disconnect/can_record) up front and
+    # gets a one-time link to relay out-of-band; the invitee visits it and
+    # picks their own username/password, so the account's password is never
+    # known to whoever created the account. Only the token's hash is stored,
+    # same reasoning as password_reset_requests.token_hash above.
+    conn.execute("""CREATE TABLE IF NOT EXISTS invites (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        token_hash          TEXT    NOT NULL,
+        role                TEXT    NOT NULL,
+        restrict_disconnect INTEGER NOT NULL DEFAULT 0,
+        can_record          INTEGER NOT NULL DEFAULT 0,
+        created_by          TEXT    NOT NULL,
+        created_at          REAL    NOT NULL,
+        expires_at          REAL    NOT NULL,
+        status              TEXT    NOT NULL DEFAULT 'pending',
+        used_by             TEXT,
+        used_at             REAL
+    )""")
+    conn.commit()
+
     # Seed kiosk defaults
     for _k, _v in [
         ('kiosk_idle_timeout_sec', '600'),
@@ -1072,7 +1099,7 @@ def check_auth():
                         'api_favorites', 'api_favorites_status',
                         'api_kiosk_settings_get', 'api_kiosk_logo_file',
                         'api_nets_list',
-                        'forgot_password', 'reset_password_page'}
+                        'forgot_password', 'reset_password_page', 'accept_invite'}
     # Any logged-in user (superuser / admin / user) — live audio requires a
     # session (previously public, letting anyone on the network listen and
     # spawn server-side encoder/relay processes with no authentication).
@@ -1408,6 +1435,89 @@ def reset_password_page():
     if not req:
         return render_template("password-reset.html", stage="invalid")
     return render_template("password-reset.html", stage="reset", token=token)
+
+
+# ── User invite links ────────────────────────────────────────────────────────
+# The invitee-facing half of the invite flow -- see invites' CREATE TABLE
+# comment in get_db() and the admin-facing create/list/revoke routes near
+# api_password_reset_request_approve() below.
+
+def _prune_invites(db):
+    """Mirrors _prune_password_reset_requests(): drop pending invites past
+    their own expiry (INVITE_TOKEN_TTL, checked against expires_at rather
+    than created_at directly so the ceiling lives in one place), plus any
+    resolved row old enough it's just audit clutter."""
+    now = time.time()
+    db.execute("DELETE FROM invites WHERE status='pending' AND expires_at < ?", (now,))
+    db.execute("DELETE FROM invites WHERE status != 'pending' AND created_at < ?", (now - 7 * 86400,))
+    db.commit()
+
+
+def _get_valid_invite(db, token):
+    """Look up a pending, unexpired invite by plaintext token (only the
+    hash is ever stored). Returns the row or None."""
+    if not token:
+        return None
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    inv = db.execute("SELECT * FROM invites WHERE token_hash=? AND status='pending'",
+                     (token_hash,)).fetchone()
+    if inv and inv["expires_at"] < time.time():
+        return None
+    return inv
+
+
+@app.route("/accept-invite", methods=["GET", "POST"])
+@limiter.limit("20 per minute; 100 per hour")
+def accept_invite():
+    token = request.values.get("token", "")
+    db = get_db()
+    _prune_invites(db)
+    inv = _get_valid_invite(db, token)
+
+    if request.method == "POST":
+        if not inv:
+            return render_template("invite-accept.html", stage="invalid")
+        username = request.form.get("username", "").strip()
+        new_pw   = request.form.get("new_password", "")
+        confirm  = request.form.get("confirm_password", "")
+        if not re.match(r'^[A-Za-z0-9_.-]{2,32}$', username):
+            return render_template("invite-accept.html", stage="accept", token=token, role=inv["role"],
+                                   error="Username must be 2-32 chars: letters, digits, _ . -")
+        if len(new_pw) < 8:
+            return render_template("invite-accept.html", stage="accept", token=token, role=inv["role"],
+                                   error="Password must be at least 8 characters.")
+        if new_pw != confirm:
+            return render_template("invite-accept.html", stage="accept", token=token, role=inv["role"],
+                                   error="Passwords do not match.")
+        try:
+            cur = db.execute(
+                "INSERT INTO users (username, password_hash, role, restrict_disconnect, can_record) "
+                "VALUES (?,?,?,?,?)",
+                (username, generate_password_hash(new_pw), inv["role"],
+                 inv["restrict_disconnect"], inv["can_record"]))
+        except sqlite3.IntegrityError:
+            return render_template("invite-accept.html", stage="accept", token=token, role=inv["role"],
+                                   error=f"Username '{username}' already exists.")
+        db.execute("UPDATE invites SET status='used', used_by=?, used_at=? WHERE id=?",
+                   (username, time.time(), inv["id"]))
+        db.commit()
+        new_user = db.execute("SELECT * FROM users WHERE id=?", (cur.lastrowid,)).fetchone()
+        _seed_default_favorites(new_user["id"])
+        log("INFO", f"[AUTH] Account '{username}' created via invite (role={inv['role']}, "
+                    f"invited by '{inv['created_by']}')")
+        session.clear()
+        session["logged_in"]    = True
+        session["username"]     = username
+        session["role"]         = inv["role"]
+        session["user_id"]      = new_user["id"]
+        session["idle_timeout"] = SESSION_IDLE_TIMEOUT
+        session["sid"] = secrets.token_hex(16)
+        touch_active_session(session["sid"], username)
+        return redirect(url_for('status_board' if inv["role"] == 'user' else 'index'))
+
+    if not inv:
+        return render_template("invite-accept.html", stage="invalid")
+    return render_template("invite-accept.html", stage="accept", token=token, role=inv["role"])
 
 
 @app.route("/api/session")
@@ -5618,6 +5728,86 @@ def api_password_reset_request_approve(uid):
 @app.route("/api/users/password-reset-requests/<int:uid>/deny", methods=["POST"])
 def api_password_reset_request_deny(uid):
     return _resolve_password_reset_request(uid, approve=False)
+
+
+# ── Invite links (Manager > Users) ──────────────────────────────────────────
+# The admin+ side of the invite flow -- see invites' CREATE TABLE comment in
+# get_db() and the invitee-facing accept_invite() route above.
+
+@app.route("/api/invites", methods=["POST"])
+def api_invites_create():
+    data        = request.json or {}
+    role        = str(data.get("role", "user")).strip()
+    caller_role = session.get('role', '')
+    if role not in ("owner", "superuser", "admin", "user"):
+        return jsonify({"error": "Role must be owner, superuser, admin, or user"}), 400
+    # Same rank/can_record gating as api_users_create() -- an invite is
+    # functionally a blank check to create an account of the chosen role,
+    # so it needs the identical ceiling.
+    if ROLE_RANK.get(role, 0) > ROLE_RANK.get(caller_role, -1):
+        return jsonify({"error": "You cannot assign a role higher than your own"}), 403
+    if caller_role == 'admin' and role in ('owner', 'superuser', 'admin'):
+        return jsonify({"error": "Admins can only invite user accounts"}), 403
+    if "can_record" in data and caller_role != "owner":
+        return jsonify({"error": "Only the owner can grant recording access"}), 403
+    restrict_disconnect = bool(data.get("restrict_disconnect", False)) and role == "user"
+    can_record = bool(data.get("can_record", False))
+
+    db = get_db()
+    _prune_invites(db)
+    token      = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    now        = time.time()
+    cur = db.execute(
+        """INSERT INTO invites (token_hash, role, restrict_disconnect, can_record,
+                                 created_by, created_at, expires_at)
+           VALUES (?,?,?,?,?,?,?)""",
+        (token_hash, role, int(restrict_disconnect), int(can_record),
+         session.get('username', ''), now, now + INVITE_TOKEN_TTL))
+    db.commit()
+    log("INFO", f"[AUTH] Invite created (id={cur.lastrowid}, role={role}) by '{session.get('username','')}'")
+    return jsonify({
+        "ok": True,
+        "invite_url": url_for('accept_invite', token=token, _external=True),
+        "expires_in_hours": INVITE_TOKEN_TTL // 3600,
+    })
+
+
+@app.route("/api/invites")
+def api_invites_list():
+    db = get_db()
+    _prune_invites(db)
+    caller_role = session.get('role', '')
+    rows = db.execute(
+        "SELECT id, role, restrict_disconnect, can_record, created_by, created_at, expires_at "
+        "FROM invites WHERE status='pending' ORDER BY created_at DESC").fetchall()
+    # Same visibility rule as password-reset-requests: an admin can only see
+    # invites for roles it's allowed to manage.
+    out = []
+    for r in rows:
+        if ROLE_RANK.get(r["role"], 0) > ROLE_RANK.get(caller_role, -1):
+            continue
+        if caller_role == 'admin' and r["role"] in ('owner', 'superuser', 'admin'):
+            continue
+        out.append(dict(r))
+    return jsonify({"invites": out})
+
+
+@app.route("/api/invites/<int:iid>/revoke", methods=["POST"])
+def api_invites_revoke(iid):
+    db          = get_db()
+    caller_role = session.get('role', '')
+    inv = db.execute("SELECT * FROM invites WHERE id=? AND status='pending'", (iid,)).fetchone()
+    if not inv:
+        return jsonify({"error": "Invite not found or already resolved"}), 404
+    if ROLE_RANK.get(inv["role"], 0) > ROLE_RANK.get(caller_role, -1):
+        return jsonify({"error": "You cannot manage an invite ranked above your own"}), 403
+    if caller_role == 'admin' and inv["role"] in ('owner', 'superuser', 'admin'):
+        return jsonify({"error": "Admins can only manage user invites"}), 403
+    db.execute("UPDATE invites SET status='revoked', used_at=? WHERE id=?", (time.time(), iid))
+    db.commit()
+    log("INFO", f"[AUTH] Invite id={iid} revoked by '{session.get('username','')}'")
+    return jsonify({"ok": True})
 
 
 # ── Favorites API ─────────────────────────────────────────────────────────────

@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HenWen | Accept Invite</title>
+<script>(function(){var t=localStorage.getItem('henwen-theme')||localStorage.getItem('asl3ez-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:     #0e1117;
+  --bg2:    #161b22;
+  --bg3:    #1f2937;
+  --border: #30363d;
+  --accent: #58a6ff;
+  --green:  #3fb950;
+  --danger: #f85149;
+  --text:   #e6edf3;
+  --text2:  #8b949e;
+  --text3:  #c9d1d9;
+  --radius: 6px;
+}
+html[data-theme="midnight"] {
+  --bg: #000000; --bg2: #0c0c0c; --border: #252525;
+  --accent: #4d9cf5; --green: #3aad4e; --danger: #e04444;
+  --text: #dde1e7; --text2: #636363; --text3: #b8bcc4;
+}
+html[data-theme="light"] {
+  --bg: #f6f8fa; --bg2: #ffffff; --border: #d0d7de;
+  --accent: #0969da; --green: #1a7f37; --danger: #cf222e;
+  --text: #1f2328; --text2: #656d76; --text3: #24292f;
+}
+html[data-theme="terminal"] {
+  --bg: #001200; --bg2: #001a00; --border: #1a4d1a;
+  --accent: #00e040; --green: #00c030; --danger: #ff3333;
+  --text: #00e040; --text2: #007a1a; --text3: #00c030;
+}
+html[data-theme="amber"] {
+  --bg: #0d0800; --bg2: #160e00; --border: #4a3200;
+  --accent: #ff9200; --green: #a0c040; --danger: #ff4040;
+  --text: #ffb000; --text2: #7a5200; --text3: #e08800;
+}
+html[data-theme="nord"] {
+  --bg: #2e3440; --bg2: #3b4252; --border: #4c566a;
+  --accent: #88c0d0; --green: #a3be8c; --danger: #bf616a;
+  --text: #eceff4; --text2: #9099a8; --text3: #d8dee9;
+}
+html[data-theme="mario"] {
+  --bg: #1a1464; --bg2: #221a7a; --border: #3c32b0;
+  --accent: #e8000d; --green: #1aaa00; --danger: #f85000;
+  --text: #f8f8f8; --text2: #c8b840; --text3: #e8e0ff;
+}
+html[data-theme="dracula"] {
+  --bg: #282a36; --bg2: #1e2030; --border: #44475a;
+  --accent: #bd93f9; --green: #50fa7b; --danger: #ff5555;
+  --text: #f8f8f2; --text2: #6272a4; --text3: #e0d8f8;
+}
+html[data-theme="monokai"] {
+  --bg: #272822; --bg2: #1e1f1a; --border: #49483e;
+  --accent: #66d9e8; --green: #a6e22e; --danger: #f92672;
+  --text: #f8f8f2; --text2: #75715e; --text3: #cfcfc2;
+}
+html[data-theme="cyberpunk"] {
+  --bg: #0d0d1a; --bg2: #12122a; --border: #2a1a50;
+  --accent: #ff00ff; --green: #00ffaa; --danger: #ff0066;
+  --text: #e8e0ff; --text2: #8870cc; --text3: #ccbbff;
+}
+html[data-theme="solarized"] {
+  --bg: #fdf6e3; --bg2: #eee8d5; --border: #cdc7b0;
+  --accent: #268bd2; --green: #859900; --danger: #dc322f;
+  --text: #657b83; --text2: #93a1a1; --text3: #586e75;
+}
+html[data-theme="cotton-candy"] {
+  --bg: #fdf0fc; --bg2: #fff5fe; --border: #ddb8e8;
+  --accent: #b44cc0; --green: #2e9e6e; --danger: #c83050;
+  --text: #2a1030; --text2: #8850a0; --text3: #1e0820;
+}
+html[data-theme="gruvbox"] {
+  --bg: #1d2021; --bg2: #282828; --border: #504945;
+  --accent: #83a598; --green: #b8bb26; --danger: #fb4934;
+  --text: #ebdbb2; --text2: #a89984; --text3: #d5c4a1;
+}
+html[data-theme="tokyo-night"] {
+  --bg: #1a1b26; --bg2: #16161e; --border: #414868;
+  --accent: #7aa2f7; --green: #9ece6a; --danger: #f7768e;
+  --text: #c0caf5; --text2: #565f89; --text3: #a9b1d6;
+}
+html[data-theme="catppuccin"] {
+  --bg: #1e1e2e; --bg2: #181825; --border: #45475a;
+  --accent: #89b4fa; --green: #a6e3a1; --danger: #f38ba8;
+  --text: #cdd6f4; --text2: #7f849c; --text3: #bac2de;
+}
+html[data-theme="onedark"] {
+  --bg: #282c34; --bg2: #21252b; --border: #3e4451;
+  --accent: #61afef; --green: #98c379; --danger: #e06c75;
+  --text: #abb2bf; --text2: #5c6370; --text3: #d7dae0;
+}
+html[data-theme="rosepine"] {
+  --bg: #191724; --bg2: #1f1d2e; --border: #403d52;
+  --accent: #c4a7e7; --green: #a3be8c; --danger: #eb6f92;
+  --text: #e0def4; --text2: #6e6a86; --text3: #908caa;
+}
+html[data-theme="synthwave"] {
+  --bg: #241b2f; --bg2: #2b213c; --border: #4a3768;
+  --accent: #f92aad; --green: #72f1b8; --danger: #fe4450;
+  --text: #f4eee8; --text2: #a58fc7; --text3: #ffe6fb;
+}
+html[data-theme="forest"] {
+  --bg: #0f1a0d; --bg2: #152413; --border: #31492a;
+  --accent: #4fd1c5; --green: #57a643; --danger: #c0392b;
+  --text: #dbe8d5; --text2: #7c9974; --text3: #c4d8bc;
+}
+html[data-theme="ayu"] {
+  --bg: #fafafa; --bg2: #ffffff; --border: #e7e6e2;
+  --accent: #fa8d3e; --green: #86b300; --danger: #f51818;
+  --text: #5c6166; --text2: #828c99; --text3: #242936;
+}
+html[data-theme="ocean"] {
+  --bg: #eef6f8; --bg2: #ffffff; --border: #bcdde3;
+  --accent: #0f7fa3; --green: #1f9c6e; --danger: #d1495b;
+  --text: #123640; --text2: #5c8894; --text3: #0d2a32;
+}
+html[data-theme="vampire"] {
+  --bg: #0a0505; --bg2: #140808; --border: #3d1414;
+  --accent: #c81d3f; --green: #7a9b5c; --danger: #ff3b3b;
+  --text: #e8d8d8; --text2: #8a5a5a; --text3: #d0b0b0;
+}
+
+html { font-size: 15px; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.box {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  width: 100%;
+  max-width: 360px;
+  padding: 32px 28px;
+}
+
+.logo {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--accent);
+  margin-bottom: 2px;
+}
+
+.app-sub {
+  font-size: 0.8rem;
+  color: var(--text2);
+  margin-bottom: 24px;
+}
+
+h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.hint {
+  font-size: 0.82rem;
+  color: var(--text2);
+  margin-bottom: 18px;
+  line-height: 1.5;
+}
+
+.role-badge {
+  display: inline-block;
+  background: rgba(88,166,255,.12);
+  color: var(--accent);
+  padding: 1px 8px;
+  border-radius: 3px;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.error {
+  background: rgba(248,81,73,0.08);
+  border: 1px solid rgba(248,81,73,0.3);
+  color: var(--danger);
+  border-radius: var(--radius);
+  padding: 9px 13px;
+  font-size: 0.88rem;
+  margin-bottom: 16px;
+}
+
+.notice {
+  background: rgba(63,185,80,0.08);
+  border: 1px solid rgba(63,185,80,0.3);
+  color: var(--green);
+  border-radius: var(--radius);
+  padding: 9px 13px;
+  font-size: 0.88rem;
+  margin-bottom: 16px;
+  line-height: 1.5;
+}
+
+.fg {
+  margin-bottom: 14px;
+}
+
+label {
+  display: block;
+  font-size: 0.83rem;
+  font-weight: 500;
+  color: var(--text3);
+  margin-bottom: 4px;
+}
+
+input[type=text], input[type=password] {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 7px 10px;
+  font-size: 0.92rem;
+  font-family: inherit;
+  transition: border-color 0.12s;
+  min-height: 36px;
+}
+
+input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+button[type=submit] {
+  width: 100%;
+  margin-top: 6px;
+  padding: 9px;
+  background: var(--accent);
+  color: #000;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 0.92rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s;
+  min-height: 38px;
+}
+
+button[type=submit]:hover {
+  background: #4898ef;
+}
+
+.back-link {
+  display: block;
+  text-align: center;
+  margin-top: 16px;
+  font-size: 0.82rem;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.back-link:hover {
+  text-decoration: underline;
+}
+</style>
+</head>
+<body>
+<div class="box">
+  <div class="logo">HenWen</div>
+  <div class="app-sub">AllStarLink 3 Manager</div>
+
+  {% if stage == 'accept' %}
+    <h2>You're Invited</h2>
+    <p class="hint">You've been invited to create a <span class="role-badge">{{ role }}</span> account. Pick your own username and password — nobody else will know it.</p>
+    {% if error %}
+    <div class="error">{{ error }}</div>
+    {% endif %}
+    <form method="POST" action="/accept-invite">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="token" value="{{ token }}">
+      <div class="fg">
+        <label for="username">Username</label>
+        <input type="text" id="username" name="username" autocomplete="username" required autofocus>
+      </div>
+      <div class="fg">
+        <label for="new_password">Password</label>
+        <input type="password" id="new_password" name="new_password" autocomplete="new-password" required>
+      </div>
+      <div class="fg">
+        <label for="confirm_password">Confirm Password</label>
+        <input type="password" id="confirm_password" name="confirm_password" autocomplete="new-password" required>
+      </div>
+      <button type="submit">Create Account</button>
+    </form>
+
+  {% elif stage == 'invalid' %}
+    <h2>Invite Invalid or Expired</h2>
+    <div class="error">This invite link is invalid, already used, revoked, or has expired. Ask whoever invited you to send a new one.</div>
+    <a class="back-link" href="/login">Back to sign in</a>
+  {% endif %}
+</div>
+</body>
+</html>
