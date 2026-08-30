@@ -220,10 +220,14 @@ LOGIN_LOCKOUT_MAX_SEC   = 900        # cap (15 min); doubles each additional fai
 PASSWORD_MIN_LEN = 8
 PASSWORD_MAX_LEN = 256
 
-# Kiosk chat panel (logged-in users only). Local, fixed ceilings rather than
-# a settings-table/UI, same "simple, hardcoded" posture as the NWS/APRS
-# staleness ceilings — storage cost is small enough (worst case ~5000 rows *
-# ~600 bytes/row, a few MB) that a configurable cap isn't worth the surface.
+# Kiosk chat panel (logged-in users only). Message length and the hard row
+# cap stay fixed, local ceilings -- storage cost is small enough (worst case
+# ~5000 rows * ~600 bytes/row, a few MB) that a configurable cap isn't worth
+# the surface. Retention *time*, though, is an owner-facing Kiosk Setting
+# (see api_kiosk_settings_get/put and 'kiosk_chat_retention_hours' in the
+# settings table) since how long chat history should stick around is a
+# real per-club judgment call, not an implementation ceiling -- this
+# constant is only the seeded default for a fresh install.
 CHAT_MESSAGE_MAX_LEN = 500
 CHAT_RETENTION_HOURS = 24
 CHAT_LOG_MAX_ROWS    = 5000
@@ -1118,6 +1122,7 @@ def get_db():
         ('kiosk_idle_timeout_sec', '600'),
         ('kiosk_clock_format',     '12'),
         ('kiosk_timezone',         'UTC'),
+        ('kiosk_chat_retention_hours', str(CHAT_RETENTION_HOURS)),
     ]:
         conn.execute("INSERT OR IGNORE INTO settings (key,value) VALUES (?,?)", (_k, _v))
     conn.commit()
@@ -5633,6 +5638,8 @@ def api_kiosk_settings_get():
         "clock_format":        get_setting('kiosk_clock_format', '12'),
         "timezone":            get_setting('kiosk_timezone', 'UTC'),
         "map_pin_duration_min": int(get_setting('kiosk_map_pin_duration_min', '60') or 60),
+        "chat_retention_hours": int(get_setting('kiosk_chat_retention_hours', str(CHAT_RETENTION_HOURS))
+                                     or CHAT_RETENTION_HOURS),
         # Public like the rest of this endpoint — a callsign is a public
         # amateur-radio identifier by regulation, not a secret (same posture
         # as the club/author callsigns already named in this project).
@@ -5676,6 +5683,14 @@ def api_kiosk_settings_put():
             set_setting('kiosk_map_pin_duration_min', str(val))
         except (TypeError, ValueError):
             return jsonify({"error": "map_pin_duration_min must be an integer"}), 400
+    if "chat_retention_hours" in data:
+        try:
+            val = int(data["chat_retention_hours"])
+            if not (1 <= val <= 720):
+                return jsonify({"error": "chat_retention_hours must be 1–720 hours (30 days)"}), 400
+            set_setting('kiosk_chat_retention_hours', str(val))
+        except (TypeError, ValueError):
+            return jsonify({"error": "chat_retention_hours must be an integer"}), 400
     if "aprs_is_callsign" in data:
         callsign = str(data["aprs_is_callsign"]).strip().upper()
         if callsign and not APRS_CALLSIGN_RE.match(callsign):
@@ -8900,12 +8915,14 @@ def api_chat_messages_delete(mid):
 
 
 def _chat_janitor_sweep(db, now):
-    """One prune pass: age-based (CHAT_RETENTION_HOURS) plus a hard row cap
-    (CHAT_LOG_MAX_ROWS, oldest first) — mirrors _nws_prune_expired_locally()'s
-    shape (a standalone db/now-taking function the loop calls each cycle, so
-    it's directly testable against a real sqlite fixture without touching
-    threading). No per-user/global byte-cap logic like recordings needs —
-    chat rows are small and uniform, a plain row-count cap is enough.
+    """One prune pass: age-based (owner-configurable retention, Kiosk
+    Settings' 'kiosk_chat_retention_hours' -- CHAT_RETENTION_HOURS is only
+    the seeded default) plus a hard row cap (CHAT_LOG_MAX_ROWS, oldest
+    first) — mirrors _nws_prune_expired_locally()'s shape (a standalone
+    db/now-taking function the loop calls each cycle, so it's directly
+    testable against a real sqlite fixture without touching threading). No
+    per-user/global byte-cap logic like recordings needs — chat rows are
+    small and uniform, a plain row-count cap is enough.
     Returns (aged_count, over_cap_count).
 
     `now` must represent UTC (e.g. datetime.now(timezone.utc)) — created_at
@@ -8913,7 +8930,9 @@ def _chat_janitor_sweep(db, now):
     plain string comparison against it with no timezone conversion of its
     own. The caller is responsible for that, same reasoning as
     _chat_row_to_dict()'s UTC tagging."""
-    cutoff = (now - timedelta(hours=CHAT_RETENTION_HOURS)).strftime('%Y-%m-%d %H:%M:%S')
+    retention_hours = int(get_setting('kiosk_chat_retention_hours', str(CHAT_RETENTION_HOURS))
+                          or CHAT_RETENTION_HOURS)
+    cutoff = (now - timedelta(hours=retention_hours)).strftime('%Y-%m-%d %H:%M:%S')
     aged = db.execute("DELETE FROM chat_messages WHERE created_at < ?", (cutoff,))
     total = db.execute("SELECT COUNT(*) AS c FROM chat_messages").fetchone()['c']
     over_cap = 0

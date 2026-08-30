@@ -1396,6 +1396,17 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
             </span>
           </div>
         </div>
+        <div class="form-group" style="margin-top:16px">
+          <label class="form-label">Chat Message Retention (hours)</label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="number" id="ks-chat-retention" class="form-control" style="width:90px"
+                   min="1" max="720" value="24">
+            <span style="font-size:0.82rem;color:var(--text-muted)">
+              How long kiosk Chat panel messages are kept before being auto-deleted (1–720 hours,
+              i.e. up to 30 days). A hard cap of 5000 messages also applies regardless of age.
+            </span>
+          </div>
+        </div>
         <div class="form-group" style="margin-top:24px;padding-top:16px;border-top:1px solid var(--border)">
           <div style="font-weight:600;margin-bottom:8px">APRS-IS (Network Map)</div>
           <label class="form-label">APRS-IS Callsign</label>
@@ -5894,6 +5905,8 @@ async function ksLoad() {
   ksPopulateTZ(d.timezone || 'UTC');
   var pinInp = document.getElementById('ks-pin-min');
   if (pinInp) pinInp.value = d.map_pin_duration_min || 60;
+  var chatRetInp = document.getElementById('ks-chat-retention');
+  if (chatRetInp) chatRetInp.value = d.chat_retention_hours || 24;
   var aprsInp = document.getElementById('ks-aprs-callsign');
   if (aprsInp) aprsInp.value = d.aprs_is_callsign || '';
   var aprsMaxInp = document.getElementById('ks-aprs-max-stations');
@@ -5959,6 +5972,11 @@ async function ksSave() {
   if (isNaN(pinMin) || pinMin < 1 || pinMin > 480) {
     st.textContent = 'Map pin duration must be 1–480 minutes.'; st.style.color = 'var(--danger)'; return;
   }
+  var chatRetInp = document.getElementById('ks-chat-retention');
+  var chatRet    = chatRetInp ? parseInt(chatRetInp.value, 10) : 24;
+  if (isNaN(chatRet) || chatRet < 1 || chatRet > 720) {
+    st.textContent = 'Chat retention must be 1–720 hours.'; st.style.color = 'var(--danger)'; return;
+  }
   var aprsInp      = document.getElementById('ks-aprs-callsign');
   var aprsCallsign = aprsInp ? aprsInp.value.trim().toUpperCase() : '';
   if (aprsCallsign && !/^[A-Z0-9]{3,9}(-[A-Z0-9]{1,2})?$/.test(aprsCallsign)) {
@@ -5975,6 +5993,7 @@ async function ksSave() {
     clock_format:         fmtEl ? fmtEl.value : '12',
     timezone:             tzEl  ? tzEl.value  : 'UTC',
     map_pin_duration_min: pinMin,
+    chat_retention_hours: chatRet,
     aprs_is_callsign:     aprsCallsign,
     aprs_max_stations:    aprsMax,
   };

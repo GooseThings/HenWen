@@ -305,3 +305,55 @@ class TestChatJanitorSweep:
 
         assert captured['now'].tzinfo is not None
         assert captured['now'].utcoffset() == timedelta(0)
+
+
+class TestChatRetentionSetting:
+    """Chat retention time is an owner-facing Kiosk Setting
+    ('kiosk_chat_retention_hours') rather than the fixed CHAT_RETENTION_HOURS
+    it used to be -- see api_kiosk_settings_get/put() and
+    _chat_janitor_sweep()'s use of get_setting(). CHAT_RETENTION_HOURS is
+    now only the seeded default for a fresh install."""
+
+    def test_default_matches_seeded_constant(self, client, create_user):
+        create_user("owner1", role="owner")
+        resp = client.get("/api/kiosk/settings")
+        assert resp.status_code == 200
+        assert resp.get_json()["chat_retention_hours"] == app.CHAT_RETENTION_HOURS
+
+    def test_owner_can_change_it_and_it_round_trips(self, client, create_user):
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        put_resp = client.put("/api/kiosk/settings", json={"chat_retention_hours": 72})
+        assert put_resp.status_code == 200
+        get_resp = client.get("/api/kiosk/settings")
+        assert get_resp.get_json()["chat_retention_hours"] == 72
+
+    def test_rejects_out_of_range(self, client, create_user):
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        too_low  = client.put("/api/kiosk/settings", json={"chat_retention_hours": 0})
+        too_high = client.put("/api/kiosk/settings", json={"chat_retention_hours": 721})
+        assert too_low.status_code == 400
+        assert too_high.status_code == 400
+
+    def test_rejects_non_integer(self, client, create_user):
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        resp = client.put("/api/kiosk/settings", json={"chat_retention_hours": "lots"})
+        assert resp.status_code == 400
+
+    def test_janitor_sweep_honors_a_shorter_configured_retention(self, client, create_user):
+        create_user("owner1", role="owner")
+        app.set_setting('kiosk_chat_retention_hours', '1')
+        db = app.get_db()
+        now_utc = datetime.now(timezone.utc)
+        # 2 hours old: still within the seeded 24h default, but past a 1h override.
+        old_ts = (now_utc - timedelta(hours=2)).strftime('%Y-%m-%d %H:%M:%S')
+        recent_id = _insert_message(db, message="recent", created_at=now_utc.strftime('%Y-%m-%d %H:%M:%S'))
+        _insert_message(db, message="old", created_at=old_ts)
+
+        aged, over_cap = app._chat_janitor_sweep(db, now_utc)
+        assert aged == 1
+        assert over_cap == 0
+        remaining = db.execute("SELECT id FROM chat_messages").fetchall()
+        assert [r["id"] for r in remaining] == [recent_id]
