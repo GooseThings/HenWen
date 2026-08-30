@@ -45,6 +45,8 @@ import grp
 import secrets
 import hashlib
 import hmac
+import io
+import base64
 import traceback
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -88,6 +90,23 @@ try:
     import aprslib
 except ImportError:
     aprslib = None
+
+# TOTP-based two-factor auth (login.html's post-password 2FA step, Manager
+# > Settings / the Status Board's Account popup). Both are pure-Python with
+# no C-extension/system-binary dependency (qrcode's SVG image factory below
+# avoids its optional Pillow dependency entirely), so this is a hard
+# requirements.txt entry rather than a Piper-binary-style optional feature
+# -- but still guarded so a venv that hasn't picked up the new dependency
+# yet fails cleanly (2FA routes return 503) instead of crashing the whole
+# app at import time. Recovery codes (sha256-hash based, see
+# _verify_totp_or_recovery()) work even without either package installed.
+try:
+    import pyotp
+    import qrcode
+    import qrcode.image.svg
+except ImportError:
+    pyotp  = None
+    qrcode = None
 
 # meshtastic_mqtt.py (decode logic, standalone module — see its own
 # docstring) and paho-mqtt (the MQTT client library) back the Meshtastic
@@ -155,6 +174,51 @@ PASSWORD_RESET_TOKEN_TTL   = 30 * 60     # an approved one-time link expires thi
 # to anyone; one TTL suffices here since (unlike password reset) there's no
 # separate approval step, the invite link itself *is* the approval.
 INVITE_TOKEN_TTL = 24 * 3600
+
+# Optional password pepper -- a server-side secret mixed into every password
+# before it reaches werkzeug's salted hash, so a leaked DB alone (without
+# also leaking this) isn't enough to brute-force offline. Deliberately its
+# own env var rather than reusing SECRET_KEY: SECRET_KEY already has a
+# one-click "Generate & Apply New Key" rotation path in Manager > Settings
+# (app.py's rotate_secret_key route), and rotating it would silently make
+# every stored password hash unverifiable if it doubled as the pepper.
+# Empty by default (no behavior change on existing installs); see
+# _peppered()/_verify_and_upgrade_password() for how a hash predating a
+# freshly-set pepper is transparently upgraded on next successful login.
+PASSWORD_PEPPER = os.environ.get("PASSWORD_PEPPER", "")
+
+# Two-factor authentication (TOTP). One issuer name for every account's
+# authenticator-app entry; a generous verify window absorbs normal clock
+# drift between the server and the user's phone without weakening the
+# 30-second code lifetime much. Recovery codes are the offline analog of an
+# email-based recovery link -- this app has no email/SMS infra (see the
+# password-reset/invite sections above), so losing the TOTP device with no
+# recovery codes left means an admin+ has to reset MFA on the account
+# (api_users_mfa_reset), same "approve it out-of-band" posture as everything
+# else auth-related here.
+TOTP_ISSUER            = "HenWen"
+TOTP_VALID_WINDOW       = 1          # ±1 step (±30s) of drift tolerance
+MFA_PENDING_TTL         = 300        # a password-verified-but-not-yet-2FA'd session has this long
+MFA_RECOVERY_CODE_COUNT = 10
+
+# Soft, capped-exponential-backoff account lockout -- protects one account
+# from a fast credential-stuffing/guessing loop without becoming a
+# permanent denial-of-service lever a stranger can pull just by knowing a
+# real username (an unconditional/permanent lock would be exactly that).
+# Layered on top of (not instead of) the existing per-IP rate limits on
+# login/2FA routes, which alone don't stop a distributed attack against one
+# specific account.
+LOGIN_LOCKOUT_THRESHOLD = 5          # consecutive failures before any lock kicks in
+LOGIN_LOCKOUT_BASE_SEC  = 30         # first lockout window
+LOGIN_LOCKOUT_MAX_SEC   = 900        # cap (15 min); doubles each additional failure in between
+
+# Shared by every "set a new password" site (initial setup, admin-created/
+# edited accounts, self-service change, reset, invite acceptance). No upper
+# bound previously existed anywhere, which -- combined with no
+# MAX_CONTENT_LENGTH on the app -- let an oversized password string reach
+# scrypt (and, below, the breached-password check) uncapped.
+PASSWORD_MIN_LEN = 8
+PASSWORD_MAX_LEN = 256
 
 # Kiosk chat panel (logged-in users only). Local, fixed ceilings rather than
 # a settings-table/UI, same "simple, hardcoded" posture as the NWS/APRS
@@ -985,6 +1049,28 @@ def get_db():
     except Exception:
         pass  # column already exists
 
+    # Auth hardening: TOTP 2FA state, soft-lockout counters, and a password
+    # epoch bumped on every password change so an already-open session
+    # signed under the old password can be told apart from a fresh one (see
+    # check_auth()'s epoch check) -- a stateless-signed-cookie session has
+    # no other way to be individually revoked. One try/except per column
+    # (not one for the whole block) so a partially-migrated DB from an
+    # interrupted upgrade doesn't get stuck re-failing on a column that did
+    # get added.
+    for _col_def in (
+        "totp_secret TEXT",
+        "totp_enabled INTEGER NOT NULL DEFAULT 0",
+        "totp_recovery_codes TEXT",
+        "failed_login_count INTEGER NOT NULL DEFAULT 0",
+        "locked_until REAL",
+        "password_epoch INTEGER NOT NULL DEFAULT 1",
+    ):
+        try:
+            conn.execute(f"ALTER TABLE users ADD COLUMN {_col_def}")
+            conn.commit()
+        except Exception:
+            pass  # column already exists
+
     # Self-service "Forgot password?" flow (login.html) — a logged-out user
     # requests a reset, which pings the owner via whatever's configured in
     # alert_config (see _send_alert()'s on_password_reset_request branch),
@@ -1099,7 +1185,8 @@ def check_auth():
                         'api_favorites', 'api_favorites_status',
                         'api_kiosk_settings_get', 'api_kiosk_logo_file',
                         'api_nets_list',
-                        'forgot_password', 'reset_password_page', 'accept_invite'}
+                        'forgot_password', 'reset_password_page', 'accept_invite',
+                        'login_2fa', 'api_login_2fa'}
     # Any logged-in user (superuser / admin / user) — live audio requires a
     # session (previously public, letting anyone on the network listen and
     # spawn server-side encoder/relay processes with no authentication).
@@ -1112,7 +1199,16 @@ def check_auth():
                       'api_tx_config', 'api_recording_permission',
                       'api_recording_start', 'api_recordings_list', 'api_recording_download',
                       'api_recordings_rename', 'api_recordings_delete',
-                      'api_chat_messages_get', 'api_chat_messages_post'}
+                      'api_chat_messages_get', 'api_chat_messages_post',
+                      # Self-service account management: every logged-in role
+                      # manages its own password/2FA, not just admin+ (a
+                      # plain 'user'/kiosk account couldn't change its own
+                      # password at all before this -- api_change_password
+                      # wasn't in this set, so it silently fell through to
+                      # the admin+-only default below).
+                      'api_change_password',
+                      'api_mfa_status', 'api_mfa_setup', 'api_mfa_confirm',
+                      'api_mfa_disable', 'api_mfa_recovery_regenerate'}
 
     endpoint  = request.endpoint
     is_public = endpoint in _PUBLIC
@@ -1142,7 +1238,22 @@ def check_auth():
         now          = time.time()
         last_active  = session.get('last_active', now)
         idle_timeout = session.get('idle_timeout', SESSION_IDLE_TIMEOUT)
-        if idle_timeout and now - last_active > idle_timeout:
+        expired = bool(idle_timeout and now - last_active > idle_timeout)
+        # Password-epoch check: a stateless signed cookie has no server-side
+        # session store to revoke from, so this is the only mechanism that
+        # invalidates an already-open session when its account's password
+        # changes elsewhere (self-service change, admin-forced reset, or a
+        # completed reset/invite link) -- see password_epoch's ALTER TABLE
+        # comment above and _establish_session() below. Skipped once we
+        # already know the session is expiring on idle-timeout grounds, to
+        # avoid a needless query.
+        if not expired:
+            epoch_row = get_db().execute(
+                "SELECT password_epoch FROM users WHERE username=?",
+                (session.get('username', ''),)).fetchone()
+            if not epoch_row or epoch_row['password_epoch'] != session.get('password_epoch'):
+                expired = True
+        if expired:
             remove_active_session(session.get('sid'))
             session.clear()
             logged_in = False
@@ -1231,6 +1342,205 @@ def _no_cache_auth_pages(resp):
     return resp
 
 
+# ── Auth hardening helpers ───────────────────────────────────────────────────
+# Shared by /login, /api/login, /login/2fa, /api/login/2fa, and every
+# "set a new password" route below.
+
+def _peppered(password):
+    """Mix PASSWORD_PEPPER (if configured) into a password before it ever
+    reaches werkzeug's salted hash. A no-op passthrough when unset, so an
+    install that never sets PASSWORD_PEPPER sees no behavior change."""
+    if not PASSWORD_PEPPER:
+        return password
+    return hmac.new(PASSWORD_PEPPER.encode('utf-8'),
+                    password.encode('utf-8', 'surrogatepass'),
+                    hashlib.sha256).hexdigest()
+
+
+# Computed once at import time -- a fixed, valid-looking hash burned through
+# check_password_hash() on every "user not found" or "account locked" login
+# attempt so that path can't be timing-distinguished from "user found, wrong
+# password". scrypt verification is deliberately slow; skipping it entirely
+# for an unknown username is a measurable, exploitable timing oracle for
+# username enumeration on both /login and /api/login -- see
+# _do_login_attempt() below.
+_DUMMY_PASSWORD_HASH = generate_password_hash(secrets.token_urlsafe(24))
+
+
+def _verify_and_upgrade_password(db, user, password):
+    """Check `password` against user['password_hash'], transparently
+    upgrading a pre-PASSWORD_PEPPER hash to a peppered one on a successful
+    legacy match so that fallback branch only ever fires once per account."""
+    if check_password_hash(user["password_hash"], _peppered(password)):
+        return True
+    if PASSWORD_PEPPER and check_password_hash(user["password_hash"], password):
+        db.execute("UPDATE users SET password_hash=? WHERE id=?",
+                   (generate_password_hash(_peppered(password)), user["id"]))
+        db.commit()
+        log("INFO", f"[AUTH] Upgraded password hash for '{user['username']}' to include the pepper")
+        return True
+    return False
+
+
+def _is_password_breached(password):
+    """Check a candidate password against HaveIBeenPwned's Pwned Passwords
+    API using k-anonymity (only the first 5 hex chars of its SHA-1 are ever
+    sent -- the full password/hash never leaves this server). Soft/fail-
+    open by design: an HIBP outage or timeout must never be able to block
+    someone from setting a password, so any error just skips the check."""
+    try:
+        sha1 = hashlib.sha1(password.encode('utf-8', 'surrogatepass')).hexdigest().upper()
+        prefix, suffix = sha1[:5], sha1[5:]
+        body = _http_get_with_dns_backstop(
+            f"https://api.pwnedpasswords.com/range/{prefix}",
+            headers={"User-Agent": "HenWen-PasswordCheck (https://github.com/GooseThings/HenWen)"},
+            timeout=3)
+        for line in body.splitlines():
+            parts = line.split(':')
+            if len(parts) == 2 and parts[0].strip() == suffix:
+                return True
+        return False
+    except Exception as e:
+        log("WARN", f"[AUTH] Breached-password check unavailable, allowing password through: {e}")
+        return False
+
+
+def _validate_new_password(password):
+    """Shared checks for every "set a new password" site. Returns an error
+    string, or None if the password is acceptable."""
+    if len(password) < PASSWORD_MIN_LEN:
+        return f"Password must be at least {PASSWORD_MIN_LEN} characters."
+    if len(password) > PASSWORD_MAX_LEN:
+        return f"Password must be {PASSWORD_MAX_LEN} characters or fewer."
+    if _is_password_breached(password):
+        return ("That password has appeared in a known data breach (checked via "
+                "HaveIBeenPwned's k-anonymity API, which never sees your full password "
+                "or its full hash). Please choose a different one.")
+    return None
+
+
+def _establish_session(user):
+    """Shared session-establishment for every login-completing path
+    (initial setup, normal login, 2FA verify, invite acceptance) so
+    password_epoch/idle_timeout/sid are set identically everywhere -- a
+    missing password_epoch here would silently defeat check_auth()'s epoch
+    check below."""
+    session.clear()
+    session["logged_in"]      = True
+    session["username"]       = user["username"]
+    session["role"]           = user["role"]
+    session["user_id"]        = user["id"]
+    session["idle_timeout"]   = (user["session_idle_timeout"] if user["session_idle_timeout"] is not None
+                                 else SESSION_IDLE_TIMEOUT)
+    session["password_epoch"] = user["password_epoch"]
+    session["sid"] = secrets.token_hex(16)
+    touch_active_session(session["sid"], user["username"], user["role"])
+
+
+def _register_failed_login(db, user):
+    """Bump the soft-lockout counter after any failed authentication step
+    (wrong password OR wrong 2FA code -- both represent a failed attempt to
+    get into this account) and set a capped-exponential-backoff lock once
+    LOGIN_LOCKOUT_THRESHOLD is reached. Layered on top of the per-IP rate
+    limits on the routes that call this, which alone don't stop a
+    distributed attack against one specific account."""
+    count = user["failed_login_count"] + 1
+    locked_until = None
+    if count >= LOGIN_LOCKOUT_THRESHOLD:
+        backoff = min(LOGIN_LOCKOUT_BASE_SEC * (2 ** (count - LOGIN_LOCKOUT_THRESHOLD)),
+                      LOGIN_LOCKOUT_MAX_SEC)
+        locked_until = time.time() + backoff
+    db.execute("UPDATE users SET failed_login_count=?, locked_until=? WHERE id=?",
+               (count, locked_until, user["id"]))
+    db.commit()
+    if locked_until:
+        log("WARN", f"[AUTH] '{user['username']}' locked out for "
+                    f"{locked_until - time.time():.0f}s after {count} consecutive failures")
+
+
+def _clear_lockout(db, user_id):
+    db.execute("UPDATE users SET failed_login_count=0, locked_until=NULL WHERE id=?", (user_id,))
+    db.commit()
+
+
+def _do_login_attempt(username, password):
+    """Shared password+lockout+MFA gate for /login and /api/login. Returns
+    a (status, user) tuple where status is one of:
+      'ok'           -- password correct, no 2FA required, ready for _establish_session()
+      'mfa_required' -- password correct, a TOTP/recovery code is needed next
+      'locked'       -- account is inside a soft-lockout window
+      'invalid'      -- unknown username or wrong password
+    Every 'locked'/'invalid' path burns a comparable amount of time via
+    _DUMMY_PASSWORD_HASH so none of "unknown username", "known username +
+    wrong password", and "known username + currently locked" can be told
+    apart by response timing.
+    """
+    db   = get_db()
+    user = db.execute("SELECT * FROM users WHERE username=? COLLATE NOCASE",
+                      (username,)).fetchone()
+    if user and user["locked_until"] and user["locked_until"] > time.time():
+        check_password_hash(_DUMMY_PASSWORD_HASH, _peppered(password))
+        return ('locked', None)
+    if not user:
+        check_password_hash(_DUMMY_PASSWORD_HASH, _peppered(password))
+        return ('invalid', None)
+    if not _verify_and_upgrade_password(db, user, password):
+        _register_failed_login(db, user)
+        return ('invalid', None)
+    if user["failed_login_count"] or user["locked_until"]:
+        _clear_lockout(db, user["id"])
+        user = db.execute("SELECT * FROM users WHERE id=?", (user["id"],)).fetchone()
+    if user["totp_enabled"]:
+        return ('mfa_required', user)
+    return ('ok', user)
+
+
+def _start_mfa_pending(user):
+    """Stash a short-lived, not-yet-authenticated marker for the post-
+    password 2FA step -- deliberately does NOT set session['logged_in'], so
+    check_auth() still treats this session as anonymous until
+    login_2fa()/api_login_2fa() completes it via _establish_session()."""
+    session.clear()
+    session['mfa_pending_uid']   = user['id']
+    session['mfa_pending_until'] = time.time() + MFA_PENDING_TTL
+
+
+def _get_mfa_pending_user(db):
+    """Resolve+validate the account mid-2FA-challenge, or None if there's
+    no live pending challenge in this session."""
+    uid           = session.get('mfa_pending_uid')
+    pending_until = session.get('mfa_pending_until', 0)
+    if not uid or time.time() > pending_until:
+        return None
+    user = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    if not user or not user["totp_enabled"]:
+        return None
+    return user
+
+
+def _verify_totp_or_recovery(db, user, code):
+    """Accept either a live TOTP code or a single-use recovery code. The
+    recovery path works even if pyotp/qrcode aren't installed, since it's
+    just a sha256 hash comparison -- same posture as reset/invite tokens."""
+    code = (code or "").strip()
+    if not code:
+        return False
+    if pyotp and user["totp_secret"] \
+            and pyotp.TOTP(user["totp_secret"]).verify(code, valid_window=TOTP_VALID_WINDOW):
+        return True
+    codes = json.loads(user["totp_recovery_codes"] or "[]")
+    code_hash = hashlib.sha256(code.encode()).hexdigest()
+    if code_hash in codes:
+        codes.remove(code_hash)
+        db.execute("UPDATE users SET totp_recovery_codes=? WHERE id=?",
+                   (json.dumps(codes), user["id"]))
+        db.commit()
+        log("WARN", f"[AUTH] '{user['username']}' logged in with a 2FA recovery code "
+                    f"({len(codes)} left)")
+        return True
+    return False
+
+
 @app.route("/login", methods=["GET", "POST"])
 @limiter.limit("10 per minute; 50 per hour")
 def login():
@@ -1245,47 +1555,47 @@ def login():
             if not username:
                 return render_template("login.html", setup_mode=True,
                                        error="Username is required.")
-            if len(password) < 8:
-                return render_template("login.html", setup_mode=True,
-                                       error="Password must be at least 8 characters.")
+            pw_error = _validate_new_password(password)
+            if pw_error:
+                return render_template("login.html", setup_mode=True, error=pw_error)
             if password != confirm:
                 return render_template("login.html", setup_mode=True,
                                        error="Passwords do not match.")
             db = get_db()
+            existing = db.execute("SELECT id FROM users WHERE username=? COLLATE NOCASE",
+                                  (username,)).fetchone()
+            if existing:
+                return render_template("login.html", setup_mode=True,
+                                       error=f"Username '{username}' already exists.")
             # The very first account is the node Owner — top of the role
             # hierarchy, since there's no one else yet to have granted it.
             db.execute("INSERT OR REPLACE INTO users (username, password_hash, role) VALUES (?,?,?)",
-                       (username, generate_password_hash(password), "owner"))
+                       (username, generate_password_hash(_peppered(password)), "owner"))
             db.commit()
             new_user = db.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
-            session.clear()
-            session["logged_in"]    = True
-            session["username"]     = username
-            session["role"]         = "owner"
-            session["user_id"]      = new_user["id"]
-            session["idle_timeout"] = new_user["session_idle_timeout"] if new_user["session_idle_timeout"] is not None else SESSION_IDLE_TIMEOUT
-            session["sid"] = secrets.token_hex(16)
-            touch_active_session(session["sid"], username)
+            _establish_session(new_user)
             _seed_default_favorites(new_user["id"])
             log("INFO", f"[AUTH] Initial account created for '{username}' (role=owner)")
             return redirect(url_for('index'))
 
         # Normal login
-        user = get_db().execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
-        if user and check_password_hash(user["password_hash"], password):
-            session.clear()
-            session["logged_in"]    = True
-            session["username"]     = username
-            session["role"]         = user["role"]
-            session["user_id"]      = user["id"]
-            session["idle_timeout"] = user["session_idle_timeout"] if user["session_idle_timeout"] is not None else SESSION_IDLE_TIMEOUT
-            session["sid"] = secrets.token_hex(16)
-            touch_active_session(session["sid"], username)
-            log("INFO", f"[AUTH] Login: '{username}' (role={user['role']})")
+        status, user = _do_login_attempt(username, password)
+        if status == 'ok':
+            _establish_session(user)
+            log("INFO", f"[AUTH] Login: '{user['username']}' (role={user['role']})")
             if user["role"] == "user":
                 return redirect(url_for('status_board'))
             return redirect(url_for('index'))
-        log("WARN", f"[AUTH] Failed login attempt for '{username}'")
+        if status == 'mfa_required':
+            _start_mfa_pending(user)
+            return redirect(url_for('login_2fa'))
+        if status == 'locked':
+            log("WARN", f"[AUTH] Login attempt for '{username}' rejected -- account locked")
+        else:
+            log("WARN", f"[AUTH] Failed login attempt for '{username}'")
+        # Identical message for 'invalid' and 'locked' -- a distinct "this
+        # account is locked" message would itself be a username-enumeration
+        # signal for anyone willing to trigger 5 failures first.
         return render_template("login.html", setup_mode=False,
                                error="Invalid username or password.")
 
@@ -1311,25 +1621,69 @@ def api_login():
     data     = request.json or {}
     username = str(data.get("username", "")).strip()
     password = str(data.get("password", ""))
-    user     = get_db().execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
-    if user and check_password_hash(user["password_hash"], password):
-        session.clear()
-        session["logged_in"] = True
-        session["username"]  = username
-        session["role"]         = user["role"]
-        session["user_id"]      = user["id"]
-        session["idle_timeout"] = user["session_idle_timeout"] if user["session_idle_timeout"] is not None else SESSION_IDLE_TIMEOUT
-        session["sid"] = secrets.token_hex(16)
-        touch_active_session(session["sid"], username)
-        log("INFO", f"[AUTH] API Login: '{username}' (role={user['role']})")
-        # session.clear() above invalidated the CSRF token that was baked into
-        # the already-loaded status page meta tag.  Return the fresh token so
-        # the JS can update _csrfToken without requiring a full page reload.
-        return jsonify({"ok": True, "role": user["role"], "username": username,
+    status, user = _do_login_attempt(username, password)
+    if status == 'ok':
+        _establish_session(user)
+        log("INFO", f"[AUTH] API Login: '{user['username']}' (role={user['role']})")
+        # session.clear() (inside _establish_session) invalidated the CSRF
+        # token baked into the already-loaded status page meta tag. Return
+        # the fresh token so the JS can update _csrfToken without requiring
+        # a full page reload.
+        return jsonify({"ok": True, "role": user["role"], "username": user["username"],
                         "restrict_disconnect": bool(user["restrict_disconnect"]),
                         "csrf_token": generate_csrf()})
-    log("WARN", f"[AUTH] API Login failed for '{username}'")
+    if status == 'mfa_required':
+        _start_mfa_pending(user)
+        return jsonify({"ok": False, "mfa_required": True, "csrf_token": generate_csrf()})
+    log("WARN", f"[AUTH] API Login failed for '{username}'"
+                f"{' (account locked)' if status == 'locked' else ''}")
+    # Identical response for 'invalid' and 'locked' -- see login()'s same note.
     return jsonify({"error": "Invalid username or password"}), 401
+
+
+@app.route("/login/2fa", methods=["GET", "POST"])
+@limiter.limit("10 per minute; 30 per hour")
+def login_2fa():
+    """Second step of login for an account with totp_enabled -- reached only
+    via _start_mfa_pending() from login()/api_login(), never directly."""
+    db   = get_db()
+    user = _get_mfa_pending_user(db)
+    if not user:
+        return redirect(url_for('login'))
+    if request.method == "POST":
+        code = request.form.get("code", "")
+        if _verify_totp_or_recovery(db, user, code):
+            session.pop('mfa_pending_uid', None)
+            session.pop('mfa_pending_until', None)
+            _establish_session(user)
+            log("INFO", f"[AUTH] Login: '{user['username']}' (role={user['role']}, via 2FA)")
+            return redirect(url_for('status_board' if user['role'] == 'user' else 'index'))
+        _register_failed_login(db, user)
+        log("WARN", f"[AUTH] Wrong 2FA code for '{user['username']}'")
+        return render_template("login.html", mfa_stage=True, error="Invalid code.")
+    return render_template("login.html", mfa_stage=True, error=None)
+
+
+@app.route("/api/login/2fa", methods=["POST"])
+@limiter.limit("10 per minute; 30 per hour")
+def api_login_2fa():
+    """JSON counterpart to login_2fa() for the Kiosk inline modal."""
+    db   = get_db()
+    user = _get_mfa_pending_user(db)
+    if not user:
+        return jsonify({"error": "2FA session expired -- log in again."}), 401
+    data = request.json or {}
+    code = str(data.get("code", ""))
+    if not _verify_totp_or_recovery(db, user, code):
+        _register_failed_login(db, user)
+        return jsonify({"error": "Invalid code."}), 401
+    session.pop('mfa_pending_uid', None)
+    session.pop('mfa_pending_until', None)
+    _establish_session(user)
+    log("INFO", f"[AUTH] API Login: '{user['username']}' (role={user['role']}, via 2FA)")
+    return jsonify({"ok": True, "role": user["role"], "username": user["username"],
+                    "restrict_disconnect": bool(user["restrict_disconnect"]),
+                    "csrf_token": generate_csrf()})
 
 
 @app.route("/api/csrf-token")
@@ -1369,8 +1723,12 @@ def forgot_password():
         username = request.form.get("username", "").strip()
         db = get_db()
         _prune_password_reset_requests(db)
-        user = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
+        user = db.execute("SELECT id, username FROM users WHERE username=? COLLATE NOCASE",
+                          (username,)).fetchone()
         if user:
+            # Use the account's stored casing from here on, not whatever
+            # casing the requester happened to type.
+            username = user["username"]
             existing = db.execute(
                 "SELECT id FROM password_reset_requests WHERE username=? AND status='pending'",
                 (username,)).fetchone()
@@ -1418,14 +1776,15 @@ def reset_password_page():
             return render_template("password-reset.html", stage="invalid")
         new_pw  = request.form.get("new_password", "")
         confirm = request.form.get("confirm_password", "")
-        if len(new_pw) < 8:
-            return render_template("password-reset.html", stage="reset", token=token,
-                                   error="Password must be at least 8 characters.")
+        pw_error = _validate_new_password(new_pw)
+        if pw_error:
+            return render_template("password-reset.html", stage="reset", token=token, error=pw_error)
         if new_pw != confirm:
             return render_template("password-reset.html", stage="reset", token=token,
                                    error="Passwords do not match.")
-        db.execute("UPDATE users SET password_hash=? WHERE username=?",
-                   (generate_password_hash(new_pw), req["username"]))
+        db.execute("UPDATE users SET password_hash=?, password_epoch=password_epoch+1, "
+                   "failed_login_count=0, locked_until=NULL WHERE username=?",
+                   (generate_password_hash(_peppered(new_pw)), req["username"]))
         db.execute("UPDATE password_reset_requests SET status='used', resolved_at=? WHERE id=?",
                    (time.time(), req["id"]))
         db.commit()
@@ -1483,17 +1842,24 @@ def accept_invite():
         if not re.match(r'^[A-Za-z0-9_.-]{2,32}$', username):
             return render_template("invite-accept.html", stage="accept", token=token, role=inv["role"],
                                    error="Username must be 2-32 chars: letters, digits, _ . -")
-        if len(new_pw) < 8:
+        pw_error = _validate_new_password(new_pw)
+        if pw_error:
             return render_template("invite-accept.html", stage="accept", token=token, role=inv["role"],
-                                   error="Password must be at least 8 characters.")
+                                   error=pw_error)
         if new_pw != confirm:
             return render_template("invite-accept.html", stage="accept", token=token, role=inv["role"],
                                    error="Passwords do not match.")
+        # A case-insensitive pre-check, not just the UNIQUE constraint below
+        # (which is case-sensitive at the SQLite level) -- see "Case-
+        # insensitive usernames" in the auth-hardening notes.
+        if db.execute("SELECT id FROM users WHERE username=? COLLATE NOCASE", (username,)).fetchone():
+            return render_template("invite-accept.html", stage="accept", token=token, role=inv["role"],
+                                   error=f"Username '{username}' already exists.")
         try:
             cur = db.execute(
                 "INSERT INTO users (username, password_hash, role, restrict_disconnect, can_record) "
                 "VALUES (?,?,?,?,?)",
-                (username, generate_password_hash(new_pw), inv["role"],
+                (username, generate_password_hash(_peppered(new_pw)), inv["role"],
                  inv["restrict_disconnect"], inv["can_record"]))
         except sqlite3.IntegrityError:
             return render_template("invite-accept.html", stage="accept", token=token, role=inv["role"],
@@ -1505,14 +1871,7 @@ def accept_invite():
         _seed_default_favorites(new_user["id"])
         log("INFO", f"[AUTH] Account '{username}' created via invite (role={inv['role']}, "
                     f"invited by '{inv['created_by']}')")
-        session.clear()
-        session["logged_in"]    = True
-        session["username"]     = username
-        session["role"]         = inv["role"]
-        session["user_id"]      = new_user["id"]
-        session["idle_timeout"] = SESSION_IDLE_TIMEOUT
-        session["sid"] = secrets.token_hex(16)
-        touch_active_session(session["sid"], username)
+        _establish_session(new_user)
         return redirect(url_for('status_board' if inv["role"] == 'user' else 'index'))
 
     if not inv:
@@ -2734,6 +3093,22 @@ def _post_json_with_dns_backstop(url, payload, headers=None, timeout=6):
     try:
         with urlreq.urlopen(req, timeout=timeout) as resp:
             resp.read()
+    finally:
+        socket.setdefaulttimeout(old_timeout)
+
+
+def _http_get_with_dns_backstop(url, headers=None, timeout=6):
+    """GET counterpart to _post_json_with_dns_backstop() above, same DNS-
+    timeout reasoning. Used by _is_password_breached()."""
+    req_headers = {"User-Agent": "HenWen/1.0"}
+    if headers:
+        req_headers.update(headers)
+    req = urlreq.Request(url, headers=req_headers)
+    old_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(timeout + 2)
+    try:
+        with urlreq.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode('utf-8', 'replace')
     finally:
         socket.setdefaulttimeout(old_timeout)
 
@@ -5510,8 +5885,8 @@ def api_alerts_test():
 @app.route("/api/users")
 def api_users_list():
     rows = get_db().execute(
-        "SELECT id, username, role, created_at, session_idle_timeout, restrict_disconnect, can_record "
-        "FROM users ORDER BY role DESC, username"
+        "SELECT id, username, role, created_at, session_idle_timeout, restrict_disconnect, "
+        "can_record, totp_enabled FROM users ORDER BY role DESC, username"
     ).fetchall()
     return jsonify({"users": [dict(r) for r in rows]})
 
@@ -5531,8 +5906,9 @@ def api_users_create():
     can_record = bool(data.get("can_record", False))
     if not re.match(r'^[A-Za-z0-9_.-]{2,32}$', username):
         return jsonify({"error": "Username must be 2-32 chars: letters, digits, _ . -"}), 400
-    if len(password) < 8:
-        return jsonify({"error": "Password must be at least 8 characters."}), 400
+    pw_error = _validate_new_password(password)
+    if pw_error:
+        return jsonify({"error": pw_error}), 400
     if role not in ("owner", "superuser", "admin", "user"):
         return jsonify({"error": "Role must be owner, superuser, admin, or user"}), 400
     # No one may grant a role above their own — otherwise a Superuser could
@@ -5543,10 +5919,15 @@ def api_users_create():
     if caller_role == 'admin' and role in ('owner', 'superuser', 'admin'):
         return jsonify({"error": "Admins can only create user accounts"}), 403
     db = get_db()
+    # Case-insensitive pre-check -- the UNIQUE constraint below is
+    # case-sensitive at the SQLite level, so without this "Bob" and "bob"
+    # could otherwise coexist as two distinct accounts.
+    if db.execute("SELECT id FROM users WHERE username=? COLLATE NOCASE", (username,)).fetchone():
+        return jsonify({"error": f"Username '{username}' already exists."}), 409
     try:
         cur = db.execute(
             "INSERT INTO users (username, password_hash, role, restrict_disconnect, can_record) VALUES (?,?,?,?,?)",
-            (username, generate_password_hash(password), role, int(restrict_disconnect), int(can_record)))
+            (username, generate_password_hash(_peppered(password)), role, int(restrict_disconnect), int(can_record)))
         db.commit()
         _seed_default_favorites(cur.lastrowid)
         log("INFO", f"[USERS] Created user '{username}' role={role} "
@@ -5588,9 +5969,17 @@ def api_users_update(uid):
         updates.append("role=?"); params.append(new_role)
     if "password" in data:
         pw = data["password"]
-        if len(pw) < 8:
-            return jsonify({"error": "Password must be at least 8 characters."}), 400
-        updates.append("password_hash=?"); params.append(generate_password_hash(pw))
+        pw_error = _validate_new_password(pw)
+        if pw_error:
+            return jsonify({"error": pw_error}), 400
+        updates.append("password_hash=?"); params.append(generate_password_hash(_peppered(pw)))
+        # Bump the epoch and clear any lockout -- an admin-forced password
+        # change is functionally identical to a self-service one for both
+        # purposes: it must invalidate any already-open session for this
+        # account (see check_auth()'s epoch check), and the account holder
+        # has just been re-authenticated-by-proxy via the admin who set it.
+        updates.append("password_epoch=password_epoch+1")
+        updates.append("failed_login_count=0"); updates.append("locked_until=NULL")
     if "session_idle_timeout" in data:
         raw = data["session_idle_timeout"]
         if raw is None:
@@ -5645,6 +6034,31 @@ def api_users_delete(uid):
     db.execute("DELETE FROM users WHERE id=?", (uid,))
     db.commit()
     log("INFO", f"[USERS] Deleted user '{user['username']}' (id={uid})")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/users/<int:uid>/mfa/reset", methods=["POST"])
+def api_users_mfa_reset(uid):
+    """Admin+ can strip 2FA off an account it's allowed to manage (lost
+    device, no recovery codes left) so the holder can log in and re-enroll.
+    Deliberately can only remove it, never see or set the secret -- same
+    "can't see the second factor, only force a redo" property this app
+    already has for passwords via the reset/invite flows."""
+    db          = get_db()
+    user        = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    caller_role = session.get('role', '')
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    if ROLE_RANK.get(user["role"], 0) > ROLE_RANK.get(caller_role, -1):
+        return jsonify({"error": "You cannot manage an account ranked above your own"}), 403
+    if caller_role == 'admin' and user["role"] in ('owner', 'superuser', 'admin'):
+        return jsonify({"error": "Admins can only manage user accounts"}), 403
+    if not user["totp_enabled"]:
+        return jsonify({"error": "2FA is not enabled on this account."}), 400
+    db.execute("UPDATE users SET totp_secret=NULL, totp_enabled=0, totp_recovery_codes=NULL "
+               "WHERE id=?", (uid,))
+    db.commit()
+    log("INFO", f"[AUTH] 2FA reset for '{user['username']}' by '{session.get('username','')}'")
     return jsonify({"ok": True})
 
 
@@ -9298,6 +9712,7 @@ def api_set_ports():
 
 
 @app.route("/api/auth/change-password", methods=["POST"])
+@limiter.limit("10 per minute; 30 per hour")
 def api_change_password():
     data       = request.json or {}
     current_pw = data.get("current_password", "")
@@ -9305,15 +9720,127 @@ def api_change_password():
     username   = session.get("username", "")
     db   = get_db()
     user = db.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
-    if not user or not check_password_hash(user["password_hash"], current_pw):
+    if not user or not _verify_and_upgrade_password(db, user, current_pw):
         return jsonify({"error": "Current password is incorrect."}), 400
-    if len(new_pw) < 8:
-        return jsonify({"error": "New password must be at least 8 characters."}), 400
-    db.execute("UPDATE users SET password_hash=? WHERE username=?",
-               (generate_password_hash(new_pw), username))
+    pw_error = _validate_new_password(new_pw)
+    if pw_error:
+        return jsonify({"error": pw_error}), 400
+    db.execute("UPDATE users SET password_hash=?, password_epoch=password_epoch+1 WHERE username=?",
+               (generate_password_hash(_peppered(new_pw)), username))
     db.commit()
+    # This session's own password_epoch is now stale too -- refresh it in
+    # place so the request that just changed the password doesn't get
+    # bounced by check_auth()'s epoch check on its very next request.
+    session["password_epoch"] = user["password_epoch"] + 1
     log("INFO", f"[AUTH] Password changed for '{username}'")
     return jsonify({"success": True, "message": "Password updated."})
+
+
+# ── Two-factor authentication (self-service) ────────────────────────────────
+# Every logged-in role manages its own 2FA -- see _USER_OR_ABOVE in
+# check_auth(). Nobody, including admin+, can view or set someone else's
+# TOTP secret; api_users_mfa_reset() below can only strip it, mirroring the
+# "can't see the second factor, only force a redo" property this app
+# already has for passwords via the reset/invite flows.
+
+@app.route("/api/mfa/status")
+def api_mfa_status():
+    user = get_db().execute("SELECT totp_enabled FROM users WHERE id=?",
+                            (session.get('user_id'),)).fetchone()
+    return jsonify({"enabled": bool(user and user["totp_enabled"])})
+
+
+@app.route("/api/mfa/setup", methods=["POST"])
+@limiter.limit("10 per minute; 30 per hour")
+def api_mfa_setup():
+    """Step 1 of enrollment: mint a new secret for the caller's own account
+    and return it as an otpauth:// URI plus a QR code (SVG, so no Pillow
+    dependency -- see the pyotp/qrcode import guard at the top of the
+    file). Stored immediately but totp_enabled stays 0 until
+    api_mfa_confirm() verifies a live code against it, so re-calling this
+    (or abandoning setup entirely) just overwrites/orphans the pending
+    secret harmlessly."""
+    if not pyotp:
+        return jsonify({"error": "Two-factor authentication requires the pyotp/qrcode "
+                                 "packages -- run pip install -r requirements.txt."}), 503
+    db   = get_db()
+    user = db.execute("SELECT * FROM users WHERE id=?", (session.get('user_id'),)).fetchone()
+    if not user:
+        return jsonify({"error": "Account not found"}), 404
+    secret = pyotp.random_base32()
+    db.execute("UPDATE users SET totp_secret=? WHERE id=?", (secret, user["id"]))
+    db.commit()
+    uri = pyotp.TOTP(secret).provisioning_uri(name=user["username"], issuer_name=TOTP_ISSUER)
+    qr_svg = None
+    if qrcode:
+        img = qrcode.make(uri, image_factory=qrcode.image.svg.SvgPathImage)
+        buf = io.BytesIO()
+        img.save(buf)
+        qr_svg = "data:image/svg+xml;base64," + base64.b64encode(buf.getvalue()).decode()
+    return jsonify({"secret": secret, "otpauth_uri": uri, "qr_svg": qr_svg})
+
+
+@app.route("/api/mfa/confirm", methods=["POST"])
+@limiter.limit("10 per minute; 30 per hour")
+def api_mfa_confirm():
+    """Step 2: verify a live code against the pending secret from
+    api_mfa_setup(), then flip totp_enabled on and mint recovery codes --
+    returned once, in plaintext, here only; only their hashes persist,
+    same posture as reset/invite tokens."""
+    if not pyotp:
+        return jsonify({"error": "Two-factor authentication requires the pyotp/qrcode "
+                                 "packages -- run pip install -r requirements.txt."}), 503
+    db   = get_db()
+    user = db.execute("SELECT * FROM users WHERE id=?", (session.get('user_id'),)).fetchone()
+    if not user or not user["totp_secret"]:
+        return jsonify({"error": "Start setup first."}), 400
+    code = str((request.json or {}).get("code", "")).strip()
+    if not pyotp.TOTP(user["totp_secret"]).verify(code, valid_window=TOTP_VALID_WINDOW):
+        return jsonify({"error": "Invalid code."}), 400
+    codes       = [secrets.token_hex(5) for _ in range(MFA_RECOVERY_CODE_COUNT)]
+    code_hashes = [hashlib.sha256(c.encode()).hexdigest() for c in codes]
+    db.execute("UPDATE users SET totp_enabled=1, totp_recovery_codes=? WHERE id=?",
+               (json.dumps(code_hashes), user["id"]))
+    db.commit()
+    log("INFO", f"[AUTH] 2FA enabled for '{user['username']}'")
+    return jsonify({"ok": True, "recovery_codes": codes})
+
+
+@app.route("/api/mfa/disable", methods=["POST"])
+@limiter.limit("10 per minute; 30 per hour")
+def api_mfa_disable():
+    """Requires re-confirming the current password -- otherwise a stolen/
+    XSS'd session cookie alone would be enough to strip 2FA off an
+    account."""
+    db       = get_db()
+    user     = db.execute("SELECT * FROM users WHERE id=?", (session.get('user_id'),)).fetchone()
+    password = str((request.json or {}).get("password", ""))
+    if not user or not _verify_and_upgrade_password(db, user, password):
+        return jsonify({"error": "Current password is incorrect."}), 400
+    db.execute("UPDATE users SET totp_secret=NULL, totp_enabled=0, totp_recovery_codes=NULL "
+               "WHERE id=?", (user["id"],))
+    db.commit()
+    log("INFO", f"[AUTH] 2FA disabled for '{user['username']}'")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/mfa/recovery-codes/regenerate", methods=["POST"])
+@limiter.limit("10 per minute; 30 per hour")
+def api_mfa_recovery_regenerate():
+    db       = get_db()
+    user     = db.execute("SELECT * FROM users WHERE id=?", (session.get('user_id'),)).fetchone()
+    password = str((request.json or {}).get("password", ""))
+    if not user or not _verify_and_upgrade_password(db, user, password):
+        return jsonify({"error": "Current password is incorrect."}), 400
+    if not user["totp_enabled"]:
+        return jsonify({"error": "2FA is not enabled on this account."}), 400
+    codes       = [secrets.token_hex(5) for _ in range(MFA_RECOVERY_CODE_COUNT)]
+    code_hashes = [hashlib.sha256(c.encode()).hexdigest() for c in codes]
+    db.execute("UPDATE users SET totp_recovery_codes=? WHERE id=?",
+               (json.dumps(code_hashes), user["id"]))
+    db.commit()
+    log("INFO", f"[AUTH] 2FA recovery codes regenerated for '{user['username']}'")
+    return jsonify({"ok": True, "recovery_codes": codes})
 
 
 @app.route("/api/lookup/<node>")

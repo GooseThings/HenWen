@@ -2647,6 +2647,59 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
     </div>
 
     <div class="card">
+      <div class="card-header">
+        <h2>Two-Factor Authentication</h2>
+        <span id="mfa-status-badge" class="muted">Loading...</span>
+      </div>
+      <div class="card-body">
+        <p class="muted" style="margin-bottom:14px">Require a code from an authenticator app (or a recovery code) in addition to your password when signing in to this account.</p>
+
+        <div id="mfa-disabled-view" style="display:none">
+          <button class="btn btn-primary" onclick="mfaStartSetup()">Enable 2FA</button>
+        </div>
+
+        <div id="mfa-setup-view" style="display:none">
+          <div class="form-row" style="align-items:flex-start;gap:20px">
+            <div id="mfa-qr-box" style="flex:0 0 auto"></div>
+            <div style="flex:1;min-width:220px">
+              <p class="muted" style="margin-bottom:8px">Scan this with an authenticator app (Google Authenticator, Aegis, 1Password, etc.), or enter the key manually:</p>
+              <code id="mfa-secret" style="display:block;word-break:break-all;background:var(--bg3);padding:8px 10px;border-radius:4px;margin-bottom:12px"></code>
+              <label class="form-label">Enter the 6-digit code to confirm</label>
+              <input type="text" id="mfa-confirm-code" inputmode="numeric" placeholder="000000" style="max-width:160px">
+              <div class="btn-row" style="margin-top:10px">
+                <button class="btn btn-primary" onclick="mfaConfirmSetup()">Confirm &amp; Enable</button>
+                <button class="btn" onclick="mfaCancelSetup()">Cancel</button>
+              </div>
+            </div>
+          </div>
+          <div id="mfa-setup-result" style="margin-top:12px"></div>
+        </div>
+
+        <div id="mfa-recovery-view" style="display:none">
+          <div class="alert alert-warn" style="margin-bottom:12px">Save these recovery codes now &mdash; each works once, and this is the only time they're shown. Use one to sign in if you lose access to your authenticator app.</div>
+          <pre id="mfa-recovery-codes" style="background:var(--bg3);padding:12px;border-radius:4px;font-size:0.9rem;line-height:1.7"></pre>
+          <button class="btn btn-primary" onclick="mfaAcknowledgeRecoveryCodes()">I've saved these codes</button>
+        </div>
+
+        <div id="mfa-enabled-view" style="display:none">
+          <div class="btn-row">
+            <button class="btn" onclick="mfaShowRegenerateForm()">Regenerate Recovery Codes</button>
+            <button class="btn btn-warn" onclick="mfaShowDisableForm()">Disable 2FA</button>
+          </div>
+          <div id="mfa-password-confirm-box" style="display:none;margin-top:14px;max-width:340px">
+            <label class="form-label" id="mfa-password-confirm-label">Confirm your current password</label>
+            <input type="password" id="mfa-password-confirm" autocomplete="current-password">
+            <div class="btn-row" style="margin-top:10px">
+              <button class="btn btn-primary" id="mfa-password-confirm-btn">Confirm</button>
+              <button class="btn" onclick="mfaHidePasswordConfirm()">Cancel</button>
+            </div>
+          </div>
+          <div id="mfa-enabled-result" style="margin-top:12px"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
       <div class="card-header"><h2>Flask Secret Key</h2></div>
       <div class="card-body">
         <p class="muted" style="margin-bottom:14px">
@@ -3148,7 +3201,7 @@ function showPage(id) {
   else if (id === 'kiosk-settings')   ksLoad();
   else if (id === 'ami-diag')         loadSysInfo();
   else if (id === 'ast-console')  astFetchLog();
-  else if (id === 'settings')       { loadSecretKeyStatus(); loadPortsStatus(); syncThemePicker(); }
+  else if (id === 'settings')       { loadSecretKeyStatus(); loadPortsStatus(); syncThemePicker(); mfaLoadStatus(); }
   else if (id === 'user-mgmt')      { loadUsers(); pwResetLoad(); invitesLoad(); }
   else if (id === 'recordings')         recordingsLoad();
   else if (id === 'recording-settings') recLoad();
@@ -5498,6 +5551,124 @@ async function changePassword() {
   }
 }
 
+/* ── Two-Factor Authentication (self-service, own account) ────────────────── */
+function _mfaShowView(id) {
+  ['mfa-disabled-view', 'mfa-setup-view', 'mfa-recovery-view', 'mfa-enabled-view'].forEach(function(v) {
+    document.getElementById(v).style.display = (v === id) ? '' : 'none';
+  });
+}
+
+async function mfaLoadStatus() {
+  var badge = document.getElementById('mfa-status-badge');
+  badge.textContent = 'Loading...';
+  var r = await api('/api/mfa/status');
+  if (!r.ok) { badge.textContent = ''; return; }
+  if (r.data.enabled) {
+    badge.textContent = 'Enabled';
+    badge.style.color = 'var(--green)';
+    _mfaShowView('mfa-enabled-view');
+    mfaHidePasswordConfirm();
+  } else {
+    badge.textContent = 'Disabled';
+    badge.style.color = 'var(--text2)';
+    _mfaShowView('mfa-disabled-view');
+  }
+}
+
+async function mfaStartSetup() {
+  var r = await api('/api/mfa/setup', {method: 'POST'});
+  if (!r.ok) { log('2FA setup failed: ' + (r.data && r.data.error || r.status), 'ERROR'); return; }
+  document.getElementById('mfa-secret').textContent = r.data.secret;
+  document.getElementById('mfa-qr-box').innerHTML = r.data.qr_svg
+    ? '<img src="' + r.data.qr_svg + '" alt="2FA QR code" style="width:160px;height:160px;background:#fff;border-radius:4px;padding:6px">'
+    : '';
+  document.getElementById('mfa-confirm-code').value = '';
+  document.getElementById('mfa-setup-result').innerHTML = '';
+  _mfaShowView('mfa-setup-view');
+}
+
+function mfaCancelSetup() {
+  mfaLoadStatus();
+}
+
+async function mfaConfirmSetup() {
+  var code = document.getElementById('mfa-confirm-code').value.trim();
+  var out  = document.getElementById('mfa-setup-result');
+  var r = await api('/api/mfa/confirm', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({code: code})
+  });
+  if (!r.ok) {
+    out.innerHTML = '<div class="alert alert-danger">' + esc(r.data.error || 'Failed.') + '</div>';
+    return;
+  }
+  document.getElementById('mfa-recovery-codes').textContent = r.data.recovery_codes.join('\n');
+  _mfaShowView('mfa-recovery-view');
+  log('Two-factor authentication enabled.', 'OK');
+}
+
+function mfaAcknowledgeRecoveryCodes() {
+  mfaLoadStatus();
+}
+
+function mfaShowRegenerateForm() {
+  document.getElementById('mfa-password-confirm-label').textContent =
+    'Confirm your current password to regenerate recovery codes';
+  document.getElementById('mfa-password-confirm').value = '';
+  document.getElementById('mfa-password-confirm-box').style.display = '';
+  document.getElementById('mfa-enabled-result').innerHTML = '';
+  document.getElementById('mfa-password-confirm-btn').onclick = mfaDoRegenerate;
+}
+
+function mfaShowDisableForm() {
+  document.getElementById('mfa-password-confirm-label').textContent =
+    'Confirm your current password to disable 2FA';
+  document.getElementById('mfa-password-confirm').value = '';
+  document.getElementById('mfa-password-confirm-box').style.display = '';
+  document.getElementById('mfa-enabled-result').innerHTML = '';
+  document.getElementById('mfa-password-confirm-btn').onclick = mfaDoDisable;
+}
+
+function mfaHidePasswordConfirm() {
+  var box = document.getElementById('mfa-password-confirm-box');
+  if (box) box.style.display = 'none';
+}
+
+async function mfaDoRegenerate() {
+  var pw  = document.getElementById('mfa-password-confirm').value;
+  var out = document.getElementById('mfa-enabled-result');
+  var r = await api('/api/mfa/recovery-codes/regenerate', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({password: pw})
+  });
+  if (!r.ok) {
+    out.innerHTML = '<div class="alert alert-danger">' + esc(r.data.error || 'Failed.') + '</div>';
+    return;
+  }
+  mfaHidePasswordConfirm();
+  document.getElementById('mfa-recovery-codes').textContent = r.data.recovery_codes.join('\n');
+  _mfaShowView('mfa-recovery-view');
+  log('2FA recovery codes regenerated.', 'OK');
+}
+
+async function mfaDoDisable() {
+  var pw  = document.getElementById('mfa-password-confirm').value;
+  var out = document.getElementById('mfa-enabled-result');
+  var r = await api('/api/mfa/disable', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({password: pw})
+  });
+  if (!r.ok) {
+    out.innerHTML = '<div class="alert alert-danger">' + esc(r.data.error || 'Failed.') + '</div>';
+    return;
+  }
+  log('Two-factor authentication disabled.', 'OK');
+  mfaLoadStatus();
+}
+
 async function loadSecretKeyStatus() {
   var el = document.getElementById('secret-key-status');
   el.innerHTML = '<span class="muted">Loading...</span>';
@@ -7679,6 +7850,10 @@ async function loadUsers() {
       roleBadge += ' <span style="background:rgba(63,185,80,.15);color:var(--green);padding:1px 7px;' +
         'border-radius:3px;font-size:0.72rem;font-weight:600" title="Can start recordings from the Status Board">can-record</span>';
     }
+    if (u.totp_enabled) {
+      roleBadge += ' <span style="background:rgba(88,166,255,.12);color:var(--accent);padding:1px 7px;' +
+        'border-radius:3px;font-size:0.72rem;font-weight:600" title="Two-factor authentication is enabled on this account">2FA</span>';
+    }
     var created = u.created_at ? new Date(u.created_at + 'Z').toLocaleDateString() : '—';
     var timeoutDisplay = u.session_idle_timeout === null || u.session_idle_timeout === undefined
       ? '<span style="color:var(--text2);font-size:0.82rem">30 min (default)</span>'
@@ -7692,6 +7867,7 @@ async function loadUsers() {
       + '<td style="color:var(--text2);font-size:0.82rem">' + created + '</td>'
       + '<td><div class="btn-row">'
       + '<button class="btn btn-sm" onclick="editUser(' + u.id + ',\'' + esc(u.username) + '\',\'' + esc(u.role) + '\',' + (u.session_idle_timeout === null || u.session_idle_timeout === undefined ? 'null' : u.session_idle_timeout) + ',' + (u.restrict_disconnect ? 'true' : 'false') + ',' + (u.can_record ? 'true' : 'false') + ')">Edit</button>'
+      + (u.totp_enabled ? '<button class="btn btn-sm" onclick="resetUserMfa(' + u.id + ',\'' + esc(u.username) + '\')">Reset 2FA</button>' : '')
       + '<button class="btn btn-warn btn-sm" onclick="deleteUser(' + u.id + ',\'' + esc(u.username) + '\')">Delete</button>'
       + '</div></td>'
       + '</tr>';
@@ -7822,6 +7998,14 @@ async function deleteUser(id, username) {
   var r = await api('/api/users/' + id, {method: 'DELETE'});
   if (r.ok) { log('User "' + username + '" deleted.', 'OK'); loadUsers(); }
   else log('Delete failed: ' + (r.data && r.data.error || r.status), 'ERROR');
+}
+
+async function resetUserMfa(id, username) {
+  if (!confirm('Reset two-factor authentication for "' + username + '"? They will be able to sign in ' +
+               'with just their password again, and can re-enroll from their own account.')) return;
+  var r = await api('/api/users/' + id + '/mfa/reset', {method: 'POST'});
+  if (r.ok) { log('2FA reset for "' + username + '".', 'OK'); loadUsers(); }
+  else log('Reset failed: ' + (r.data && r.data.error || r.status), 'ERROR');
 }
 </script>
 </body>

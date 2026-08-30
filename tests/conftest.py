@@ -63,6 +63,20 @@ def fresh_db(tmp_path, monkeypatch):
     monkeypatch.setattr(henwen_app._db_local, "conn", None, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_live_breach_check(monkeypatch):
+    """_is_password_breached() (app.py, called from _validate_new_password())
+    calls out to api.pwnedpasswords.com on every "set a new password" route.
+    Tests must stay network-independent (and fast) regardless of whatever
+    internet access the sandbox actually has, so default it to "not
+    breached" everywhere -- most test passwords (password12345, etc.) are
+    exactly the kind of predictable string that really is in the breach
+    corpus, which would otherwise make unrelated tests fail based on live
+    HIBP data. Tests that specifically exercise the breach-rejection or
+    fail-open behavior override this per-test."""
+    monkeypatch.setattr(henwen_app, "_is_password_breached", lambda password: False)
+
+
 @pytest.fixture()
 def client(fresh_db):
     """Flask test client backed by an isolated DB and a clean active-session table."""
