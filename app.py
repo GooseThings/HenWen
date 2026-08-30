@@ -673,6 +673,11 @@ def get_db():
         # connection (Manager > IRC Relay) rather than through
         # _irc_relay_queue -- see _send_alert()'s irc_enabled branch for why.
         conn.execute("ALTER TABLE alert_config ADD COLUMN irc_enabled INTEGER NOT NULL DEFAULT 0")
+    if 'on_disk_high' not in _alert_cols:
+        # Same crossing/reset shape as on_cpu_temp_high/cpu_temp_threshold --
+        # see _check_alerts()'s disk-usage branch.
+        conn.execute("ALTER TABLE alert_config ADD COLUMN on_disk_high INTEGER NOT NULL DEFAULT 1")
+        conn.execute("ALTER TABLE alert_config ADD COLUMN disk_pct_threshold INTEGER NOT NULL DEFAULT 90")
     conn.commit()
     # Singleton config for the NWS severe weather auto-announcement poller —
     # separate from alert_config (that's push notifications; this is
@@ -2016,8 +2021,8 @@ def _poll_loop():
                                             f"Node {peer} disconnected from {local}")
                 except Exception:
                     pass
-            # AMI state + CPU temp alerts — outside lock, OK to do network I/O here
-            _check_alerts(_ami_connected, get_cpu_temp())
+            # AMI state + CPU temp + disk usage alerts — outside lock, OK to do network I/O here
+            _check_alerts(_ami_connected, get_cpu_temp(), get_disk_usage())
             _check_asterisk_dns_health()
 
         except Exception as outer:
@@ -2188,6 +2193,7 @@ _node_last_active_lock = threading.Lock()
 # ── Alert state ───────────────────────────────────────────────────────────────
 _alert_prev_ami    = None   # None=unknown, True=was connected, False=was disconnected
 _alert_cpu_alerted = False
+_alert_disk_alerted = False
 
 # ── Asterisk DNS-stuck detection ──────────────────────────────────────────────
 # Asterisk's own resolver can get stuck unable to resolve register.allstarlink.org /
@@ -2588,9 +2594,10 @@ def _send_alert(title, message, priority="default"):
             log("ERROR", f"[ALERTS] irc send error: {e}")
 
 
-def _check_alerts(ami_ok, cpu_temp):
-    """Check AMI state and CPU temp conditions, send alerts when thresholds cross."""
-    global _alert_prev_ami, _alert_cpu_alerted
+def _check_alerts(ami_ok, cpu_temp, disk=None):
+    """Check AMI state, CPU temp, and disk usage conditions, send alerts when
+    thresholds cross. `disk` is a get_disk_usage()-shaped dict (or None)."""
+    global _alert_prev_ami, _alert_cpu_alerted, _alert_disk_alerted
     cfg = _get_alert_config()
     if not cfg or not cfg["enabled"]:
         _alert_prev_ami = ami_ok
@@ -2611,6 +2618,20 @@ def _check_alerts(ami_ok, cpu_temp):
             _alert_cpu_alerted = True
         elif cpu_temp <= thr:
             _alert_cpu_alerted = False
+    # Disk usage — same crossing/reset shape as CPU temp above
+    if cfg["on_disk_high"] and disk and disk.get("pct"):
+        try:
+            disk_pct = int(disk["pct"].rstrip("%"))
+        except (ValueError, AttributeError):
+            disk_pct = None
+        if disk_pct is not None:
+            thr = cfg["disk_pct_threshold"]
+            if disk_pct > thr and not _alert_disk_alerted:
+                _send_alert("HenWen: Low Disk Space",
+                            f"Disk is {disk_pct}% full (threshold {thr}%)", "high")
+                _alert_disk_alerted = True
+            elif disk_pct <= thr:
+                _alert_disk_alerted = False
 
 
 def _check_asterisk_dns_health():
@@ -5180,6 +5201,7 @@ def api_alerts_get_config():
             "on_cpu_temp_high": 1, "cpu_temp_threshold": 80,
             "on_node_connect": 0, "on_node_disconnect": 0, "watch_nodes": "",
             "on_dns_stuck": 1,
+            "on_disk_high": 1, "disk_pct_threshold": 90,
         })
     return jsonify(dict(cfg))
 
@@ -5193,8 +5215,9 @@ def api_alerts_save_config():
            (id, enabled, ntfy_enabled, pushover_enabled, discord_enabled, chat_enabled, irc_enabled,
             ntfy_topic, pushover_token, pushover_user,
             on_ami_disconnect, on_ami_reconnect, on_cpu_temp_high, cpu_temp_threshold,
-            on_node_connect, on_node_disconnect, watch_nodes, on_dns_stuck)
-           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            on_node_connect, on_node_disconnect, watch_nodes, on_dns_stuck,
+            on_disk_high, disk_pct_threshold)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             1 if data.get("enabled")           else 0,
             1 if data.get("ntfy_enabled")       else 0,
@@ -5213,6 +5236,8 @@ def api_alerts_save_config():
             1 if data.get("on_node_disconnect") else 0,
             str(data.get("watch_nodes",        "")),
             1 if data.get("on_dns_stuck")      else 0,
+            1 if data.get("on_disk_high")      else 0,
+            int(data.get("disk_pct_threshold", 90)),
         )
     )
     db.commit()

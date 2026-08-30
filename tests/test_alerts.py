@@ -179,6 +179,66 @@ class TestSendAlertChatDestination:
         assert app._irc_relay_queue.empty()
 
 
+class TestDiskSpaceAlert:
+    """on_disk_high/disk_pct_threshold follow the same crossing/reset shape
+    as on_cpu_temp_high/cpu_temp_threshold in _check_alerts()."""
+
+    def test_fires_once_on_crossing_then_resets_below_threshold(self, client, create_user, monkeypatch):
+        create_user("owner1", role="owner")
+        db = app.get_db()
+        db.execute(
+            "INSERT OR REPLACE INTO alert_config (id, enabled, on_disk_high, disk_pct_threshold) "
+            "VALUES (1, 1, 1, 90)"
+        )
+        db.commit()
+        calls = []
+        monkeypatch.setattr(
+            app, "_send_alert",
+            lambda title, msg, priority="default": calls.append((title, msg))
+        )
+        app._alert_disk_alerted = False
+        app._alert_prev_ami = True
+
+        app._check_alerts(True, None, {"pct": "85%"})
+        assert calls == []
+
+        app._check_alerts(True, None, {"pct": "95%"})
+        assert len(calls) == 1
+        assert calls[0][0] == "HenWen: Low Disk Space"
+        assert "95%" in calls[0][1] and "90%" in calls[0][1]
+
+        # Still above threshold -- must not re-fire
+        app._check_alerts(True, None, {"pct": "96%"})
+        assert len(calls) == 1
+
+        # Drops back at/under the threshold -- resets the alerted flag
+        app._check_alerts(True, None, {"pct": "80%"})
+        assert len(calls) == 1
+
+        # Crosses again -- fires again
+        app._check_alerts(True, None, {"pct": "92%"})
+        assert len(calls) == 2
+
+    def test_disabled_toggle_never_fires(self, client, create_user, monkeypatch):
+        create_user("owner1", role="owner")
+        db = app.get_db()
+        db.execute(
+            "INSERT OR REPLACE INTO alert_config (id, enabled, on_disk_high, disk_pct_threshold) "
+            "VALUES (1, 1, 0, 90)"
+        )
+        db.commit()
+        calls = []
+        monkeypatch.setattr(
+            app, "_send_alert",
+            lambda title, msg, priority="default": calls.append((title, msg))
+        )
+        app._alert_disk_alerted = False
+        app._alert_prev_ami = True
+
+        app._check_alerts(True, None, {"pct": "99%"})
+        assert calls == []
+
+
 class _FakeIrcClient:
     def __init__(self, alive=True):
         self.alive = alive

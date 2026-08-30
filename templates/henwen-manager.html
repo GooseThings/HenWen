@@ -1212,6 +1212,17 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
             <label class="switch"><input type="checkbox" id="al-dns-stuck"><span class="slider"></span></label>
           </div>
           <div class="toggle-row">
+            <div class="toggle-info">
+              <div class="toggle-key">Low Disk Space</div>
+              <div class="toggle-desc">
+                Disk usage exceeds
+                <input id="al-disk-thr" type="number" min="50" max="99" value="90" style="width:52px;font-size:0.82rem;padding:1px 4px;border:1px solid var(--border);border-radius:3px;background:var(--bg3);color:var(--text);margin:0 3px">
+                %
+              </div>
+            </div>
+            <label class="switch"><input type="checkbox" id="al-disk-high"><span class="slider"></span></label>
+          </div>
+          <div class="toggle-row">
             <div class="toggle-info"><div class="toggle-key">Node Connect</div><div class="toggle-desc">A node links to this server</div></div>
             <label class="switch"><input type="checkbox" id="al-node-conn" onchange="alToggleWatchNodes()"><span class="slider"></span></label>
           </div>
@@ -4147,6 +4158,8 @@ async function alLoad() {
   document.getElementById('al-cpu-high').checked  = !!d.on_cpu_temp_high;
   document.getElementById('al-cpu-thr').value     = d.cpu_temp_threshold || 80;
   document.getElementById('al-dns-stuck').checked = !!d.on_dns_stuck;
+  document.getElementById('al-disk-high').checked = !!d.on_disk_high;
+  document.getElementById('al-disk-thr').value    = d.disk_pct_threshold || 90;
   document.getElementById('al-node-conn').checked = !!d.on_node_connect;
   document.getElementById('al-node-dc').checked   = !!d.on_node_disconnect;
   document.getElementById('al-watch-nodes').value = d.watch_nodes || '';
@@ -4186,6 +4199,8 @@ async function alSave() {
     on_cpu_temp_high:   document.getElementById('al-cpu-high').checked  ? 1 : 0,
     cpu_temp_threshold: parseInt(document.getElementById('al-cpu-thr').value) || 80,
     on_dns_stuck:       document.getElementById('al-dns-stuck').checked ? 1 : 0,
+    on_disk_high:       document.getElementById('al-disk-high').checked ? 1 : 0,
+    disk_pct_threshold: parseInt(document.getElementById('al-disk-thr').value) || 90,
     on_node_connect:    document.getElementById('al-node-conn').checked ? 1 : 0,
     on_node_disconnect: document.getElementById('al-node-dc').checked   ? 1 : 0,
     watch_nodes:        document.getElementById('al-watch-nodes').value.trim(),
