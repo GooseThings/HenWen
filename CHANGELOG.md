@@ -1,5 +1,17 @@
 # Changelog
 
+## v2026.08.30
+
+- **Added: optional TOTP two-factor authentication**, self-service for every account role from Manager > Settings or a new Status Board "Account" popup (the latter also gives plain `user`/kiosk accounts a way to change their own password for the first time, which they previously had no way to do). Ten single-use recovery codes are shown once at enrollment; admin+ can force-reset (never view or set) another account's 2FA for lost-device recovery.
+- **Hardened: password/account auth end to end**, following a security audit. Closed a login timing side-channel that let "unknown username" be distinguished from "known username, wrong password" by response time; added session invalidation on password change (a new `password_epoch` force-logs-out any other already-open session); added a soft per-account lockout (capped exponential backoff, 30s doubling to 15 min) layered on top of the existing per-IP rate limits; added an optional `PASSWORD_PEPPER`, mixed in separately from `SECRET_KEY`; made usernames case-insensitive everywhere an account is looked up or created; and added a soft/fail-open breached-password check against HaveIBeenPwned's Pwned Passwords API (k-anonymity — only a 5-character hash prefix ever leaves this server).
+- **Added: self-service password reset** and **invite links**, so a new account can set its own username/password instead of an admin choosing it for them.
+- **Added: low-disk-space alert**, joining the existing ntfy/Pushover/Discord/Kiosk Chat/IRC alert destinations.
+- **Added: weather alert areas on the kiosk map.** An "Alerts" checkbox next to Radar overlays each active NWS alert's affected county/zone area(s) as a translucent polygon, colored by severity (warning vs. watch), using the alert's own CAP polygon when NWS provides one.
+- **Changed: chat message retention is now an owner-selected Kiosk Setting** (1–720 hours) instead of a fixed 24-hour constant.
+- **Changed: the kiosk Map panel's Radar/Alerts/ASL/APRS/ISS toggles and tile-style picker are now behind a single hamburger menu button**, instead of crowding the card header.
+- **Fixed: CartoDB map tile options (Dark/Light/Voyager) silently degraded to a watermarked "API KEY REQUIRED" placeholder** now that CartoDB requires a key for unauthenticated tile requests — removed; the remaining Esri/OSM options need no key. The "Network Map" panel is also renamed to just "Map."
+- **Fixed: the Listen live-audio stream carried a hidden ~2.9s latency bug** in its AGC filter chain (`dynaudnorm`'s lookahead window was far larger than necessary) — cut end-to-end time-to-first-byte from ~3.3s to ~0.4s, with no change to clip-safety.
+
 ## v2026.08.20
 
 - **Added: two-way IRC relay for the kiosk Chat panel.** Bridges the Status Board's Chat panel to one IRC channel — messages typed in kiosk chat relay out to IRC, and messages typed in the channel appear in kiosk chat with a distinct green `irc`-role styling. Configurable from Manager > IRC Relay (host/port/TLS/channel/nick/optional NickServ password), with a live connected/disconnected indicator and exponential reconnect backoff.
