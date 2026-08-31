@@ -576,12 +576,29 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .leaflet-tile.radar-tile { filter: none !important; }
 .leaflet-control-zoom a { background: var(--bg3) !important; color: var(--text) !important;
   border-color: var(--border) !important; }
-.map-ctl { display: flex; align-items: center; gap: 5px; margin-left: auto; flex-wrap: wrap; }
+.map-ctl { position: relative; margin-left: auto; }
+.map-ctl-menu-btn { display: flex; align-items: center; background: var(--bg3);
+  border: 1px solid var(--border); color: var(--text2); border-radius: 5px;
+  padding: 4px 6px; cursor: pointer; }
+.map-ctl-menu-btn:hover { color: var(--text); }
+.map-ctl-menu-btn .icon { width: 1rem; height: 1rem; }
+/* position:fixed (not absolute) and top/left set in JS at open time
+   (see toggleMapCtlMenu) — .map-card clips overflow for its rounded
+   corners/Leaflet div, so an absolutely-positioned dropdown anchored inside
+   it would get clipped instead of floating over the map. */
+.map-ctl-dropdown { position: fixed; display: flex; flex-direction: column; gap: 8px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+  min-width: 200px; box-shadow: 0 4px 16px rgba(0,0,0,.4);
+  /* Leaflet's own panes/controls run z-index up to 1000 (see leaflet.css) —
+     comfortably clear that so the dropdown never paints under the map. */
+  z-index: 2000; }
 .map-ctl-sel { background: var(--bg3); border: 1px solid var(--border); color: var(--text);
-  border-radius: 4px; padding: 2px 5px; font-size: 0.7rem; cursor: pointer; }
-.map-ctl-radar { display: flex; align-items: center; gap: 4px; color: var(--text2);
-  font-size: 0.7rem; cursor: pointer; user-select: none; }
+  border-radius: 4px; padding: 3px 5px; font-size: 0.72rem; cursor: pointer; width: 100%;
+  box-sizing: border-box; }
+.map-ctl-radar { display: flex; align-items: center; gap: 6px; color: var(--text2);
+  font-size: 0.75rem; cursor: pointer; user-select: none; }
 .map-ctl-radar input { cursor: pointer; }
+.map-ctl-subrow { margin-left: 22px; }
 .popup-node-link { color: var(--accent); font-weight: 600; text-decoration: none; }
 
 /* ── Favorites sidebar (top 2/3 of the right column; Chat takes the bottom
@@ -871,6 +888,11 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <path d="m21 21-4.34-4.34" />
     <circle cx="11" cy="11" r="8" />
   </symbol>
+  <symbol id="icon-menu" viewBox="0 0 24 24">
+    <path d="M4 5h16" />
+    <path d="M4 12h16" />
+    <path d="M4 19h16" />
+  </symbol>
   <symbol id="icon-calendar-days" viewBox="0 0 24 24">
     <path d="M8 2v4" />
     <path d="M16 2v4" />
@@ -1159,57 +1181,63 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
               ondragstart="dashDragStart(event,'map')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
         <span class="card-title">Map</span>
         <div class="map-ctl">
-          <label class="map-ctl-radar" title="Overlay live NEXRAD weather radar (NOAA/Iowa Mesonet)">
-            <input type="checkbox" id="map-radar-chk" onchange="toggleRadar(this.checked)"> Radar
-          </label>
-          <label class="map-ctl-radar" title="Highlight counties/zones affected by an active NWS alert">
-            <input type="checkbox" id="map-nws-chk" onchange="toggleNwsAlertAreas(this.checked)"> Alerts
-          </label>
-          <label class="map-ctl-radar" title="Show AllStarLink node activity pins and list entries">
-            <input type="checkbox" id="act-asl-chk" checked onchange="toggleAslActivity(this.checked)"> ASL
-          </label>
-          <label class="map-ctl-radar" title="Overlay nearby APRS stations (APRS-IS)">
-            <input type="checkbox" id="map-aprs-chk" onchange="toggleAprs(this.checked)"> APRS
-          </label>
-          <span id="map-aprs-radius-wrap" style="display:none;align-items:center;gap:4px">
-            <input type="range" id="map-aprs-radius" min="1" max="200" value="25"
-                   title="APRS search radius"
-                   oninput="onAprsRadiusInput(this.value)"
-                   onchange="onAprsRadiusChange(this.value)">
-            <span id="map-aprs-radius-val" style="font-size:0.7rem;color:var(--text2);width:3.4em;flex-shrink:0">25 mi</span>
-          </span>
-          <label class="map-ctl-radar" title="Overlay the ISS's current position and next upcoming visible passes over this node">
-            <input type="checkbox" id="map-iss-chk" onchange="toggleIss(this.checked)"> ISS
-          </label>
-          <span id="map-iss-passes-wrap" style="display:none;align-items:center;gap:4px">
-            <select class="map-ctl-sel" id="map-iss-passes" onchange="onIssPassCountChange(this.value)">
-              <option value="1">1 pass</option>
-              <option value="2">2 passes</option>
-              <option value="3">3 passes</option>
-              <option value="4">4 passes</option>
-              <option value="5">5 passes</option>
-              <option value="6">6 passes</option>
+          <button type="button" class="map-ctl-menu-btn" id="map-ctl-menu-btn"
+                  onclick="toggleMapCtlMenu(event)" title="Map options" aria-haspopup="true" aria-expanded="false">
+            <svg class="icon"><use href="#icon-menu"></use></svg>
+          </button>
+          <div class="map-ctl-dropdown" id="map-ctl-dropdown" style="display:none">
+            <label class="map-ctl-radar" title="Overlay live NEXRAD weather radar (NOAA/Iowa Mesonet)">
+              <input type="checkbox" id="map-radar-chk" onchange="toggleRadar(this.checked)"> Radar
+            </label>
+            <label class="map-ctl-radar" title="Highlight counties/zones affected by an active NWS alert">
+              <input type="checkbox" id="map-nws-chk" onchange="toggleNwsAlertAreas(this.checked)"> Alerts
+            </label>
+            <label class="map-ctl-radar" title="Show AllStarLink node activity pins and list entries">
+              <input type="checkbox" id="act-asl-chk" checked onchange="toggleAslActivity(this.checked)"> ASL
+            </label>
+            <label class="map-ctl-radar" title="Overlay nearby APRS stations (APRS-IS)">
+              <input type="checkbox" id="map-aprs-chk" onchange="toggleAprs(this.checked)"> APRS
+            </label>
+            <span id="map-aprs-radius-wrap" class="map-ctl-subrow" style="display:none;align-items:center;gap:4px">
+              <input type="range" id="map-aprs-radius" min="1" max="200" value="25"
+                     title="APRS search radius"
+                     oninput="onAprsRadiusInput(this.value)"
+                     onchange="onAprsRadiusChange(this.value)">
+              <span id="map-aprs-radius-val" style="font-size:0.7rem;color:var(--text2);width:3.4em;flex-shrink:0">25 mi</span>
+            </span>
+            <label class="map-ctl-radar" title="Overlay the ISS's current position and next upcoming visible passes over this node">
+              <input type="checkbox" id="map-iss-chk" onchange="toggleIss(this.checked)"> ISS
+            </label>
+            <span id="map-iss-passes-wrap" class="map-ctl-subrow" style="display:none;align-items:center;gap:4px">
+              <select class="map-ctl-sel" id="map-iss-passes" onchange="onIssPassCountChange(this.value)" style="width:auto">
+                <option value="1">1 pass</option>
+                <option value="2">2 passes</option>
+                <option value="3">3 passes</option>
+                <option value="4">4 passes</option>
+                <option value="5">5 passes</option>
+                <option value="6">6 passes</option>
+              </select>
+              <span id="map-iss-status" style="font-size:0.68rem;color:var(--text2);white-space:nowrap"></span>
+            </span>
+            <select class="map-ctl-sel" id="map-tile-sel" onchange="changeTiles(this.value)">
+              <optgroup label="Dark">
+                <option value="dark">OSM Dark</option>
+                <option value="esri-dark-gray">Dark Gray (Esri)</option>
+              </optgroup>
+              <optgroup label="Light">
+                <option value="esri-light-gray">Light Gray (Esri)</option>
+                <option value="esri-street">Street (Esri)</option>
+                <option value="osm-hot">Humanitarian (OSM)</option>
+                <option value="cyclosm">CyclOSM</option>
+              </optgroup>
+              <optgroup label="Terrain &amp; Satellite">
+                <option value="topo">Topography</option>
+                <option value="esri-topo">Topography (Esri)</option>
+                <option value="esri-natgeo">National Geographic</option>
+                <option value="satellite">Satellite</option>
+              </optgroup>
             </select>
-            <span id="map-iss-status" style="font-size:0.68rem;color:var(--text2);white-space:nowrap"></span>
-          </span>
-          <select class="map-ctl-sel" id="map-tile-sel" onchange="changeTiles(this.value)">
-            <optgroup label="Dark">
-              <option value="dark">OSM Dark</option>
-              <option value="esri-dark-gray">Dark Gray (Esri)</option>
-            </optgroup>
-            <optgroup label="Light">
-              <option value="esri-light-gray">Light Gray (Esri)</option>
-              <option value="esri-street">Street (Esri)</option>
-              <option value="osm-hot">Humanitarian (OSM)</option>
-              <option value="cyclosm">CyclOSM</option>
-            </optgroup>
-            <optgroup label="Terrain &amp; Satellite">
-              <option value="topo">Topography</option>
-              <option value="esri-topo">Topography (Esri)</option>
-              <option value="esri-natgeo">National Geographic</option>
-              <option value="satellite">Satellite</option>
-            </optgroup>
-          </select>
+          </div>
         </div>
         <button class="dash-hide-btn" onclick="toggleDashHide('map',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
       </div>
@@ -1718,6 +1746,45 @@ var _globalWindowMin    = 15;  /* global-activity display window, from the serve
 var _mapFitted          = false;
 var _popupOpen          = false;  /* a pin popup is open — hold off re-rendering */
 var _mapDirty           = false;  /* data changed while a popup was open */
+
+/* ── Map options dropdown (hamburger menu) ──
+   Holds every map toggle/select (Radar, Alerts, ASL, APRS, ISS, tile style)
+   that used to sit directly in the card header — same open/outside-click
+   pattern as the footer's "Logged in" panel (see _activeUsersOutsideClick). */
+var _mapCtlMenuOpen = false;
+
+function _mapCtlOutsideClick(e) {
+  var wrap = document.getElementById('map-ctl-dropdown');
+  var btn = document.getElementById('map-ctl-menu-btn');
+  if (wrap && !wrap.contains(e.target) && btn && !btn.contains(e.target)) closeMapCtlMenu();
+}
+
+function closeMapCtlMenu() {
+  var dropdown = document.getElementById('map-ctl-dropdown');
+  var btn = document.getElementById('map-ctl-menu-btn');
+  if (dropdown) dropdown.style.display = 'none';
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+  _mapCtlMenuOpen = false;
+  document.removeEventListener('click', _mapCtlOutsideClick);
+}
+
+function toggleMapCtlMenu(e) {
+  if (e) e.stopPropagation();
+  if (_mapCtlMenuOpen) { closeMapCtlMenu(); return; }
+  var dropdown = document.getElementById('map-ctl-dropdown');
+  var btn = document.getElementById('map-ctl-menu-btn');
+  if (!dropdown || !btn) return;
+  /* position:fixed, so anchor off the button's viewport rect rather than a
+     CSS top/right offset — see the .map-ctl-dropdown comment above. */
+  var r = btn.getBoundingClientRect();
+  dropdown.style.display = 'flex';
+  dropdown.style.top = (r.bottom + 6) + 'px';
+  dropdown.style.left = 'auto';
+  dropdown.style.right = (window.innerWidth - r.right) + 'px';
+  btn.setAttribute('aria-expanded', 'true');
+  _mapCtlMenuOpen = true;
+  document.addEventListener('click', _mapCtlOutsideClick);
+}
 
 /* Tile layer definitions: darkFilter=true means keep OSM invert CSS */
 var _tileDefs = {
