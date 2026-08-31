@@ -1392,7 +1392,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
             <input type="number" id="ks-pin-min" class="form-control" style="width:90px"
                    min="1" max="480" value="60">
             <span style="font-size:0.82rem;color:var(--text-muted)">
-              How long activity pins remain visible on the Network Map (1–480 min).
+              How long activity pins remain visible on the Map (1–480 min).
             </span>
           </div>
         </div>
@@ -1408,13 +1408,13 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
           </div>
         </div>
         <div class="form-group" style="margin-top:24px;padding-top:16px;border-top:1px solid var(--border)">
-          <div style="font-weight:600;margin-bottom:8px">APRS-IS (Network Map)</div>
+          <div style="font-weight:600;margin-bottom:8px">APRS-IS (Map)</div>
           <label class="form-label">APRS-IS Callsign</label>
           <div style="display:flex;gap:8px;align-items:center">
             <input type="text" id="ks-aprs-callsign" class="form-control" style="width:140px;text-transform:uppercase"
                    maxlength="12" placeholder="e.g. N8GMZ-15">
             <span style="font-size:0.82rem;color:var(--text-muted)">
-              Powers the optional "APRS" layer on the kiosk's Network Map. Log into APRS-IS
+              Powers the optional "APRS" layer on the kiosk's Map. Log into APRS-IS
               (receive-only) as this callsign to pull nearby station positions — leave blank to
               keep that layer off. Only a licensed amateur's own callsign, please.<br>
               Takes effect on the connection's next reconnect, or immediately after a HenWen restart.
@@ -1425,7 +1425,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
             <input type="number" id="ks-aprs-max-stations" class="form-control" style="width:90px"
                    min="1" max="1000" value="100">
             <span style="font-size:0.82rem;color:var(--text-muted)">
-              Caps how many nearby stations are drawn on the Network Map and listed in Latest
+              Caps how many nearby stations are drawn on the Map and listed in Latest
               Activity, closest first (1–1000).
             </span>
           </div>
