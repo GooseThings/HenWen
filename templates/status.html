@@ -1162,6 +1162,9 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
           <label class="map-ctl-radar" title="Overlay live NEXRAD weather radar (NOAA/Iowa Mesonet)">
             <input type="checkbox" id="map-radar-chk" onchange="toggleRadar(this.checked)"> Radar
           </label>
+          <label class="map-ctl-radar" title="Highlight counties/zones affected by an active NWS alert">
+            <input type="checkbox" id="map-nws-chk" onchange="toggleNwsAlertAreas(this.checked)"> Alerts
+          </label>
           <label class="map-ctl-radar" title="Show AllStarLink node activity pins and list entries">
             <input type="checkbox" id="act-asl-chk" checked onchange="toggleAslActivity(this.checked)"> ASL
           </label>
@@ -1843,6 +1846,14 @@ function initMap() {
      refreshActivity() already fetches on its own cycle regardless. */
   var aslChk = document.getElementById('act-asl-chk');
   if (aslChk) aslChk.checked = localStorage.getItem('henwen-activity-asl') !== '0';
+
+  /* Load saved NWS-alert-area pref. No enable-side fetch needed, same
+     reasoning as ASL above: this only gates rendering of alert geometry
+     refreshNwsAlerts() already fetches every 60s regardless. */
+  var nwsChk = document.getElementById('map-nws-chk');
+  _nwsAlertAreasEnabled = localStorage.getItem('henwen-nws-map') === '1';
+  if (nwsChk) nwsChk.checked = _nwsAlertAreasEnabled;
+  if (_nwsAlertAreasEnabled) renderNwsAlertAreas(_lastNwsAlerts);
 
   /* Load saved APRS pref (checkbox + radius) */
   var aprsRadius = localStorage.getItem('henwen-aprs-radius') || '25';
@@ -2744,8 +2755,56 @@ async function refreshNwsAlerts() {
     var r = await apiFetch('/api/status/nws-alerts');
     if (!r.ok) return;
     var d = await r.json();
-    _renderNwsAlertBar(d.enabled ? d.alerts : []);
+    _lastNwsAlerts = d.enabled ? d.alerts : [];
+    _renderNwsAlertBar(_lastNwsAlerts);
+    renderNwsAlertAreas(_lastNwsAlerts);
   } catch(e) {}
+}
+
+/* ── NWS alert-area map highlight ──
+   Polygons for the county/zone(s) each active alert covers, drawn on the
+   kiosk map — reuses the same /api/status/nws-alerts payload the ticker
+   bar already polls every 60s (refreshNwsAlerts() above), rather than a
+   separate timer, since it's the same underlying "what's active" data.
+   The checkbox only gates whether renderNwsAlertAreas() draws anything;
+   like the ASL-activity toggle, there's no enable-side fetch to kick off. */
+var _nwsAlertAreasEnabled = false;
+var _lastNwsAlerts = [];
+var _nwsAlertAreaLayers = [];
+
+function _nwsAlertAreaColor(a) {
+  var cls = _nwsSeverityClass(a);
+  var varName = cls === 'nws-sev-warning' ? '--danger' : '--warn';
+  var v = getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+  return v || (cls === 'nws-sev-warning' ? '#e5484d' : '#f5a623');
+}
+
+function clearNwsAlertAreas() {
+  _nwsAlertAreaLayers.forEach(function(l) { _map.removeLayer(l); });
+  _nwsAlertAreaLayers = [];
+}
+
+function renderNwsAlertAreas(alerts) {
+  if (!_map) return;
+  clearNwsAlertAreas();
+  if (!_nwsAlertAreasEnabled || !alerts || !alerts.length) return;
+  alerts.forEach(function(a) {
+    if (!a.geometry) return;
+    var color = _nwsAlertAreaColor(a);
+    try {
+      var layer = L.geoJSON(a.geometry, {
+        style: { color: color, weight: 2, fillColor: color, fillOpacity: 0.15 }
+      }).bindPopup('<strong>' + esc(a.event) + '</strong><br>' + esc(a.text));
+      layer.addTo(_map);
+      _nwsAlertAreaLayers.push(layer);
+    } catch (e) {}
+  });
+}
+
+function toggleNwsAlertAreas(on) {
+  _nwsAlertAreasEnabled = on;
+  localStorage.setItem('henwen-nws-map', on ? '1' : '0');
+  renderNwsAlertAreas(_lastNwsAlerts);
 }
 
 /* ── Scheduled nets (calendar reminders) ──────────────────────────────────

@@ -11059,8 +11059,65 @@ def _nws_fetch_active_alerts(zone_mode: str, zone: str, state: str, event_types=
             "areaDesc": p.get("areaDesc", ""),
             "expires":  p.get("expires", ""),
             "severity": p.get("severity", ""),
+            "zones":    (p.get("geocode") or {}).get("UGC") or [],
+            "geometry": feat.get("geometry"),
         })
     return out
+
+
+# In-process cache of UGC zone/county code -> GeoJSON boundary geometry,
+# keyed by code and never expired — zone/county boundaries are static, so
+# unlike _nws_lookup_zone_name (an admin-triggered, one-off lookup) this is
+# consulted every poll cycle for every active alert's zones and would
+# otherwise re-fetch the same shape from api.weather.gov over and over.
+_nws_zone_geometry_cache = {}
+_nws_zone_geometry_lock  = threading.Lock()
+
+
+def _nws_lookup_zone_geometry(code: str):
+    """Resolve one UGC code (e.g. 'MIZ056' or 'MIC077') to its boundary
+    polygon via api.weather.gov/zones — same zone-type-from-3rd-character
+    rule as _nws_lookup_zone_name. Returns a GeoJSON geometry dict, or None
+    on any lookup failure (callers treat that as 'no boundary available',
+    never fatal — the alert still displays, just without a highlighted
+    area on the map)."""
+    code = code.strip().upper()
+    with _nws_zone_geometry_lock:
+        if code in _nws_zone_geometry_cache:
+            return _nws_zone_geometry_cache[code]
+    if len(code) < 3:
+        return None
+    zone_type = "county" if code[2] == "C" else "forecast"
+    try:
+        url = f"{NWS_ALERTS_BASE_URL}/zones/{zone_type}/{code}"
+        req = urlreq.Request(url, headers={"User-Agent": NWS_USER_AGENT})
+        with urlreq.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        geom = data.get("geometry")
+    except Exception as e:
+        log("WARN", f"[NWS] _nws_lookup_zone_geometry({code}): {e}")
+        return None
+    with _nws_zone_geometry_lock:
+        _nws_zone_geometry_cache[code] = geom
+    return geom
+
+
+def _nws_resolve_alert_geometry(alert: dict):
+    """Best-effort area polygon(s) for the kiosk map's alert-area highlight
+    layer. Prefers the alert's own CAP `geometry` (present on most
+    Warning-tier polygon-based products, e.g. Tornado/Severe Thunderstorm
+    Warnings); falls back to the boundary of each affected UGC zone/county
+    from `geocode.UGC` (resolved+cached via _nws_lookup_zone_geometry) for
+    the many alert types NWS issues zone-wide with no inline polygon
+    (Watches, and most non-convective Warnings/Advisories). Returns a
+    GeoJSON geometry (Polygon/MultiPolygon/GeometryCollection) or None if
+    nothing could be resolved."""
+    if alert.get("geometry"):
+        return alert["geometry"]
+    geoms = [g for g in (_nws_lookup_zone_geometry(c) for c in alert.get("zones", [])) if g]
+    if not geoms:
+        return None
+    return geoms[0] if len(geoms) == 1 else {"type": "GeometryCollection", "geometries": geoms}
 
 
 _STATE_ABBREV_RE = re.compile(r',\s*[A-Z]{2}\b')
@@ -12310,6 +12367,7 @@ def _nws_alert_poll_loop():
                                 "severity": a.get("severity", ""),
                                 "expires":  a.get("expires", ""),
                                 "vtec_key": a["vtec_key"],
+                                "geometry": _nws_resolve_alert_geometry(a),
                             }
                             for a in alerts
                         ]
