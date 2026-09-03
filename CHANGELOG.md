@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Fixed: clicking/popping on the Listen live-audio stream** (issue #36). `audio_relay.py`'s jitter buffer snapped straight to/from silence on a genuine underrun and spliced out audio on a buffer-overflow drop — both raw sample-value discontinuities. Both now get a 5ms linear declick ramp instead.
+- **Changed: Listen's AGC now also targets average loudness (RMS), not just peak** (issue #34). A node with a brief hot peak but otherwise soft speech previously stayed quiet, since `dynaudnorm`'s gain was computed from peak level alone.
 - **Added: Connection History now records which user initiated each connection.** A new "By" column on Manager > Connection History shows the logged-in username that clicked Connect (or "Smart Connector" for a scheduled connect); also included in the panel's search. A link HenWen didn't initiate itself — a static `rpt.conf` `connect=`, a raw AMI/CLI `ilink`, or app_rpt auto-reconnecting a permanent link after a restart — is shown blank, same as the existing Permanent/Idle-timeout tracking.
 
 ## v2026.08.30
