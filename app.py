@@ -8097,6 +8097,23 @@ def _start_broadcast(node):
     # this sounds like it's pumping/over-processing on your traffic, the
     # first things to try are g up (smoother, slower) before m (max gain)
     # down or f up — both of the latter reintroduce latency for the same g.
+    #
+    # r (target RMS) was added after live feedback that some audio stayed
+    # loud and some stayed soft even with the above tuned in: dynaudnorm's
+    # r defaults to 0 (disabled), meaning gain is computed from peak level
+    # only (p=0.95). A node with a brief hot peak (a burst, static crack, a
+    # CTCSS blip) but otherwise soft speech gets normalized against that
+    # peak and the underlying speech never comes up — the peak-based gain
+    # calc has nothing to do with perceived loudness. r=0.3 makes dynaudnorm
+    # also target average loudness (RMS) per frame, taking the more
+    # conservative of the peak- and RMS-based gain (still capped by m=6), so
+    # a quiet stretch gets boosted toward a consistent level instead of only
+    # reacting to its own peak. Tradeoff: RMS-based gain will also amplify
+    # background noise/static during a weak-signal or no-speech stretch more
+    # than peak-only did — if that's audible as noise pumping on your
+    # traffic, lower r (toward 0) before touching m or p. Not yet verified
+    # against real repeater audio with weak/hot nodes side by side — this is
+    # a starting value, not a measured optimum.
     ffmpeg_cmd = [
         'ffmpeg', '-loglevel', 'warning',
         '-probesize', '32',
@@ -8104,7 +8121,7 @@ def _start_broadcast(node):
         '-fflags', '+nobuffer',
         '-f', 's16le', '-ar', '8000', '-ac', '1', '-channel_layout', 'mono',
         '-i', fifo_out_path,
-        '-af', 'dynaudnorm=f=50:g=5:p=0.95:m=6,'
+        '-af', 'dynaudnorm=f=50:g=5:p=0.95:m=6:r=0.3,'
                'alimiter=limit=0.85:attack=5:release=50:level=false',
         '-ar', '48000',        # resample to Opus native rate before encoding
         '-c:a', 'libopus', '-b:a', '24k',
