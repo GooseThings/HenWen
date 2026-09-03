@@ -48,6 +48,8 @@ import hmac
 import io
 import base64
 import traceback
+import select
+import uuid
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for, send_file, Response, stream_with_context
@@ -7669,6 +7671,14 @@ class _AudioBroadcast:
         self._mixmonitor_id = None  # set by _start_broadcast() once MixMonitor
                                      # confirms its instance ID, so shutdown()
                                      # can target StopMixMonitor precisely
+        self._tap_mode       = 'mixmonitor'  # or 'audiosocket' -- which capture
+                                     # path this broadcast is using, set by
+                                     # _start_broadcast(); shutdown() branches on
+                                     # it to know whether to StopMixMonitor or
+                                     # hang up the ChanSpy/AudioSocket tap channel
+        self._tap_channel_id = None  # audiosocket mode only: the ChannelId the
+                                     # Originate call assigned the tap's ChanSpy
+                                     # leg, so shutdown() can hang it up precisely
 
         self._reader = threading.Thread(target=self._read_loop, daemon=True,
                                         name=f'audio-reader-{node}')
@@ -7960,32 +7970,172 @@ class _AudioBroadcast:
                 except Exception:
                     pass
 
-        def _stop_mm(ami):
-            params = {'Action': 'StopMixMonitor', 'Channel': self.channel}
-            if self._mixmonitor_id:
-                # Targets this exact MixMonitor instance rather than "whatever
-                # is currently running on this channel" — without this, a
-                # shutdown racing a newer broadcast's fresh MixMonitor on the
-                # same channel (e.g. a listener reconnecting the instant its
-                # old stream is torn down) could stop the NEW instance
-                # instead of this one.
-                params['MixMonitorID'] = self._mixmonitor_id
-            ami._send_action(params)
-            ami._recv_until('\r\n\r\n', timeout=ami.timeout)
-            return {'ok': True}
+        if self._tap_mode == 'audiosocket':
+            # Hanging up the ChanSpy leg by its known ChannelId tears down
+            # both halves of the Local-channel bridge (see
+            # _try_audiosocket_tap()) -- there is no MixMonitor instance to
+            # stop in this mode. If the tap channel already hung up on its
+            # own (e.g. audio_relay.py's own process exit already broke the
+            # AudioSocket connection, which is exactly what closing the
+            # relay_proc/ffmpeg_proc above just did), this just fails
+            # harmlessly ("No such channel").
+            if self._tap_channel_id:
+                def _hangup_tap(ami):
+                    ami._send_action({'Action': 'Hangup', 'Channel': self._tap_channel_id})
+                    ami._recv_until('\r\n\r\n', timeout=ami.timeout)
+                    return {'ok': True}
+                try:
+                    ami_send_command(_hangup_tap)
+                except Exception:
+                    pass
+        else:
+            def _stop_mm(ami):
+                params = {'Action': 'StopMixMonitor', 'Channel': self.channel}
+                if self._mixmonitor_id:
+                    # Targets this exact MixMonitor instance rather than
+                    # "whatever is currently running on this channel" —
+                    # without this, a shutdown racing a newer broadcast's
+                    # fresh MixMonitor on the same channel (e.g. a listener
+                    # reconnecting the instant its old stream is torn down)
+                    # could stop the NEW instance instead of this one.
+                    params['MixMonitorID'] = self._mixmonitor_id
+                ami._send_action(params)
+                ami._recv_until('\r\n\r\n', timeout=ami.timeout)
+                return {'ok': True}
+            try:
+                ami_send_command(_stop_mm)
+            except Exception:
+                pass
+        log('INFO', f'[AUDIO] broadcast for node {self.node} shut down '
+                    f'(tap_mode={self._tap_mode})')
+
+
+def _try_audiosocket_tap(node, channel, fifo_out_path, gen, relay_env):
+    """
+    Attempt the low-latency AudioSocket capture path (issue #30) for this
+    broadcast: spawn audio_relay.py in AudioSocket-listen mode, then
+    Originate a ChanSpy(<channel>,qou) + AudioSocket() Local-channel bridge
+    (installed by audiosocket-tap/apply.sh -- see that script and
+    audiosocket-tap/extensions-custom.snippet) pointed at it, and confirm
+    the connection actually completed before handing back to the caller.
+
+    This exists because MixMonitor writes to its FIFO through a buffered
+    stdio stream that flushes in ~32KB/~2s lumps (see audio_relay.py's own
+    jitter-buffer comment) -- ~2s of latency baked in before any of this
+    app's own pacing/encoding even starts. AudioSocket instead streams each
+    20ms frame over a TCP socket as Asterisk produces it, with no such
+    buffering. ChanSpy's 'o' flag means read-only (audio *from* the channel
+    only, never whispered/barged into it) and 'q' suppresses the
+    announce-tone/interactive-digit behavior ChanSpy has by default --
+    verified live against a real running node channel (SimpleUSB/643930)
+    to have zero effect on the channel's own Rpt() execution, with clean
+    teardown via Hangup-by-ChannelId leaving no stray channels behind.
+
+    Purely additive/opt-in: on ANY failure -- most commonly the feature
+    simply not installed yet (audiosocket-tap/apply.sh never run, the
+    common case for every existing install today), but also a handshake
+    timeout or a rejected Originate -- this returns None so the caller
+    falls straight through to the existing MixMonitor path unchanged.
+    Never raises; every failure is logged at DEBUG rather than WARN, since
+    "not available" is the expected steady state until an owner opts in.
+    Returns (relay_proc, tap_channel_id) on success.
+    """
+    try:
+        def _check_modules(ami):
+            as_lines = ami.command('module show like audiosocket')
+            cs_lines = ami.command('module show like chanspy')
+            has_res = any('res_audiosocket' in l for l in as_lines)
+            has_app = any('app_audiosocket' in l for l in as_lines)
+            has_cs  = any('app_chanspy' in l for l in cs_lines)
+            return {'ok': has_res and has_app and has_cs}
+        if not ami_send_command(_check_modules).get('ok'):
+            log('DEBUG', f'[AUDIO] AudioSocket tap not available for node {node} '
+                        f'(modules not loaded -- run audiosocket-tap/apply.sh to enable)')
+            return None
+    except Exception as e:
+        log('DEBUG', f'[AUDIO] AudioSocket tap module check failed for node {node}: {e}')
+        return None
+
+    relay_proc = subprocess.Popen(
+        [sys.executable, _AUDIO_RELAY_SCRIPT, 'tcp:0', fifo_out_path],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,   # only for the PORT/CONNECTED handshake below;
+        stderr=subprocess.PIPE,   # never written to again once CONNECTED arrives
+        env=relay_env,
+    )
+
+    def _abort(reason):
+        log('WARN', f'[AUDIO] AudioSocket tap for node {node}: {reason} '
+                    f'-- falling back to MixMonitor')
         try:
-            ami_send_command(_stop_mm)
+            relay_proc.kill()
+            relay_proc.wait(timeout=2)
         except Exception:
             pass
-        log('INFO', f'[AUDIO] broadcast for node {self.node} shut down')
+
+    def _readline(timeout):
+        r, _, _ = select.select([relay_proc.stdout], [], [], timeout)
+        if not r:
+            return None
+        line = relay_proc.stdout.readline()
+        return line.decode('utf-8', errors='replace').strip() if line else None
+
+    port_line = _readline(3.0)
+    if not port_line or not port_line.startswith('PORT '):
+        _abort(f'relay did not report a listen port (got {port_line!r})')
+        return None
+    port = int(port_line.split()[1])
+
+    tap_channel_id = f'henwen-tap-{node}-{gen}'
+    as_uuid = str(uuid.uuid4())
+
+    def _originate(ami):
+        ami._send_action({
+            'Action':      'Originate',
+            'Channel':     'Local/tap@henwen-audiosocket-tap',
+            'Application': 'ChanSpy',
+            'Data':        f'{channel},qou',
+            'Timeout':     '15000',
+            'Async':       'true',
+            'ChannelId':   tap_channel_id,
+            'Variable':    f'__AS_UUID={as_uuid},__AS_SERVICE=127.0.0.1:{port}',
+        })
+        raw = ami._recv_until('\r\n\r\n', timeout=ami.timeout)
+        return ami._parse_packet(raw)
+
+    try:
+        pkt = ami_send_command(_originate)
+    except Exception as e:
+        _abort(f'Originate failed: {e}')
+        return None
+    if pkt.get('Response') != 'Success':
+        _abort(f'Originate rejected: {pkt.get("Message", pkt)}')
+        return None
+
+    connected_line = _readline(10.0)
+    if connected_line != 'CONNECTED':
+        _abort(f'never connected (got {connected_line!r})')
+        try:
+            def _hangup(ami):
+                ami._send_action({'Action': 'Hangup', 'Channel': tap_channel_id})
+                ami._recv_until('\r\n\r\n', timeout=ami.timeout)
+                return {'ok': True}
+            ami_send_command(_hangup)
+        except Exception:
+            pass
+        return None
+
+    log('DEBUG', f'[AUDIO] AudioSocket tap connected for node {node} on 127.0.0.1:{port}')
+    return relay_proc, tap_channel_id
 
 
 def _start_broadcast(node):
     """
-    Apply MixMonitor to the node's existing Asterisk channel, spawn the
-    audio_relay.py pacing process (MixMonitor FIFO -> paced FIFO), then
-    point ffmpeg directly at the paced FIFO -> WebM/Opus -> HTTP clients.
-    Raises on error.
+    Capture the node's existing Asterisk channel's audio (via the
+    AudioSocket tap when available, else MixMonitor -- see
+    _try_audiosocket_tap()), spawn the audio_relay.py pacing process
+    (raw PCM in -> paced FIFO out), then point ffmpeg directly at the
+    paced FIFO -> WebM/Opus -> HTTP clients. Raises on error.
     """
     _t0 = time.monotonic()
     channel = _find_node_channel(node)
@@ -8005,39 +8155,54 @@ def _start_broadcast(node):
     # audio pipeline for ~34 minutes on 2026-08-12: the old broadcast's
     # teardown unlinked the new broadcast's freshly-created FIFO between its
     # mkfifo() and audio_relay.py's open(), leaving a MixMonitor writing into
-    # a FIFO with no reader.
+    # a FIFO with no reader. Still relevant in AudioSocket mode too, since
+    # the *output* paced FIFO (the only one that mode uses) is exactly the
+    # same kind of per-instance path.
     _gen = secrets.token_hex(4)
-    fifo_in_path  = f'/tmp/henwen_audio_{node}_{_gen}.sln'
     fifo_out_path = f'/tmp/henwen_audio_{node}_{_gen}_paced.sln'
-    for p in (fifo_in_path, fifo_out_path):
-        if os.path.exists(p):
-            os.unlink(p)
-        os.mkfifo(p)
-        os.chmod(p, 0o666)   # asterisk user must be able to write
-    log('DEBUG', f'[AUDIO] FIFOs created: {fifo_in_path}, {fifo_out_path}')
+    if os.path.exists(fifo_out_path):
+        os.unlink(fifo_out_path)
+    os.mkfifo(fifo_out_path)
+    os.chmod(fifo_out_path, 0o666)   # asterisk user must be able to write
 
-    # audio_relay.py opens both FIFOs itself (O_RDWR, so it never blocks
-    # waiting for MixMonitor/ffmpeg to open their ends first) and paces
-    # MixMonitor's raw PCM into fifo_out_path as strict 20 ms frames,
-    # injecting silence whenever the node is quiet. It runs as its own OS
-    # process specifically so its real-time frame loop is scheduled by the
-    # kernel rather than competing for this gunicorn worker's GIL — see the
-    # module-level comment above.
     _relay_env = os.environ.copy()
     if LOG_LEVEL == 'DEBUG':
         # Only ask the relay for its per-5s frame/silence/drift heartbeat when
         # we're actually running at DEBUG ourselves — otherwise the lines
         # would just be dropped by _relay_stderr_loop below anyway.
         _relay_env['AUDIO_RELAY_DEBUG'] = '1'
-    relay_proc = subprocess.Popen(
-        [sys.executable, _AUDIO_RELAY_SCRIPT, fifo_in_path, fifo_out_path],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        env=_relay_env,
-    )
-    log('DEBUG', f'[AUDIO] relay PID {relay_proc.pid} for node {node} '
-                f'(heartbeat={"on" if _relay_env.get("AUDIO_RELAY_DEBUG") else "off"})')
+
+    fifo_in_path   = None
+    tap_channel_id = None
+    _audiosocket_result = _try_audiosocket_tap(node, channel, fifo_out_path, _gen, _relay_env)
+    if _audiosocket_result is not None:
+        relay_proc, tap_channel_id = _audiosocket_result
+        tap_mode = 'audiosocket'
+        log('DEBUG', f'[AUDIO] relay PID {relay_proc.pid} for node {node} (AudioSocket mode)')
+    else:
+        # audio_relay.py opens both FIFOs itself (O_RDWR, so it never blocks
+        # waiting for MixMonitor/ffmpeg to open their ends first) and paces
+        # MixMonitor's raw PCM into fifo_out_path as strict 20 ms frames,
+        # injecting silence whenever the node is quiet. It runs as its own OS
+        # process specifically so its real-time frame loop is scheduled by the
+        # kernel rather than competing for this gunicorn worker's GIL — see the
+        # module-level comment above.
+        fifo_in_path = f'/tmp/henwen_audio_{node}_{_gen}.sln'
+        if os.path.exists(fifo_in_path):
+            os.unlink(fifo_in_path)
+        os.mkfifo(fifo_in_path)
+        os.chmod(fifo_in_path, 0o666)
+        log('DEBUG', f'[AUDIO] FIFOs created: {fifo_in_path}, {fifo_out_path}')
+        relay_proc = subprocess.Popen(
+            [sys.executable, _AUDIO_RELAY_SCRIPT, fifo_in_path, fifo_out_path],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            env=_relay_env,
+        )
+        tap_mode = 'mixmonitor'
+        log('DEBUG', f'[AUDIO] relay PID {relay_proc.pid} for node {node} '
+                    f'(heartbeat={"on" if _relay_env.get("AUDIO_RELAY_DEBUG") else "off"})')
 
     # ffmpeg reads the already-paced PCM directly from fifo_out_path (a normal
     # blocking open on the read side waits for audio_relay.py's writer to open
@@ -8163,6 +8328,17 @@ def _start_broadcast(node):
     broadcast = _AudioBroadcast(node, channel, ffmpeg_proc, relay_proc)
     broadcast._fifo_in_path  = fifo_in_path    # stored for cleanup in shutdown()
     broadcast._fifo_out_path = fifo_out_path
+    broadcast._tap_mode       = tap_mode
+    broadcast._tap_channel_id = tap_channel_id
+
+    if tap_mode == 'audiosocket':
+        # The tap connection (and thus MixMonitor-equivalent capture) is
+        # already up by this point — _try_audiosocket_tap() doesn't return
+        # until AudioSocket confirms CONNECTED — so there's no further AMI
+        # setup needed here, unlike the MixMonitor branch below.
+        log('INFO', f'[AUDIO] AudioSocket tap started on {channel} for node {node}, '
+                    f'broadcast setup took {time.monotonic() - _t0:.3f}s total')
+        return broadcast
 
     # Ensure app_mixmonitor.so is loaded (not in the default ASL3 module list)
     def _ensure_mm_module(ami):
