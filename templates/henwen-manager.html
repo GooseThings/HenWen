@@ -1108,7 +1108,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
       <div class="card-header">
         <h2>History</h2>
         <div class="btn-row">
-          <input id="ch-search" type="search" placeholder="Search peer / callsign…" style="width:180px;font-size:0.82rem;padding:3px 7px;border:1px solid var(--border);border-radius:4px;background:var(--bg3);color:var(--text)" oninput="chLoad(0)">
+          <input id="ch-search" type="search" placeholder="Search peer / callsign / user…" style="width:180px;font-size:0.82rem;padding:3px 7px;border:1px solid var(--border);border-radius:4px;background:var(--bg3);color:var(--text)" oninput="chLoad(0)">
           <select id="ch-node-sel" onchange="chLoad(0)" style="font-size:0.82rem;padding:3px 6px;border:1px solid var(--border);border-radius:4px;background:var(--bg3);color:var(--text)">
             <option value="">All nodes</option>
             {% for node in nodes %}<option value="{{ node }}">{{ node }}</option>{% endfor %}
@@ -1119,8 +1119,8 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
       </div>
       <div class="card-body" style="padding:0">
         <table class="tbl" id="ch-table">
-          <thead><tr><th>Connected</th><th>Peer Node</th><th>Callsign</th><th>Location</th><th>Dir</th><th>Duration / Status</th></tr></thead>
-          <tbody id="ch-tbody"><tr><td colspan="6" class="muted" style="padding:14px">Loading…</td></tr></tbody>
+          <thead><tr><th>Connected</th><th>Peer Node</th><th>Callsign</th><th>Location</th><th>Dir</th><th>By</th><th>Duration / Status</th></tr></thead>
+          <tbody id="ch-tbody"><tr><td colspan="7" class="muted" style="padding:14px">Loading…</td></tr></tbody>
         </table>
       </div>
       <div class="card-body" style="border-top:1px solid var(--border);padding:8px 12px;display:flex;gap:12px;align-items:center">
@@ -4256,11 +4256,11 @@ async function chLoad(offset) {
   if (node)   url += '&node='   + encodeURIComponent(node);
   var r = await api(url);
   var tbody = document.getElementById('ch-tbody');
-  if (!r.ok) { tbody.innerHTML = '<tr><td colspan="6" class="muted" style="padding:14px">Error loading history.</td></tr>'; return; }
+  if (!r.ok) { tbody.innerHTML = '<tr><td colspan="7" class="muted" style="padding:14px">Error loading history.</td></tr>'; return; }
   _chTotal = r.data.total;
   var rows = r.data.rows;
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="muted" style="padding:14px">No records found.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="muted" style="padding:14px">No records found.</td></tr>';
   } else {
     var html = '';
     rows.forEach(function(row) {
@@ -4274,6 +4274,7 @@ async function chLoad(offset) {
         + '<td style="font-size:0.85rem">'                     + esc(row.peer_callsign || '—') + '</td>'
         + '<td style="font-size:0.82rem;color:var(--text2)">'  + esc(row.peer_location || '—') + '</td>'
         + '<td style="font-size:0.8rem;color:var(--text2)">'   + esc(dirLabel) + '</td>'
+        + '<td style="font-size:0.82rem;color:var(--text2)">'  + esc(row.initiated_by || '—') + '</td>'
         + '<td>' + status + '</td>'
         + '</tr>';
     });

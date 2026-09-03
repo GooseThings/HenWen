@@ -691,8 +691,19 @@ def get_db():
         direction         TEXT    DEFAULT '',
         connected_at      REAL    NOT NULL,
         disconnected_at   REAL,
-        duration_seconds  REAL
+        duration_seconds  REAL,
+        initiated_by      TEXT    DEFAULT ''
     )""")
+    # initiated_by: the HenWen username that clicked Connect/Perm Connect (looked
+    # up from _kiosk_temp_conns at the moment the AMI poller observes the link
+    # come up — see _db_conn_open()). Blank for anything HenWen didn't initiate
+    # itself: a link made permanent in rpt.conf directly, a raw AMI/CLI ilink
+    # command, or app_rpt auto-reconnecting a dropped ilink 13 after HenWen's
+    # own in-process _kiosk_temp_conns entry for it was lost to a restart.
+    # "Smart Connector" for connections the scheduler made on its own.
+    _connhist_cols = {r[1] for r in conn.execute("PRAGMA table_info(connection_history)").fetchall()}
+    if 'initiated_by' not in _connhist_cols:
+        conn.execute("ALTER TABLE connection_history ADD COLUMN initiated_by TEXT DEFAULT ''")
     # _db_conn_open()/_db_conn_close() (called from the 1s AMI poll loop, on
     # every connect/disconnect) both filter on (local_node, peer_node,
     # disconnected_at) -- unlike permanent_links/kiosk_temp_conns, which use
@@ -2590,8 +2601,10 @@ def _poll_loop():
             # individually best-effort (they catch and log their own errors).
             for (ln, pn, direction) in _conn_opens:
                 info = lookup_node(pn)   # may hit the network on a cache miss
+                with _kiosk_temp_lock:
+                    initiated_by = _kiosk_temp_conns.get((ln, pn), {}).get('initiated_by', '')
                 _db_conn_open(ln, pn, info.get("callsign", ""),
-                              info.get("location", ""), direction)
+                              info.get("location", ""), direction, initiated_by)
             for (ln, pn) in _conn_closes:
                 _db_conn_close(ln, pn)
             for (ln, pn) in _link_prunes:
@@ -2909,7 +2922,7 @@ def _forget_keyed(node: str):
 
 # ── Connection history DB helpers ──────────────────────────────────────────────
 
-def _db_conn_open(local_node, peer, callsign, location, direction):
+def _db_conn_open(local_node, peer, callsign, location, direction, initiated_by=''):
     """Insert a connection record only if none is already open for this pair."""
     try:
         db = get_db()
@@ -2922,9 +2935,9 @@ def _db_conn_open(local_node, peer, callsign, location, direction):
             return
         db.execute(
             "INSERT INTO connection_history "
-            "(local_node, peer_node, peer_callsign, peer_location, direction, connected_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (local_node, peer, callsign, location, direction, time.time())
+            "(local_node, peer_node, peer_callsign, peer_location, direction, connected_at, initiated_by) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (local_node, peer, callsign, location, direction, time.time(), initiated_by)
         )
         db.commit()
         log("DEBUG", f"[CONNHIST] Opened: {local_node} <-> {peer} ({direction})")
@@ -5788,9 +5801,9 @@ def api_conn_history():
         where.append("local_node = ?")
         params.append(node)
     if search:
-        where.append("(peer_node LIKE ? OR peer_callsign LIKE ? OR peer_location LIKE ?)")
+        where.append("(peer_node LIKE ? OR peer_callsign LIKE ? OR peer_location LIKE ? OR initiated_by LIKE ?)")
         pat = "%" + search + "%"
-        params.extend([pat, pat, pat])
+        params.extend([pat, pat, pat, pat])
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
     total = db.execute(
@@ -6718,7 +6731,17 @@ def api_ami_connect():
         }
 
     try:
-        return jsonify(ami_send_command(_do))
+        result = ami_send_command(_do)
+        if result.get("success") and mode in ("2", "3", "12", "13"):
+            # Attribute this connection to the logged-in user for Connection
+            # History (see _db_conn_open()), without disturbing any Permanent/
+            # Idle-timeout tracking an earlier connect on this pair already set
+            # in _kiosk_temp_conns — this raw ilink panel doesn't manage that
+            # state itself, unlike /api/status/connect and /api/ami/perm_connect.
+            with _kiosk_temp_lock:
+                entry = _kiosk_temp_conns.setdefault((local_node, remote_node), {})
+                entry['initiated_by'] = session.get('username', '')
+        return jsonify(result)
     except Exception as e:
         log("ERROR", f"[API] /api/ami/connect error: {e}")
         return jsonify({"error": str(e)}), 500
@@ -6780,6 +6803,12 @@ def api_ami_perm_connect():
 
     try:
         result = ami_send_command(_do)
+        if result.get("success") and mode in ("2", "3"):
+            # Non-permanent connect modes via this panel: attribute only,
+            # same as /api/ami/connect — see the comment there.
+            with _kiosk_temp_lock:
+                entry = _kiosk_temp_conns.setdefault((local_node, remote_node), {})
+                entry['initiated_by'] = session.get('username', '')
         if result.get("success") and mode in ("12", "13"):
             monitor = (mode == "12")
             with _kiosk_temp_lock:
@@ -6788,6 +6817,7 @@ def api_ami_perm_connect():
                     'monitor':     monitor,
                     'no_timeout':  False,
                     'last_active': time.time(),
+                    'initiated_by': session.get('username', ''),
                 }
             db = get_db()
             db.execute(
@@ -7170,10 +7200,11 @@ def api_status_connect():
         now = time.time()
         with _kiosk_temp_lock:
             _kiosk_temp_conns[(local_node, remote_node)] = {
-                'permanent':   permanent,
-                'monitor':     monitor,
-                'no_timeout':  False,
-                'last_active': now,
+                'permanent':    permanent,
+                'monitor':      monitor,
+                'no_timeout':   False,
+                'last_active':  now,
+                'initiated_by': session.get('username', ''),
             }
         if permanent:
             db = get_db()
@@ -12682,6 +12713,12 @@ def _run_connectors():
                         raise RuntimeError(
                             f"ilink 3 rejected by Asterisk: {result.get('raw', '')[:120]}"
                         )
+                    # Attribute this connection to Smart Connector for Connection
+                    # History (see _db_conn_open()) — this is a scheduled connect,
+                    # not a specific logged-in user's action.
+                    with _kiosk_temp_lock:
+                        entry = _kiosk_temp_conns.setdefault((local, target), {})
+                        entry['initiated_by'] = 'Smart Connector'
                     db.execute(
                         "UPDATE connectors SET state='connected', state_msg='Connected', "
                         "state_updated=?, connected_at=?, last_activity=?"
