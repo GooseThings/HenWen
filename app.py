@@ -8014,7 +8014,7 @@ def _try_audiosocket_tap(node, channel, fifo_out_path, gen, relay_env):
     """
     Attempt the low-latency AudioSocket capture path (issue #30) for this
     broadcast: spawn audio_relay.py in AudioSocket-listen mode, then
-    Originate a ChanSpy(<channel>,qou) + AudioSocket() Local-channel bridge
+    Originate a ChanSpy(<channel>,q) + AudioSocket() Local-channel bridge
     (installed by audiosocket-tap/apply.sh -- see that script and
     audiosocket-tap/extensions-custom.snippet) pointed at it, and confirm
     the connection actually completed before handing back to the caller.
@@ -8024,12 +8024,29 @@ def _try_audiosocket_tap(node, channel, fifo_out_path, gen, relay_env):
     jitter-buffer comment) -- ~2s of latency baked in before any of this
     app's own pacing/encoding even starts. AudioSocket instead streams each
     20ms frame over a TCP socket as Asterisk produces it, with no such
-    buffering. ChanSpy's 'o' flag means read-only (audio *from* the channel
-    only, never whispered/barged into it) and 'q' suppresses the
-    announce-tone/interactive-digit behavior ChanSpy has by default --
-    verified live against a real running node channel (SimpleUSB/643930)
-    to have zero effect on the channel's own Rpt() execution, with clean
-    teardown via Hangup-by-ChannelId leaving no stray channels behind.
+    buffering.
+
+    Deliberately does NOT pass ChanSpy's 'o' flag ("only listen to audio
+    coming from this channel"), despite that reading like the safe/correct
+    choice — it isn't. 'o' has nothing to do with whisper/barge safety
+    (that's 'w'/'W'/'B', never used here); it restricts ChanSpy to ONE
+    direction of the target channel's own audio. On an app_rpt channel,
+    which has no conventional Asterisk Bridge object (app_rpt composites
+    audio from linked nodes and writes it directly to the local channel via
+    its own internal mixing, not through core's bridging subsystem), 'o'
+    silently drops that written-direction audio and leaves only the local
+    hardware receiver's own input — audible live as "no audio" whenever a
+    *linked* node is transmitting, even though the repeater is genuinely
+    keyed (confirmed live: -91dB/near-silence captured with 'o' during a
+    real link's active transmission, vs. -21dB/real audio content with it
+    removed, same moment, same channel). Bare 'q' (suppress the
+    announce-tone/interactive-digit behavior ChanSpy has by default) mixes
+    both directions, matching MixMonitor's own default behavior. Still
+    strictly listen-only either way — dropping 'o' does not add whisper/
+    barge; only 'w'/'W'/'B' do that, and none are used here. Verified live
+    against a real running node channel (SimpleUSB/643930) to have zero
+    effect on the channel's own Rpt() execution, with clean teardown via
+    Hangup-by-ChannelId leaving no stray channels behind.
 
     Purely additive/opt-in: on ANY failure -- most commonly the feature
     simply not installed yet (audiosocket-tap/apply.sh never run, the
@@ -8094,7 +8111,7 @@ def _try_audiosocket_tap(node, channel, fifo_out_path, gen, relay_env):
             'Action':      'Originate',
             'Channel':     'Local/tap@henwen-audiosocket-tap',
             'Application': 'ChanSpy',
-            'Data':        f'{channel},qou',
+            'Data':        f'{channel},q',
             'Timeout':     '15000',
             'Async':       'true',
             'ChannelId':   tap_channel_id,

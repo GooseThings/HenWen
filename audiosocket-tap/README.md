@@ -19,11 +19,16 @@ socket as it's produced, with no such buffering.
 - Three Asterisk modules loaded live and persisted in `modules.conf`:
   `res_audiosocket.so`, `app_audiosocket.so` (load order matters — the app
   resolves a symbol from the res_ module at load time), and `app_chanspy.so`
-  (`ChanSpy(<channel>,qou)` is what actually captures the node channel's
+  (`ChanSpy(<channel>,q)` is what actually captures the node channel's
   audio onto the tap leg — `q` suppresses the interactive tone/prompt
-  behavior, `o` means read-only: audio *from* the channel only, never
-  whispered/barged into it, so this has zero effect on the node's own
-  `Rpt()` execution).
+  behavior. Deliberately not `o`: that flag restricts capture to one
+  direction of the target's own audio, which on an app_rpt channel (no
+  conventional Asterisk Bridge — linked-node audio is composited and
+  written directly to the channel by app_rpt itself) silently drops
+  linked-node traffic, leaving only the local hardware receiver's own
+  input. This is still strictly listen-only either way — whisper/barge
+  require `w`/`W`/`B`, none of which are used — so it has zero effect on
+  the node's own `Rpt()` execution).
 
 `app.py`'s `_try_audiosocket_tap()` (see `_start_broadcast()` in app.py) then
 originates a Local-channel bridge — one half runs `ChanSpy` on the node's
