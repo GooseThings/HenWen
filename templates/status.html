@@ -876,7 +876,18 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   .node-card {
     min-height: 0; max-height: none; padding: 14px 12px;
   }
-  .connected-card, .activity-card, .favorites-card, .chat-card, .meshtastic-card { max-height: 320px; }
+  .activity-card, .favorites-card, .chat-card, .meshtastic-card { max-height: 320px; }
+  /* Connected Nodes is deliberately uncapped here (unlike the cards above):
+     with a fixed max-height, .node-list's own overflow-y:auto (needed for
+     the desktop fixed-grid-row layout) kicks in on mobile too, forcing an
+     awkward internally-scrolling list on top of the page's own scroll once
+     more than a couple of nodes are connected, or the PTT bar (#tx-bar,
+     inline above the list in this same card while armed) eats into the
+     capped height. Letting the card grow to its content's natural height
+     means every connected node is visible via the one ordinary page
+     scroll instead. */
+  .connected-card { max-height: none; }
+  .connected-card .node-list { overflow-y: visible; }
   .map-card { height: 340px; flex-shrink: 0; }
   .card-header { padding: 10px 12px 8px; }
 
