@@ -7411,6 +7411,26 @@ def api_tx_config():
     if not nodes:
         return jsonify({"error": "No local node configured"}), 500
     node = str(nodes[0])
+
+    # app_rpt's Time-Out Timer (totime=, in *milliseconds* despite the name
+    # inviting the "seconds" guess — confirmed against rpt.conf's own inline
+    # comment: "transmit time-out time (in ms) ... default to 180000 ms (3
+    # minutes)"). parse_stanza_settings() resolves node-vs-template
+    # inheritance/override the same way Asterisk itself would, so this is
+    # the value that's actually in effect for this node, not just whatever
+    # its own stanza happens to say. A commented-out or unparseable value
+    # falls back to app_rpt's own documented default (180s) rather than 0,
+    # since 0 would read as "no timeout" — a real, different setting app_rpt
+    # itself doesn't treat totime=0 as meaning (0 isn't a valid totime).
+    tot_sec = 180
+    node_settings = parse_stanza_settings(content, node) if content else {}
+    tot_setting = node_settings.get("totime")
+    if tot_setting and not tot_setting.get("commented") and tot_setting.get("value"):
+        try:
+            tot_sec = max(0, int(tot_setting["value"])) // 1000
+        except ValueError:
+            pass
+
     log("INFO", f"[TX] Browser-TX credentials issued to {session.get('username', '?')} "
                 f"for node {node}")
     resp = jsonify({
@@ -7420,6 +7440,7 @@ def api_tx_config():
         "ws_path":  TX_WS_PATH,
         "dial":     "2" + node,
         "node":     node,
+        "tot_sec":  tot_sec,
     })
     # Live SIP credential in the body — keep it out of shared-kiosk disk caches.
     resp.headers["Cache-Control"] = "no-store"

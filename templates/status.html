@@ -1279,7 +1279,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <input type="range" id="listen-volume" min="0" max="100" value="100" disabled title="Listen volume — separate from your device's system volume" style="flex:1">
       </div>
       <div id="tx-bar" style="display:none">
-        <button id="tx-ptt" disabled><svg class="icon"><use href="#icon-mic"></use></svg> PTT &mdash; hold to transmit&ensp;<span class="tx-ptt-space-hint" style="font-size:0.7rem;font-weight:400">(or hold Space &middot; keys in ~&frac12;s)</span></button>
+        <button id="tx-ptt" disabled>
+          <div><svg class="icon"><use href="#icon-mic"></use></svg> PTT &mdash; hold to transmit&ensp;<span class="tx-ptt-space-hint" style="font-size:0.7rem;font-weight:400">(or hold Space &middot; keys in ~&frac12;s)</span></div>
+          <div id="tx-ptt-tot" style="font-size:0.7rem;font-weight:400;opacity:.8;display:none"></div>
+        </button>
         <div id="tx-audio-row">
           <span style="font-size:0.7rem;color:var(--text2);flex-shrink:0">Mic</span>
           <div id="tx-meter"><div id="tx-meter-fill"></div></div>
@@ -5610,6 +5613,16 @@ async function armTx() {
     await _loadJsSIP();
     if (!_tx.armed) return;  // disarmed while loading
     _tx.node = cfg.node;
+
+    var totEl = document.getElementById('tx-ptt-tot');
+    if (totEl) {
+      if (typeof cfg.tot_sec === 'number' && cfg.tot_sec > 0) {
+        totEl.textContent = 'Time-out timer: ' + _histDuration(cfg.tot_sec);
+        totEl.style.display = '';
+      } else {
+        totEl.style.display = 'none';
+      }
+    }
 
     var domain = location.hostname;
     var socket = new JsSIP.WebSocketInterface('wss://' + location.host + cfg.ws_path);
