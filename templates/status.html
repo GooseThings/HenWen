@@ -874,16 +874,34 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   /* Cards no longer share an implicit grid-row height, so each gets its own
      cap with an internally-scrolling list instead of flexing to fill a row. */
   .node-card {
-    min-height: 0; max-height: none; padding: 14px 12px;
+    min-height: 0; max-height: none; padding: 12px 14px;
   }
   .connected-card, .activity-card, .favorites-card, .chat-card, .meshtastic-card { max-height: 320px; }
   .map-card { height: 340px; flex-shrink: 0; }
   .card-header { padding: 10px 12px 8px; }
 
-  .node-number { font-variant-numeric: tabular-nums; font-size: 1.9rem; }
-  .node-callsign { font-size: 1.1rem; }
-  .keyed-dot { width: 32px; height: 32px; }
-  .keyed-label { font-size: 0.88rem; }
+  /* Node panel: info-left / status-right instead of one tall centered
+     stack. The centered-column desktop layout wastes the width that's
+     otherwise empty on a single-column phone screen, and made this one of
+     the tallest things on the page for what's really just 3 lines of text
+     plus a status badge. #node-info's children are flat siblings (see
+     refreshBoard()'s nc.innerHTML), so a 2-column grid can place the
+     number/callsign/location column and the status badge independently
+     without any markup change — .keyed-wrap is explicitly given both axes
+     (col 2, spanning the other three's rows) so the grid's auto-placement
+     slots node-number/callsign/location into column 1 in DOM order around it. */
+  #node-info {
+    display: grid; grid-template-columns: 1fr auto; align-items: center;
+    column-gap: 12px; row-gap: 1px; text-align: left;
+  }
+  .node-number, .node-callsign, .node-location { grid-column: 1; text-align: left; }
+  .node-number { font-variant-numeric: tabular-nums; font-size: 1.6rem; }
+  .node-callsign { font-size: 0.95rem; }
+  .node-location { font-size: 0.72rem; }
+  .keyed-wrap { grid-column: 2; grid-row: 1 / span 3; margin: 0; }
+  .keyed-dot { width: 34px; height: 34px; }
+  .keyed-label { font-size: 0.62rem; }
+  .locked-badge { grid-column: 1 / span 2; justify-self: start; }
 
   /* .node-row already wraps instead of truncating (see base styles) — just
      tighten sizes/gaps so more fits per line before wrapping kicks in. */
