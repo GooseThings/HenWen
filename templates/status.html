@@ -810,6 +810,12 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   .header-menu-items #kiosk-user-bar { flex-direction: column; align-items: stretch; width: 100%; }
   .header-menu-label { display: inline; margin-left: 8px; }
 
+  /* Time/weather bars hidden entirely on mobile (issue #35) — not just
+     collapsed, since there's no header affordance to tap here the way
+     cards have. #net-bar shares the .weather-bar class but is untouched:
+     it's its own independent net-reminder toggle, already hidden unless a
+     net is actually due today. */
+  #clock-bar, #weather-bar { display: none !important; }
   .weather-bar { min-height: 0; overflow: visible; }
   /* The "|" separator only reads right on a single ticker line, which never
      happens at this width — hide it and force .weather-items onto its own
@@ -845,21 +851,23 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
   /* Fewer visible cards by default (issue #35): Node + Connected Nodes are
      what a phone visitor checks first (see the ordering comment above) and
-     always stay expanded; everything else collapses to just its header
-     unless previously expanded (see onMobileCardHeaderClick() and the
-     load-time init that reads localStorage — default is collapsed, not
-     "whatever was visible last," so a first-time mobile visitor gets the
-     minimal view immediately). Content is unaffected: this hides
-     presentation only, all the same data still loads/updates underneath. */
+     always stay expanded. Map/Latest Activity/Meshtastic/Chat are hidden
+     outright on mobile (not just collapsed — there's nothing to tap to get
+     them back; a phone visitor who wants those checks the desktop site).
+     Favorites is the one exception left collapsible rather than hidden:
+     tap its header to expand (see onMobileCardHeaderClick() and the
+     load-time init that reads localStorage — default is collapsed, so a
+     first-time mobile visitor still gets the minimal view immediately).
+     None of this touches content/data — hidden cards' data still loads and
+     updates underneath, same as before, in case they're ever un-hidden. */
   .content-area { gap: 8px; }
-  .map-card .card-header, .activity-card .card-header, .meshtastic-card .card-header,
-  .favorites-card .card-header, .chat-card .card-header { cursor: pointer; }
+  .map-card, .activity-card, .meshtastic-card, .chat-card { display: none !important; }
+  .favorites-card .card-header { cursor: pointer; }
   .mobile-collapse-chevron { display: flex; align-items: center; margin-left: 4px; color: var(--text2); transition: transform .15s; flex-shrink: 0; }
   .mobile-collapse-chevron .icon { width: 1rem; height: 1rem; }
   .dash-card.mobile-collapsed > :not(.card-header) { display: none !important; }
   .dash-card.mobile-collapsed .mobile-collapse-chevron { transform: rotate(-90deg); }
   .dash-card.mobile-collapsed { max-height: none; }
-  .map-card.mobile-collapsed { height: auto; flex-shrink: 1; }
 
   /* Cards no longer share an implicit grid-row height, so each gets its own
      cap with an internally-scrolling list instead of flexing to fill a row. */
@@ -1238,7 +1246,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <!-- Map -->
     <div class="map-card dash-card" data-dash-id="map"
          ondragover="dashDragOver(event)" ondragleave="dashDragLeave(event)" ondrop="dashDrop(event,'map')">
-      <div class="card-header" onclick="onMobileCardHeaderClick(event,'map')">
+      <div class="card-header">
         <span class="dash-header-grip" draggable="true" title="Drag to move"
               ondragstart="dashDragStart(event,'map')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
         <span class="card-title">Map</span>
@@ -1302,7 +1310,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
           </div>
         </div>
         <button class="dash-hide-btn" onclick="toggleDashHide('map',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
-        <span class="mobile-collapse-chevron" aria-hidden="true"><svg class="icon"><use href="#icon-chevron-down"></use></svg></span>
       </div>
       <div id="map"></div>
     </div>
@@ -1310,13 +1317,12 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <!-- Latest Activity: under Connected Nodes, right of the map, matching the map's height -->
     <div class="activity-card dash-card" data-dash-id="activity"
          ondragover="dashDragOver(event)" ondragleave="dashDragLeave(event)" ondrop="dashDrop(event,'activity')">
-      <div class="card-header" onclick="onMobileCardHeaderClick(event,'activity')">
+      <div class="card-header">
         <span class="dash-header-grip" draggable="true" title="Drag to move"
               ondragstart="dashDragStart(event,'activity')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
         <span class="card-title">Latest Activity</span>
         <span class="card-count" id="act-count"></span>
         <button class="dash-hide-btn" style="margin-left:auto" onclick="toggleDashHide('activity',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
-        <span class="mobile-collapse-chevron" aria-hidden="true"><svg class="icon"><use href="#icon-chevron-down"></use></svg></span>
       </div>
       <div class="activity-list" id="activity-list">
         <div class="empty-msg">Loading&hellip;</div>
@@ -1326,13 +1332,12 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <!-- Meshtastic: public-channel MQTT text feed, config is Manager > Meshtastic (owner-only) -->
     <div class="meshtastic-card dash-card" data-dash-id="meshtastic"
          ondragover="dashDragOver(event)" ondragleave="dashDragLeave(event)" ondrop="dashDrop(event,'meshtastic')">
-      <div class="card-header" onclick="onMobileCardHeaderClick(event,'meshtastic')">
+      <div class="card-header">
         <span class="dash-header-grip" draggable="true" title="Drag to move"
               ondragstart="dashDragStart(event,'meshtastic')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
         <span class="card-title">Meshtastic</span>
         <span class="mesh-channel-label" id="mesh-channel-label"></span>
         <button class="dash-hide-btn" style="margin-left:auto" onclick="toggleDashHide('meshtastic',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
-        <span class="mobile-collapse-chevron" aria-hidden="true"><svg class="icon"><use href="#icon-chevron-down"></use></svg></span>
       </div>
       <div class="mesh-list" id="mesh-list">
         <div class="empty-msg">Loading&hellip;</div>
@@ -1372,12 +1377,11 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
          message data is ever fetched until login is confirmed. -->
     <div class="chat-card dash-card" data-dash-id="chat"
          ondragover="dashDragOver(event)" ondragleave="dashDragLeave(event)" ondrop="dashDrop(event,'chat')">
-      <div class="card-header" onclick="onMobileCardHeaderClick(event,'chat')">
+      <div class="card-header">
         <span class="dash-header-grip" draggable="true" title="Drag to move"
               ondragstart="dashDragStart(event,'chat')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
         <span class="card-title">Chat</span>
         <button class="dash-hide-btn" onclick="toggleDashHide('chat',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
-        <span class="mobile-collapse-chevron" aria-hidden="true"><svg class="icon"><use href="#icon-chevron-down"></use></svg></span>
       </div>
       <div class="chat-login-note" id="chat-login-note">Log in to join the chat.</div>
       <div class="chat-list" id="chat-list" role="log" aria-live="polite" aria-relevant="additions" style="display:none"></div>
@@ -1823,14 +1827,15 @@ var _mapDirty           = false;  /* data changed while a popup was open */
       same open/outside-click/fixed-position pattern as the map options
       dropdown just below (#header-menu-items is display:contents on
       desktop, so this is purely additive there).
-   2. Collapsible secondary cards — Map/Activity/Meshtastic/Favorites/Chat
-      start collapsed to just their header on a phone; Node and Connected
-      Nodes (what a visitor checks first) always stay expanded. Each card's
-      open/closed state persists per-browser in localStorage, so a panel
-      someone actually opens stays open across reloads instead of
-      re-collapsing every time. */
+   2. Collapsible Favorites card — starts collapsed to just its header on a
+      phone; Node and Connected Nodes (what a visitor checks first) always
+      stay expanded. Its open/closed state persists per-browser in
+      localStorage, so it stays open across reloads once opened. Map,
+      Latest Activity, Meshtastic, and Chat are hidden outright on mobile
+      instead (see the CSS, not collapsible at all) — a phone visitor who
+      wants those uses the desktop site. */
 var MOBILE_BREAKPOINT_QUERY  = '(max-width: 860px)';
-var MOBILE_COLLAPSIBLE_CARDS = ['map', 'activity', 'meshtastic', 'favorites', 'chat'];
+var MOBILE_COLLAPSIBLE_CARDS = ['favorites'];
 
 function onMobileCardHeaderClick(e, cardId) {
   if (!window.matchMedia(MOBILE_BREAKPOINT_QUERY).matches) return;
