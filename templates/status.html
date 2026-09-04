@@ -3807,8 +3807,8 @@ async function refreshBoard() {
         if (typeof c.connect_elapsed_sec === 'number') meta.push('Connected: <strong>' + _histDuration(c.connect_elapsed_sec) + '</strong>');
         meta.push('Keyups: <strong>' + (c.keyups || 0) + '</strong>');
         var modeBadge = '';
-        if (c.mode === 'T') modeBadge = '<span class="mode-badge tx">TX</span>';
-        else if (c.mode === 'R') modeBadge = '<span class="mode-badge mon">Mon</span>';
+        if (c.mode === 'T') modeBadge = '<span class="mode-badge tx">TX enabled</span>';
+        else if (c.mode === 'R') modeBadge = '<span class="mode-badge mon">Monitor Only</span>';
         var idleBadge = '';
         if (c.permanent === false && c.no_timeout !== true && typeof c.idle_elapsed === 'number') {
           var mins = Math.floor(c.idle_elapsed / 60);
@@ -3863,7 +3863,8 @@ async function refreshBoard() {
               (c.callsign ? callsignLink(c.callsign, 'nr-call') : '<div class="nr-call">—</div>') +
               '<div class="nr-loc">' + esc(c.location||c.desc||'') + '</div>' +
             '</div>' +
-            (meta.length ? '<div class="nr-meta"><span>' + meta.join('</span><span>') + '</span>' + badges + '</div>' : (badges ? '<div class="nr-meta">' + badges + '</div>' : '')) +
+            (meta.length ? '<div class="nr-meta"><span>' + meta.join('</span><span>') + '</span></div>' : '') +
+            (badges ? '<div class="nr-meta nr-badges">' + badges + '</div>' : '') +
             (!isConn ? '<div class="nr-meta" style="color:var(--warn)">Connecting…</div>' : '') +
           '</div>' +
           renderKeyedTimeline(c.local_node, c.node) +
