@@ -1908,6 +1908,17 @@ function toggleHeaderMenu(e) {
   document.addEventListener('click', _headerMenuOutsideClick);
 }
 
+/* Close the menu once an item inside it is actually picked (Net Schedule,
+   Account, Fullscreen, Manager, ...) instead of leaving it open until the
+   next outside tap — every control in here is a one-shot action, not a
+   toggle that needs the menu to stay open. Delegated on the wrapper so it
+   covers every current and future item without a per-button onclick edit;
+   fires on the bubble phase, after the clicked button's own onclick has
+   already run. */
+document.getElementById('header-menu-items').addEventListener('click', function() {
+  if (_headerMenuOpen) closeHeaderMenu();
+});
+
 /* ── Map options dropdown (hamburger menu) ──
    Holds every map toggle/select (Radar, Alerts, ASL, APRS, ISS, tile style)
    that used to sit directly in the card header — same open/outside-click
