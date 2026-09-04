@@ -20,11 +20,57 @@ import os
 import sys
 import time
 import signal
+import struct
+import array
 
 FRAME_BYTES    = 320    # 20 ms at 8 kHz mono s16le (160 samples x 2 bytes)
 FRAME_INTERVAL = 0.020
 SILENCE_FRAME  = b'\x00' * FRAME_BYTES
 STATS_INTERVAL = 5.0    # seconds between STATS lines on stderr
+
+# Length of the declick ramp applied at a discontinuity (real<->silence
+# transition, or an overflow-drop splice) — see _fade_frame() below. 40
+# samples = 5ms at 8kHz: long enough to turn a hard sample-value jump into an
+# inaudible ramp, short enough that the ramp itself is never perceptible as
+# its own artifact. Applied only at the rare frames where a discontinuity is
+# known to exist, not on every frame, so the added cost is a handful of
+# float multiplies a few times a second at most — negligible even on a Pi
+# Zero 2 W.
+FADE_SAMPLES = 40
+_NATIVE_LE   = sys.byteorder == 'little'
+
+
+def _fade_frame(frame_bytes, start_sample, n=FADE_SAMPLES):
+    """Blend the first `n` samples of `frame_bytes` from `start_sample`
+    (the last sample actually written to out_fd) into the frame's own
+    content, linearly. Used to smooth over a point where the output is not
+    a sample-continuous extension of what was just emitted:
+
+      - a genuine underrun (real audio -> silence): the silence frame is
+        all zero, so this ramps start_sample down to ~0 instead of an
+        instant drop.
+      - recovery from an underrun (silence -> real audio): start_sample is
+        ~0, so this ramps up into the real frame's content instead of an
+        instant jump.
+      - an overflow drop (oldest audio discarded to bound latency): both
+        sides are real audio, but no longer contiguous samples, so this
+        smooths the splice the same way.
+
+    Without this, any of the above is a hard sample-value discontinuity —
+    audible as a click or pop. frame_bytes is always exactly FRAME_BYTES
+    long (a full real slice or a copy of SILENCE_FRAME), so the return
+    value is too."""
+    samples = array.array('h')
+    samples.frombytes(frame_bytes)
+    if not _NATIVE_LE:
+        samples.byteswap()
+    n = min(n, len(samples))
+    for i in range(n):
+        t = (i + 1) / (n + 1)
+        samples[i] = int(start_sample * (1 - t) + samples[i] * t)
+    if not _NATIVE_LE:
+        samples.byteswap()
+    return samples.tobytes()
 
 # DEBUG env var (set by app.py when it spawns us) enables the STATS heartbeat
 # below plus a couple of one-off diagnostic lines. Left off by default since
@@ -68,12 +114,23 @@ def main():
     # injected on a genuine buffer underrun (nothing left to send);
     # overflows counts how many times the jitter buffer exceeded its cap
     # and we dropped the oldest audio to keep latency bounded; resyncs
-    # counts scheduler-slip recoveries.
+    # counts scheduler-slip recoveries; fades counts declick ramps applied
+    # (see _fade_frame) — a real<->silence transition or an overflow splice.
     real_frames    = 0
     silence_frames = 0
     overflows      = 0
     resyncs        = 0
+    fades          = 0
     stats_deadline = time.monotonic() + STATS_INTERVAL
+
+    # Declick state: the last sample actually written to out_fd, and whether
+    # that frame was real audio or injected silence — used by _fade_frame to
+    # smooth the next frame if it turns out to be a discontinuity. fade_pending
+    # is set by the overflow-drop path below, since that's a real->real splice
+    # that the real/silence transition check alone wouldn't catch.
+    last_sample       = 0
+    prev_frame_is_real = False
+    fade_pending       = False
 
     # Jitter buffer. MixMonitor delivers PCM in bursts, not a smooth 20ms
     # trickle, so a per-slot "is there exactly one frame readable right
@@ -148,16 +205,29 @@ def main():
             drop = len(buf) - MAX_BUF_BYTES
             del buf[:drop]
             overflows += 1
+            fade_pending = True    # real audio, but no longer contiguous — declick the splice
             if DEBUG:
                 _stat(f'buffer overflow: dropped {drop} byte(s) of oldest audio')
 
-        if len(buf) >= FRAME_BYTES:
-            frame = bytes(buf[:FRAME_BYTES])
+        frame_is_real = len(buf) >= FRAME_BYTES
+        if frame_is_real:
+            frame = bytearray(buf[:FRAME_BYTES])
             del buf[:FRAME_BYTES]
             real_frames += 1
         else:
-            frame = SILENCE_FRAME       # genuine underrun — buffer is empty
+            frame = bytearray(SILENCE_FRAME)   # genuine underrun — buffer is empty
             silence_frames += 1
+
+        # A real<->silence transition or an overflow splice means this frame
+        # isn't a sample-continuous extension of the last one written — ramp
+        # from last_sample into this frame's own content instead of emitting
+        # the hard jump raw (audible as a click/pop). See _fade_frame().
+        if fade_pending or frame_is_real != prev_frame_is_real:
+            frame = _fade_frame(frame, last_sample)
+            fade_pending = False
+            fades += 1
+        prev_frame_is_real = frame_is_real
+        last_sample = struct.unpack_from('<h', frame, FRAME_BYTES - 2)[0]
 
         try:
             os.write(out_fd, frame)
@@ -174,12 +244,13 @@ def main():
             pct_silence = (100.0 * silence_frames / total) if total else 0.0
             _stat(f'frames real={real_frames} silence={silence_frames} '
                   f'({pct_silence:.1f}% silence) overflows={overflows} '
-                  f'resyncs={resyncs} buf={len(buf)}B drift={(now - deadline):+.3f}s')
+                  f'resyncs={resyncs} fades={fades} buf={len(buf)}B '
+                  f'drift={(now - deadline):+.3f}s')
             stats_deadline = now + STATS_INTERVAL
 
     if DEBUG:
         _stat(f'exiting: real_frames={real_frames} silence_frames={silence_frames} '
-              f'overflows={overflows} resyncs={resyncs}')
+              f'overflows={overflows} resyncs={resyncs} fades={fades}')
 
     for fd in (in_fd, out_fd):
         try:
