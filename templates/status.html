@@ -804,13 +804,20 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
      options menu works (see .map-ctl-dropdown). */
   #header-menu-btn { display: flex !important; }
   .header-menu-items {
-    display: none; position: fixed; flex-direction: column; gap: 2px;
+    display: none; position: fixed; flex-direction: column; gap: 6px;
     background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
-    padding: 6px; min-width: 190px; box-shadow: 0 4px 16px rgba(0,0,0,.4); z-index: 2000;
+    padding: 8px; min-width: 220px; box-shadow: 0 4px 16px rgba(0,0,0,.4); z-index: 2000;
   }
-  .header-menu-items .btn-icon { width: 100%; justify-content: flex-start; }
-  .header-menu-items #kiosk-user-bar { flex-direction: column; align-items: stretch; width: 100%; }
-  .header-menu-label { display: inline; margin-left: 8px; }
+  /* Bigger touch targets than the same buttons get elsewhere (e.g. the
+     Connected Nodes header) — this is a vertical list of one-shot taps with
+     nothing else competing for the row's width, so there's no reason to
+     keep them icon-strip-sized here. ~44px tall meets the usual minimum
+     touch-target guidance. */
+  .header-menu-items .btn-icon {
+    width: 100%; justify-content: flex-start; padding: 12px 14px; font-size: 1rem;
+  }
+  .header-menu-items #kiosk-user-bar { flex-direction: column; align-items: stretch; width: 100%; gap: 6px; }
+  .header-menu-label { display: inline; margin-left: 10px; }
 
   /* Time/weather bars hidden entirely on mobile (issue #35) — not just
      collapsed, since there's no header affordance to tap here the way
