@@ -34,7 +34,18 @@ apt-get install -y python3-venv python3-full 2>/dev/null || true
 # ── Copy files ────────────────────────────────────────────
 echo "[2/9] Installing to $INSTALL_DIR..."
 mkdir -p "$INSTALL_DIR"
-cp -r . "$INSTALL_DIR/"
+# Re-running this script from inside a checkout that already *is*
+# INSTALL_DIR (e.g. /opt/HenWen's own live git checkout, used to pick up a
+# sudoers rule added after the initial install) makes `cp -r .
+# "$INSTALL_DIR/"` a same-file no-op that cp refuses to do — under `set -e`
+# that would otherwise abort the whole script before reaching the later
+# steps (sudoers rule, firewall, service enable). Skip the copy in that one
+# case; every other file/permission/service step below still runs.
+if [ "$(pwd -P)" = "$(cd "$INSTALL_DIR" && pwd -P)" ]; then
+    echo "      Already running from $INSTALL_DIR — skipping copy."
+else
+    cp -r . "$INSTALL_DIR/"
+fi
 chmod 755 "$INSTALL_DIR"          # standard app dir: owner rwx, group rx, others rx
 chmod +x "$INSTALL_DIR/"*.sh 2>/dev/null || true
 
