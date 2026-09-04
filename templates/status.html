@@ -179,8 +179,18 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .btn-icon { background: var(--bg3); border: 1px solid var(--border); color: var(--text2);
   border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 0.82rem;
   text-decoration: none; display: inline-flex; align-items: center; gap: 4px;
-  line-height: 1; transition: color .15s, border-color .15s; }
+  line-height: 1; transition: color .15s, border-color .15s; white-space: nowrap; }
 .btn-icon:hover { color: var(--text); border-color: var(--text2); }
+
+/* TX/Listen/Rec cycle through longer active-state labels (e.g. "TX
+   arming…", "Reconnecting...", "Rec Stop (12:34)") than their resting
+   "TX"/"Listen"/"Rec" text. Without nowrap above, a button narrower than
+   its longest label would wrap that text onto a second line internally,
+   growing just that one button's height mid-interaction — jarring since
+   its neighbors don't move. nowrap fixes the internal wrap; the extra
+   padding/font-size here gives these three enough room that the longest
+   states actually fit, so the row reflows (if anything) instead. */
+#tx-btn, #listen-btn, #record-btn { padding: 8px 13px; font-size: 0.88rem; }
 
 /* Header's utility row (search/net-schedule/login/layout-edit/fullscreen/
    manager) — lives in .header-actions, on the right of .header-brand via
@@ -1249,18 +1259,17 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <span class="dash-header-grip" draggable="true" title="Drag to move"
               ondragstart="dashDragStart(event,'connected')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
         <span class="card-title">Connected Nodes</span>
-        <span class="card-count" id="conn-count"></span>
         <span style="margin-left:auto;display:flex;align-items:center;gap:6px">
           <button class="btn-icon" id="tx-btn" onclick="openTx()" style="display:none" title="Transmit from your microphone through this node"><svg class="icon"><use href="#icon-mic"></use></svg> TX</button>
-          <span id="listen-vol-row" style="display:flex;align-items:center;gap:4px;opacity:0.4">
-            <span style="font-size:0.8rem;color:var(--text2)" title="Listen volume"><svg class="icon"><use href="#icon-volume-2"></use></svg></span>
-            <input type="range" id="listen-volume" min="0" max="100" value="100" disabled title="Listen volume — separate from your device's system volume">
-          </span>
           <button class="btn-icon" id="listen-btn" onclick="toggleListen()" title="Stream live audio from this node — expect ~1 second delay"><svg class="icon"><use href="#icon-headphones"></use></svg> Listen</button>
-          <button class="btn-icon" id="record-btn" onclick="toggleRecord()" style="display:none" title="Record this node's audio to a file"><svg class="icon" style="color:var(--red,#f85149)"><use href="#icon-circle"></use></svg> REC</button>
+          <button class="btn-icon" id="record-btn" onclick="toggleRecord()" style="display:none" title="Record this node's audio to a file"><svg class="icon" style="color:var(--red,#f85149)"><use href="#icon-circle"></use></svg> Rec</button>
           <button class="btn-icon" id="myrec-btn" onclick="openMyRecordingsModal()" style="display:none" title="View, rename, download, or delete your saved recordings"><svg class="icon"><use href="#icon-folder-open"></use></svg></button>
           <button class="dash-hide-btn" onclick="toggleDashHide('connected',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
         </span>
+      </div>
+      <div id="listen-vol-row" style="display:flex;align-items:center;gap:8px;padding:7px 18px;border-bottom:1px solid var(--border);opacity:0.4">
+        <span style="font-size:0.78rem;color:var(--text2);flex-shrink:0;display:flex;align-items:center;gap:4px" title="Listen volume"><svg class="icon"><use href="#icon-volume-2"></use></svg> Volume</span>
+        <input type="range" id="listen-volume" min="0" max="100" value="100" disabled title="Listen volume — separate from your device's system volume" style="flex:1">
       </div>
       <div id="tx-bar" style="display:none">
         <button id="tx-ptt" disabled><svg class="icon"><use href="#icon-mic"></use></svg> PTT &mdash; hold to transmit&ensp;<span class="tx-ptt-space-hint" style="font-size:0.7rem;font-weight:400">(or hold Space &middot; keys in ~&frac12;s)</span></button>
@@ -3769,7 +3778,6 @@ async function refreshBoard() {
       });
     });
     var nl = document.getElementById('node-list');
-    document.getElementById('conn-count').textContent = allLinked.length ? allLinked.length + ' linked' : '';
 
     var warnBar = document.getElementById('connector-warn-bar');
     if (warnBar) {
@@ -5178,7 +5186,7 @@ function _startRecord() {
     body:    JSON.stringify({node: node}),
   }).then(function(r) {
     if (r.status === 401) {
-      _recordSetBtn(_RECORD_ICON + ' REC', '', false);
+      _recordSetBtn(_RECORD_ICON + ' Rec', '', false);
       openKioskLogin(_startRecord, []);
       return null;
     }
@@ -5229,7 +5237,7 @@ function _startRecord() {
     if (e.name === 'AbortError') return;
     _recordActive = false;
     _recordCtrl   = null;
-    _recordSetBtn(_RECORD_ICON + ' REC', '', false);
+    _recordSetBtn(_RECORD_ICON + ' Rec', '', false);
     sbToast('Could not start recording: ' + e.message, false);
   });
 }
@@ -5240,7 +5248,7 @@ function _stopRecord(auto) {
   if (_recordElapsedTimer) { clearInterval(_recordElapsedTimer); _recordElapsedTimer = null; }
   if (_recordCtrl) { _recordCtrl.abort(); _recordCtrl = null; }
   _recordActive = false;
-  _recordSetBtn(_RECORD_ICON + ' REC', '', false);
+  _recordSetBtn(_RECORD_ICON + ' Rec', '', false);
 
   var rid = _recordCurrentId;
   _recordCurrentId = null;
