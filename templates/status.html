@@ -156,6 +156,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .header-brand { display: flex; align-items: center; gap: 10px; color: var(--text2);
   font-size: 0.9rem; letter-spacing: 0.06em; }
 .header-brand strong { color: var(--accent); font-size: 1rem; }
+.header-brand-mobile-suffix { display: none; }
 .header-logo { height: 48px; width: 48px; object-fit: contain; flex-shrink: 0;
   filter: drop-shadow(0 0 6px rgba(63,185,80,.35)); }
 /* Owner-uploaded club/callsign branding, centered independent of the two
@@ -792,6 +793,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   .header-logo { height: 31px; width: 31px; }
   .header-brand { font-size: 0.8rem; }
   .header-brand strong { font-size: 0.92rem; }
+  .header-brand-mobile-suffix { display: inline; }
   .header-actions { gap: 6px; }
   .header-club-logo { display: none; }
 
@@ -1097,7 +1099,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   <header class="header">
     <div class="header-brand">
       <img class="header-logo" src="/static/logo-512.png" alt="HenWen">
-      <strong>HenWen</strong> <span>KIOSK</span>
+      <strong>HenWen</strong> <span>KIOSK</span><span class="header-brand-mobile-suffix"> Mobile</span>
     </div>
     <img class="header-club-logo" id="club-logo-img" alt="" style="display:none">
     <div class="header-actions">
