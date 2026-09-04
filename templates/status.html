@@ -1780,6 +1780,33 @@ function toggleFS() {
   else document.exitFullscreen().catch(function(){});
 }
 
+/* Screen Wake Lock: tied to fullscreenchange (not toggleFS itself) so it
+   also covers exiting via Esc/back-gesture, not just the button. Mainly for
+   a phone mounted as a kiosk display via Fullscreen — without this, mobile
+   browsers screen-blank on their normal idle timer regardless of anything
+   still visibly updating on the page. A lock is auto-released by the browser
+   whenever the tab goes non-visible (tab-switch, screen off), so it has to
+   be re-acquired on visibilitychange, not just once at fullscreen-entry.
+   Unsupported browsers (e.g. iOS Safari <16.4) just no-op — no fallback. */
+var _wakeLock = null;
+function _acquireWakeLock() {
+  if (!('wakeLock' in navigator)) return;
+  navigator.wakeLock.request('screen').then(function(lock) {
+    _wakeLock = lock;
+    lock.addEventListener('release', function() { if (_wakeLock === lock) _wakeLock = null; });
+  }).catch(function() {});
+}
+function _releaseWakeLock() {
+  if (_wakeLock) { try { _wakeLock.release(); } catch (e) {} _wakeLock = null; }
+}
+document.addEventListener('fullscreenchange', function() {
+  if (document.fullscreenElement) _acquireWakeLock();
+  else _releaseWakeLock();
+});
+document.addEventListener('visibilitychange', function() {
+  if (document.visibilityState === 'visible' && document.fullscreenElement && !_wakeLock) _acquireWakeLock();
+});
+
 /* ── Leaflet map ── */
 var _map            = null;
 var _markers        = [];
