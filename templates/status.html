@@ -744,7 +744,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 /* Browser-transmit PTT bar (inline in the Connected Nodes card while armed) */
 #tx-bar { padding: 8px 18px; border-bottom: 1px solid var(--border);
   display: flex; flex-direction: column; gap: 5px; }
-#tx-ptt { width: 100%; padding: 14px; font-size: 1rem; font-weight: 700;
+#tx-ptt { width: 100%; padding: 18px 14px; font-size: 1rem; font-weight: 700;
   background: rgba(63,185,80,.08); border: 2px solid rgba(63,185,80,.4);
   border-radius: 8px; color: var(--green); cursor: pointer;
   user-select: none; -webkit-user-select: none; touch-action: none; }
@@ -1251,14 +1251,13 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <span class="card-title">Connected Nodes</span>
         <span class="card-count" id="conn-count"></span>
         <span style="margin-left:auto;display:flex;align-items:center;gap:6px">
-          <span id="listen-delay-note" style="font-size:0.65rem;color:var(--text2);font-style:italic;display:none">~1s delay</span>
           <button class="btn-icon" id="tx-btn" onclick="openTx()" style="display:none" title="Transmit from your microphone through this node"><svg class="icon"><use href="#icon-mic"></use></svg> TX</button>
           <span id="listen-vol-row" style="display:flex;align-items:center;gap:4px;opacity:0.4">
             <span style="font-size:0.8rem;color:var(--text2)" title="Listen volume"><svg class="icon"><use href="#icon-volume-2"></use></svg></span>
             <input type="range" id="listen-volume" min="0" max="100" value="100" disabled title="Listen volume — separate from your device's system volume">
           </span>
           <button class="btn-icon" id="listen-btn" onclick="toggleListen()" title="Stream live audio from this node — expect ~1 second delay"><svg class="icon"><use href="#icon-headphones"></use></svg> Listen</button>
-          <button class="btn-icon" id="record-btn" onclick="toggleRecord()" style="display:none" title="Record this node's audio to a file"><svg class="icon" style="color:var(--red,#f85149)"><use href="#icon-circle"></use></svg> Record</button>
+          <button class="btn-icon" id="record-btn" onclick="toggleRecord()" style="display:none" title="Record this node's audio to a file"><svg class="icon" style="color:var(--red,#f85149)"><use href="#icon-circle"></use></svg> REC</button>
           <button class="btn-icon" id="myrec-btn" onclick="openMyRecordingsModal()" style="display:none" title="View, rename, download, or delete your saved recordings"><svg class="icon"><use href="#icon-folder-open"></use></svg></button>
           <button class="dash-hide-btn" onclick="toggleDashHide('connected',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
         </span>
@@ -5168,7 +5167,7 @@ function _startRecord() {
     body:    JSON.stringify({node: node}),
   }).then(function(r) {
     if (r.status === 401) {
-      _recordSetBtn(_RECORD_ICON + ' Record', '', false);
+      _recordSetBtn(_RECORD_ICON + ' REC', '', false);
       openKioskLogin(_startRecord, []);
       return null;
     }
@@ -5219,7 +5218,7 @@ function _startRecord() {
     if (e.name === 'AbortError') return;
     _recordActive = false;
     _recordCtrl   = null;
-    _recordSetBtn(_RECORD_ICON + ' Record', '', false);
+    _recordSetBtn(_RECORD_ICON + ' REC', '', false);
     sbToast('Could not start recording: ' + e.message, false);
   });
 }
@@ -5230,7 +5229,7 @@ function _stopRecord(auto) {
   if (_recordElapsedTimer) { clearInterval(_recordElapsedTimer); _recordElapsedTimer = null; }
   if (_recordCtrl) { _recordCtrl.abort(); _recordCtrl = null; }
   _recordActive = false;
-  _recordSetBtn(_RECORD_ICON + ' Record', '', false);
+  _recordSetBtn(_RECORD_ICON + ' REC', '', false);
 
   var rid = _recordCurrentId;
   _recordCurrentId = null;
@@ -5631,7 +5630,12 @@ async function armTx() {
       s.connection.addEventListener('track', muteInbound);
       s.on('confirmed', function() {
         muteInbound();
-        _txStatus('Armed — hold PTT to transmit');
+        /* No _txStatus() call here — the PTT button's own label already
+           says "PTT — hold to transmit"; repeating "Armed — hold PTT to
+           transmit" right below it was pure redundancy. #tx-status is left
+           blank at rest and still used for genuinely new info (TRANSMITTING
+           while keyed, errors, disconnects). */
+        _txStatus('');
         _txSetBtn('<svg class="icon"><use href="#icon-mic"></use></svg> TX armed', 'var(--green)');
         document.getElementById('tx-ptt').disabled = false;
         /* Listen is the monitor path — make sure it's running */
@@ -5741,7 +5745,7 @@ function _txUnkey() {
   if (b) b.classList.remove('tx');
   _txMuteListen(false);
   if (_tx.session && _tx.session.isEstablished()) {
-    _txStatus('Armed — hold PTT to transmit');
+    _txStatus('');
     _txTouchIdle();
     try { _tx.session.sendDTMF('#', { duration: 100, interToneGap: 70 }); } catch (e) {}
   }
@@ -5870,8 +5874,6 @@ function _listenSetBtn(html, color, disabled) {
   btn.style.color = color || '';
   btn.disabled = !!disabled;
   var active = (color === 'var(--green)');
-  var note = document.getElementById('listen-delay-note');
-  if (note) note.style.display = active ? '' : 'none';
   var volRow = document.getElementById('listen-vol-row');
   if (volRow) volRow.style.opacity = active ? '1' : '0.4';
   var vol = document.getElementById('listen-volume');
