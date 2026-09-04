@@ -902,9 +902,9 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
   /* .node-row already wraps instead of truncating (see base styles) — just
      tighten sizes/gaps so more fits per line before wrapping kicks in. */
-  .node-row { gap: 6px; padding: 8px 12px; }
-  .nr-num   { font-size: 0.95rem; }
-  .nr-call  { font-size: 0.85rem; }
+  .node-row { gap: 6px; padding: 10px 12px; }
+  .nr-num   { font-size: 1.05rem; }
+  .nr-call  { font-size: 0.95rem; }
   .nr-line  { gap: 6px; }
   .node-row > .sb-btn.disconnect { padding-left: 6px; padding-right: 6px; }
   /* No room for a 60-bar strip beside nr-main on a phone-width single column.
@@ -919,9 +919,23 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
      grid column, both act-body and the button wrapper stack automatically. */
   .act-row { grid-template-columns: 1fr; row-gap: 6px; }
 
-  /* Larger touch targets for the controls people actually tap on a phone. */
-  .sb-btn, .btn-icon { padding-top: 6px; padding-bottom: 6px; }
-  .conn-form-bar input { flex: 1 1 100px; }
+  /* Permanent is already admin/superuser-only (see #perm-label's JS-driven
+     default display:none) and rarely relevant on a phone-sized screen even
+     for those roles — dropped outright on mobile rather than left small. */
+  #perm-label { display: none !important; }
+
+  /* Monitor (listen-only link, no TX) is dropped from every mobile control
+     row — connect-form-bar, Favorites, node rows — same "one less rarely-
+     needed control on a small screen" call as Permanent above. */
+  .sb-btn.monitor { display: none !important; }
+
+  /* Larger touch targets and text for the controls people actually tap on
+     a phone — base sizes were tuned for a mouse-driven desktop layout, so
+     bump font-size/padding here rather than just the vertical padding. */
+  .sb-btn { font-size: 0.78rem; padding: 7px 11px; }
+  .btn-icon { padding-top: 6px; padding-bottom: 6px; }
+  .conn-form-bar input { flex: 1 1 100px; font-size: 0.92rem; padding: 7px 10px; }
+  #conn-form-msg { font-size: 0.85rem !important; }
 
   #sb-toast { white-space: normal; max-width: 88vw; text-align: center; }
 }
