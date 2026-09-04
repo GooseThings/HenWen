@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v2026.09.04
 
 - **Changed: dropped the redundant "Arming…" status line under the mic bar** — the TX button itself already reads "TX arming…" during that state.
 - **Added: the PTT button shows the node's Time-Out Timer (TOT) length** once TX is armed — e.g. "Time-out timer: 5m", read from rpt.conf's `totime=` setting (in milliseconds, resolved through node/template inheritance the same way Asterisk itself would). Falls back to app_rpt's own documented default (180s/3min) if the node doesn't set one.
