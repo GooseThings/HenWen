@@ -2,9 +2,9 @@
 """
 HenWen real-time audio relay — standalone process.
 
-Reads raw 8kHz/mono/s16le PCM from the MixMonitor FIFO and writes a strictly
-paced 20ms-frame stream (silence-filled whenever the node is quiet) to a
-second FIFO that ffmpeg reads directly.
+Reads raw 8kHz/mono/s16le PCM from either a MixMonitor FIFO or an AudioSocket
+TCP connection and writes a strictly paced 20ms-frame stream (silence-filled
+whenever the node is quiet) to a second FIFO that ffmpeg reads directly.
 
 This runs as its own OS process, spawned by app.py, rather than as a thread
 inside the gunicorn worker. The previous in-process design shared a GIL with
@@ -14,7 +14,18 @@ window delayed the next write, and a delayed/dropped frame is audible as a
 click or stutter. Running the pacing loop in its own process lets the kernel
 schedule it independently of everything else the app is doing.
 
-Usage: audio_relay.py <in_fifo_path> <out_fifo_path>
+Input modes (first argv):
+  <path>    legacy: a MixMonitor FIFO, opened O_RDWR|O_NONBLOCK.
+  tcp:<port>  AudioSocket: listens on 127.0.0.1:<port> for the one inbound
+              connection Asterisk's AudioSocket() app makes (see
+              app.py's _start_broadcast() and audiosocket-tap/ for how that
+              connection gets the node's audio onto it). Added to eliminate
+              MixMonitor's own ~2s buffered-stdio-write latency (issue #30)
+              -- everything downstream of "raw PCM bytes appended to buf"
+              (jitter buffer, pacing, declick fades) is identical between
+              the two modes; only how bytes get into `buf` differs.
+
+Usage: audio_relay.py <in_spec> <out_fifo_path>
 """
 import os
 import sys
@@ -22,6 +33,7 @@ import time
 import signal
 import struct
 import array
+import socket
 
 FRAME_BYTES    = 320    # 20 ms at 8 kHz mono s16le (160 samples x 2 bytes)
 FRAME_INTERVAL = 0.020
@@ -83,20 +95,136 @@ def _stat(msg):
     print(f'STATS {msg}', file=sys.stderr, flush=True)
 
 
+class _AudioSocketReader:
+    """Pulls raw PCM out of an AudioSocket TCP connection and hands it to
+    the caller with the same calling convention as os.read(fd, n): raises
+    BlockingIOError when nothing new is parseable yet, returns b'' on a
+    clean hangup, lets a genuine socket error propagate as OSError. This
+    lets main()'s read loop stay identical between FIFO and AudioSocket
+    input modes -- only what backs `read_input` differs.
+
+    Wire format (https://docs.asterisk.org/Configuration/Channel-Driver/
+    AudioSocket/, confirmed empirically against a live Asterisk 22/ASL3
+    instance since the spec alone wasn't enough to trust blindly on a live
+    repeater's audio path): a 3-byte header (1-byte kind, 2-byte big-endian
+    length) followed by that many payload bytes. kind 0x01 is a 16-byte
+    UUID sent once right after connect; kind 0x10 is audio (payload was
+    measured at exactly 320 bytes -- one 20ms slin8 frame, matching
+    FRAME_BYTES exactly, so no reframing is needed); kind 0x00 is a
+    terminate/hangup with no payload.
+    """
+    KIND_TERMINATE = 0x00
+    KIND_UUID      = 0x01
+    KIND_AUDIO     = 0x10
+
+    def __init__(self, port):
+        # Loopback only -- AudioSocket has no auth, so this must never be
+        # reachable from anywhere but this same box's Asterisk instance.
+        # port=0 lets the OS pick a free port (the caller, app.py, doesn't
+        # know a port in advance and needs to read the actual bound one
+        # back -- see accept()'s "PORT " stdout line in main() below --
+        # before it can Originate the call that connects here).
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._srv.bind(('127.0.0.1', port))
+        self._srv.listen(1)
+        self.port = self._srv.getsockname()[1]
+        self.conn = None
+        self._buf      = bytearray()
+        self._hungup   = False
+        self._got_uuid = False
+
+    def accept(self, timeout=10.0):
+        """Block until Asterisk's AudioSocket() connects, or raise
+        socket.timeout if nothing does within `timeout` seconds (the
+        caller, app.py, treats that as "feature unavailable, fall back to
+        MixMonitor")."""
+        self._srv.settimeout(timeout)
+        try:
+            self.conn, _addr = self._srv.accept()
+        finally:
+            self._srv.close()
+        self.conn.setblocking(False)
+
+    def read(self, _n=65536):
+        if self._hungup:
+            return b''
+        try:
+            chunk = self.conn.recv(65536)
+        except BlockingIOError:
+            chunk = None
+        if chunk == b'':
+            self._hungup = True
+            return b''
+        if chunk:
+            self._buf += chunk
+
+        out = bytearray()
+        while len(self._buf) >= 3:
+            kind   = self._buf[0]
+            length = (self._buf[1] << 8) | self._buf[2]
+            if len(self._buf) < 3 + length:
+                break   # incomplete packet -- wait for more to arrive
+            payload = bytes(self._buf[3:3 + length])
+            del self._buf[:3 + length]
+            if kind == self.KIND_AUDIO:
+                out += payload
+            elif kind == self.KIND_TERMINATE:
+                self._hungup = True
+                break
+            elif kind == self.KIND_UUID and DEBUG and not self._got_uuid:
+                self._got_uuid = True
+                _stat(f'AudioSocket UUID packet: {payload.hex()}')
+        if out:
+            return bytes(out)
+        if self._hungup:
+            return b''
+        raise BlockingIOError()
+
+    def close(self):
+        try:
+            self.conn.close()
+        except OSError:
+            pass
+
+
 def main():
-    in_path, out_path = sys.argv[1], sys.argv[2]
+    in_spec, out_path = sys.argv[1], sys.argv[2]
 
     if DEBUG:
-        _stat(f'starting pid={os.getpid()} in={in_path} out={out_path}')
+        _stat(f'starting pid={os.getpid()} in={in_spec} out={out_path}')
 
-    # O_RDWR on both ends: lets us open immediately without waiting for the
-    # other side (Asterisk / ffmpeg) to open its end first, and prevents
-    # either FIFO from ever seeing EOF.
-    in_fd  = os.open(in_path,  os.O_RDWR | os.O_NONBLOCK)
+    in_fd  = None
+    reader = None
+    if in_spec.startswith('tcp:'):
+        # Handshake with app.py over stdout (never used again after this,
+        # since ordinary operation only ever logs to stderr): "PORT n" as
+        # soon as the listen socket is bound, so app.py can pass it to the
+        # AMI Originate call that makes Asterisk connect here, then
+        # "CONNECTED" once that connection actually completes. app.py
+        # reads both with a bounded timeout and falls back to MixMonitor
+        # if either is missing or late -- see app.py's _try_audiosocket_tap().
+        reader = _AudioSocketReader(int(in_spec[len('tcp:'):]))
+        print(f'PORT {reader.port}', flush=True)
+        reader.accept()
+        print('CONNECTED', flush=True)
+        read_input = reader.read
+        if DEBUG:
+            _stat(f'AudioSocket connection accepted on 127.0.0.1:{reader.port}')
+    else:
+        # O_RDWR: lets us open immediately without waiting for the other
+        # side (MixMonitor) to open its end first, and prevents the FIFO
+        # from ever seeing EOF.
+        in_fd = os.open(in_spec, os.O_RDWR | os.O_NONBLOCK)
+        read_input = lambda: os.read(in_fd, 65536)
+
+    # O_RDWR: lets us open immediately without waiting for the other side
+    # (ffmpeg) to open its end first, and prevents the FIFO from ever
+    # seeing EOF.
     out_fd = os.open(out_path, os.O_RDWR)
 
     if DEBUG:
-        _stat(f'both FIFOs opened in_fd={in_fd} out_fd={out_fd}')
+        _stat(f'input ready, out FIFO opened out_fd={out_fd}')
 
     running = True
 
@@ -181,7 +309,7 @@ def main():
         eof = False
         while True:
             try:
-                chunk = os.read(in_fd, 65536)
+                chunk = read_input()
             except BlockingIOError:
                 break
             except OSError as e:
@@ -190,11 +318,14 @@ def main():
                 eof = True
                 break
             if not chunk:
-                # Write end closed (MixMonitor stopped). With O_RDWR this
-                # normally can't happen — shutdown is via SIGTERM — but
-                # handle it defensively.
+                # Write end closed (MixMonitor stopped) or the AudioSocket
+                # peer hung up. With O_RDWR the FIFO case normally can't
+                # happen — shutdown is via SIGTERM — but handle it
+                # defensively; for AudioSocket this is the normal way a
+                # broadcast's teardown (shutdown() hanging up the
+                # originated channel) ends this process's input side.
                 if DEBUG:
-                    _stat('read() returned EOF (MixMonitor stopped) — exiting')
+                    _stat('read() returned EOF (input closed) — exiting')
                 eof = True
                 break
             buf += chunk
@@ -252,7 +383,11 @@ def main():
         _stat(f'exiting: real_frames={real_frames} silence_frames={silence_frames} '
               f'overflows={overflows} resyncs={resyncs} fades={fades}')
 
+    if reader is not None:
+        reader.close()
     for fd in (in_fd, out_fd):
+        if fd is None:
+            continue
         try:
             os.close(fd)
         except OSError:

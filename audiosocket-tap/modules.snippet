@@ -1,0 +1,15 @@
+; ── HenWen AudioSocket tap (2026-09-03) ────────────────────────────────────
+; Low-latency Listen-audio capture: replaces MixMonitor's buffered file
+; writer (which was found to add ~2s of latency in ~32KB/~2s stdio flush
+; lumps) with a live tap that streams the node's RX audio out over a plain
+; TCP socket in real time. res_audiosocket.so MUST load before
+; app_audiosocket.so -- the app resolves ast_audiosocket_init from the res_
+; module at load time and fails outright ("undefined symbol") if loaded
+; first; app_chanspy.so is what actually captures the node channel's audio
+; onto the tap leg (see extensions-custom.snippet) without disturbing the
+; channel's own Rpt() execution. Remove this whole block (and restart
+; Asterisk) to fully disable.
+load = res_audiosocket.so
+load = app_audiosocket.so
+load = app_chanspy.so
+; ── end HenWen AudioSocket tap ──────────────────────────────────────────────

@@ -1,0 +1,12 @@
+; ── HenWen AudioSocket tap (2026-09-03) ────────────────────────────────────
+; The tap leg: one half of a Local-channel pair. AS_UUID/AS_SERVICE arrive
+; as inherited channel variables (__ prefix) set by app.py's Originate call,
+; since a Local channel's ";2" half doesn't otherwise see variables set on
+; its ";1" sibling. AudioSocket() streams whatever audio reaches this leg
+; (via the Local channel's automatic ;1<->;2 bridge) to app.py's
+; audio_relay.py, listening as a plain TCP server on 127.0.0.1.
+[henwen-audiosocket-tap]
+exten => tap,1,Answer()
+ same => n,AudioSocket(${AS_UUID},${AS_SERVICE})
+ same => n,Hangup()
+; ── end HenWen AudioSocket tap ──────────────────────────────────────────────
