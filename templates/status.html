@@ -1289,7 +1289,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
           <input type="range" id="tx-gain" min="0" max="200" value="100" title="Microphone gain">
           <span id="tx-gain-val" style="font-size:0.7rem;color:var(--text2);width:3em;flex-shrink:0">100%</span>
         </div>
-        <div id="tx-status" style="font-size:0.75rem;color:var(--accent);min-height:1em">Arming&hellip;</div>
+        <div id="tx-status" style="font-size:0.75rem;color:var(--accent);min-height:1em"></div>
       </div>
       <div class="connector-warn-bar" id="connector-warn-bar" style="display:none">
         <svg class="icon"><use href="#icon-triangle-alert"></use></svg> <span id="connector-warn-text"></span>
@@ -5598,8 +5598,11 @@ async function armTx() {
   if (!window._kioskRole) { openKioskLogin(armTx, []); return; }
   _tx.armed = true;
   document.getElementById('tx-bar').style.display = '';
+  /* No _txStatus('Arming…') here — the TX button itself already reads
+     "TX arming…" (line above); #tx-status stays blank until there's
+     something new to say (errors, TRANSMITTING while keyed, disconnects). */
   _txSetBtn('<svg class="icon"><use href="#icon-mic"></use></svg> TX arming&hellip;', 'var(--text2)');
-  _txStatus('Arming…');
+  _txStatus('');
   try {
     var r = await apiFetch('/api/tx/config');
     if (r.status === 401) { disarmTx(); openKioskLogin(armTx, []); return; }
