@@ -193,6 +193,22 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .header-actions .btn-icon { padding: 5px 7px; flex-shrink: 0; }
 .header-actions #kiosk-login-btn { padding: 5px 10px; }
 
+/* display:contents on desktop: this wrapper is invisible to layout, so its
+   children sit directly in .header-actions' flex row exactly as if it
+   didn't exist — zero visual change from before it was introduced. The
+   mobile media query below replaces this with the actual dropdown
+   presentation (see .header-menu-items there and #header-menu-btn). */
+.header-menu-items { display: contents; }
+/* Icon-only header buttons rely on their title= tooltip on desktop (mouse
+   hover) — that's not available on a touch device, so the mobile dropdown
+   below shows this text alongside each icon instead. Hidden here so
+   desktop's icon-only row is unchanged. */
+.header-menu-label { display: none; }
+/* Collapse-state chevron for the mobile-only card accordion (issue #35) —
+   hidden here so desktop, which has no collapse behavior at all, never
+   shows it; the mobile media query turns it back on. */
+.mobile-collapse-chevron { display: none; }
+
 /* Inline SVG icons (Lucide, ISC license) — see the sprite comment near the
    top of <body> for the add-a-new-icon recipe. `.icon` is the one place
    size/stroke is set so every icon stays visually consistent by default;
@@ -779,6 +795,21 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   .header-actions { gap: 6px; }
   .header-club-logo { display: none; }
 
+  /* Header hamburger (issue #35): everything except Login folds into one
+     menu instead of a scrollable icon strip. #header-menu-items keeps
+     display:contents' desktop flow above; here it becomes the actual
+     dropdown, opened/positioned by toggleHeaderMenu() the same way the map
+     options menu works (see .map-ctl-dropdown). */
+  #header-menu-btn { display: flex !important; }
+  .header-menu-items {
+    display: none; position: fixed; flex-direction: column; gap: 2px;
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 6px; min-width: 190px; box-shadow: 0 4px 16px rgba(0,0,0,.4); z-index: 2000;
+  }
+  .header-menu-items .btn-icon { width: 100%; justify-content: flex-start; }
+  .header-menu-items #kiosk-user-bar { flex-direction: column; align-items: stretch; width: 100%; }
+  .header-menu-label { display: inline; margin-left: 8px; }
+
   .weather-bar { min-height: 0; overflow: visible; }
   /* The "|" separator only reads right on a single ticker line, which never
      happens at this width — hide it and force .weather-items onto its own
@@ -812,6 +843,24 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
      in JS) — hide their controls entirely here rather than leave dead UI. */
   .dash-header-grip, .dash-hide-btn, .dash-divider, #dash-drop-indicator, #dash-edit-btn, #dash-hidden-wrap { display: none !important; }
 
+  /* Fewer visible cards by default (issue #35): Node + Connected Nodes are
+     what a phone visitor checks first (see the ordering comment above) and
+     always stay expanded; everything else collapses to just its header
+     unless previously expanded (see onMobileCardHeaderClick() and the
+     load-time init that reads localStorage — default is collapsed, not
+     "whatever was visible last," so a first-time mobile visitor gets the
+     minimal view immediately). Content is unaffected: this hides
+     presentation only, all the same data still loads/updates underneath. */
+  .content-area { gap: 8px; }
+  .map-card .card-header, .activity-card .card-header, .meshtastic-card .card-header,
+  .favorites-card .card-header, .chat-card .card-header { cursor: pointer; }
+  .mobile-collapse-chevron { display: flex; align-items: center; margin-left: 4px; color: var(--text2); transition: transform .15s; flex-shrink: 0; }
+  .mobile-collapse-chevron .icon { width: 1rem; height: 1rem; }
+  .dash-card.mobile-collapsed > :not(.card-header) { display: none !important; }
+  .dash-card.mobile-collapsed .mobile-collapse-chevron { transform: rotate(-90deg); }
+  .dash-card.mobile-collapsed { max-height: none; }
+  .map-card.mobile-collapsed { height: auto; flex-shrink: 1; }
+
   /* Cards no longer share an implicit grid-row height, so each gets its own
      cap with an internally-scrolling list instead of flexing to fill a row. */
   .node-card {
@@ -819,6 +868,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   }
   .connected-card, .activity-card, .favorites-card, .chat-card, .meshtastic-card { max-height: 320px; }
   .map-card { height: 340px; flex-shrink: 0; }
+  .card-header { padding: 10px 12px 8px; }
 
   .node-number { font-variant-numeric: tabular-nums; font-size: 1.9rem; }
   .node-callsign { font-size: 1.1rem; }
@@ -1011,6 +1061,9 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143" />
     <path d="m2 2 20 20" />
   </symbol>
+  <symbol id="icon-chevron-down" viewBox="0 0 24 24">
+    <path d="m6 9 6 6 6-6" />
+  </symbol>
   <symbol id="icon-eye" viewBox="0 0 24 24">
     <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" />
     <circle cx="12" cy="12" r="3" />
@@ -1043,30 +1096,39 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       <audio id="node-audio" preload="none">
         <source type="audio/webm; codecs=opus">
       </audio>
-      <!-- Search stays hidden until login (it bridges RF, like every other
-           connect path); the net-schedule calendar is always visible. -->
-      <button class="btn-icon" id="node-search-btn" onclick="openSearchModal()" title="Search the AllStar and EchoLink directories for nodes to connect to" style="display:none"><svg class="icon"><use href="#icon-search"></use></svg></button>
-      <button class="btn-icon" id="net-cal-btn" onclick="openNetModal()" title="Net Schedule — scheduled net reminders"><svg class="icon"><use href="#icon-calendar-days"></use></svg></button>
-      <div id="kiosk-user-bar" style="display:none;align-items:center;gap:6px;font-size:0.75rem;flex-shrink:0">
-        <button class="btn-icon" onclick="openAccountModal()" title="Change your password or set up two-factor authentication"><svg class="icon"><use href="#icon-user"></use></svg></button>
-        <button class="btn-icon" onclick="kioskLogout()" title="Logout"><svg class="icon"><use href="#icon-door-open"></use></svg></button>
-      </div>
       <button class="btn-icon" id="kiosk-login-btn" onclick="openKioskLogin()" style="display:none">Login</button>
-      <div id="dash-hidden-wrap" style="position:relative;display:inline-flex">
-        <button class="btn-icon" id="dash-hidden-btn" onclick="toggleDashHiddenMenu(event)" title="Hidden panels" style="display:none"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
-        <!-- position:fixed, not absolute: .header-actions has overflow-x:auto as a
-             narrow-screen safety net (see its CSS comment), which implicitly sets
-             overflow-y:auto too — an absolutely-positioned dropdown anchored inside
-             it would get clipped/scrolled instead of floating over the page.
-             toggleDashHiddenMenu() computes top/right from the button's own
-             bounding rect each time it opens since fixed positioning is
-             viewport-relative, not relative to #dash-hidden-wrap. -->
-        <div id="dash-hidden-menu" style="display:none;position:fixed;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:6px;min-width:170px;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:50;font-size:0.78rem"></div>
+      <!-- Everything else folds into a single hamburger menu on mobile (see
+           #header-menu-btn / .header-menu-items below) — desktop keeps them
+           as a plain inline row via display:contents, so this wrapper is
+           purely a mobile-width affordance, not a restructuring of what's
+           actually here. Login stays outside the fold since it's the one
+           action an anonymous mobile viewer is most likely to need. -->
+      <div class="header-menu-items" id="header-menu-items">
+        <!-- Search stays hidden until login (it bridges RF, like every other
+             connect path); the net-schedule calendar is always visible. -->
+        <button class="btn-icon" id="node-search-btn" onclick="openSearchModal()" title="Search the AllStar and EchoLink directories for nodes to connect to" style="display:none"><svg class="icon"><use href="#icon-search"></use></svg><span class="header-menu-label">Search</span></button>
+        <button class="btn-icon" id="net-cal-btn" onclick="openNetModal()" title="Net Schedule — scheduled net reminders"><svg class="icon"><use href="#icon-calendar-days"></use></svg><span class="header-menu-label">Net Schedule</span></button>
+        <div id="kiosk-user-bar" style="display:none;align-items:center;gap:6px;font-size:0.75rem;flex-shrink:0">
+          <button class="btn-icon" onclick="openAccountModal()" title="Change your password or set up two-factor authentication"><svg class="icon"><use href="#icon-user"></use></svg><span class="header-menu-label">Account</span></button>
+          <button class="btn-icon" onclick="kioskLogout()" title="Logout"><svg class="icon"><use href="#icon-door-open"></use></svg><span class="header-menu-label">Logout</span></button>
+        </div>
+        <div id="dash-hidden-wrap" style="position:relative;display:inline-flex">
+          <button class="btn-icon" id="dash-hidden-btn" onclick="toggleDashHiddenMenu(event)" title="Hidden panels" style="display:none"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
+          <!-- position:fixed, not absolute: .header-actions has overflow-x:auto as a
+               narrow-screen safety net (see its CSS comment), which implicitly sets
+               overflow-y:auto too — an absolutely-positioned dropdown anchored inside
+               it would get clipped/scrolled instead of floating over the page.
+               toggleDashHiddenMenu() computes top/right from the button's own
+               bounding rect each time it opens since fixed positioning is
+               viewport-relative, not relative to #dash-hidden-wrap. -->
+          <div id="dash-hidden-menu" style="display:none;position:fixed;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:6px;min-width:170px;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:50;font-size:0.78rem"></div>
+        </div>
+        <button class="btn-icon" id="dash-edit-btn" onclick="toggleDashEditMode()" title="Rearrange, resize, or hide the panels below"><svg class="icon"><use href="#icon-layout-dashboard"></use></svg></button>
+        <button class="btn-icon" onclick="toggleFS()" title="Fullscreen"><svg class="icon"><use href="#icon-maximize"></use></svg><span class="header-menu-label">Fullscreen</span></button>
+        <a class="btn-icon" href="/accessible" title="Accessible View — larger text and screen-reader support">Accessible</a>
+        <a class="btn-icon" id="manager-link-btn" href="/henwen-manager" target="_blank" rel="noopener" title="Manager"><svg class="icon"><use href="#icon-book-open"></use></svg><span class="header-menu-label">Manager</span></a>
       </div>
-      <button class="btn-icon" id="dash-edit-btn" onclick="toggleDashEditMode()" title="Rearrange, resize, or hide the panels below"><svg class="icon"><use href="#icon-layout-dashboard"></use></svg></button>
-      <button class="btn-icon" onclick="toggleFS()" title="Fullscreen"><svg class="icon"><use href="#icon-maximize"></use></svg></button>
-      <a class="btn-icon" href="/accessible" title="Accessible View — larger text and screen-reader support">Accessible</a>
-      <a class="btn-icon" id="manager-link-btn" href="/henwen-manager" target="_blank" rel="noopener" title="Manager"><svg class="icon"><use href="#icon-book-open"></use></svg></a>
+      <button type="button" class="btn-icon" id="header-menu-btn" onclick="toggleHeaderMenu(event)" title="Menu" aria-haspopup="true" aria-expanded="false" style="display:none"><svg class="icon"><use href="#icon-menu"></use></svg></button>
     </div>
   </header>
 
@@ -1176,7 +1238,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <!-- Map -->
     <div class="map-card dash-card" data-dash-id="map"
          ondragover="dashDragOver(event)" ondragleave="dashDragLeave(event)" ondrop="dashDrop(event,'map')">
-      <div class="card-header">
+      <div class="card-header" onclick="onMobileCardHeaderClick(event,'map')">
         <span class="dash-header-grip" draggable="true" title="Drag to move"
               ondragstart="dashDragStart(event,'map')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
         <span class="card-title">Map</span>
@@ -1240,6 +1302,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
           </div>
         </div>
         <button class="dash-hide-btn" onclick="toggleDashHide('map',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
+        <span class="mobile-collapse-chevron" aria-hidden="true"><svg class="icon"><use href="#icon-chevron-down"></use></svg></span>
       </div>
       <div id="map"></div>
     </div>
@@ -1247,12 +1310,13 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <!-- Latest Activity: under Connected Nodes, right of the map, matching the map's height -->
     <div class="activity-card dash-card" data-dash-id="activity"
          ondragover="dashDragOver(event)" ondragleave="dashDragLeave(event)" ondrop="dashDrop(event,'activity')">
-      <div class="card-header">
+      <div class="card-header" onclick="onMobileCardHeaderClick(event,'activity')">
         <span class="dash-header-grip" draggable="true" title="Drag to move"
               ondragstart="dashDragStart(event,'activity')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
         <span class="card-title">Latest Activity</span>
         <span class="card-count" id="act-count"></span>
         <button class="dash-hide-btn" style="margin-left:auto" onclick="toggleDashHide('activity',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
+        <span class="mobile-collapse-chevron" aria-hidden="true"><svg class="icon"><use href="#icon-chevron-down"></use></svg></span>
       </div>
       <div class="activity-list" id="activity-list">
         <div class="empty-msg">Loading&hellip;</div>
@@ -1262,12 +1326,13 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <!-- Meshtastic: public-channel MQTT text feed, config is Manager > Meshtastic (owner-only) -->
     <div class="meshtastic-card dash-card" data-dash-id="meshtastic"
          ondragover="dashDragOver(event)" ondragleave="dashDragLeave(event)" ondrop="dashDrop(event,'meshtastic')">
-      <div class="card-header">
+      <div class="card-header" onclick="onMobileCardHeaderClick(event,'meshtastic')">
         <span class="dash-header-grip" draggable="true" title="Drag to move"
               ondragstart="dashDragStart(event,'meshtastic')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
         <span class="card-title">Meshtastic</span>
         <span class="mesh-channel-label" id="mesh-channel-label"></span>
         <button class="dash-hide-btn" style="margin-left:auto" onclick="toggleDashHide('meshtastic',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
+        <span class="mobile-collapse-chevron" aria-hidden="true"><svg class="icon"><use href="#icon-chevron-down"></use></svg></span>
       </div>
       <div class="mesh-list" id="mesh-list">
         <div class="empty-msg">Loading&hellip;</div>
@@ -1277,7 +1342,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <!-- Favorites sidebar -->
     <div class="favorites-card dash-card" data-dash-id="favorites"
          ondragover="dashDragOver(event)" ondragleave="dashDragLeave(event)" ondrop="dashDrop(event,'favorites')">
-      <div class="card-header">
+      <div class="card-header" onclick="onMobileCardHeaderClick(event,'favorites')">
         <span class="dash-header-grip" draggable="true" title="Drag to move"
               ondragstart="dashDragStart(event,'favorites')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
         <span class="card-title">Favorites</span>
@@ -1291,6 +1356,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
           <button id="fav-sort-dir-btn" class="fav-sort-dir-btn" onclick="toggleFavSortDir()" title="Toggle sort direction"><svg class="icon"><use href="#icon-arrow-up"></use></svg></button>
         </div>
         <button class="dash-hide-btn" onclick="toggleDashHide('favorites',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
+        <span class="mobile-collapse-chevron" aria-hidden="true"><svg class="icon"><use href="#icon-chevron-down"></use></svg></span>
       </div>
       <div id="fav-warn" class="fav-warn" style="display:none">
         <svg class="icon"><use href="#icon-triangle-alert"></use></svg> Disconnect all nodes first
@@ -1306,11 +1372,12 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
          message data is ever fetched until login is confirmed. -->
     <div class="chat-card dash-card" data-dash-id="chat"
          ondragover="dashDragOver(event)" ondragleave="dashDragLeave(event)" ondrop="dashDrop(event,'chat')">
-      <div class="card-header">
+      <div class="card-header" onclick="onMobileCardHeaderClick(event,'chat')">
         <span class="dash-header-grip" draggable="true" title="Drag to move"
               ondragstart="dashDragStart(event,'chat')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
         <span class="card-title">Chat</span>
         <button class="dash-hide-btn" onclick="toggleDashHide('chat',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
+        <span class="mobile-collapse-chevron" aria-hidden="true"><svg class="icon"><use href="#icon-chevron-down"></use></svg></span>
       </div>
       <div class="chat-login-note" id="chat-login-note">Log in to join the chat.</div>
       <div class="chat-list" id="chat-list" role="log" aria-live="polite" aria-relevant="additions" style="display:none"></div>
@@ -1746,6 +1813,93 @@ var _globalWindowMin    = 15;  /* global-activity display window, from the serve
 var _mapFitted          = false;
 var _popupOpen          = false;  /* a pin popup is open — hold off re-rendering */
 var _mapDirty           = false;  /* data changed while a popup was open */
+
+/* ── Mobile minimalist layout (issue #35) ──────────────────────────────
+   Two independent pieces, both presentation-only (no data/behavior change,
+   both gated to actually do anything only below the 860px breakpoint the
+   rest of the mobile CSS already uses):
+
+   1. Header hamburger — collapses everything except Login into one menu,
+      same open/outside-click/fixed-position pattern as the map options
+      dropdown just below (#header-menu-items is display:contents on
+      desktop, so this is purely additive there).
+   2. Collapsible secondary cards — Map/Activity/Meshtastic/Favorites/Chat
+      start collapsed to just their header on a phone; Node and Connected
+      Nodes (what a visitor checks first) always stay expanded. Each card's
+      open/closed state persists per-browser in localStorage, so a panel
+      someone actually opens stays open across reloads instead of
+      re-collapsing every time. */
+var MOBILE_BREAKPOINT_QUERY  = '(max-width: 860px)';
+var MOBILE_COLLAPSIBLE_CARDS = ['map', 'activity', 'meshtastic', 'favorites', 'chat'];
+
+function onMobileCardHeaderClick(e, cardId) {
+  if (!window.matchMedia(MOBILE_BREAKPOINT_QUERY).matches) return;
+  /* Don't hijack clicks on an actual control inside the header (map options
+     button, hide button, favorites sort select, etc.) — only a tap on the
+     header's own empty space toggles collapse. */
+  if (e.target.closest('button, select, input, a, label')) return;
+  var card = document.querySelector('.dash-card[data-dash-id="' + cardId + '"]');
+  if (!card) return;
+  var collapsed = card.classList.toggle('mobile-collapsed');
+  try { localStorage.setItem('henwen-mobile-collapsed-' + cardId, collapsed ? '1' : '0'); } catch (err) {}
+  /* Leaflet sizes its tile grid from the map div's dimensions at the moment
+     it's (re)shown — a map that was display:none while collapsed needs an
+     explicit nudge once it's visible again, same as every other place this
+     file already calls invalidateSize() after a layout change. */
+  if (cardId === 'map' && !collapsed) {
+    setTimeout(function() { if (_map) _map.invalidateSize(); }, 50);
+  }
+}
+
+(function initMobileCollapsedCards() {
+  if (!window.matchMedia(MOBILE_BREAKPOINT_QUERY).matches) return;
+  MOBILE_COLLAPSIBLE_CARDS.forEach(function(cardId) {
+    var card = document.querySelector('.dash-card[data-dash-id="' + cardId + '"]');
+    if (!card) return;
+    var stored = null;
+    try { stored = localStorage.getItem('henwen-mobile-collapsed-' + cardId); } catch (err) {}
+    /* No stored preference yet -> collapsed. This only matters on first
+       visit; after that, whatever the visitor last chose sticks. */
+    var collapsed = stored === null ? true : stored === '1';
+    card.classList.toggle('mobile-collapsed', collapsed);
+  });
+})();
+
+var _headerMenuOpen = false;
+
+function _headerMenuOutsideClick(e) {
+  var wrap = document.getElementById('header-menu-items');
+  var btn  = document.getElementById('header-menu-btn');
+  if (wrap && !wrap.contains(e.target) && btn && !btn.contains(e.target)) closeHeaderMenu();
+}
+
+function closeHeaderMenu() {
+  var wrap = document.getElementById('header-menu-items');
+  var btn  = document.getElementById('header-menu-btn');
+  if (wrap) wrap.style.display = 'none';
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+  _headerMenuOpen = false;
+  document.removeEventListener('click', _headerMenuOutsideClick);
+}
+
+function toggleHeaderMenu(e) {
+  if (e) e.stopPropagation();
+  if (_headerMenuOpen) { closeHeaderMenu(); return; }
+  var wrap = document.getElementById('header-menu-items');
+  var btn  = document.getElementById('header-menu-btn');
+  if (!wrap || !btn) return;
+  /* position:fixed, anchored off the button's own viewport rect at open
+     time — same reasoning as toggleMapCtlMenu() below: fixed positioning is
+     viewport-relative, not relative to any scrolling ancestor. */
+  var r = btn.getBoundingClientRect();
+  wrap.style.display = 'flex';
+  wrap.style.top   = (r.bottom + 6) + 'px';
+  wrap.style.left  = 'auto';
+  wrap.style.right = (window.innerWidth - r.right) + 'px';
+  btn.setAttribute('aria-expanded', 'true');
+  _headerMenuOpen = true;
+  document.addEventListener('click', _headerMenuOutsideClick);
+}
 
 /* ── Map options dropdown (hamburger menu) ──
    Holds every map toggle/select (Radar, Alerts, ASL, APRS, ISS, tile style)
