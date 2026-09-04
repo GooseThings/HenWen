@@ -128,6 +128,7 @@ app = Flask(__name__)
 # ---------------------------------------------------------------------------
 RPT_CONF_PATH   = os.environ.get("RPT_CONF_PATH",   "/etc/asterisk/rpt.conf")
 MANAGER_CONF    = os.environ.get("MANAGER_CONF",    "/etc/asterisk/manager.conf")
+MODULES_CONF_PATH = os.environ.get("MODULES_CONF_PATH", "/etc/asterisk/modules.conf")
 BACKUP_DIR      = os.environ.get("BACKUP_DIR",      "/etc/asterisk/rpt_backups")
 SECRET_KEY      = os.environ.get("SECRET_KEY",      "henwen-change-me")
 PORT            = int(os.environ.get("PORT",         5000))
@@ -327,6 +328,11 @@ if not os.path.exists(SYSTEMD_RUN_PATH):
 UPDATE_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "update.sh")
 ROTATE_SECRET_KEY_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rotate_secret_key.sh")
 UPDATE_SERVICE_PORTS_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "update_service_ports.sh")
+AUDIOSOCKET_TAP_APPLY_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audiosocket-tap", "apply.sh")
+# Same marker string apply.sh greps modules.conf for before deciding whether
+# to append its snippet — reused here (read-only) so the Manager UI can show
+# applied/not-applied without needing root.
+AUDIOSOCKET_TAP_MARKER = "HenWen AudioSocket tap"
 
 
 def _systemctl(*args, timeout=30):
@@ -9608,6 +9614,68 @@ def api_update_launch():
                    "automatically in a moment — this page will disconnect, then "
                    "reload it. Follow progress with: journalctl -u henwen-updater -f",
     })
+
+
+# ── AudioSocket tap (low-latency Listen audio) ───────────────────────────────
+#
+# Optional opt-in swap of the Status Board's Listen capture path from AMI
+# MixMonitor (buffered, ~2s latency — see "Audio streaming" in CLAUDE.md) to
+# a live AudioSocket tap. See audiosocket-tap/README.md for what apply.sh
+# actually does. Owner-only, matching every other shell/deploy-level action
+# on this page (Force Update, ports, secret key) — misconfiguring Asterisk
+# modules/dialplan isn't something to expose below the top role.
+
+@app.route("/api/audiosocket-tap/status")
+def api_audiosocket_tap_status():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Owner access required"}), 403
+    try:
+        with open(MODULES_CONF_PATH) as f:
+            applied = AUDIOSOCKET_TAP_MARKER in f.read()
+    except OSError as e:
+        return jsonify({"error": f"Couldn't read {MODULES_CONF_PATH}: {e}"}), 500
+    return jsonify({"applied": applied, "installed": os.path.exists(AUDIOSOCKET_TAP_APPLY_SCRIPT_PATH)})
+
+
+@app.route("/api/audiosocket-tap/apply", methods=["POST"])
+def api_audiosocket_tap_apply():
+    """Runs audiosocket-tap/apply.sh via the same narrowly-scoped passwordless
+    sudo rule pattern as the updater/secret-key/ports routes above. Unlike
+    Force Update, this doesn't restart HenWen or Asterisk — modules load live
+    and the dialplan reload doesn't touch in-progress calls — so it's run
+    straight from this request rather than handed off via systemd-run."""
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Owner access required"}), 403
+
+    if not os.path.exists(AUDIOSOCKET_TAP_APPLY_SCRIPT_PATH):
+        return jsonify({"error": f"apply.sh not found: {AUDIOSOCKET_TAP_APPLY_SCRIPT_PATH}"}), 404
+
+    cmd = [SUDO_PATH, "-n", AUDIOSOCKET_TAP_APPLY_SCRIPT_PATH]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "apply.sh timed out after 30s — check journalctl / "
+                                  "asterisk -rx 'module show like audiosocket' by hand"}), 500
+    except Exception as e:
+        log("ERROR", f"[API] /api/audiosocket-tap/apply exception: {e}")
+        return jsonify({"error": str(e)}), 500
+
+    output = (r.stdout or "") + (r.stderr or "")
+    if r.returncode != 0:
+        hint = ("Service account lacks sudo rights for apply.sh — re-run install.sh "
+                 "to install the henwen-systemctl sudoers rule."
+                 if "password" in output.lower() or "authoriz" in output.lower()
+                 else None)
+        log("ERROR", f"[API] audiosocket-tap apply failed (exit {r.returncode}): {output.strip()}")
+        resp = {"error": output.strip() or f"apply.sh returned code {r.returncode}", "output": output}
+        if hint:
+            resp["hint"] = hint
+        return jsonify(resp), 500
+
+    log("INFO", f"[API] AudioSocket tap applied by '{session.get('username')}'")
+    return jsonify({"success": True, "output": output,
+                     "message": "AudioSocket tap applied. Listen will use it automatically "
+                                "next time it starts for any node — no restart needed."})
 
 
 # ── App settings (SECRET_KEY) ─────────────────────────────────────────────────

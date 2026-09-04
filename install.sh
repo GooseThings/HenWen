@@ -158,17 +158,21 @@ fi
 # ── Sudoers rule for privileged systemctl actions ─────────
 # The service runs unprivileged as User=asterisk (see HenWen.service), but
 # the Dashboard's "Restart Asterisk" button, secret-key rotation, port
-# rotation, and the "Launch Updater" button need to run `systemctl restart
+# rotation, the "Launch Updater" button, and the Settings page's "Apply"
+# button for the optional AudioSocket tap need to run `systemctl restart
 # asterisk`, `systemctl restart HenWen`, `systemctl daemon-reload`,
 # rotate_secret_key.sh / update_service_ports.sh (the only code allowed to
 # edit the root-owned unit file's SECRET_KEY/PORT/AMI_PORT lines — see
-# app.py's api_set_secret_key / api_set_ports), and (via systemd-run, so it
-# survives outside HenWen.service's own cgroup) update.sh. Without this
-# rule those actions fail with "Interactive authentication required" since
-# there's no session for polkit to prompt. Scope is intentionally limited
-# to these exact commands — do not broaden with wildcards. The updater rule
-# only works if $INSTALL_DIR is itself a git checkout of the HenWen repo —
-# update.sh no-ops with an error otherwise.
+# app.py's api_set_secret_key / api_set_ports), (via systemd-run, so it
+# survives outside HenWen.service's own cgroup) update.sh, and
+# audiosocket-tap/apply.sh (edits /etc/asterisk/modules.conf and
+# custom/extensions.conf, loads Asterisk modules live — see
+# audiosocket-tap/README.md). Without this rule those actions fail with
+# "Interactive authentication required" since there's no session for
+# polkit to prompt. Scope is intentionally limited to these exact commands
+# — do not broaden with wildcards. The updater rule only works if
+# $INSTALL_DIR is itself a git checkout of the HenWen repo — update.sh
+# no-ops with an error otherwise.
 echo "[8/9] Installing sudoers rule for restart/reload/update actions..."
 SUDOERS_FILE=/etc/sudoers.d/henwen-systemctl
 SYSTEMCTL_BIN=$(command -v systemctl || echo /bin/systemctl)
@@ -184,6 +188,7 @@ asterisk ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} restart ${SERVICE_NAME}
 asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/rotate_secret_key.sh
 asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/update_service_ports.sh
 asterisk ALL=(root) NOPASSWD: ${SYSTEMD_RUN_BIN} --unit=henwen-updater --collect ${INSTALL_DIR}/update.sh
+asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/audiosocket-tap/apply.sh
 EOF
 if visudo -c -f "${SUDOERS_FILE}.tmp" &>/dev/null; then
     chmod 440 "${SUDOERS_FILE}.tmp"
