@@ -6169,7 +6169,8 @@ function _txMediaKeySync(quiet) {
 var TX_BLE_SERVICE = '89a8591d-bb19-485b-9f59-58492bc33e24';
 var TX_BLE_CHAR     = '894c8042-e841-461c-a5c9-5a73d25db08e';
 var _txBle = { device: null, char: null, statusMsg: '', warn: false,
-               wantConnected: false, retry: 0, retryTimer: null, autoTried: false };
+               wantConnected: false, retry: 0, retryTimer: null, autoTried: false,
+               pollTimer: null, lastState: false, readFails: 0, reading: false };
 
 function _txBleSetStatus(msg, warn) {
   _txBle.statusMsg = msg || '';
@@ -6191,12 +6192,58 @@ function _txBleUpdateBtn() {
     ? 'Connected to ' + (_txBle.device.name || 'PTT device') + ' — click to disconnect'
     : "Connects directly over Bluetooth LE to a Tidradio-style PTT button's own press/release signal for true hold-to-transmit — works independently of whether TX is currently armed. Chrome only (Web Bluetooth) — confirmed against one Tidradio TD-PTT unit.";
 }
-function _txBleOnValue(e) {
-  var pressed = e.target.value.getUint8(0) === 1;
-  _txDiag('ble-value', pressed ? 'press' : 'release');
+/* Notifications are not the only way to read this characteristic, and on
+   this device they are the unreliable one. Confirmed with nRF Connect while
+   subscribed: pressing PTT flips the value 0x00 -> 0x01 -> 0x00 every time,
+   so the peripheral notifies correctly and it is Chrome's Web Bluetooth that
+   stops delivering — HenWen's own log has the CCCD write accepted
+   ('subscribed') followed by no events at all for a run of presses.
+   The characteristic is READ as well as NOTIFY, so rather than fight that,
+   poll it. At 150ms the worst-case added latency on a press is well under
+   what a PTT feels, and it needs nothing from the notification path. Both
+   sources feed _txBleApply(), which de-duplicates on the last known state,
+   so whichever arrives first wins and notifications remain a free speed-up
+   on any device where they do work — the log line says which delivered it.
+   This is what makes real press-and-hold possible: the value mirrors live
+   button state, so it gives a genuine down/up pair, unlike the media-key
+   toggle that is the only alternative on standard APIs. */
+var TX_BLE_POLL_MS       = 150;
+var TX_BLE_READ_FAIL_MAX = 5;
+
+function _txBleApply(pressed, src) {
+  if (pressed === _txBle.lastState) return;
+  _txBle.lastState = pressed;
+  _txDiag('ble-value', (pressed ? 'press' : 'release') + ' via ' + src);
   if (!_tx.armed || !_tx.session || !_tx.session.isEstablished()) return;
   if (pressed) { if (!_tx.keyed) _txKey(); }
   else         { if (_tx.keyed)  _txUnkey(); }
+}
+
+function _txBleOnValue(e) {
+  _txBleApply(e.target.value.getUint8(0) === 1, 'notify');
+}
+
+/* A read that keeps failing is the only honest signal that a link has died
+   without raising gattserverdisconnected — the exact "connected but deaf"
+   state this device was originally documented as producing. Forcing a
+   disconnect hands it to the existing reconnect path rather than sitting
+   there believing a dead link is fine. */
+function _txBlePollTick() {
+  if (_txBle.reading || !_txBle.char) return;
+  if (!_txBle.device || !_txBle.device.gatt.connected) return;
+  _txBle.reading = true;
+  _txBle.char.readValue().then(function(v) {
+    _txBle.reading = false;
+    _txBle.readFails = 0;
+    _txBleApply(v.getUint8(0) === 1, 'poll');
+  }).catch(function(err) {
+    _txBle.reading = false;
+    _txBle.readFails++;
+    if (_txBle.readFails === TX_BLE_READ_FAIL_MAX) {
+      _txDiag('ble-read-dead', TX_BLE_READ_FAIL_MAX + ' consecutive read failures: ' + err.message);
+      try { _txBle.device.gatt.disconnect(); } catch (e) {}
+    }
+  });
 }
 /* Observed live: the link drops on its own (a real gattserverdisconnected,
    ~15-40s after connecting) while Bluetooth audio is active, and until then
@@ -6213,6 +6260,8 @@ function _txBleOnDisconnect() {
   _txBleUpdateBtn();
   if (_tx.keyed) _txUnkey();   // never leave the node keyed on a dropped link
   _txBle.char = null;
+  clearInterval(_txBle.pollTimer);
+  if (_tx.keyed) _txUnkey();
   if (!_txBle.wantConnected) { _txBleSetStatus('Disconnected'); return; }
   if (_txBle.retry >= TX_BLE_RETRY_MAX) {
     _txBle.wantConnected = false;
@@ -6240,7 +6289,15 @@ async function _txBleAttach(device) {
   var ch      = await service.getCharacteristic(TX_BLE_CHAR);
   _txBle.char = ch;
   ch.addEventListener('characteristicvaluechanged', _txBleOnValue);
-  await ch.startNotifications();
+  /* Notifications stay requested — free and instant where they work — but
+     nothing depends on them, so a peripheral that accepts the CCCD write and
+     then never notifies is no longer a silent failure. */
+  try { await ch.startNotifications(); } catch (e) { _txDiag('ble-notify-err', e.message); }
+  _txBle.lastState = false;
+  _txBle.readFails = 0;
+  _txBle.reading   = false;
+  clearInterval(_txBle.pollTimer);
+  _txBle.pollTimer = setInterval(_txBlePollTick, TX_BLE_POLL_MS);
   _txBle.retry = 0;
   _txBleSetStatus('Connected: ' + (device.name || 'PTT device'));
   _txBleUpdateBtn();
@@ -6254,6 +6311,7 @@ async function _txBleConnect() {
   clearTimeout(_txBle.retryTimer);
   if (_txBle.device && _txBle.device.gatt.connected) {
     _txBle.wantConnected = false;      // explicit user disconnect, don't retry
+    clearInterval(_txBle.pollTimer);
     _txBle.device.gatt.disconnect();
     return;
   }
