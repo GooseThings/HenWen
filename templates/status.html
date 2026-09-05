@@ -6170,7 +6170,8 @@ var TX_BLE_SERVICE = '89a8591d-bb19-485b-9f59-58492bc33e24';
 var TX_BLE_CHAR     = '894c8042-e841-461c-a5c9-5a73d25db08e';
 var _txBle = { device: null, char: null, statusMsg: '', warn: false,
                wantConnected: false, retry: 0, retryTimer: null, autoTried: false,
-               pollTimer: null, lastState: false, readFails: 0, reading: false, reads: 0 };
+               pollTimer: null, lastState: false, readFails: 0, reading: false, reads: 0,
+               readStart: 0, ticks: 0 };
 
 function _txBleSetStatus(msg, warn) {
   _txBle.statusMsg = msg || '';
@@ -6209,6 +6210,7 @@ function _txBleUpdateBtn() {
    toggle that is the only alternative on standard APIs. */
 var TX_BLE_POLL_MS       = 150;
 var TX_BLE_READ_FAIL_MAX = 5;
+var TX_BLE_READ_STALL_MS  = 1500;
 
 function _txBleApply(pressed, src) {
   if (pressed === _txBle.lastState) return;
@@ -6229,40 +6231,46 @@ function _txBleOnValue(e) {
    disconnect hands it to the existing reconnect path rather than sitting
    there believing a dead link is fine. */
 function _txBlePollTick() {
-  if (_txBle.reading || !_txBle.char) return;
-  if (!_txBle.device || !_txBle.device.gatt.connected) return;
-  _txBle.reading = true;
-  _txBle.char.readValue().then(function(v) {
+  if (!_txBle.char || !_txBle.device || !_txBle.device.gatt.connected) return;
+  /* Timestamped rather than a bare in-flight boolean. A readValue() promise
+     that never settles — which is what the log pointed at: poll started, no
+     read logged, no read failure logged either — wedges a boolean guard
+     permanently and silently kills polling for the rest of the session.
+     A stale in-flight read is abandoned and retried instead. */
+  if (_txBle.reading && (Date.now() - _txBle.readStart) < TX_BLE_READ_STALL_MS) return;
+  if (_txBle.reading) _txDiag('ble-read-stall', 'abandoning read after ' + TX_BLE_READ_STALL_MS + 'ms');
+  _txBle.reading   = true;
+  _txBle.readStart = Date.now();
+  if (_txBle.ticks === 0) _txDiag('ble-poll-tick', 'first read issued');
+  _txBle.ticks++;
+  /* readValue() can also throw synchronously (Chrome rejects overlapping
+     GATT operations), which would escape the interval callback entirely and
+     leave the guard set — same silent death, different cause. */
+  try {
+    _txBle.char.readValue().then(function(v) {
+      _txBle.reading = false;
+      _txBle.readFails = 0;
+      var raw = v.getUint8(0);
+      if (_txBle.reads === 0 || _txBle.reads % 100 === 0) {
+        _txDiag('ble-poll-read', '#' + _txBle.reads + ' value=0x' + ('0' + raw.toString(16)).slice(-2));
+      }
+      _txBle.reads++;
+      _txBleApply(raw === 1, 'poll');
+    }).catch(function(err) {
+      _txBle.reading = false;
+      _txBle.readFails++;
+      if (_txBle.readFails === 1 || _txBle.readFails === TX_BLE_READ_FAIL_MAX) {
+        _txDiag('ble-read-err', '#' + _txBle.readFails + ' ' + (err.name || '') + ' ' + err.message);
+      }
+      if (_txBle.readFails === TX_BLE_READ_FAIL_MAX) {
+        try { _txBle.device.gatt.disconnect(); } catch (e) {}
+      }
+    });
+  } catch (e) {
     _txBle.reading = false;
-    _txBle.readFails = 0;
-    var raw = v.getUint8(0);
-    /* The first read is logged whatever it says, and every 100th after
-       (~15s), so "reads are working and returning 0x00" is distinguishable
-       from "reads are not happening" — the two look identical otherwise,
-       and they need completely different fixes. */
-    if (_txBle.reads === 0 || _txBle.reads % 100 === 0) {
-      _txDiag('ble-poll-read', '#' + _txBle.reads + ' value=0x' + ('0' + raw.toString(16)).slice(-2));
-    }
-    _txBle.reads++;
-    _txBleApply(raw === 1, 'poll');
-  }).catch(function(err) {
-    _txBle.reading = false;
-    _txBle.readFails++;
-    if (_txBle.readFails === TX_BLE_READ_FAIL_MAX) {
-      _txDiag('ble-read-dead', TX_BLE_READ_FAIL_MAX + ' consecutive read failures: ' + err.message);
-      try { _txBle.device.gatt.disconnect(); } catch (e) {}
-    }
-  });
+    _txDiag('ble-read-throw', (e.name || '') + ' ' + e.message);
+  }
 }
-/* Observed live: the link drops on its own (a real gattserverdisconnected,
-   ~15-40s after connecting) while Bluetooth audio is active, and until then
-   delivers no notifications at all. Web Bluetooth only needs a user gesture
-   for requestDevice() — re-connecting an already-permitted device does not —
-   so a drop is recoverable without making the operator tap Connect again.
-   Retries are bounded with backoff rather than looping forever: if the radio
-   is genuinely too contended to hold a link, retrying forever just burns
-   battery and buries the log. */
-var TX_BLE_RETRY_MAX = 10;
 
 function _txBleOnDisconnect() {
   _txDiag('ble-disconnected', 'wanted=' + _txBle.wantConnected);
@@ -6306,6 +6314,8 @@ async function _txBleAttach(device) {
   _txBle.readFails = 0;
   _txBle.reading   = false;
   _txBle.reads     = 0;
+  _txBle.ticks     = 0;
+  _txBle.readStart = 0;
   clearInterval(_txBle.pollTimer);
   _txBle.pollTimer = setInterval(_txBlePollTick, TX_BLE_POLL_MS);
   /* Explicit marker that the polling build is what the browser is actually
