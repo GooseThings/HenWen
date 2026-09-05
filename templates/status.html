@@ -6168,6 +6168,11 @@ function _txMediaKeySync(quiet) {
    ble-connected/ble-disconnected/ble-value log trail is there to pin it. */
 var TX_BLE_SERVICE = '89a8591d-bb19-485b-9f59-58492bc33e24';
 var TX_BLE_CHAR     = '894c8042-e841-461c-a5c9-5a73d25db08e';
+/* The LE instance's other services, from an nRF Connect dump. Listed in
+   optionalServices so they can be inspected without re-pairing: 0xFFE0 is
+   almost certainly the HM-10-style serial passthrough, the obvious backup
+   if the PTT characteristic stays unreadable from Chrome. */
+var TX_BLE_EXTRA_SERVICES = [0xFFE0, 0xFF00, 0xAE30];
 var _txBle = { device: null, char: null, statusMsg: '', warn: false,
                wantConnected: false, retry: 0, retryTimer: null, autoTried: false,
                pollTimer: null, lastState: false, readFails: 0, reading: false, reads: 0,
@@ -6323,6 +6328,21 @@ function _txBleOnDisconnect() {
 async function _txBleAttach(device) {
   var server  = await device.gatt.connect();
   var service = await server.getPrimaryService(TX_BLE_SERVICE);
+  /* Enumerate rather than assume. Chrome returning a zero-length read from a
+     characteristic nRF Connect reads correctly would be explained by there
+     being more than one characteristic under this UUID, or by the properties
+     Chrome sees differing from what nRF reports — both visible here and
+     neither visible from getCharacteristic() alone. */
+  try {
+    var all = await service.getCharacteristics();
+    _txDiag('ble-chars', all.map(function(c) {
+      var p = c.properties || {};
+      return c.uuid.slice(0, 8) +
+             (p.read ? '+r' : '') + (p.notify ? '+n' : '') +
+             (p.write ? '+w' : '') + (p.writeWithoutResponse ? '+W' : '') +
+             (p.indicate ? '+i' : '');
+    }).join(' ').slice(0, 190));
+  } catch (e) { _txDiag('ble-chars-err', e.message); }
   var ch      = await service.getCharacteristic(TX_BLE_CHAR);
   _txBle.char = ch;
   ch.addEventListener('characteristicvaluechanged', _txBleOnValue);
@@ -6381,7 +6401,8 @@ async function _txBleConnect() {
        in filters/optionalServices at requestDevice() time). */
     var device = _txBle.device;
     if (!device) {
-      device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [TX_BLE_SERVICE] });
+      device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true,
+                 optionalServices: [TX_BLE_SERVICE].concat(TX_BLE_EXTRA_SERVICES) });
       _txBle.device = device;
       device.addEventListener('gattserverdisconnected', _txBleOnDisconnect);
     }
