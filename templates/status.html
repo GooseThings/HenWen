@@ -1299,6 +1299,11 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
           <input type="range" id="tx-gain" min="0" max="200" value="100" title="Microphone gain">
           <span id="tx-gain-val" style="font-size:0.7rem;color:var(--text2);width:3em;flex-shrink:0">100%</span>
         </div>
+        <label style="display:flex;align-items:center;gap:6px;font-size:0.72rem;color:var(--text2);padding:4px 0 0"
+               title="Uses a paired Bluetooth headset/PTT button's play/pause control to toggle transmit. Experimental: exact behavior depends on your specific device and phone, so test it before relying on it.">
+          <input type="checkbox" id="tx-bt-ptt">
+          Bluetooth PTT button (experimental) &mdash; toggles TX on press
+        </label>
         <div id="tx-status" style="font-size:0.75rem;color:var(--accent);min-height:1em"></div>
       </div>
       <div class="connector-warn-bar" id="connector-warn-bar" style="display:none">
@@ -5694,6 +5699,7 @@ async function armTx() {
         /* Listen is the monitor path — make sure it's running */
         if (!_listenActive) _startListen();
         _txTouchIdle();
+        _txBtSync();
         _txDiag('armed', 'call confirmed');
         _txStatsSample('armed');
       });
@@ -5741,6 +5747,7 @@ function _txTeardown() {
   _txUnkey();
   clearTimeout(_tx.idleTimer);
   clearTimeout(_tx.statsTimer);
+  _txBtSync();
   var pttEl = document.getElementById('tx-ptt');
   if (pttEl) pttEl.disabled = true;
   if (_tx.session) { try { _tx.session.terminate(); } catch (e) {} _tx.session = null; }
@@ -5804,6 +5811,40 @@ function _txUnkey() {
   }
 }
 
+/* ── Bluetooth/hardware PTT button (experimental) ────────────────────────
+   Cheap Bluetooth "PTT" buttons sold for radio apps (including Tidradio's)
+   advertise working with "most PTT applications" with no per-app pairing
+   step — that's only possible if the button rides the standard Bluetooth
+   headset control (AVRCP play/pause, the same signal a wired headset's
+   inline button sends) rather than a proprietary protocol each app has to
+   support individually. That's the hook used here, via the Media Session
+   API: while armed and this box is checked, a 'play' or 'pause' media
+   action toggles TX. Toggle rather than press/hold because the OS/browser
+   only ever hands a page a single semantic action, not a raw button-down/
+   button-up pair with real timing.
+   This was implemented without the actual hardware in hand to verify
+   against, so it's opt-in and off by default — a device that behaves
+   differently (or a phone that never routes the button to the page at
+   all) should be inert, not surprising. Confirm the toggle behavior
+   before relying on it in the field. */
+function _txBtSavedPref() {
+  return localStorage.getItem('henwen-tx-bt-ptt') === '1';
+}
+function _txBtToggle() {
+  if (!_tx.armed || !_tx.session || !_tx.session.isEstablished()) return;
+  if (_tx.keyed) _txUnkey(); else _txKey();
+  _txDiag('bt-toggle', 'keyed=' + _tx.keyed);
+}
+function _txBtSync() {
+  if (!('mediaSession' in navigator)) return;
+  var want = _tx.armed && _txBtSavedPref();
+  try {
+    navigator.mediaSession.setActionHandler('play',  want ? _txBtToggle : null);
+    navigator.mediaSession.setActionHandler('pause', want ? _txBtToggle : null);
+    navigator.mediaSession.playbackState = want ? 'playing' : 'none';
+  } catch (e) { _txDiag('bt-handler-err', e.message); }
+}
+
 (function() {
   var gain = document.getElementById('tx-gain');
   var gval = document.getElementById('tx-gain-val');
@@ -5814,6 +5855,15 @@ function _txUnkey() {
     localStorage.setItem('henwen-tx-gain', gain.value);
     if (_tx.gainNode) _tx.gainNode.gain.value = gain.value / 100;
   });
+
+  var btChk = document.getElementById('tx-bt-ptt');
+  if (btChk) {
+    btChk.checked = _txBtSavedPref();
+    btChk.addEventListener('change', function() {
+      localStorage.setItem('henwen-tx-bt-ptt', btChk.checked ? '1' : '0');
+      _txBtSync();
+    });
+  }
 
   var ptt = document.getElementById('tx-ptt');
   ptt.addEventListener('pointerdown',   function(e) { e.preventDefault(); _txKey(); });
