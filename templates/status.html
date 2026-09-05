@@ -470,9 +470,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
    would grow the whole column past .connected-card's fixed height instead of
    this scrolling within the space left over, clipping node entries via the
    card's own overflow:hidden. */
-.node-list { flex: 1; overflow-y: auto; min-height: 0; }
-.node-list::-webkit-scrollbar { width: 3px; }
-.node-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.node-list { flex: 1; overflow-y: auto; min-height: 0; scrollbar-color: var(--border) transparent; }
+.node-list::-webkit-scrollbar { width: 10px; }
+.node-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
+.node-list::-webkit-scrollbar-thumb:hover { background: var(--text2); background-clip: padding-box; }
 .empty-msg { display: flex; align-items: center; justify-content: center; height: 100%;
   color: var(--text2); font-size: 0.95rem; min-height: 48px; }
 
@@ -566,9 +567,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
-.activity-list { flex: 1; overflow-y: auto; }
-.activity-list::-webkit-scrollbar { width: 3px; }
-.activity-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.activity-list { flex: 1; overflow-y: auto; scrollbar-color: var(--border) transparent; }
+.activity-list::-webkit-scrollbar { width: 10px; }
+.activity-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
+.activity-list::-webkit-scrollbar-thumb:hover { background: var(--text2); background-clip: padding-box; }
 
 .act-row { display: grid; grid-template-columns: 1fr auto; gap: 0 10px;
   align-items: center; padding: 8px 14px; cursor: pointer;
@@ -598,9 +600,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
 .mesh-channel-label { font-size: 0.65rem; color: var(--text2); font-family: var(--mono); }
-.mesh-list { flex: 1; overflow-y: auto; }
-.mesh-list::-webkit-scrollbar { width: 3px; }
-.mesh-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.mesh-list { flex: 1; overflow-y: auto; scrollbar-color: var(--border) transparent; }
+.mesh-list::-webkit-scrollbar { width: 10px; }
+.mesh-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
+.mesh-list::-webkit-scrollbar-thumb:hover { background: var(--text2); background-clip: padding-box; }
 .mesh-row { padding: 6px 14px; border-bottom: 1px solid var(--border); }
 .mesh-row:last-child { border-bottom: none; }
 .mesh-top { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
@@ -657,9 +660,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
-.fav-list { flex: 1; overflow-y: auto; }
-.fav-list::-webkit-scrollbar { width: 3px; }
-.fav-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.fav-list { flex: 1; overflow-y: auto; scrollbar-color: var(--border) transparent; }
+.fav-list::-webkit-scrollbar { width: 10px; }
+.fav-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
+.fav-list::-webkit-scrollbar-thumb:hover { background: var(--text2); background-clip: padding-box; }
 .fav-warn {
   padding: 5px 12px; font-size: 0.67rem; color: var(--warn);
   border-bottom: 1px solid var(--border); background: rgba(255,179,0,.07);
@@ -703,9 +707,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .fav-drag-handle:hover { opacity: 0.9; }
 
 /* ── Chat panel ── */
-.chat-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; padding: 4px 10px; }
-.chat-list::-webkit-scrollbar { width: 3px; }
-.chat-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.chat-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; padding: 4px 10px; scrollbar-color: var(--border) transparent; }
+.chat-list::-webkit-scrollbar { width: 10px; }
+.chat-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
+.chat-list::-webkit-scrollbar-thumb:hover { background: var(--text2); background-clip: padding-box; }
 .chat-row { padding: 4px 2px; font-size: 0.78rem; line-height: 1.4; word-wrap: break-word; white-space: pre-wrap; }
 .chat-row .chat-ts { font-size: 0.85em; color: var(--text2); }
 .chat-row .chat-user { font-weight: 700; color: var(--accent); }
