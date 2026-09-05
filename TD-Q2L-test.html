@@ -39,6 +39,11 @@
   <button id="b-clear">Clear log</button>
 </div>
 
+<div>
+  <button id="b-ffe0-read"   disabled>6. Read 0xFFE0 notify-char</button>
+  <button id="b-ffe0-notify" disabled>7. Subscribe 0xFFE0 notify-char</button>
+</div>
+
 <div id="state">Not connected &nbsp; PTT: <span id="ptt">—</span></div>
 <div id="log"></div>
 
@@ -52,6 +57,7 @@ const CHAR    = '894c8042-e841-461c-a5c9-5a73d25db08e';
 const EXTRA   = [0xFFE0, 0xFF00, 0xAE30];
 
 let device = null, server = null, chr = null, pollTimer = null;
+let ffe0Chr = null;
 let reads = 0, empties = 0, last = null;
 
 const $ = id => document.getElementById(id);
@@ -86,6 +92,7 @@ $('b-connect').onclick = async () => {
       log('!!! gattserverdisconnected');
       $('state').firstChild.textContent = 'Disconnected ';
       clearInterval(pollTimer);
+      ffe0Chr = null;
     });
     server = await device.gatt.connect();
     log('gatt.connect() ok');
@@ -95,8 +102,43 @@ $('b-connect').onclick = async () => {
     const p = chr.properties;
     log(`characteristic ok — properties: ${Object.keys(p).filter(k => p[k]).join(', ')}`);
     $('state').firstChild.textContent = 'Connected ';
-    enable(['b-enum', 'b-read', 'b-poll', 'b-notify', 'b-stop'], true);
+    enable(['b-enum', 'b-read', 'b-poll', 'b-notify', 'b-stop', 'b-ffe0-read', 'b-ffe0-notify'], true);
   } catch (e) { log(`ERROR ${e.name}: ${e.message}`); }
+};
+
+/* Backup avenue per TD-Q2L.md: 0xFFE0 is likely an HM-10-style serial
+   passthrough and may carry the same button state over a different
+   transport. Auto-picks its first notify-or-read characteristic since the
+   doc never sniffed 0xFFE1 specifically on this unit. */
+async function getFfe0Char() {
+  if (ffe0Chr) return ffe0Chr;
+  const svc = await server.getPrimaryService(0xFFE0);
+  const cs = await svc.getCharacteristics();
+  const c = cs.find(c => c.properties.notify || c.properties.read) || cs[0];
+  if (!c) throw new Error('0xFFE0 has no characteristics');
+  log(`0xFFE0 using characteristic ${c.uuid} [${Object.keys(c.properties).filter(k => c.properties[k]).join(',')}]`);
+  ffe0Chr = c;
+  return c;
+}
+
+$('b-ffe0-read').onclick = async () => {
+  try {
+    const c = await getFfe0Char();
+    const v = await c.readValue();
+    log(`0xFFE0 read: byteLength=${v.byteLength} value=${hex(v)}`);
+  } catch (e) { log(`0xFFE0 read ERROR ${e.name}: ${e.message}`); }
+};
+
+$('b-ffe0-notify').onclick = async () => {
+  try {
+    const c = await getFfe0Char();
+    c.addEventListener('characteristicvaluechanged', e => {
+      const v = e.target.value;
+      log(`0xFFE0 notify: byteLength=${v.byteLength} value=${hex(v)}`);
+    });
+    await c.startNotifications();
+    log('0xFFE0 startNotifications() resolved. Press PTT.');
+  } catch (e) { log(`0xFFE0 notify ERROR ${e.name}: ${e.message}`); }
 };
 
 /* More than one characteristic under the same UUID, or properties differing
