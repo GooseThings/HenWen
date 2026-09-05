@@ -1292,7 +1292,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       </div>
       <div id="tx-bar" style="display:none">
         <button id="tx-ptt" disabled>
-          <div><svg class="icon"><use href="#icon-mic"></use></svg> PTT &mdash; hold to transmit&ensp;<span class="tx-ptt-space-hint" style="font-size:0.7rem;font-weight:400">(or hold Space &middot; keys in ~&frac12;s)</span></div>
+          <div><svg class="icon"><use href="#icon-mic"></use></svg> PTT &mdash; hold to transmit&ensp;<span class="tx-ptt-space-hint" style="font-size:0.7rem;font-weight:400">(or hold Space, or press Fwd on a Bluetooth mic &middot; keys in ~&frac12;s)</span></div>
           <div id="tx-ptt-tot" style="font-size:0.7rem;font-weight:400;opacity:.8;display:none"></div>
         </button>
         <div id="tx-audio-row">
@@ -5018,7 +5018,7 @@ async function removeFavorite(node) {
    is hidden unless that endpoint says the feature is configured AND the
    page is a secure context (mic capture requires HTTPS). */
 var _tx = { ua: null, session: null, keyed: false, armed: false, idleTimer: null,
-            node: '', statsTimer: null,
+            node: '', statsTimer: null, totSec: 0, keyWatchdog: null,
             audioCtx: null, gainNode: null, analyser: null, rawStream: null, meterTimer: null };
 var _TX_IDLE_HANGUP_MS = 5 * 60 * 1000;  // auto-disarm after 5 min without keying
 
@@ -5192,12 +5192,12 @@ async function _txUpdateBtn() {
        why establishing this BLE link only after TX's own mic capture has
        already started turned out to matter on real hardware. */
     if (bleBtn) bleBtn.style.display = (r.ok && navigator.bluetooth) ? '' : 'none';
-    /* Once per load, and only once TX is known to be available at all —
-       no point reaching for the radio on a board where TX isn't offered. */
-    if (r.ok && navigator.bluetooth && !_txBle.autoTried) {
-      _txBle.autoTried = true;
-      _txBleAutoAttach();
-    }
+    /* Deliberately not auto-attaching the BLE link here. Transmit now rides
+       the headset's AVRCP media keys, which share the same classic radio the
+       BLE GATT link was observed contending with — reaching for that link
+       unprompted on every board load risks breaking the path that works to
+       chase one that never delivered a press. The BLE PTT button is still
+       there for anyone who wants to try it explicitly. */
   } catch (e) {
     btn.style.display = 'none';
     if (bleBtn) bleBtn.style.display = 'none';
@@ -5731,7 +5731,8 @@ async function armTx() {
     }
     await _loadJsSIP();
     if (!_tx.armed) return;  // disarmed while loading
-    _tx.node = cfg.node;
+    _tx.node   = cfg.node;
+    _tx.totSec = (typeof cfg.tot_sec === 'number' && cfg.tot_sec > 0) ? cfg.tot_sec : 0;
 
     var totEl = document.getElementById('tx-ptt-tot');
     if (totEl) {
@@ -5801,6 +5802,7 @@ async function armTx() {
         /* Listen is the monitor path — make sure it's running */
         if (!_listenActive) _startListen();
         _txTouchIdle();
+        _txMediaKeySync();
         _txDiag('armed', 'call confirmed');
         _txStatsSample('armed');
       });
@@ -5846,6 +5848,7 @@ function _txReleaseMic() {
    readable. Listen is left exactly as the user has it (just unmuted). */
 function _txTeardown() {
   _txUnkey();
+  _txMediaKeySync();
   clearTimeout(_tx.idleTimer);
   clearTimeout(_tx.statsTimer);
   var pttEl = document.getElementById('tx-ptt');
@@ -5900,6 +5903,7 @@ function _txKey() {
 
 function _txUnkey() {
   if (!_tx.keyed) return;
+  clearTimeout(_tx.keyWatchdog);
   _tx.keyed = false;
   var b = document.getElementById('tx-ptt');
   if (b) b.classList.remove('tx');
@@ -5908,6 +5912,91 @@ function _txUnkey() {
     _txStatus('');
     _txTouchIdle();
     try { _tx.session.sendDTMF('#', { duration: 100, interToneGap: 70 }); } catch (e) {}
+  }
+}
+
+/* ── Hardware media-key PTT (the Fwd button on a Bluetooth PTT mic) ──────
+   The Q2L presents itself to Android as an ordinary Bluetooth headset, and
+   its Fwd / Rev / Vol± / Play-Pause buttons are real AVRCP media keys the
+   phone already recognises — only the PTT-labelled button is proprietary
+   (see TD-Q2L.md). So rather than fight for the proprietary one over BLE,
+   this binds transmit to a media key the platform already delivers.
+
+   Two things have to be true for a page to receive those keys, and the
+   earlier attempt at this (commit 2d374a3, on play/pause) had neither
+   reliably: the page must own the system media session, which on Android
+   means it must actually be playing audio — Listen playing through the
+   #node-audio element is what earns it, and armTx() already ensures Listen
+   is running — and it must have registered a handler for that specific
+   action. Setting metadata as well is what makes Android surface it as the
+   active media notification, which is what routes the headset's keys here
+   rather than to whichever app played audio last.
+
+   Fwd and Rev are BOTH bound to transmit for now. TD-Q2L.md's button table
+   records this device's forward-labelled key arriving as 'previoustrack'
+   and its reverse-labelled one as 'nexttrack' — the labelling is inverted
+   relative to the media semantics — so binding both means the operator's
+   Fwd button works whichever way round it actually lands, and the
+   tx-mediakey log line says which one fired so this can be narrowed later.
+
+   A media key is a single semantic action with no press/hold pair, so this
+   is necessarily a toggle: press to key, press again to unkey. That makes a
+   stuck transmitter possible in a way the hold-to-talk controls aren't, so
+   a watchdog unkeys on its own — at the node's own time-out timer when
+   there is one, otherwise a conservative default. Asterisk's TOT is the
+   real backstop, but it shouldn't be the only one. */
+var TX_MEDIAKEY_ACTIONS  = ['nexttrack', 'previoustrack'];
+var TX_MEDIAKEY_MAX_KEY_MS = 120000;
+
+function _txMediaKeyWatchdog() {
+  clearTimeout(_tx.keyWatchdog);
+  var ms = _tx.totSec ? (_tx.totSec * 1000) : TX_MEDIAKEY_MAX_KEY_MS;
+  _tx.keyWatchdog = setTimeout(function() {
+    if (!_tx.keyed) return;
+    _txUnkey();
+    _txStatus('Unkeyed automatically — media-key PTT is a toggle, press again to transmit', 'var(--warn)');
+    _txDiag('mediakey-watchdog', 'auto-unkey after ' + ms + 'ms');
+  }, ms);
+}
+
+function _txMediaKeyToggle(action) {
+  _txDiag('mediakey', action + ' (keyed was ' + _tx.keyed + ')');
+  if (!_tx.armed || !_tx.session || !_tx.session.isEstablished()) return;
+  if (_tx.keyed) {
+    clearTimeout(_tx.keyWatchdog);
+    _txUnkey();
+  } else {
+    _txKey();
+    _txMediaKeyWatchdog();
+  }
+}
+
+/* Called on arm and on teardown: handlers exist only while a call is up, so
+   the headset's Fwd key keeps its normal meaning the rest of the time. */
+function _txMediaKeySync() {
+  if (!('mediaSession' in navigator)) return;
+  var want = !!(_tx.armed && _tx.session);
+  try {
+    TX_MEDIAKEY_ACTIONS.forEach(function(a) {
+      navigator.mediaSession.setActionHandler(a, want ? function() { _txMediaKeyToggle(a); } : null);
+    });
+    if (want) {
+      /* Claiming the media session explicitly. Without metadata Android may
+         leave the notification (and therefore the headset's keys) attached
+         to whatever played last, even while this page is the one sounding. */
+      if (window.MediaMetadata) {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: 'Node ' + (_tx.node || '') + ' — press Fwd to transmit',
+          artist: 'HenWen',
+        });
+      }
+      navigator.mediaSession.playbackState = 'playing';
+    } else {
+      navigator.mediaSession.playbackState = 'none';
+    }
+    _txDiag('mediakey-handlers', want ? 'registered ' + TX_MEDIAKEY_ACTIONS.join(',') : 'cleared');
+  } catch (e) {
+    _txDiag('mediakey-err', e.message);
   }
 }
 
@@ -5927,10 +6016,11 @@ function _txUnkey() {
    Requires Web Bluetooth (Chrome on Android/desktop only; no Safari/Firefox
    support) and a fresh user-gesture pairing each page load — Web Bluetooth
    has no silent auto-reconnect on a plain page load, so there's a Connect
-   button — though _txBleAutoAttach() below reconnects a previously-paired
-   unit without it where the browser supports that. Deliberately does not
-   touch audio device selection at all: pairing the phone to the Q2L already
-   routes its mic and speaker there, and that is the OS's job, not ours.
+   button. Nothing here auto-connects: transmit rides the headset's AVRCP
+   media keys now (see _txMediaKeySync), and this link shares the same radio,
+   so it is only established when someone explicitly asks for it. Deliberately
+   does not touch audio device selection at all: pairing the phone to the Q2L
+   already routes its mic and speaker there, and that is the OS's job.
    On the radio-contention problem, the field evidence is broader than the
    original TD-Q2L.md writeup concluded: that writeup pinned it on SCO
    capture, but the link has also been seen dropping with Bluetooth capture
@@ -6024,34 +6114,6 @@ async function _txBleAttach(device) {
   _txDiag('ble-connected', (device.name || '?') + ' subscribed');
 }
 
-/* "When the mic is detected, the mic PTT should work" — as close to that as
-   the platform allows. Web Bluetooth demands a user gesture to *choose* a
-   device, but not to reconnect one already permitted, which getDevices()
-   returns across page loads. Where that exists (Chrome, recent versions),
-   a previously-paired Q2L is picked back up on load with no tap at all;
-   where it doesn't, this no-ops and the BLE PTT button is still there.
-   Silent by design: this runs on every board load, including for operators
-   who have never paired anything, so a failure here is not news — the
-   device simply isn't in range or isn't advertising (it only advertises in
-   narrow windows, see TD-Q2L.md), and the button remains the way in. */
-async function _txBleAutoAttach() {
-  try {
-    if (!navigator.bluetooth || !navigator.bluetooth.getDevices) return;
-    var known = await navigator.bluetooth.getDevices();
-    if (!known || !known.length) return;
-    var want = localStorage.getItem('henwen-tx-ble-id');
-    var device = known.filter(function(d) { return d.id === want; })[0] || known[0];
-    if (!device) return;
-    _txBle.device = device;
-    device.addEventListener('gattserverdisconnected', _txBleOnDisconnect);
-    _txBle.wantConnected = true;
-    _txBle.retry = 0;
-    await _txBleAttach(device);
-  } catch (e) {
-    _txBle.wantConnected = false;   // stay quiet; the button is the fallback
-  }
-}
-
 async function _txBleConnect() {
   clearTimeout(_txBle.retryTimer);
   if (_txBle.device && _txBle.device.gatt.connected) {
@@ -6077,7 +6139,6 @@ async function _txBleConnect() {
     if (!device) {
       device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [TX_BLE_SERVICE] });
       _txBle.device = device;
-      try { localStorage.setItem('henwen-tx-ble-id', device.id); } catch (e) {}
       device.addEventListener('gattserverdisconnected', _txBleOnDisconnect);
     }
     _txBle.wantConnected = true;
