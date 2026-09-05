@@ -6176,7 +6176,7 @@ var TX_BLE_EXTRA_SERVICES = [0xFFE0, 0xFF00, 0xAE30];
 var _txBle = { device: null, char: null, statusMsg: '', warn: false,
                wantConnected: false, retry: 0, retryTimer: null, autoTried: false,
                pollTimer: null, lastState: false, readFails: 0, reading: false, reads: 0,
-               readStart: 0, ticks: 0, empties: 0, warmupTimer: null, serialChar: null };
+               readStart: 0, ticks: 0, empties: 0, serialChar: null };
 
 function _txBleSetStatus(msg, warn) {
   _txBle.statusMsg = msg || '';
@@ -6213,15 +6213,14 @@ function _txBleUpdateBtn() {
    This is what makes real press-and-hold possible: the value mirrors live
    button state, so it gives a genuine down/up pair, unlike the media-key
    toggle that is the only alternative on standard APIs. */
-var TX_BLE_POLL_MS       = 150;
+var TX_BLE_POLL_MS       = 40;
 var TX_BLE_READ_FAIL_MAX = 5;
 var TX_BLE_READ_STALL_MS  = 1500;
 var TX_BLE_USE_NOTIFY     = true;
 var TX_BLE_SVC_TRIES      = 6;
 var TX_BLE_SVC_RETRY_MS   = 500;
 var TX_BLE_SERIAL_SERVICE = 0xFFE0;
-var TX_BLE_WARMUP_MS      = 3000;   // fast reads right after connect
-var TX_BLE_WARMUP_POLL_MS = 40;
+
 
 function _txBleApply(pressed, src) {
   if (pressed === _txBle.lastState) return;
@@ -6267,7 +6266,7 @@ function _txBlePollTick() {
          7/sec and never reaching the disconnect threshold. */
       if (!v || v.byteLength < 1) {
         _txBle.empties++;
-        if (_txBle.empties === 1 || _txBle.empties % 200 === 0) {
+        if (_txBle.empties === 1 || _txBle.empties % 2000 === 0) {
           _txDiag('ble-read-empty', '#' + _txBle.empties + ' zero-length read' +
                   (TX_BLE_USE_NOTIFY ? ' (notifications on)' : ' (notifications off)'));
         }
@@ -6309,7 +6308,6 @@ function _txBleOnDisconnect() {
   _txBle.char = null;
   _txBle.serialChar = null;
   clearInterval(_txBle.pollTimer);
-  clearTimeout(_txBle.warmupTimer);
   if (_tx.keyed) _txUnkey();
   if (!_txBle.wantConnected) { _txBleSetStatus('Disconnected'); return; }
   if (_txBle.retry >= TX_BLE_RETRY_MAX) {
@@ -6421,31 +6419,26 @@ async function _txBleAttach(device) {
   _txBle.ticks     = 0;
   _txBle.readStart = 0;
   _txBle.empties   = 0;
-  /* Warm-up burst. The leading theory for the on-again/off-again delivery is
-     BLE connection-interval variability: a fresh link can start on a slow,
-     power-saving interval where a quick press and release completes entirely
-     between two polling windows and is never seen at all. Native clients fix
-     this by requesting a high-priority interval on connect
-     (BluetoothGatt.requestConnectionPriority), which Web Bluetooth does not
-     expose to JavaScript in any form. Sustained GATT traffic is the only
-     lever a page has, so poll hard for the first few seconds to encourage the
-     stack to tighten the interval, then settle to the normal rate. Whether
-     this actually shortens time-to-fast-interval is the open question
-     TD-Q2L.md lists as untested — the ble-value log lines are what will
-     answer it. */
+  /* The poll is a keep-alive, not a data source. On this device the reads
+     themselves are useless — they come back zero-length every time — but the
+     GATT traffic they generate is the only lever a page has over the BLE
+     connection interval, since Web Bluetooth exposes no equivalent of
+     BluetoothGatt.requestConnectionPriority(). A slow, power-saving interval
+     is what makes a quick press-and-release complete entirely between two
+     polling windows and never be seen at all.
+     This was a 3s warm-up that then settled to 150ms, and the phone log made
+     that look wrong in one shot: two clean press/release pairs delivered by
+     notification during the 40ms warm-up — the first button state the phone
+     had ever produced — and nothing at all after 'settled to 150ms' fired
+     one second later. So the fast rate is not a warm-up, it is the operating
+     rate, for as long as the link is up. It is only up while an operator has
+     deliberately connected a PTT button, so the cost is bounded. */
   clearInterval(_txBle.pollTimer);
-  _txBle.pollTimer = setInterval(_txBlePollTick, TX_BLE_WARMUP_POLL_MS);
-  clearTimeout(_txBle.warmupTimer);
-  _txBle.warmupTimer = setTimeout(function() {
-    if (!_txBle.device || !_txBle.device.gatt.connected) return;
-    clearInterval(_txBle.pollTimer);
-    _txBle.pollTimer = setInterval(_txBlePollTick, TX_BLE_POLL_MS);
-    _txDiag('ble-warmup-done', 'settled to ' + TX_BLE_POLL_MS + 'ms');
-  }, TX_BLE_WARMUP_MS);
+  _txBle.pollTimer = setInterval(_txBlePollTick, TX_BLE_POLL_MS);
   /* Explicit marker that the polling build is what the browser is actually
      running. Without it, a stale page and a live page that simply saw no
      presses produce identical logs — which cost a debugging round. */
-  _txDiag('ble-poll-start', TX_BLE_WARMUP_POLL_MS + 'ms warm-up for ' + TX_BLE_WARMUP_MS + 'ms');
+  _txDiag('ble-poll-start', 'keep-alive every ' + TX_BLE_POLL_MS + 'ms');
   _txBleAttachSerial(server);   // redundant second source, never awaited
   _txBle.retry = 0;
   _txBleSetStatus('Connected: ' + (device.name || 'PTT device') + ' — polling button');

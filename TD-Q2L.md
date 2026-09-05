@@ -507,6 +507,45 @@ Log lines to watch: `ble-svc-retry`, `ble-serial`, `ble-warmup-done`, and
 `ble-value … via poll|notify|ffe1` — the source tag says which transport
 actually delivered each press.
 
+## Phone result, 2026-09-05 evening: fast polling correlates with delivery
+
+First delivery of button state to Chrome **on the phone**, and it arrived
+with a sharp correlation attached. Connect at `19:47:27` started the poll at
+40ms as a 3-second warm-up:
+
+```
+19:47:27  ble-poll-start: 40ms warm-up for 3000ms
+19:47:28  ble-value: press via notify
+19:47:28  ble-value: release via notify
+19:47:29  ble-value: press via notify
+19:47:29  ble-value: release via notify
+19:47:30  ble-warmup-done: settled to 150ms
+   ...nothing further, for the rest of the session
+```
+
+Two clean press/release pairs while polling at 40ms; nothing at all after
+the poll relaxed to 150ms. This is the first time the phone has produced
+button state through Chrome by any route, and it supports the
+connection-interval theory directly rather than by inference from timing.
+
+**Caveat, and it is a real one:** TX was armed at `19:47:32`, one second
+after the warm-up ended. So this single run cannot separate "the poll rate
+dropped" from "Bluetooth audio started" — the original radio-contention
+theory predicts the same silence. The two are distinguishable by testing:
+with the fast poll now permanent, presses that keep working *after* arming
+point at the interval; presses that stop again at the moment of arming point
+at audio contention.
+
+Note also that the reads themselves stayed useless throughout —
+`ble-read-empty` at #1, #200, #400 — so the poll is not a data source on
+this device. It is a keep-alive whose only purpose is generating enough GATT
+traffic to hold a fast connection interval. **Notifications are what deliver
+the button; the poll is what appears to keep them flowing.**
+
+Acted on: the 40ms rate is no longer a warm-up that settles, it is the
+operating rate for as long as the link is up. The link only exists while an
+operator has deliberately connected a PTT button, so the cost is bounded.
+
 ## Troubleshooting on a desktop
 
 `TD-Q2L-test.html` at the repo root is a standalone harness — no server-side
