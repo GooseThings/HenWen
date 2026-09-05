@@ -1,5 +1,19 @@
 # Tidradio TD-Q2L Bluetooth PTT mic — reverse-engineered notes
 
+> **Status 2026-09-05 — open problem, handed off for desktop testing.**
+> The PTT button works in nRF Connect on Android and cannot be read from
+> Chrome on the same phone: every `readValue()` resolves with **zero bytes**,
+> and notifications stop being delivered after the CCCD write is accepted.
+> Everything else about the device is understood. Jump to
+> [Open problem](#open-problem-chrome-reads-return-zero-bytes) for the state
+> of play, and [Troubleshooting on a desktop](#troubleshooting-on-a-desktop)
+> for what to try next and the standalone harness to try it with.
+>
+> Meanwhile HenWen ships a working-but-imperfect fallback: PTT on the **Rev**
+> media key, which is a toggle rather than hold-to-talk. Removing that
+> compromise is the entire point of getting the BLE read working.
+
+
 No public protocol documentation exists for this device (checked as of 2026-09).
 Tidradio markets it as compatible with "most PTT applications" without a
 per-app pairing step, which implied — before this was actually tested against
@@ -225,6 +239,85 @@ and the notifications themselves are being lost.
 Not confirmed: whether a different (pricier / different chipset) Bluetooth
 PTT accessory would avoid this entirely, or whether some other combination
 of Android/Chrome versions handles the radio-sharing better.
+
+## Open problem: Chrome reads return zero bytes
+
+The BLE characteristic is the only route to genuine press-and-hold on this
+device (every standard input API was ruled out — see the exhaustive scan
+above). It works from nRF Connect and not from Chrome.
+
+**Confirmed working, Android + nRF Connect:**
+- connect to the LE instance (no bonding needed — it reports NOT BONDED while
+  fully serving GATT)
+- subscribe: pressing PTT flips the value `0x00` → `0x01` → `0x00`, every time
+- read while holding the button down: returns `0x01`
+
+**Confirmed failing, Android + Chrome (same phone, same device, same session):**
+- `requestDevice()` + `gatt.connect()` + `getPrimaryService()` +
+  `getCharacteristic()` all succeed
+- `startNotifications()` resolves — the CCCD write is accepted — and then
+  **no `characteristicvaluechanged` event ever fires** for a run of presses
+- `readValue()` resolves successfully but with a **zero-length DataView**, at
+  every one of ~7 reads/sec for minutes at a time
+
+### Ruled out, with the evidence
+
+| Theory | Killed by |
+|---|---|
+| The button emits some standard signal we never registered for | Exhaustive scan: all 15 Media Session actions, DOM `keydown`/`keyup`, Gamepad API. Nothing, while Power/Fwd/Rev logged correctly seconds apart in the same run |
+| Bonding the LE instance would expose it as a BLE-HID keyboard | No HID service (`0x1812`) on the device at all |
+| The device stops notifying under Bluetooth-audio load | nRF Connect receives every press reliably, including with audio active |
+| Chrome answers reads from an empty notification cache | Reads still return zero-length with notifications never enabled (`ble-read-empty … (notifications off)`) |
+| Our poll was wedged / not running | `ble-poll-tick` and ~7 reads/sec confirmed; failures are real resolved-but-empty values, not a stuck in-flight guard |
+
+### Not yet tried
+
+- **Desktop Chrome.** A different Web Bluetooth implementation from Android's.
+  This is the obvious next environment and the reason for the harness below.
+- **`chrome://bluetooth-internals`** → Devices → Inspect → read the
+  characteristic directly. Takes application code out of the picture entirely:
+  empty there too means the bug is in Chrome/Android, not in any caller.
+- **Clearing Android's GATT attribute cache** (Bluetooth off/on, or forget the
+  device). A stale cache produces exactly this signature — handles resolve,
+  reads succeed, values come back empty.
+- **The `0xFFE0` service.** Very likely an HM-10-style serial passthrough; it
+  may carry the same button events over a different transport. Declared in the
+  harness's `optionalServices` so it can be enumerated immediately.
+- **Reading with a longer MTU / after a delay**, in case the zero-length
+  response is a negotiation artefact.
+
+## Troubleshooting on a desktop
+
+`TD-Q2L-test.html` at the repo root is a standalone harness — no server-side
+component, nothing to do with HenWen. Pair the mic to the laptop, then:
+
+```bash
+python3 -m http.server 8000
+# open http://localhost:8000/TD-Q2L-test.html in Chrome
+```
+
+`http://localhost` counts as a secure context, so Web Bluetooth works;
+`file://` does not. **Only one central can hold the LE link** — quit nRF
+Connect and close any HenWen tab before connecting, or the connect attempt
+fails with `Connection Error: Connection attempt failed.`
+
+Buttons, in order: **Connect**, **Enumerate services** (lists every
+characteristic under the PTT service and the three extras, with the
+properties Chrome sees — a second characteristic under the same UUID, or
+properties differing from nRF's, would explain the empty read), **Read once**,
+**Start poll**, **Subscribe**. The log shows `byteLength` and raw hex for
+every read and notification, and a PTT indicator turns red on `0x01`.
+
+The single question to answer first: **hold the button down and read — does
+`byteLength` come back 1 or 0?**
+
+- **1, value `0x01`** → desktop Chrome can read it and the fault is
+  Android-specific. HenWen's polling approach is correct as written and the
+  fix is a platform workaround (cache clear, different Chrome version) rather
+  than a code change.
+- **0** → Chrome cannot read this characteristic on any platform, and the
+  remaining avenues are `chrome://bluetooth-internals`, then the `0xFFE0`
+  serial service.
 
 ## Known-working reference implementation
 

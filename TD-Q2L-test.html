@@ -1,0 +1,174 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TD-Q2L BLE PTT test harness</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 0; padding: 16px; max-width: 900px; }
+  h1 { font-size: 1.15rem; margin: 0 0 4px; }
+  p.sub { margin: 0 0 16px; opacity: .75; }
+  button { font: inherit; padding: 7px 12px; margin: 0 6px 6px 0; cursor: pointer; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  #state { font-weight: 600; margin: 12px 0; }
+  #ptt { display: inline-block; min-width: 5.5em; text-align: center; padding: 3px 10px;
+         border-radius: 4px; background: #8883; }
+  #ptt.down { background: #d33; color: #fff; }
+  #log { white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 12px;
+         border: 1px solid #8886; border-radius: 4px; padding: 10px; height: 22em;
+         overflow-y: auto; margin-top: 12px; }
+  .hint { font-size: 12px; opacity: .75; border-left: 3px solid #8886; padding-left: 10px; }
+</style>
+
+<h1>TD-Q2L BLE PTT test harness</h1>
+<p class="sub">Standalone. No server-side anything — open it over <code>http://localhost</code> or HTTPS
+(Web Bluetooth needs a secure context; <code>file://</code> will not work).</p>
+
+<p class="hint">
+  From the repo root: <code>python3 -m http.server 8000</code> then open
+  <code>http://localhost:8000/TD-Q2L-test.html</code> in Chrome.<br>
+  Only one central can hold the LE link — quit nRF Connect and close any HenWen tab first.
+</p>
+
+<div>
+  <button id="b-connect">1. Connect</button>
+  <button id="b-enum"    disabled>2. Enumerate services</button>
+  <button id="b-read"    disabled>3. Read once</button>
+  <button id="b-poll"    disabled>4. Start poll (150ms)</button>
+  <button id="b-notify"  disabled>5. Subscribe (notify)</button>
+  <button id="b-stop"    disabled>Stop</button>
+  <button id="b-clear">Clear log</button>
+</div>
+
+<div id="state">Not connected &nbsp; PTT: <span id="ptt">—</span></div>
+<div id="log"></div>
+
+<script>
+const SERVICE = '89a8591d-bb19-485b-9f59-58492bc33e24';
+const CHAR    = '894c8042-e841-461c-a5c9-5a73d25db08e';
+/* Other services seen on this unit via nRF Connect. 0xFFE0 is very likely the
+   HM-10-style serial passthrough and is the main backup avenue if the PTT
+   characteristic stays unreadable. They must be declared here to be reachable
+   at all — Chrome blocks any service not named at requestDevice() time. */
+const EXTRA   = [0xFFE0, 0xFF00, 0xAE30];
+
+let device = null, server = null, chr = null, pollTimer = null;
+let reads = 0, empties = 0, last = null;
+
+const $ = id => document.getElementById(id);
+function log(msg) {
+  const t = new Date().toISOString().slice(11, 23);
+  $('log').textContent += `${t}  ${msg}\n`;
+  $('log').scrollTop = $('log').scrollHeight;
+}
+function hex(dv) {
+  if (!dv || !dv.byteLength) return '(empty)';
+  return [...new Uint8Array(dv.buffer)].map(b => b.toString(16).padStart(2, '0')).join(' ');
+}
+function setPtt(down) {
+  if (down === last) return;
+  last = down;
+  $('ptt').textContent = down ? 'DOWN' : 'up';
+  $('ptt').className = down ? 'down' : '';
+  log(`>>> PTT ${down ? 'PRESSED' : 'RELEASED'}`);
+}
+function enable(ids, on) { ids.forEach(i => { $(i).disabled = !on; }); }
+
+$('b-clear').onclick = () => { $('log').textContent = ''; };
+
+$('b-connect').onclick = async () => {
+  try {
+    log('requestDevice() — pick TID-MIC-Q2L-…');
+    device = await navigator.bluetooth.requestDevice({
+      acceptAllDevices: true, optionalServices: [SERVICE, ...EXTRA],
+    });
+    log(`picked: ${device.name || '(unnamed)'}  id=${device.id}`);
+    device.addEventListener('gattserverdisconnected', () => {
+      log('!!! gattserverdisconnected');
+      $('state').firstChild.textContent = 'Disconnected ';
+      clearInterval(pollTimer);
+    });
+    server = await device.gatt.connect();
+    log('gatt.connect() ok');
+    const svc = await server.getPrimaryService(SERVICE);
+    log(`service ${SERVICE.slice(0, 8)}… ok`);
+    chr = await svc.getCharacteristic(CHAR);
+    const p = chr.properties;
+    log(`characteristic ok — properties: ${Object.keys(p).filter(k => p[k]).join(', ')}`);
+    $('state').firstChild.textContent = 'Connected ';
+    enable(['b-enum', 'b-read', 'b-poll', 'b-notify', 'b-stop'], true);
+  } catch (e) { log(`ERROR ${e.name}: ${e.message}`); }
+};
+
+/* More than one characteristic under the same UUID, or properties differing
+   from what nRF Connect reports, would both explain a read that succeeds with
+   no bytes — and neither is visible through getCharacteristic() alone. */
+$('b-enum').onclick = async () => {
+  for (const uuid of [SERVICE, ...EXTRA]) {
+    try {
+      const svc = await server.getPrimaryService(uuid);
+      const cs  = await svc.getCharacteristics();
+      log(`service ${uuid.toString(16)} — ${cs.length} characteristic(s):`);
+      for (const c of cs) {
+        const p = Object.keys(c.properties).filter(k => c.properties[k]).join(',');
+        log(`    ${c.uuid}  [${p}]`);
+      }
+    } catch (e) { log(`service ${uuid.toString(16)}: ${e.name} ${e.message}`); }
+  }
+};
+
+$('b-read').onclick = async () => {
+  try {
+    const v = await chr.readValue();
+    log(`read: byteLength=${v.byteLength} value=${hex(v)}`);
+    if (v.byteLength) setPtt(v.getUint8(0) === 1);
+  } catch (e) { log(`read ERROR ${e.name}: ${e.message}`); }
+};
+
+/* The whole question this harness exists to answer: does a plain read return
+   live button state on this platform? On Android Chrome it returns zero bytes
+   every time, while nRF Connect reads 0x01 from the same characteristic on the
+   same phone. Hold the button down while polling and watch byteLength. */
+$('b-poll').onclick = () => {
+  clearInterval(pollTimer);
+  reads = 0; empties = 0;
+  log('polling every 150ms — hold PTT down now');
+  pollTimer = setInterval(async () => {
+    try {
+      const v = await chr.readValue();
+      if (!v || !v.byteLength) {
+        empties++;
+        if (empties === 1 || empties % 40 === 0) log(`poll: EMPTY read #${empties}`);
+        return;
+      }
+      reads++;
+      if (reads === 1 || reads % 40 === 0) log(`poll: #${reads} value=${hex(v)}`);
+      setPtt(v.getUint8(0) === 1);
+    } catch (e) { log(`poll ERROR ${e.name}: ${e.message}`); }
+  }, 150);
+};
+
+$('b-notify').onclick = async () => {
+  try {
+    chr.addEventListener('characteristicvaluechanged', e => {
+      const v = e.target.value;
+      log(`notify: byteLength=${v.byteLength} value=${hex(v)}`);
+      if (v.byteLength) setPtt(v.getUint8(0) === 1);
+    });
+    await chr.startNotifications();
+    log('startNotifications() resolved — CCCD accepted. Press PTT.');
+  } catch (e) { log(`notify ERROR ${e.name}: ${e.message}`); }
+};
+
+$('b-stop').onclick = () => {
+  clearInterval(pollTimer);
+  try { chr && chr.stopNotifications(); } catch (e) {}
+  try { device && device.gatt.connected && device.gatt.disconnect(); } catch (e) {}
+  log('stopped / disconnected');
+};
+
+if (!navigator.bluetooth) {
+  log('This browser has no Web Bluetooth. Chrome/Edge on desktop or Android only.');
+} else {
+  log('Ready. Click Connect.');
+}
+</script>
