@@ -6170,7 +6170,7 @@ var TX_BLE_SERVICE = '89a8591d-bb19-485b-9f59-58492bc33e24';
 var TX_BLE_CHAR     = '894c8042-e841-461c-a5c9-5a73d25db08e';
 var _txBle = { device: null, char: null, statusMsg: '', warn: false,
                wantConnected: false, retry: 0, retryTimer: null, autoTried: false,
-               pollTimer: null, lastState: false, readFails: 0, reading: false };
+               pollTimer: null, lastState: false, readFails: 0, reading: false, reads: 0 };
 
 function _txBleSetStatus(msg, warn) {
   _txBle.statusMsg = msg || '';
@@ -6235,7 +6235,16 @@ function _txBlePollTick() {
   _txBle.char.readValue().then(function(v) {
     _txBle.reading = false;
     _txBle.readFails = 0;
-    _txBleApply(v.getUint8(0) === 1, 'poll');
+    var raw = v.getUint8(0);
+    /* The first read is logged whatever it says, and every 100th after
+       (~15s), so "reads are working and returning 0x00" is distinguishable
+       from "reads are not happening" — the two look identical otherwise,
+       and they need completely different fixes. */
+    if (_txBle.reads === 0 || _txBle.reads % 100 === 0) {
+      _txDiag('ble-poll-read', '#' + _txBle.reads + ' value=0x' + ('0' + raw.toString(16)).slice(-2));
+    }
+    _txBle.reads++;
+    _txBleApply(raw === 1, 'poll');
   }).catch(function(err) {
     _txBle.reading = false;
     _txBle.readFails++;
@@ -6296,10 +6305,15 @@ async function _txBleAttach(device) {
   _txBle.lastState = false;
   _txBle.readFails = 0;
   _txBle.reading   = false;
+  _txBle.reads     = 0;
   clearInterval(_txBle.pollTimer);
   _txBle.pollTimer = setInterval(_txBlePollTick, TX_BLE_POLL_MS);
+  /* Explicit marker that the polling build is what the browser is actually
+     running. Without it, a stale page and a live page that simply saw no
+     presses produce identical logs — which cost a debugging round. */
+  _txDiag('ble-poll-start', 'every ' + TX_BLE_POLL_MS + 'ms');
   _txBle.retry = 0;
-  _txBleSetStatus('Connected: ' + (device.name || 'PTT device'));
+  _txBleSetStatus('Connected: ' + (device.name || 'PTT device') + ' — polling button');
   _txBleUpdateBtn();
   /* Logged after startNotifications() resolves, so this line means the CCCD
      write was accepted — if presses still don't arrive after it, the
