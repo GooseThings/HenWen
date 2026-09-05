@@ -1302,9 +1302,9 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
           <span id="tx-gain-val" style="font-size:0.7rem;color:var(--text2);width:3em;flex-shrink:0">100%</span>
         </div>
         <label style="display:flex;align-items:center;gap:6px;font-size:0.72rem;color:var(--text2);padding:4px 0 0"
-               title="Off (default): audio stays on this device's own mic/speaker, which leaves a BLE PTT button's radio uncontended so its presses keep arriving while you transmit. On: routes mic/speaker through a connected Bluetooth headset — but on a combo BLE+Classic device like the Tidradio TD-Q2L that stops the PTT button's presses from getting through once transmit audio is live, so use the on-screen PTT or Space instead. Takes effect the next time you arm TX.">
+               title="Off (default): transmits this device's own built-in mic. That leaves a BLE PTT button's radio uncontended so its presses keep arriving while you key up — but a phone mic held away from your mouth will sound quieter and duller than a headset's close-talk mic, so expect a real audio-quality drop. On: mic and speaker route through a connected Bluetooth headset for much better audio — but on a combo BLE+Classic device like the Tidradio TD-Q2L that stops the PTT button's presses getting through once transmit audio is live, so key up with the on-screen PTT or Space instead. Takes effect the next time you arm TX.">
           <input type="checkbox" id="tx-bt-audio">
-          Route audio through Bluetooth headset
+          Route audio through Bluetooth headset &mdash; better audio, but the BLE PTT button stops working
         </label>
         <div id="tx-ble-status" style="font-size:0.72rem;color:var(--text2);padding:4px 0 0"></div>
         <div id="tx-status" style="font-size:0.75rem;color:var(--accent);min-height:1em"></div>
@@ -5065,13 +5065,51 @@ function _txBtAudioPref() {
   return localStorage.getItem('henwen-tx-bt-audio') === '1';
 }
 
+/* Local speech leveller, used only when the browser's own AGC is off.
+   Turning AGC off is what keeps Chrome out of SCO (and therefore keeps the
+   BLE PTT button alive), but it also means the capture runs at whatever raw
+   level the phone's built-in mic produces — which is both quiet and, once
+   it hits Opus and then the repeater at that level, dull. This is the
+   missing AGC put back where it can't do any harm: a WebAudio compressor
+   plus fixed makeup gain lives entirely inside our own graph, so unlike the
+   getUserMedia constraint it has no bearing on Chrome's routing decision.
+   Threshold/ratio are set limiter-ish rather than gentle — the makeup gain
+   is doing the real lifting and the compressor is there to stop the peaks
+   it lifts from clipping. Skipped entirely when the browser AGC is on,
+   since stacking two levellers is how you get pumping. */
+function _txAddLeveller(ctx, input) {
+  var comp = ctx.createDynamicsCompressor();
+  comp.threshold.value = -24;
+  comp.knee.value      = 12;
+  comp.ratio.value     = 12;
+  comp.attack.value    = 0.005;
+  comp.release.value   = 0.3;
+  var makeup = ctx.createGain();
+  makeup.gain.value = 3.5;          // ~+11 dB, the compressor's missing makeup stage
+  input.connect(comp);
+  comp.connect(makeup);
+  return makeup;
+}
+
 function _txBuildMicChain() {
   var agc = _txBtAudioPref();
-  _txDiag('mic-constraints', 'agc=' + agc);
   return navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: agc },
     video: false,
   }).then(function(raw) {
+    /* Which mic actually got picked, and which processing Chrome actually
+       applied, are the two facts that decide whether this sounds right —
+       and both are decided by the browser, not by what we asked for. Log
+       the resolved values so "am I on the Bluetooth mic or the phone's
+       own?" is a journalctl line rather than a guess: the track label
+       names the device, and getSettings() reports whether SCO-implying
+       processing really engaged. */
+    try {
+      var t = raw.getAudioTracks()[0], s = (t.getSettings && t.getSettings()) || {};
+      _txDiag('mic-source', 'want-agc=' + agc + ' label=' + (t.label || '?') +
+              ' agc=' + s.autoGainControl + ' ns=' + s.noiseSuppression +
+              ' aec=' + s.echoCancellation + ' rate=' + s.sampleRate);
+    } catch (e) {}
     _tx.rawStream = raw;
     _tx.audioCtx  = new (window.AudioContext || window.webkitAudioContext)();
     var src  = _tx.audioCtx.createMediaStreamSource(raw);
@@ -5081,8 +5119,12 @@ function _txBuildMicChain() {
     _tx.analyser.fftSize = 1024;
     var dest = _tx.audioCtx.createMediaStreamDestination();
     src.connect(_tx.gainNode);
-    _tx.gainNode.connect(_tx.analyser);
-    _tx.gainNode.connect(dest);
+    /* Leveller sits after the manual slider so the slider stays the coarse
+       control, and before the analyser so the meter keeps showing what
+       actually transmits rather than what went in. */
+    var tail = agc ? _tx.gainNode : _txAddLeveller(_tx.audioCtx, _tx.gainNode);
+    tail.connect(_tx.analyser);
+    tail.connect(dest);
     _txStartMeter();
     return dest.stream;
   });
