@@ -5091,10 +5091,29 @@ function _txAddLeveller(ctx, input) {
   return makeup;
 }
 
+/* Capture processing, and why the two modes ask for opposite things.
+   Bluetooth-routing mode has to request the full AEC+NS+AGC trio, because
+   that request is exactly what makes Chromium's Android backend engage SCO
+   at all — the constraints are the routing lever there, not a tone choice.
+   Own-mic mode has no such obligation, and asking for that trio actively
+   hurts: on Android, requesting echoCancellation puts Chrome on the
+   VOICE_COMMUNICATION capture path, where the platform's own telephony
+   AEC/NS runs ahead of us — narrowband-tuned, heavily gated, and the most
+   likely source of the muffled/thin character reported from the field.
+   Nothing here needs it: this is half-duplex, Listen is hard-muted for the
+   whole time the node is keyed (_txMuteListen), so there is no echo path to
+   cancel and no speaker bleed for NS to chew on. Turning both off gets the
+   raw capture, and our own compressor supplies the levelling AGC would have.
+   Worth being explicit that the call itself is ulaw 8kHz (pjsip.conf
+   disallow=all / allow=ulaw), so this isn't about capturing wideband audio
+   that survives to the far end — it's that the platform's processing
+   artifacts (spectral gating, over-suppression) survive the downsample just
+   fine, so it's better not to introduce them upstream of it. */
 function _txBuildMicChain() {
-  var agc = _txBtAudioPref();
+  var bt = _txBtAudioPref();
   return navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: agc },
+    audio: bt ? { echoCancellation: true,  noiseSuppression: true,  autoGainControl: true }
+              : { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
     video: false,
   }).then(function(raw) {
     /* Which mic actually got picked, and which processing Chrome actually
@@ -5106,7 +5125,7 @@ function _txBuildMicChain() {
        processing really engaged. */
     try {
       var t = raw.getAudioTracks()[0], s = (t.getSettings && t.getSettings()) || {};
-      _txDiag('mic-source', 'want-agc=' + agc + ' label=' + (t.label || '?') +
+      _txDiag('mic-source', 'bt-mode=' + bt + ' label=' + (t.label || '?') +
               ' agc=' + s.autoGainControl + ' ns=' + s.noiseSuppression +
               ' aec=' + s.echoCancellation + ' rate=' + s.sampleRate);
       /* A track label of "Default" names Chrome's default-device alias, not
@@ -5133,7 +5152,7 @@ function _txBuildMicChain() {
     /* Leveller sits after the manual slider so the slider stays the coarse
        control, and before the analyser so the meter keeps showing what
        actually transmits rather than what went in. */
-    var tail = agc ? _tx.gainNode : _txAddLeveller(_tx.audioCtx, _tx.gainNode);
+    var tail = bt ? _tx.gainNode : _txAddLeveller(_tx.audioCtx, _tx.gainNode);
     tail.connect(_tx.analyser);
     tail.connect(dest);
     _txStartMeter();
@@ -5971,12 +5990,20 @@ function _txUnkey() {
    has no silent auto-reconnect on a plain page load, so there's a Connect
    button rather than a persisted preference. Deliberately does not touch
    audio device *selection* at all — mic/speaker routing is left to the
-   browser/OS's own default, same as any other WebRTC page; the one audio
-   knob that matters here is the Bluetooth-routing constraint choice in
-   _txBtAudioPref(), which this button's presses can't survive being on. */
+   browser/OS's own default, same as any other WebRTC page.
+   On the radio-contention problem, the field evidence is broader than the
+   original TD-Q2L.md writeup concluded: that writeup pinned it on SCO
+   capture, but the link has also been seen dropping with Bluetooth capture
+   routing *off*, which points at Bluetooth audio activity in general rather
+   than the mic path specifically — Listen's own playback routes to a
+   connected headset over A2DP regardless of what TX captures from. It also
+   does now produce a real gattserverdisconnected (the writeup recorded none),
+   which is what makes the reconnect below possible at all. Unresolved; the
+   ble-connected/ble-disconnected/ble-value log trail is there to pin it. */
 var TX_BLE_SERVICE = '89a8591d-bb19-485b-9f59-58492bc33e24';
 var TX_BLE_CHAR     = '894c8042-e841-461c-a5c9-5a73d25db08e';
-var _txBle = { device: null, char: null, statusMsg: '' };
+var _txBle = { device: null, char: null, statusMsg: '',
+               wantConnected: false, retry: 0, retryTimer: null };
 
 function _txBleSetStatus(msg) {
   _txBle.statusMsg = msg || '';
@@ -6014,15 +6041,62 @@ function _txBleOnValue(e) {
   if (pressed) { if (!_tx.keyed) _txKey(); }
   else         { if (_tx.keyed)  _txUnkey(); }
 }
+/* Observed live: the link drops on its own (a real gattserverdisconnected,
+   ~15-40s after connecting) while Bluetooth audio is active, and until then
+   delivers no notifications at all. Web Bluetooth only needs a user gesture
+   for requestDevice() — re-connecting an already-permitted device does not —
+   so a drop is recoverable without making the operator tap Connect again.
+   Bounded retries with backoff rather than an unbounded loop: if the radio
+   is genuinely too contended to hold a link, retrying forever just burns
+   battery and buries the log. */
+var TX_BLE_RETRY_MAX = 5;
+
 function _txBleOnDisconnect() {
-  _txBleSetStatus('Disconnected');
+  _txDiag('ble-disconnected', 'wanted=' + _txBle.wantConnected);
   _txBleUpdateBtn();
-  _txDiag('ble-disconnected', '');
-  if (_tx.keyed) _txUnkey();
+  if (_tx.keyed) _txUnkey();   // never leave the node keyed on a dropped link
   _txBle.char = null;
+  if (!_txBle.wantConnected) { _txBleSetStatus('Disconnected'); return; }
+  if (_txBle.retry >= TX_BLE_RETRY_MAX) {
+    _txBle.wantConnected = false;
+    _txBleSetStatus('Disconnected — gave up reconnecting after ' + TX_BLE_RETRY_MAX +
+                    ' tries. Bluetooth audio being active is the usual cause; tap BLE PTT to retry.');
+    return;
+  }
+  var delay = 1000 * Math.pow(2, _txBle.retry);   // 1s, 2s, 4s, 8s, 16s
+  _txBle.retry++;
+  _txBleSetStatus('Link dropped — reconnecting (' + _txBle.retry + '/' + TX_BLE_RETRY_MAX + ')…');
+  clearTimeout(_txBle.retryTimer);
+  _txBle.retryTimer = setTimeout(function() {
+    if (!_txBle.wantConnected || !_txBle.device) return;
+    _txBleAttach(_txBle.device).catch(function(e) {
+      _txDiag('ble-reconnect-err', e.message);
+      _txBleOnDisconnect();      // failed attempt counts as another drop
+    });
+  }, delay);
 }
+
+/* Connect + subscribe, shared by the initial pairing and every reconnect. */
+async function _txBleAttach(device) {
+  var server  = await device.gatt.connect();
+  var service = await server.getPrimaryService(TX_BLE_SERVICE);
+  var ch      = await service.getCharacteristic(TX_BLE_CHAR);
+  _txBle.char = ch;
+  ch.addEventListener('characteristicvaluechanged', _txBleOnValue);
+  await ch.startNotifications();
+  _txBle.retry = 0;
+  _txBleSetStatus('Connected: ' + (device.name || 'PTT device'));
+  _txBleUpdateBtn();
+  /* Logged after startNotifications() resolves, so this line means the CCCD
+     write was accepted — if presses still don't arrive after it, the
+     subscription is fine and the radio is dropping the notifications. */
+  _txDiag('ble-connected', (device.name || '?') + ' subscribed');
+}
+
 async function _txBleConnect() {
+  clearTimeout(_txBle.retryTimer);
   if (_txBle.device && _txBle.device.gatt.connected) {
+    _txBle.wantConnected = false;      // explicit user disconnect, don't retry
     _txBle.device.gatt.disconnect();
     return;
   }
@@ -6040,19 +6114,17 @@ async function _txBleConnect() {
        optionalServices is what actually grants access to the PTT service
        once connected (Chrome blocks GATT access to any service not named
        in filters/optionalServices at requestDevice() time). */
-    var device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [TX_BLE_SERVICE] });
-    _txBle.device = device;
-    device.addEventListener('gattserverdisconnected', _txBleOnDisconnect);
-    var server = await device.gatt.connect();
-    var service = await server.getPrimaryService(TX_BLE_SERVICE);
-    var ch = await service.getCharacteristic(TX_BLE_CHAR);
-    _txBle.char = ch;
-    ch.addEventListener('characteristicvaluechanged', _txBleOnValue);
-    await ch.startNotifications();
-    _txBleSetStatus('Connected: ' + (device.name || 'PTT device'));
-    _txBleUpdateBtn();
-    _txDiag('ble-connected', device.name || '?');
+    var device = _txBle.device;
+    if (!device) {
+      device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [TX_BLE_SERVICE] });
+      _txBle.device = device;
+      device.addEventListener('gattserverdisconnected', _txBleOnDisconnect);
+    }
+    _txBle.wantConnected = true;
+    _txBle.retry = 0;
+    await _txBleAttach(device);
   } catch (e) {
+    _txBle.wantConnected = false;
     _txBleSetStatus('Connect failed: ' + e.message);
     _txDiag('ble-connect-err', e.message);
   }
