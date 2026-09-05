@@ -6171,7 +6171,7 @@ var TX_BLE_CHAR     = '894c8042-e841-461c-a5c9-5a73d25db08e';
 var _txBle = { device: null, char: null, statusMsg: '', warn: false,
                wantConnected: false, retry: 0, retryTimer: null, autoTried: false,
                pollTimer: null, lastState: false, readFails: 0, reading: false, reads: 0,
-               readStart: 0, ticks: 0 };
+               readStart: 0, ticks: 0, empties: 0 };
 
 function _txBleSetStatus(msg, warn) {
   _txBle.statusMsg = msg || '';
@@ -6211,6 +6211,7 @@ function _txBleUpdateBtn() {
 var TX_BLE_POLL_MS       = 150;
 var TX_BLE_READ_FAIL_MAX = 5;
 var TX_BLE_READ_STALL_MS  = 1500;
+var TX_BLE_USE_NOTIFY     = false;
 
 function _txBleApply(pressed, src) {
   if (pressed === _txBle.lastState) return;
@@ -6249,9 +6250,26 @@ function _txBlePollTick() {
   try {
     _txBle.char.readValue().then(function(v) {
       _txBle.reading = false;
+      /* A zero-length DataView is what this device actually returns, so it
+         gets handled as a state rather than reached by throwing out of
+         getUint8() — which previously landed in the catch below, after the
+         failure counter had already been reset, logging "#1" forever at
+         7/sec and never reaching the disconnect threshold. */
+      if (!v || v.byteLength < 1) {
+        _txBle.empties++;
+        if (_txBle.empties === 1 || _txBle.empties % 200 === 0) {
+          _txDiag('ble-read-empty', '#' + _txBle.empties + ' zero-length read' +
+                  (TX_BLE_USE_NOTIFY ? ' (notifications on)' : ' (notifications off)'));
+        }
+        if (_txBle.empties === 60) {
+          _txBleSetStatus('PTT button link is up but returning no data — press still unreadable', true);
+        }
+        return;
+      }
       _txBle.readFails = 0;
+      _txBle.empties   = 0;
       var raw = v.getUint8(0);
-      if (_txBle.reads === 0 || _txBle.reads % 100 === 0) {
+      if (_txBle.reads === 0 || _txBle.reads % 200 === 0) {
         _txDiag('ble-poll-read', '#' + _txBle.reads + ' value=0x' + ('0' + raw.toString(16)).slice(-2));
       }
       _txBle.reads++;
@@ -6259,7 +6277,9 @@ function _txBlePollTick() {
     }).catch(function(err) {
       _txBle.reading = false;
       _txBle.readFails++;
-      if (_txBle.readFails === 1 || _txBle.readFails === TX_BLE_READ_FAIL_MAX) {
+      /* Throttled hard: at 150ms an unthrottled log floods the journal and
+         trips the client-log rate limit, which then hides everything else. */
+      if (_txBle.readFails === 1 || _txBle.readFails % 100 === 0) {
         _txDiag('ble-read-err', '#' + _txBle.readFails + ' ' + (err.name || '') + ' ' + err.message);
       }
       if (_txBle.readFails === TX_BLE_READ_FAIL_MAX) {
@@ -6306,16 +6326,22 @@ async function _txBleAttach(device) {
   var ch      = await service.getCharacteristic(TX_BLE_CHAR);
   _txBle.char = ch;
   ch.addEventListener('characteristicvaluechanged', _txBleOnValue);
-  /* Notifications stay requested — free and instant where they work — but
-     nothing depends on them, so a peripheral that accepts the CCCD write and
-     then never notifies is no longer a silent failure. */
-  try { await ch.startNotifications(); } catch (e) { _txDiag('ble-notify-err', e.message); }
+  /* Notifications are off. Every read came back zero-length while they were
+     enabled, which fits Chrome answering the read from its notification
+     cache — empty, because notifications were never being delivered either.
+     nRF Connect reads 0x01 from this same characteristic while holding the
+     button, so the peripheral answers real reads fine; the difference worth
+     testing is not subscribing at all. Flip TX_BLE_USE_NOTIFY to re-enable. */
+  if (TX_BLE_USE_NOTIFY) {
+    try { await ch.startNotifications(); } catch (e) { _txDiag('ble-notify-err', e.message); }
+  }
   _txBle.lastState = false;
   _txBle.readFails = 0;
   _txBle.reading   = false;
   _txBle.reads     = 0;
   _txBle.ticks     = 0;
   _txBle.readStart = 0;
+  _txBle.empties   = 0;
   clearInterval(_txBle.pollTimer);
   _txBle.pollTimer = setInterval(_txBlePollTick, TX_BLE_POLL_MS);
   /* Explicit marker that the polling build is what the browser is actually
