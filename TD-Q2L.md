@@ -62,6 +62,38 @@ The scan itself is kept in `status.html` behind `?btscan=1` (see
 `_txMediaKeyMode()`), so it can be re-run against a different accessory
 without rebuilding it.
 
+## The LE instance — full GATT service list
+
+The Q2L appears **twice** in Android's Bluetooth menu: the Classic BR/EDR
+instance (headset audio + AVRCP media keys) and a separate LE instance,
+`TID-MIC-Q2L-1a8d` / `29:D7:1F:9C:4E:58`. The LE one cannot be paired from
+Android's menu, and does not need to be — it reports **NOT BONDED** while
+fully connected and serving GATT. That is normal for a GATT-only peripheral;
+a failed pairing attempt there is not a fault and not worth chasing.
+
+Services, read off nRF Connect while connected (2026-09-05):
+
+| UUID | Notes |
+|---|---|
+| `0x1800` | Generic Access (standard) |
+| `0xAE30` | Vendor-specific, unexplored |
+| `0xFF00` | Vendor-specific, unexplored |
+| `89a8591d-bb19-485b-9f59-58492bc33e24` | **The PTT service.** Characteristic `894c8042-…` NOTIFY+READ, value `0x00` at rest, CCCD `0x2902` reads "Notifications enabled" |
+| `0xFFE0` | Almost certainly the HM-10-style BLE serial/UART passthrough (its `0xFFE1` characteristic is the usual notify/write pair). Unexplored, and the most promising backup if the PTT service proves unreliable |
+
+**No Human Interface Device service (`0x1812`).** This rules out the
+otherwise-attractive theory that bonding the LE instance would make the PTT
+button arrive as an ordinary BLE-HID keyboard key, giving OS-level
+press/release for free. It would not — there is no HID service to bond to,
+which is consistent with the exhaustive input scan above finding nothing on
+any standard channel.
+
+**Only one central can hold the LE link at a time.** nRF Connect and Chrome
+cannot both be connected, and whichever gets there first locks the other
+out — a likely cause of `Connection Error: Connection attempt failed.` in
+HenWen's log. Disconnect nRF Connect before testing the browser, and vice
+versa.
+
 ## PTT button — BLE GATT protocol
 
 Sniffed with **nRF Connect for Mobile** (Nordic Semiconductor, free Android/iOS
