@@ -114,33 +114,40 @@ device-picker UI the actual fix made unnecessary. The constraint fix is
 simpler and matches how any other WebRTC site on this browser already
 behaves, so it's the one actually in use.
 
-## Hardware constraint: Bluetooth audio and BLE PTT sniffing may conflict
+## Radio contention between Bluetooth audio and BLE PTT — revised 2026-09-05
 
-Confirmed live and repeatedly reproduced: once the above audio fix is in
-place and a call is actually using the Tidradio's mic/speaker over classic
-Bluetooth (SCO), the BLE GATT PTT characteristic's notifications stop being
-delivered — `characteristicvaluechanged` simply never fires for a press,
-even though `device.gatt.connected` still reports `true` (the connection
-object never sees a formal disconnect event). Before the call goes active,
-the exact same BLE connection reliably delivers every press/release.
+An earlier revision of this file concluded that Bluetooth audio and the BLE
+PTT button were **mutually exclusive** on this device: that once a call was
+using the mic/speaker over classic Bluetooth, GATT notifications stopped
+arriving entirely, with `device.gatt.connected` still `true` and no
+disconnect event ever fired.
 
-This looks like a genuine radio-sharing limit of this device's (likely
-single, combined BLE + Classic Bluetooth) chip, not a browser or app bug —
-it can apparently maintain a nominal GATT connection while a Classic SCO
-audio link is active, but can't actually get notification packets through
-under that load. No software-side retry/reconnect logic was found to help,
-since the connection never reports itself as broken.
+**Field use contradicts that.** With the phone simply paired to the Q2L and
+Android routing mic and speaker to it as it does for any other app, the
+mic, the speaker and the BLE PTT button have all been observed working at
+the same time. So the mutual exclusion is not a fixed property of the
+device, and code should not be built around assuming it.
 
-**Practical implication:** on this device, you likely cannot have both
-"automatic Bluetooth audio routing" and "reliable physical PTT button"
-active at the same time. Pick one:
-- Reliable PTT button → keep `autoGainControl: false` (or otherwise avoid
-  triggering Bluetooth SCO) so audio stays on the phone's own mic/speaker,
-  leaving the BLE radio uncontended.
-- Bluetooth audio routing → accept that the physical PTT button may stop
-  responding once a call/transmission is actually using the Bluetooth audio
-  path; an on-screen/software PTT control is needed as the reliable
-  fallback in that mode.
+What *is* real is intermittent contention. In one session the link connected
+four times, delivered zero press notifications, and dropped twice on its
+own after 14s and 39s. Two corrections to the original writeup fall out of
+that:
+
+- the drops raise a genuine `gattserverdisconnected`, where the original
+  writeup recorded none — which is what makes automatic reconnection
+  possible at all;
+- they happen with Bluetooth *capture* routing off too, so pinning it on
+  SCO capture specifically was wrong. Anything keeping the classic radio
+  busy is a candidate, including the board's own Listen playback going to
+  the headset over A2DP.
+
+Still unexplained: why the link sometimes delivers every press reliably and
+sometimes none at all, with no visible difference in configuration. The
+`tx-ble-connected` / `tx-ble-disconnected` / `tx-ble-value` trail in
+`journalctl -u HenWen` is there to pin that down — `tx-ble-connected` is
+logged only after `startNotifications()` resolves, so that line appearing
+without any `tx-ble-value` following it means the subscription was accepted
+and the notifications themselves are being lost.
 
 Not confirmed: whether a different (pricier / different chipset) Bluetooth
 PTT accessory would avoid this entirely, or whether some other combination
@@ -157,26 +164,25 @@ press/release is reported to the server log as `tx-ble-value` via
 `/api/audio/client-log`, so `journalctl -u HenWen -f` alone is enough to
 confirm the button is being seen — no browser devtools needed.
 
-It deliberately does not attempt manual audio device selection; mic/speaker
-routing is left entirely to the browser. The radio-sharing conflict above is
-surfaced as an explicit user choice rather than silently picked: a "Route
-audio through Bluetooth headset" checkbox in the TX bar (`_txBtAudioPref()`,
-persisted in `localStorage`) is what decides the `autoGainControl` constraint
-in `_txBuildMicChain()`, i.e. whether Chrome engages SCO at all.
+It deliberately does not attempt manual audio device selection, and does not
+manipulate `getUserMedia` constraints to steer routing either. Pairing the
+phone to the Q2L already makes Android use it for mic and speaker; HenWen
+requests the plain WebRTC defaults (the AEC+NS+AGC trio any calling site
+asks for) and lets that happen.
 
-- **Unchecked (default)** — `autoGainControl: false`, no SCO, BLE PTT keeps
-  working through a transmission. Audio stays on the phone's own
-  mic/speaker; the manual gain slider is the level control.
-- **Checked** — `autoGainControl: true`, Bluetooth headset mic/speaker
-  routing, and the physical PTT button goes deaf once transmit audio is
-  live. The on-screen PTT button and the Space key still work.
+A checkbox briefly existed to switch between routed-Bluetooth and own-mic
+capture, built on the mutual-exclusion premise above. When that premise
+turned out to be wrong the checkbox went with it — it made the operator
+reason about a tradeoff that isn't reliably there, and the constraint
+fiddling behind it caused its own problems (opting out of `echoCancellation`
+lands Chrome on Android's heavily-processed VOICE_COMMUNICATION capture
+path; a local compressor added to compensate for the resulting level drop
+then overdrove the input by ~3x once the processing came back out).
 
-Default is unchecked because a physical button that works is the reason to
-pair one at all. Ticking the box while a BLE PTT device is connected paints
-a warning in the TX bar rather than letting the button just quietly stop
-responding, since the failure mode has no disconnect event to report. The
-constraint is only read when the mic chain is built, so a change applies on
-the next arm, which the UI also says out loud.
+The lesson worth keeping: on this device, don't fight the OS's own audio
+routing. Ask for the defaults, leave routing alone, and treat the BLE PTT
+link as something to reconnect when it drops rather than something to
+protect by starving the audio path.
 
 ## Open questions / untested
 

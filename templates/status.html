@@ -1301,11 +1301,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
           <input type="range" id="tx-gain" min="0" max="200" value="100" title="Microphone gain">
           <span id="tx-gain-val" style="font-size:0.7rem;color:var(--text2);width:3em;flex-shrink:0">100%</span>
         </div>
-        <label style="display:flex;align-items:center;gap:6px;font-size:0.72rem;color:var(--text2);padding:4px 0 0"
-               title="Off (default): transmits this device's own built-in mic. That leaves a BLE PTT button's radio uncontended so its presses keep arriving while you key up — but a phone mic held away from your mouth will sound quieter and duller than a headset's close-talk mic, so expect a real audio-quality drop. On: mic and speaker route through a connected Bluetooth headset for much better audio — but on a combo BLE+Classic device like the Tidradio TD-Q2L that stops the PTT button's presses getting through once transmit audio is live, so key up with the on-screen PTT or Space instead. Takes effect the next time you arm TX.">
-          <input type="checkbox" id="tx-bt-audio">
-          Route audio through Bluetooth headset &mdash; better audio, but the BLE PTT button stops working
-        </label>
         <div id="tx-ble-status" style="font-size:0.72rem;color:var(--text2);padding:4px 0 0"></div>
         <div id="tx-status" style="font-size:0.75rem;color:var(--accent);min-height:1em"></div>
       </div>
@@ -5032,89 +5027,31 @@ var _TX_IDLE_HANGUP_MS = 5 * 60 * 1000;  // auto-disarm after 5 min without keyi
    parrot test), so AGC is off by default and level is set manually with
    this slider — the mic runs through a WebAudio gain stage before it
    enters the call, with a post-gain analyser feeding the level meter (what
-   the meter shows is what transmits). Persisted per browser. Still applies
-   on top of AGC when Bluetooth-headset routing turns AGC back on, as a
-   further trim if a specific mic runs hot. */
+   the meter shows is what transmits). Persisted per browser, and applied on
+   top of the browser's own AGC as a further trim if a mic runs hot. */
 function _txSavedGain() {
   var v = parseInt(localStorage.getItem('henwen-tx-gain') || '100', 10);
   return (v >= 0 && v <= 200) ? v : 100;
 }
 
-/* Bluetooth headset audio routing — an explicit either/or, not a bug.
-   Requesting the full default AEC+NS+AGC trio (rather than opting any one
-   of them out) is what Chromium's Android audio backend ties its automatic
-   Bluetooth SCO routing decision to: ask for all three and mic/speaker
-   follow whatever Bluetooth headset is connected, exactly like Zoom/Meet
-   get for free in this browser; opt any one out and Chrome drops into a
-   plain capture path that never engages SCO at all no matter what's paired.
-   Both halves of that were confirmed empirically on real hardware.
-   The catch, also confirmed live and repeatedly reproduced: on a combo
-   BLE + Classic Bluetooth device like the Tidradio TD-Q2L, once SCO audio
-   is actually flowing the BLE GATT PTT characteristic stops delivering
-   notifications entirely — no press/release events arrive, while
-   device.gatt.connected still reports true and no disconnect event ever
-   fires, so there's nothing for _txBleConnect()'s reconnect path to even
-   react to. That appears to be a radio-sharing limit of the device's chip
-   rather than anything fixable in software here (see TD-Q2L.md).
-   So the two can't both be on: routed Bluetooth audio costs you the
-   physical PTT button, and a working physical PTT button costs you routed
-   Bluetooth audio. Default is off — the physical button working is the
-   whole point of pairing one, and the on-screen/Space PTT is always
-   available as the fallback in the other mode. */
-function _txBtAudioPref() {
-  return localStorage.getItem('henwen-tx-bt-audio') === '1';
-}
-
-/* Safety limiter on the own-mic path, used only when the browser's own AGC
-   is off. This started life as a leveller with +11 dB of makeup gain, on the
-   theory that an AGC-less capture would be too quiet — true while the
-   platform's VOICE_COMMUNICATION processing was still in the path, and
-   wrong once that came out: the raw capture turned out to be plenty hot, so
-   the makeup was simply overdriving. Measured by the operator's own slider,
-   which had to come down from a habitual 65-70% to 22% — a factor of ~3
-   against a 3.5x makeup, i.e. the makeup was all of it.
-   So no makeup at all now, and the threshold sits high enough to stay out of
-   the way of normal speech instead of compressing it — heavy compression on
-   every syllable was itself a candidate for the squashed/dull character.
-   What's left is a true safety limiter: inaudible until something actually
-   approaches clipping, which is the failure the manual-gain design has
-   always been exposed to. Placed after the gain slider so it's the last
-   thing before transmit and holds regardless of where that slider sits.
-   Skipped when the browser AGC is on, since stacking two is how you pump. */
-function _txAddLimiter(ctx, input) {
-  var comp = ctx.createDynamicsCompressor();
-  comp.threshold.value = -6;        // peaks only; normal speech passes untouched
-  comp.knee.value      = 6;
-  comp.ratio.value     = 20;        // limiter, not a compressor
-  comp.attack.value    = 0.003;
-  comp.release.value   = 0.25;
-  input.connect(comp);
-  return comp;
-}
-
-/* Capture processing, and why the two modes ask for opposite things.
-   Bluetooth-routing mode has to request the full AEC+NS+AGC trio, because
-   that request is exactly what makes Chromium's Android backend engage SCO
-   at all — the constraints are the routing lever there, not a tone choice.
-   Own-mic mode has no such obligation, and asking for that trio actively
-   hurts: on Android, requesting echoCancellation puts Chrome on the
-   VOICE_COMMUNICATION capture path, where the platform's own telephony
-   AEC/NS runs ahead of us — narrowband-tuned, heavily gated, and the most
-   likely source of the muffled/thin character reported from the field.
-   Nothing here needs it: this is half-duplex, Listen is hard-muted for the
-   whole time the node is keyed (_txMuteListen), so there is no echo path to
-   cancel and no speaker bleed for NS to chew on. Turning both off gets the
-   raw capture, and our own compressor supplies the levelling AGC would have.
-   Worth being explicit that the call itself is ulaw 8kHz (pjsip.conf
-   disallow=all / allow=ulaw), so this isn't about capturing wideband audio
-   that survives to the far end — it's that the platform's processing
-   artifacts (spectral gating, over-suppression) survive the downsample just
-   fine, so it's better not to introduce them upstream of it. */
+/* One capture path, asking for nothing unusual.
+   Pairing the phone to the Q2L already makes Android route its mic and
+   speaker to it — that is the platform's own behaviour, and the operator's
+   other apps get it for free. So this asks for the plain WebRTC defaults
+   (the AEC+NS+AGC trio every other calling site requests) and lets that
+   routing happen, rather than opting out of a constraint and landing on a
+   capture path that never engages Bluetooth at all.
+   There was briefly a checkbox here that switched between routed-Bluetooth
+   and own-mic capture, on the premise from TD-Q2L.md that Bluetooth audio
+   and the BLE PTT button were mutually exclusive. Field use contradicted
+   that premise — mic, speaker and PTT button were all working together —
+   so the split was removed rather than kept as a setting nobody should
+   need to reason about. The manual gain slider below remains the one level
+   control; there is deliberately no second leveller in our own graph, since
+   the browser's AGC is already doing that job here. */
 function _txBuildMicChain() {
-  var bt = _txBtAudioPref();
   return navigator.mediaDevices.getUserMedia({
-    audio: bt ? { echoCancellation: true,  noiseSuppression: true,  autoGainControl: true }
-              : { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     video: false,
   }).then(function(raw) {
     /* Which mic actually got picked, and which processing Chrome actually
@@ -5126,15 +5063,14 @@ function _txBuildMicChain() {
        processing really engaged. */
     try {
       var t = raw.getAudioTracks()[0], s = (t.getSettings && t.getSettings()) || {};
-      _txDiag('mic-source', 'bt-mode=' + bt + ' label=' + (t.label || '?') +
+      _txDiag('mic-source', 'label=' + (t.label || '?') +
               ' agc=' + s.autoGainControl + ' ns=' + s.noiseSuppression +
               ' aec=' + s.echoCancellation + ' rate=' + s.sampleRate);
       /* A track label of "Default" names Chrome's default-device alias, not
-         the hardware behind it, so it can't answer "did Bluetooth routing
-         actually happen?" on its own. Listing the input devices alongside it
-         does: if no Bluetooth mic is even enumerated, the checkbox had
-         nothing to route to. Labels are only populated post-permission,
-         which is why this runs after getUserMedia rather than before. */
+         the hardware behind it, so it can't say on its own whether the Q2L
+         is what got used. Listing the input devices alongside it does.
+         Labels are only populated post-permission, which is why this runs
+         after getUserMedia rather than before. */
       navigator.mediaDevices.enumerateDevices().then(function(ds) {
         _txDiag('mic-devices', ds.filter(function(d) { return d.kind === 'audioinput'; })
                                  .map(function(d) { return d.label || d.deviceId.slice(0, 8); })
@@ -5150,12 +5086,8 @@ function _txBuildMicChain() {
     _tx.analyser.fftSize = 1024;
     var dest = _tx.audioCtx.createMediaStreamDestination();
     src.connect(_tx.gainNode);
-    /* Limiter sits after the manual slider so the slider stays the level
-       control, and before the analyser so the meter keeps showing what
-       actually transmits rather than what went in. */
-    var tail = bt ? _tx.gainNode : _txAddLimiter(_tx.audioCtx, _tx.gainNode);
-    tail.connect(_tx.analyser);
-    tail.connect(dest);
+    _tx.gainNode.connect(_tx.analyser);
+    _tx.gainNode.connect(dest);
     _txStartMeter();
     return dest.stream;
   });
@@ -5260,6 +5192,12 @@ async function _txUpdateBtn() {
        why establishing this BLE link only after TX's own mic capture has
        already started turned out to matter on real hardware. */
     if (bleBtn) bleBtn.style.display = (r.ok && navigator.bluetooth) ? '' : 'none';
+    /* Once per load, and only once TX is known to be available at all —
+       no point reaching for the radio on a board where TX isn't offered. */
+    if (r.ok && navigator.bluetooth && !_txBle.autoTried) {
+      _txBle.autoTried = true;
+      _txBleAutoAttach();
+    }
   } catch (e) {
     btn.style.display = 'none';
     if (bleBtn) bleBtn.style.display = 'none';
@@ -5989,9 +5927,10 @@ function _txUnkey() {
    Requires Web Bluetooth (Chrome on Android/desktop only; no Safari/Firefox
    support) and a fresh user-gesture pairing each page load — Web Bluetooth
    has no silent auto-reconnect on a plain page load, so there's a Connect
-   button rather than a persisted preference. Deliberately does not touch
-   audio device *selection* at all — mic/speaker routing is left to the
-   browser/OS's own default, same as any other WebRTC page.
+   button — though _txBleAutoAttach() below reconnects a previously-paired
+   unit without it where the browser supports that. Deliberately does not
+   touch audio device selection at all: pairing the phone to the Q2L already
+   routes its mic and speaker there, and that is the OS's job, not ours.
    On the radio-contention problem, the field evidence is broader than the
    original TD-Q2L.md writeup concluded: that writeup pinned it on SCO
    capture, but the link has also been seen dropping with Bluetooth capture
@@ -6003,28 +5942,19 @@ function _txUnkey() {
    ble-connected/ble-disconnected/ble-value log trail is there to pin it. */
 var TX_BLE_SERVICE = '89a8591d-bb19-485b-9f59-58492bc33e24';
 var TX_BLE_CHAR     = '894c8042-e841-461c-a5c9-5a73d25db08e';
-var _txBle = { device: null, char: null, statusMsg: '',
-               wantConnected: false, retry: 0, retryTimer: null };
+var _txBle = { device: null, char: null, statusMsg: '', warn: false,
+               wantConnected: false, retry: 0, retryTimer: null, autoTried: false };
 
-function _txBleSetStatus(msg) {
+function _txBleSetStatus(msg, warn) {
   _txBle.statusMsg = msg || '';
+  _txBle.warn = !!warn;
   _txBleRenderStatus();
 }
-/* The audio-routing conflict warning is rendered here rather than only at
-   connect time so that ticking the Bluetooth-audio box *after* pairing the
-   button surfaces it too — that order is at least as likely as the other. */
 function _txBleRenderStatus() {
   var el = document.getElementById('tx-ble-status');
   if (!el) return;
-  var connected = !!(_txBle.device && _txBle.device.gatt.connected);
-  if (connected && _txBtAudioPref()) {
-    el.textContent = (_txBle.statusMsg ? _txBle.statusMsg + ' — ' : '') +
-      'Bluetooth headset routing is on, so this button stops responding once transmit audio goes live. Uncheck it above, or key up with the on-screen PTT.';
-    el.style.color = 'var(--warn)';
-  } else {
-    el.textContent = _txBle.statusMsg;
-    el.style.color = 'var(--text2)';
-  }
+  el.textContent = _txBle.statusMsg;
+  el.style.color = _txBle.warn ? 'var(--warn)' : 'var(--text2)';
 }
 function _txBleUpdateBtn() {
   var btn = document.getElementById('tx-ble-connect');
@@ -6047,10 +5977,10 @@ function _txBleOnValue(e) {
    delivers no notifications at all. Web Bluetooth only needs a user gesture
    for requestDevice() — re-connecting an already-permitted device does not —
    so a drop is recoverable without making the operator tap Connect again.
-   Bounded retries with backoff rather than an unbounded loop: if the radio
+   Retries are bounded with backoff rather than looping forever: if the radio
    is genuinely too contended to hold a link, retrying forever just burns
    battery and buries the log. */
-var TX_BLE_RETRY_MAX = 5;
+var TX_BLE_RETRY_MAX = 10;
 
 function _txBleOnDisconnect() {
   _txDiag('ble-disconnected', 'wanted=' + _txBle.wantConnected);
@@ -6060,11 +5990,11 @@ function _txBleOnDisconnect() {
   if (!_txBle.wantConnected) { _txBleSetStatus('Disconnected'); return; }
   if (_txBle.retry >= TX_BLE_RETRY_MAX) {
     _txBle.wantConnected = false;
-    _txBleSetStatus('Disconnected — gave up reconnecting after ' + TX_BLE_RETRY_MAX +
-                    ' tries. Bluetooth audio being active is the usual cause; tap BLE PTT to retry.');
+    _txBleSetStatus('PTT button disconnected — gave up after ' + TX_BLE_RETRY_MAX +
+                    ' tries. The on-screen PTT still works; tap BLE PTT to retry the button.', true);
     return;
   }
-  var delay = 1000 * Math.pow(2, _txBle.retry);   // 1s, 2s, 4s, 8s, 16s
+  var delay = Math.min(30000, 1000 * Math.pow(2, _txBle.retry));  // 1s,2s,4s… capped at 30s
   _txBle.retry++;
   _txBleSetStatus('Link dropped — reconnecting (' + _txBle.retry + '/' + TX_BLE_RETRY_MAX + ')…');
   clearTimeout(_txBle.retryTimer);
@@ -6094,6 +6024,34 @@ async function _txBleAttach(device) {
   _txDiag('ble-connected', (device.name || '?') + ' subscribed');
 }
 
+/* "When the mic is detected, the mic PTT should work" — as close to that as
+   the platform allows. Web Bluetooth demands a user gesture to *choose* a
+   device, but not to reconnect one already permitted, which getDevices()
+   returns across page loads. Where that exists (Chrome, recent versions),
+   a previously-paired Q2L is picked back up on load with no tap at all;
+   where it doesn't, this no-ops and the BLE PTT button is still there.
+   Silent by design: this runs on every board load, including for operators
+   who have never paired anything, so a failure here is not news — the
+   device simply isn't in range or isn't advertising (it only advertises in
+   narrow windows, see TD-Q2L.md), and the button remains the way in. */
+async function _txBleAutoAttach() {
+  try {
+    if (!navigator.bluetooth || !navigator.bluetooth.getDevices) return;
+    var known = await navigator.bluetooth.getDevices();
+    if (!known || !known.length) return;
+    var want = localStorage.getItem('henwen-tx-ble-id');
+    var device = known.filter(function(d) { return d.id === want; })[0] || known[0];
+    if (!device) return;
+    _txBle.device = device;
+    device.addEventListener('gattserverdisconnected', _txBleOnDisconnect);
+    _txBle.wantConnected = true;
+    _txBle.retry = 0;
+    await _txBleAttach(device);
+  } catch (e) {
+    _txBle.wantConnected = false;   // stay quiet; the button is the fallback
+  }
+}
+
 async function _txBleConnect() {
   clearTimeout(_txBle.retryTimer);
   if (_txBle.device && _txBle.device.gatt.connected) {
@@ -6119,6 +6077,7 @@ async function _txBleConnect() {
     if (!device) {
       device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [TX_BLE_SERVICE] });
       _txBle.device = device;
+      try { localStorage.setItem('henwen-tx-ble-id', device.id); } catch (e) {}
       device.addEventListener('gattserverdisconnected', _txBleOnDisconnect);
     }
     _txBle.wantConnected = true;
@@ -6141,20 +6100,6 @@ async function _txBleConnect() {
     localStorage.setItem('henwen-tx-gain', gain.value);
     if (_tx.gainNode) _tx.gainNode.gain.value = gain.value / 100;
   });
-
-  /* Only read when the mic chain is built, so a mid-session change lands on
-     the next arm rather than silently doing nothing until a page reload —
-     said out loud in the status line, since "I ticked the box and nothing
-     happened" is otherwise indistinguishable from the feature being broken. */
-  var btAudio = document.getElementById('tx-bt-audio');
-  if (btAudio) {
-    btAudio.checked = _txBtAudioPref();
-    btAudio.addEventListener('change', function() {
-      localStorage.setItem('henwen-tx-bt-audio', btAudio.checked ? '1' : '0');
-      _txBleRenderStatus();
-      if (_tx.armed) _txStatus('Audio routing changes apply next time you arm TX', 'var(--warn)');
-    });
-  }
 
   var ptt = document.getElementById('tx-ptt');
   ptt.addEventListener('pointerdown',   function(e) { e.preventDefault(); _txKey(); });
