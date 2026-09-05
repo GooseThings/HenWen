@@ -331,19 +331,35 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   padding: 16px 12px; display: flex; flex-direction: column;
   gap: 8px; overflow: hidden; min-height: 0;
 }
-#node-info { display: flex; flex-direction: column; align-items: center; gap: 8px; flex-shrink: 0; }
+/* Info-left / status-right grid, used on every width (see the mobile media
+   query below for the phone-tuned size overrides layered on top of this same
+   structure). Was originally mobile-only: the desktop card used a single
+   centered vertical stack, which wasted the column's width for what's really
+   just 3 lines of text plus a status badge and left most of node-card's
+   full-height column empty below it. #node-info's children are flat siblings
+   (see refreshBoard()'s nc.innerHTML), so a 2-column grid can place the
+   number/callsign/location column and the status badge independently
+   without any markup change — .keyed-wrap is explicitly given both axes
+   (col 2, spanning the other three's rows) so the grid's auto-placement
+   slots node-number/callsign/location into column 1 in DOM order around it. */
+#node-info {
+  display: grid; grid-template-columns: 1fr auto; align-items: center;
+  column-gap: 12px; row-gap: 2px; flex-shrink: 0; text-align: left;
+}
 
 /* .hist-num is also reused by the node search results list (renderAslResults()) */
 .hist-num { font-size: 0.85rem; font-weight: 700; font-family: var(--mono); color: var(--accent); text-decoration: none; }
-.node-number { font-size: 2.4rem; font-weight: 700; line-height: 1; color: var(--accent); text-decoration: none; }
+.node-number, .node-callsign, .node-location { grid-column: 1; text-align: left; }
+.node-number { font-size: 2.4rem; font-weight: 700; line-height: 1; color: var(--accent); text-decoration: none; font-variant-numeric: tabular-nums; }
 .el-badge { display: inline-block; font-size: 0.6rem; font-weight: 700; letter-spacing: .02em;
   padding: 1px 4px; border-radius: 3px; background: rgba(88,166,255,.15); color: var(--accent);
   vertical-align: middle; margin-left: 3px; }
 .node-callsign { font-size: 1.25rem; font-weight: 600; color: var(--text); letter-spacing: 0.04em; text-decoration: none; }
 .node-callsign:hover { text-decoration: underline; }
-.node-location { font-size: 0.78rem; color: var(--text2); text-align: center; }
+.node-location { font-size: 0.78rem; color: var(--text2); }
 
-.keyed-wrap { display: flex; flex-direction: column; align-items: center; gap: 6px; margin: 6px 0 2px; }
+.keyed-wrap { display: flex; flex-direction: column; align-items: center; gap: 6px; margin: 0;
+  grid-column: 2; grid-row: 1 / span 3; }
 .keyed-dot { width: 39px; height: 39px; border-radius: 50%; background: #222;
   border: 3px solid #333; transition: background .4s, border-color .4s, box-shadow .4s;
   display: flex; align-items: center; justify-content: center; overflow: hidden; }
@@ -364,7 +380,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .keyed-label.down { color: var(--danger); }
 .locked-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 0.72rem;
   font-weight: 700; letter-spacing: .06em; text-transform: uppercase; padding: 2px 8px;
-  border-radius: 3px; margin-top: 4px; background: rgba(219,68,55,.15); color: var(--danger); }
+  border-radius: 3px; margin-top: 4px; background: rgba(219,68,55,.15); color: var(--danger);
+  grid-column: 1 / span 2; justify-self: start; }
 .link-count { font-size: 0.82rem; color: var(--text2); }
 .link-count span { color: var(--text); font-weight: 600; }
 
@@ -912,28 +929,16 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   .map-card { height: 340px; flex-shrink: 0; }
   .card-header { padding: 10px 12px 8px; }
 
-  /* Node panel: info-left / status-right instead of one tall centered
-     stack. The centered-column desktop layout wastes the width that's
-     otherwise empty on a single-column phone screen, and made this one of
-     the tallest things on the page for what's really just 3 lines of text
-     plus a status badge. #node-info's children are flat siblings (see
-     refreshBoard()'s nc.innerHTML), so a 2-column grid can place the
-     number/callsign/location column and the status badge independently
-     without any markup change — .keyed-wrap is explicitly given both axes
-     (col 2, spanning the other three's rows) so the grid's auto-placement
-     slots node-number/callsign/location into column 1 in DOM order around it. */
-  #node-info {
-    display: grid; grid-template-columns: 1fr auto; align-items: center;
-    column-gap: 12px; row-gap: 1px; text-align: left;
-  }
-  .node-number, .node-callsign, .node-location { grid-column: 1; text-align: left; }
-  .node-number { font-variant-numeric: tabular-nums; font-size: 1.6rem; }
+  /* Node panel: same info-left/status-right grid as desktop now (see
+     #node-info above) — just tightened for phone width, since a single
+     column has less room to spare than the desktop card's full-height
+     column. */
+  #node-info { row-gap: 1px; }
+  .node-number { font-size: 1.6rem; }
   .node-callsign { font-size: 0.95rem; }
   .node-location { font-size: 0.72rem; }
-  .keyed-wrap { grid-column: 2; grid-row: 1 / span 3; margin: 0; }
   .keyed-dot { width: 34px; height: 34px; }
   .keyed-label { font-size: 0.62rem; }
-  .locked-badge { grid-column: 1 / span 2; justify-self: start; }
 
   /* .node-row already wraps instead of truncating (see base styles) — just
      tighten sizes/gaps so more fits per line before wrapping kicks in. */
