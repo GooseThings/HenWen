@@ -15,11 +15,52 @@ That turned out to be only half true: see below.
 | Volume + / − | Standard AVRCP media key — volume up/down |
 | Power (momentary press) | Standard AVRCP media key — play/pause (toggle) |
 | Power (long press) | Powers the mic off |
-| **PTT** | **Not a standard signal.** Does nothing in normal Android media apps (confirmed against YouTube Music). Only reachable via the device's proprietary BLE GATT characteristic below. |
+| **PTT** | **Not a standard signal — exhaustively confirmed, see below.** Emits nothing any web page can observe. Only reachable via the device's proprietary BLE GATT characteristic below. |
 
 Everything except PTT is a real, OS-recognized hardware media key — any app
 using the standard media-key APIs (e.g. the Web `MediaSession` API in a
 browser) will see those presses with zero device-specific code.
+
+### The PTT button emits nothing observable — exhaustive scan, 2026-09-05
+
+Worth recording properly, because the first version of this claim rested on a
+scan that could not have found most of the possibilities: it registered only
+the Media Session `play`/`pause` actions, and a handler fires *only* for an
+action explicitly registered, so anything else the button might send was
+indistinguishable from silence.
+
+Re-run against every input surface a web page has:
+
+- **all 15 Media Session actions** — `play`, `pause`, `stop`, `seekbackward`,
+  `seekforward`, `seekto`, `skipad`, `previoustrack`, `nexttrack`,
+  `togglemicrophone`, `togglecamera`, `hangup`, `previousslide`, `nextslide`,
+  `enterpictureinpicture` (all accepted by Chrome on this phone)
+- **raw DOM `keydown`/`keyup`** on the window, capture phase
+- **the Gamepad API**, polled at 100ms
+
+Result — PTT pressed repeatedly, short and long, produced **zero events on
+every channel**. The same run captured, seconds apart:
+
+```
+16:57:28  scan-mediakey: pause          <- Power button
+16:57:30  scan-mediakey: previoustrack  <- Fwd
+16:57:31  scan-mediakey: nexttrack      <- Rev
+```
+
+That control matters: the channel was demonstrably live at the moment PTT
+was pressed. This is a real negative, not a null result from a broken test.
+
+Vol+/Vol- also produced nothing, as expected - those are absolute-volume
+commands the phone handles itself and never routes to a page.
+
+**Consequence:** hold-to-talk is unreachable through any standard API on this
+device. A media key is one semantic action with no down/up pair, so PTT bound
+to Rev is necessarily a toggle. The BLE characteristic below is the *only*
+path to genuine press-and-hold, since it alone reports live button state.
+
+The scan itself is kept in `status.html` behind `?btscan=1` (see
+`_txMediaKeyMode()`), so it can be re-run against a different accessory
+without rebuilding it.
 
 ## PTT button — BLE GATT protocol
 
