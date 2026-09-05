@@ -1292,7 +1292,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       </div>
       <div id="tx-bar" style="display:none">
         <button id="tx-ptt" disabled>
-          <div><svg class="icon"><use href="#icon-mic"></use></svg> PTT &mdash; hold to transmit&ensp;<span class="tx-ptt-space-hint" style="font-size:0.7rem;font-weight:400">(or hold Space, or press Fwd on a Bluetooth mic &middot; keys in ~&frac12;s)</span></div>
+          <div><svg class="icon"><use href="#icon-mic"></use></svg> PTT &mdash; hold to transmit&ensp;<span class="tx-ptt-space-hint" style="font-size:0.7rem;font-weight:400">(or hold Space, or press Rev on a Bluetooth mic &middot; keys in ~&frac12;s)</span></div>
           <div id="tx-ptt-tot" style="font-size:0.7rem;font-weight:400;opacity:.8;display:none"></div>
         </button>
         <div id="tx-audio-row">
@@ -5018,7 +5018,7 @@ async function removeFavorite(node) {
    is hidden unless that endpoint says the feature is configured AND the
    page is a secure context (mic capture requires HTTPS). */
 var _tx = { ua: null, session: null, keyed: false, armed: false, idleTimer: null,
-            node: '', statsTimer: null, totSec: 0, keyWatchdog: null,
+            node: '', statsTimer: null, totSec: 0, keyWatchdog: null, duckedFrom: null,
             audioCtx: null, gainNode: null, analyser: null, rawStream: null, meterTimer: null };
 var _TX_IDLE_HANGUP_MS = 5 * 60 * 1000;  // auto-disarm after 5 min without keying
 
@@ -5877,9 +5877,27 @@ function _txTouchIdle() {
 
 /* Mute Listen only while keyed — the radio-style RX mute. Restored on
    unkey so the operator hears their own repeater tail as confirmation. */
+/* Ducked to near-silence rather than muted outright, deliberately.
+   Android routes a headset's media keys to whichever page owns the system
+   media session, and a page only holds that while it is actually producing
+   audible audio — muting the element makes it inaudible, so keying up was
+   handing the media session away at exactly the moment the operator needed
+   the next press to come back. That matches the observed failure precisely:
+   the first press keyed, and no further media-key event ever arrived.
+   A very low volume is inaudible in practice while keeping the element
+   audible as far as the media session is concerned. The operator's own
+   Listen volume is captured and restored, so this never fights the slider. */
+var _TX_DUCK_VOLUME = 0.0001;
 function _txMuteListen(muted) {
   var a = document.getElementById('node-audio');
-  if (a) a.muted = muted;
+  if (!a) return;
+  if (muted) {
+    if (_tx.duckedFrom === null || _tx.duckedFrom === undefined) _tx.duckedFrom = a.volume;
+    a.volume = _TX_DUCK_VOLUME;
+  } else if (_tx.duckedFrom !== null && _tx.duckedFrom !== undefined) {
+    a.volume = _tx.duckedFrom;
+    _tx.duckedFrom = null;
+  }
 }
 
 function _txKey() {
@@ -5945,7 +5963,8 @@ function _txUnkey() {
    a watchdog unkeys on its own — at the node's own time-out timer when
    there is one, otherwise a conservative default. Asterisk's TOT is the
    real backstop, but it shouldn't be the only one. */
-var TX_MEDIAKEY_ACTIONS  = ['nexttrack', 'previoustrack'];
+var TX_MEDIAKEY_PTT      = 'nexttrack';
+var TX_MEDIAKEY_RELEASE  = ['previoustrack', 'play', 'pause'];
 var TX_MEDIAKEY_MAX_KEY_MS = 120000;
 
 function _txMediaKeyWatchdog() {
@@ -5959,26 +5978,27 @@ function _txMediaKeyWatchdog() {
   }, ms);
 }
 
-function _txMediaKeyToggle(action) {
-  _txDiag('mediakey', action + ' (keyed was ' + _tx.keyed + ')');
+/* toggle=true only for the PTT key. Every other bound key can release but
+   never key, so a stuck transmit can be cleared by any button on the mic
+   without any of them being able to start one unexpectedly. */
+function _txMediaKeyAction(action, toggle) {
+  _txDiag('mediakey', action + (toggle ? '' : ' (release-only)') + ' keyed=' + _tx.keyed);
   if (!_tx.armed || !_tx.session || !_tx.session.isEstablished()) return;
-  if (_tx.keyed) {
-    clearTimeout(_tx.keyWatchdog);
-    _txUnkey();
-  } else {
-    _txKey();
-    _txMediaKeyWatchdog();
-  }
+  if (_tx.keyed)   { _txUnkey(); }
+  else if (toggle) { _txKey(); _txMediaKeyWatchdog(); }
+  _txMediaKeySync(true);   // re-assert the session; see _txMuteListen
 }
 
 /* Called on arm and on teardown: handlers exist only while a call is up, so
    the headset's Fwd key keeps its normal meaning the rest of the time. */
-function _txMediaKeySync() {
+function _txMediaKeySync(quiet) {
   if (!('mediaSession' in navigator)) return;
   var want = !!(_tx.armed && _tx.session);
   try {
-    TX_MEDIAKEY_ACTIONS.forEach(function(a) {
-      navigator.mediaSession.setActionHandler(a, want ? function() { _txMediaKeyToggle(a); } : null);
+    navigator.mediaSession.setActionHandler(TX_MEDIAKEY_PTT,
+      want ? function() { _txMediaKeyAction(TX_MEDIAKEY_PTT, true); } : null);
+    TX_MEDIAKEY_RELEASE.forEach(function(a) {
+      navigator.mediaSession.setActionHandler(a, want ? function() { _txMediaKeyAction(a, false); } : null);
     });
     if (want) {
       /* Claiming the media session explicitly. Without metadata Android may
@@ -5986,7 +6006,7 @@ function _txMediaKeySync() {
          to whatever played last, even while this page is the one sounding. */
       if (window.MediaMetadata) {
         navigator.mediaSession.metadata = new MediaMetadata({
-          title: 'Node ' + (_tx.node || '') + ' — press Fwd to transmit',
+          title: 'Node ' + (_tx.node || '') + ' — press Rev to transmit',
           artist: 'HenWen',
         });
       }
@@ -5994,7 +6014,8 @@ function _txMediaKeySync() {
     } else {
       navigator.mediaSession.playbackState = 'none';
     }
-    _txDiag('mediakey-handlers', want ? 'registered ' + TX_MEDIAKEY_ACTIONS.join(',') : 'cleared');
+    if (!quiet) _txDiag('mediakey-handlers', want ? 'ptt=' + TX_MEDIAKEY_PTT +
+                        ' release=' + TX_MEDIAKEY_RELEASE.join(',') : 'cleared');
   } catch (e) {
     _txDiag('mediakey-err', e.message);
   }
@@ -6293,7 +6314,11 @@ function _listenSetBtn(html, color, disabled) {
   vol.value = saved;
   audio.volume = saved / 100;
   vol.addEventListener('input', function() {
-    audio.volume = vol.value / 100;
+    /* While keyed the element is ducked (see _txMuteListen), so a change
+       made mid-transmission has to land on the value that gets restored,
+       not on the live element — otherwise unkeying would undo it. */
+    if (_tx.duckedFrom !== null && _tx.duckedFrom !== undefined) _tx.duckedFrom = vol.value / 100;
+    else audio.volume = vol.value / 100;
     localStorage.setItem('henwen-listen-volume', vol.value);
   });
 })();
