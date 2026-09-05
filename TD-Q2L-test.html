@@ -60,6 +60,25 @@ let device = null, server = null, chr = null, pollTimer = null;
 let ffe0Chr = null;
 let reads = 0, empties = 0, last = null;
 
+/* getPrimaryService() can race the platform's own GATT discovery on a device
+   with no cached attribute table: gatt.connect() resolves, and a NotFoundError
+   lands ~49ms later — far too fast for a real over-the-air discovery of a whole
+   attribute table to have completed and genuinely not found the service.
+   Retry rather than believe the first miss. */
+async function getPrimaryServiceRetry(uuid, tries = 6, delayMs = 500) {
+  let lastErr;
+  for (let i = 0; i < tries; i++) {
+    try { return await server.getPrimaryService(uuid); }
+    catch (e) {
+      lastErr = e;
+      if (e.name !== 'NotFoundError') throw e;
+      log(`getPrimaryService(${uuid.toString(16)}) miss ${i + 1}/${tries}, retrying in ${delayMs}ms`);
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+  throw lastErr;
+}
+
 const $ = id => document.getElementById(id);
 function log(msg) {
   const t = new Date().toISOString().slice(11, 23);
@@ -96,7 +115,7 @@ $('b-connect').onclick = async () => {
     });
     server = await device.gatt.connect();
     log('gatt.connect() ok');
-    const svc = await server.getPrimaryService(SERVICE);
+    const svc = await getPrimaryServiceRetry(SERVICE);
     log(`service ${SERVICE.slice(0, 8)}… ok`);
     chr = await svc.getCharacteristic(CHAR);
     const p = chr.properties;
@@ -112,7 +131,7 @@ $('b-connect').onclick = async () => {
    doc never sniffed 0xFFE1 specifically on this unit. */
 async function getFfe0Char() {
   if (ffe0Chr) return ffe0Chr;
-  const svc = await server.getPrimaryService(0xFFE0);
+  const svc = await getPrimaryServiceRetry(0xFFE0);
   const cs = await svc.getCharacteristics();
   const c = cs.find(c => c.properties.notify || c.properties.read) || cs[0];
   if (!c) throw new Error('0xFFE0 has no characteristics');
@@ -147,7 +166,7 @@ $('b-ffe0-notify').onclick = async () => {
 $('b-enum').onclick = async () => {
   for (const uuid of [SERVICE, ...EXTRA]) {
     try {
-      const svc = await server.getPrimaryService(uuid);
+      const svc = await getPrimaryServiceRetry(uuid);
       const cs  = await svc.getCharacteristics();
       log(`service ${uuid.toString(16)} — ${cs.length} characteristic(s):`);
       for (const c of cs) {

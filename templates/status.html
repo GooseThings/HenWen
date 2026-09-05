@@ -6176,7 +6176,7 @@ var TX_BLE_EXTRA_SERVICES = [0xFFE0, 0xFF00, 0xAE30];
 var _txBle = { device: null, char: null, statusMsg: '', warn: false,
                wantConnected: false, retry: 0, retryTimer: null, autoTried: false,
                pollTimer: null, lastState: false, readFails: 0, reading: false, reads: 0,
-               readStart: 0, ticks: 0, empties: 0 };
+               readStart: 0, ticks: 0, empties: 0, warmupTimer: null, serialChar: null };
 
 function _txBleSetStatus(msg, warn) {
   _txBle.statusMsg = msg || '';
@@ -6216,7 +6216,12 @@ function _txBleUpdateBtn() {
 var TX_BLE_POLL_MS       = 150;
 var TX_BLE_READ_FAIL_MAX = 5;
 var TX_BLE_READ_STALL_MS  = 1500;
-var TX_BLE_USE_NOTIFY     = false;
+var TX_BLE_USE_NOTIFY     = true;
+var TX_BLE_SVC_TRIES      = 6;
+var TX_BLE_SVC_RETRY_MS   = 500;
+var TX_BLE_SERIAL_SERVICE = 0xFFE0;
+var TX_BLE_WARMUP_MS      = 3000;   // fast reads right after connect
+var TX_BLE_WARMUP_POLL_MS = 40;
 
 function _txBleApply(pressed, src) {
   if (pressed === _txBle.lastState) return;
@@ -6302,7 +6307,9 @@ function _txBleOnDisconnect() {
   _txBleUpdateBtn();
   if (_tx.keyed) _txUnkey();   // never leave the node keyed on a dropped link
   _txBle.char = null;
+  _txBle.serialChar = null;
   clearInterval(_txBle.pollTimer);
+  clearTimeout(_txBle.warmupTimer);
   if (_tx.keyed) _txUnkey();
   if (!_txBle.wantConnected) { _txBleSetStatus('Disconnected'); return; }
   if (_txBle.retry >= TX_BLE_RETRY_MAX) {
@@ -6325,9 +6332,60 @@ function _txBleOnDisconnect() {
 }
 
 /* Connect + subscribe, shared by the initial pairing and every reconnect. */
+/* getPrimaryService() races the platform's GATT discovery on a device with no
+   cached attribute table. Measured on desktop Linux: gatt.connect() resolved
+   and NotFoundError landed 49ms later — far too fast for a real over-the-air
+   discovery of a whole attribute table to have run and genuinely not found the
+   service. Retry instead of believing the first miss. */
+async function _txBleService(server, uuid) {
+  var lastErr;
+  for (var i = 0; i < TX_BLE_SVC_TRIES; i++) {
+    try { return await server.getPrimaryService(uuid); }
+    catch (e) {
+      lastErr = e;
+      if (e.name !== 'NotFoundError') throw e;
+      _txDiag('ble-svc-retry', uuid + ' miss ' + (i + 1) + '/' + TX_BLE_SVC_TRIES);
+      await new Promise(function(r) { setTimeout(r, TX_BLE_SVC_RETRY_MS); });
+    }
+  }
+  throw lastErr;
+}
+
+/* 0xFFE1, on the 0xFFE0 serial-passthrough service, carries the same button
+   byte as the primary characteristic — in the best desktop session both
+   delivered every press within single-digit milliseconds of each other. It is
+   subscribed as a redundant second source rather than a fallback: whichever
+   arrives first wins, and _txBleApply() drops the duplicate. Failure here is
+   logged and ignored, since the primary path must not depend on it. */
+async function _txBleAttachSerial(server) {
+  try {
+    var svc = await _txBleService(server, TX_BLE_SERIAL_SERVICE);
+    var cs  = await svc.getCharacteristics();
+    /* Properties come back empty for every characteristic on Chrome/BlueZ
+       (a separate, reproducible platform bug — see TD-Q2L.md), so pick by
+       UUID and fall back to the first characteristic rather than filtering
+       on .notify, which cannot be trusted to be populated. */
+    var ch = cs.filter(function(c) { return c.uuid.indexOf('ffe1') !== -1; })[0] || cs[0];
+    if (!ch) return;
+    ch.addEventListener('characteristicvaluechanged', function(e) {
+      var v = e.target.value;
+      if (!v || v.byteLength < 1) return;
+      var raw = v.getUint8(0);
+      /* A serial passthrough can carry anything; only 0x00/0x01 are button
+         state, so anything else is somebody else's traffic. */
+      if (raw === 0 || raw === 1) _txBleApply(raw === 1, 'ffe1');
+    });
+    await ch.startNotifications();
+    _txBle.serialChar = ch;
+    _txDiag('ble-serial', 'subscribed ' + ch.uuid.slice(0, 8));
+  } catch (e) {
+    _txDiag('ble-serial-err', (e.name || '') + ' ' + e.message);
+  }
+}
+
 async function _txBleAttach(device) {
   var server  = await device.gatt.connect();
-  var service = await server.getPrimaryService(TX_BLE_SERVICE);
+  var service = await _txBleService(server, TX_BLE_SERVICE);
   /* Enumerate rather than assume. Chrome returning a zero-length read from a
      characteristic nRF Connect reads correctly would be explained by there
      being more than one characteristic under this UUID, or by the properties
@@ -6346,12 +6404,13 @@ async function _txBleAttach(device) {
   var ch      = await service.getCharacteristic(TX_BLE_CHAR);
   _txBle.char = ch;
   ch.addEventListener('characteristicvaluechanged', _txBleOnValue);
-  /* Notifications are off. Every read came back zero-length while they were
-     enabled, which fits Chrome answering the read from its notification
-     cache — empty, because notifications were never being delivered either.
-     nRF Connect reads 0x01 from this same characteristic while holding the
-     button, so the peripheral answers real reads fine; the difference worth
-     testing is not subscribing at all. Flip TX_BLE_USE_NOTIFY to re-enable. */
+  /* Notifications back on. Desktop testing (TD-Q2L.md, follow-up section)
+     eventually got 150+ consecutive press/release events out of this exact
+     characteristic with nothing in the code changed from the sessions that
+     got none — so the zero-byte reads and silent notifications were
+     connection-state-dependent, not an unconditional Chrome limitation.
+     Both sources feed _txBleApply(), which de-duplicates, so subscribing
+     costs nothing and wins whenever it works. */
   if (TX_BLE_USE_NOTIFY) {
     try { await ch.startNotifications(); } catch (e) { _txDiag('ble-notify-err', e.message); }
   }
@@ -6362,12 +6421,32 @@ async function _txBleAttach(device) {
   _txBle.ticks     = 0;
   _txBle.readStart = 0;
   _txBle.empties   = 0;
+  /* Warm-up burst. The leading theory for the on-again/off-again delivery is
+     BLE connection-interval variability: a fresh link can start on a slow,
+     power-saving interval where a quick press and release completes entirely
+     between two polling windows and is never seen at all. Native clients fix
+     this by requesting a high-priority interval on connect
+     (BluetoothGatt.requestConnectionPriority), which Web Bluetooth does not
+     expose to JavaScript in any form. Sustained GATT traffic is the only
+     lever a page has, so poll hard for the first few seconds to encourage the
+     stack to tighten the interval, then settle to the normal rate. Whether
+     this actually shortens time-to-fast-interval is the open question
+     TD-Q2L.md lists as untested — the ble-value log lines are what will
+     answer it. */
   clearInterval(_txBle.pollTimer);
-  _txBle.pollTimer = setInterval(_txBlePollTick, TX_BLE_POLL_MS);
+  _txBle.pollTimer = setInterval(_txBlePollTick, TX_BLE_WARMUP_POLL_MS);
+  clearTimeout(_txBle.warmupTimer);
+  _txBle.warmupTimer = setTimeout(function() {
+    if (!_txBle.device || !_txBle.device.gatt.connected) return;
+    clearInterval(_txBle.pollTimer);
+    _txBle.pollTimer = setInterval(_txBlePollTick, TX_BLE_POLL_MS);
+    _txDiag('ble-warmup-done', 'settled to ' + TX_BLE_POLL_MS + 'ms');
+  }, TX_BLE_WARMUP_MS);
   /* Explicit marker that the polling build is what the browser is actually
      running. Without it, a stale page and a live page that simply saw no
      presses produce identical logs — which cost a debugging round. */
-  _txDiag('ble-poll-start', 'every ' + TX_BLE_POLL_MS + 'ms');
+  _txDiag('ble-poll-start', TX_BLE_WARMUP_POLL_MS + 'ms warm-up for ' + TX_BLE_WARMUP_MS + 'ms');
+  _txBleAttachSerial(server);   // redundant second source, never awaited
   _txBle.retry = 0;
   _txBleSetStatus('Connected: ' + (device.name || 'PTT device') + ' — polling button');
   _txBleUpdateBtn();

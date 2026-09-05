@@ -403,10 +403,12 @@ different story than "stale cache" this time: `gatt.connect()` resolved at
 later. Real over-the-air GATT discovery of a whole attribute table takes
 hundreds of milliseconds at minimum. Chrome's `getPrimaryService()` call was
 simply racing BlueZ's own discovery on a device with zero prior cache to
-serve from. Fix, now in `TD-Q2L-test.html`: `getPrimaryServiceRetry()` wraps
-`getPrimaryService()` in retries with a 500ms backoff (6 attempts) instead of
-failing on the first miss. This is a harness/client-code bug, not a device
-or platform bug — worth carrying into HenWen's own connect logic.
+serve from. Fix: `getPrimaryServiceRetry()` wraps `getPrimaryService()` in retries with a
+500ms backoff (6 attempts) instead of failing on the first miss. This is a
+harness/client-code bug, not a device or platform bug. (The fix was described
+here before it was actually committed — the harness was still calling
+`getPrimaryService()` directly at all three call sites. Now genuinely present
+in `TD-Q2L-test.html`, and carried into HenWen as `_txBleService()`.)
 
 **2. Wi-Fi/Bluetooth coexistence looked like the answer, then wasn't.** With
 the classic BR/EDR audio link disconnected, comparing quick taps vs. held
@@ -478,6 +480,32 @@ wait for) a good connection interval before relying on it."
   often a fresh connection lands on a fast interval immediately vs. needs
   time to get there — the sample size so far is one good session against
   several bad ones.
+
+## Carried into HenWen, 2026-09-05
+
+Acting on the follow-up findings, `templates/status.html` now:
+
+- **retries service discovery** (`_txBleService()`, 6 tries / 500ms) rather
+  than trusting the first `NotFoundError`;
+- **subscribes again** — `TX_BLE_USE_NOTIFY` is back on, since the good
+  session proved notifications do work on this characteristic;
+- **subscribes to `0xFFE1` as a redundant second source**, not a fallback:
+  both delivered every press within single-digit milliseconds of each other
+  in the best session, and `_txBleApply()` de-duplicates, so whichever
+  arrives first wins. Non-`0x00`/`0x01` values are ignored, since a serial
+  passthrough can carry other traffic. Its characteristic is picked by UUID
+  rather than by `.notify`, because properties come back empty on Chrome/BlueZ;
+- **polls hard for the first 3 seconds** after connect (40ms, then settling to
+  150ms) as a **warm-up attempt**. This is the untested item from the list
+  above, now live: sustained GATT traffic is the only lever a page has, since
+  Web Bluetooth exposes no equivalent of
+  `BluetoothGatt.requestConnectionPriority()`. Whether it actually shortens
+  time-to-first-delivery is what the `ble-poll-start` → first `ble-value`
+  interval in `journalctl -u HenWen` will show, across several connects.
+
+Log lines to watch: `ble-svc-retry`, `ble-serial`, `ble-warmup-done`, and
+`ble-value … via poll|notify|ffe1` — the source tag says which transport
+actually delivered each press.
 
 ## Troubleshooting on a desktop
 
