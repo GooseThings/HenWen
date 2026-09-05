@@ -1278,6 +1278,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <span class="card-title">Connected Nodes</span>
         <span style="margin-left:auto;display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:6px;row-gap:6px">
           <button class="btn-icon" id="tx-btn" onclick="openTx()" style="display:none" title="Transmit from your microphone through this node"><svg class="icon"><use href="#icon-mic"></use></svg> TX</button>
+          <button class="btn-icon" id="tx-ble-connect" onclick="_txBleConnect()" style="display:none"
+                  title="Connects directly over Bluetooth LE to a Tidradio-style PTT button's own press/release signal for true hold-to-transmit — works independently of whether TX is currently armed. Chrome only (Web Bluetooth) — confirmed against one Tidradio TD-PTT unit.">BLE PTT</button>
           <button class="btn-icon" id="listen-btn" onclick="toggleListen()" title="Stream live audio from this node — expect ~1 second delay"><svg class="icon"><use href="#icon-headphones"></use></svg> Listen</button>
           <button class="btn-icon" id="record-btn" onclick="toggleRecord()" style="display:none" title="Record this node's audio to a file"><svg class="icon" style="color:var(--red,#f85149)"><use href="#icon-circle"></use></svg> Rec</button>
           <button class="btn-icon" id="myrec-btn" onclick="openMyRecordingsModal()" style="display:none" title="View, rename, download, or delete your saved recordings"><svg class="icon"><use href="#icon-folder-open"></use></svg></button>
@@ -1300,10 +1302,11 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
           <span id="tx-gain-val" style="font-size:0.7rem;color:var(--text2);width:3em;flex-shrink:0">100%</span>
         </div>
         <label style="display:flex;align-items:center;gap:6px;font-size:0.72rem;color:var(--text2);padding:4px 0 0"
-               title="Uses a paired Bluetooth headset/PTT button's play/pause control to toggle transmit. Experimental: exact behavior depends on your specific device and phone, so test it before relying on it.">
-          <input type="checkbox" id="tx-bt-ptt">
-          Bluetooth PTT button (experimental) &mdash; toggles TX on press
+               title="Off (default): audio stays on this device's own mic/speaker, which leaves a BLE PTT button's radio uncontended so its presses keep arriving while you transmit. On: routes mic/speaker through a connected Bluetooth headset — but on a combo BLE+Classic device like the Tidradio TD-Q2L that stops the PTT button's presses from getting through once transmit audio is live, so use the on-screen PTT or Space instead. Takes effect the next time you arm TX.">
+          <input type="checkbox" id="tx-bt-audio">
+          Route audio through Bluetooth headset
         </label>
+        <div id="tx-ble-status" style="font-size:0.72rem;color:var(--text2);padding:4px 0 0"></div>
         <div id="tx-status" style="font-size:0.75rem;color:var(--accent);min-height:1em"></div>
       </div>
       <div class="connector-warn-bar" id="connector-warn-bar" style="display:none">
@@ -5026,18 +5029,47 @@ var _TX_IDLE_HANGUP_MS = 5 * 60 * 1000;  // auto-disarm after 5 min without keyi
 
 /* Mic gain: the browser's autoGainControl drove a headset mic to hard
    clipping (media-source audioLevel pinned at 1.000, "much too loud" on a
-   parrot test), so AGC is off and level is set manually with this slider —
-   the mic runs through a WebAudio gain stage before it enters the call,
-   with a post-gain analyser feeding the level meter (what the meter shows
-   is what transmits). Persisted per browser. */
+   parrot test), so AGC is off by default and level is set manually with
+   this slider — the mic runs through a WebAudio gain stage before it
+   enters the call, with a post-gain analyser feeding the level meter (what
+   the meter shows is what transmits). Persisted per browser. Still applies
+   on top of AGC when Bluetooth-headset routing turns AGC back on, as a
+   further trim if a specific mic runs hot. */
 function _txSavedGain() {
   var v = parseInt(localStorage.getItem('henwen-tx-gain') || '100', 10);
   return (v >= 0 && v <= 200) ? v : 100;
 }
 
+/* Bluetooth headset audio routing — an explicit either/or, not a bug.
+   Requesting the full default AEC+NS+AGC trio (rather than opting any one
+   of them out) is what Chromium's Android audio backend ties its automatic
+   Bluetooth SCO routing decision to: ask for all three and mic/speaker
+   follow whatever Bluetooth headset is connected, exactly like Zoom/Meet
+   get for free in this browser; opt any one out and Chrome drops into a
+   plain capture path that never engages SCO at all no matter what's paired.
+   Both halves of that were confirmed empirically on real hardware.
+   The catch, also confirmed live and repeatedly reproduced: on a combo
+   BLE + Classic Bluetooth device like the Tidradio TD-Q2L, once SCO audio
+   is actually flowing the BLE GATT PTT characteristic stops delivering
+   notifications entirely — no press/release events arrive, while
+   device.gatt.connected still reports true and no disconnect event ever
+   fires, so there's nothing for _txBleConnect()'s reconnect path to even
+   react to. That appears to be a radio-sharing limit of the device's chip
+   rather than anything fixable in software here (see TD-Q2L.md).
+   So the two can't both be on: routed Bluetooth audio costs you the
+   physical PTT button, and a working physical PTT button costs you routed
+   Bluetooth audio. Default is off — the physical button working is the
+   whole point of pairing one, and the on-screen/Space PTT is always
+   available as the fallback in the other mode. */
+function _txBtAudioPref() {
+  return localStorage.getItem('henwen-tx-bt-audio') === '1';
+}
+
 function _txBuildMicChain() {
+  var agc = _txBtAudioPref();
+  _txDiag('mic-constraints', 'agc=' + agc);
   return navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false },
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: agc },
     video: false,
   }).then(function(raw) {
     _tx.rawStream = raw;
@@ -5082,11 +5114,17 @@ function _txStartMeter() {
    log (was DTMF actually sent? was the mic track live? was the outbound RTP
    audio level non-zero?) without browser devtools open. */
 function _txDiag(type, detail) {
-  if (!_tx.node) return;
+  /* _tx.node is only set once armTx()'s config fetch resolves — but BLE PTT
+     can now connect and report events (ble-connected, ble-value on every
+     press/release) before TX is ever armed, so fall back to the board's own
+     local node number rather than going silent for anything that happens
+     pre-arm. */
+  var node = _tx.node || (window._lastBoardNodes && window._lastBoardNodes[0] && window._lastBoardNodes[0].node) || '';
+  if (!node) return;
   try {
     apiFetch('/api/audio/client-log', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({node: _tx.node, type: 'tx-' + type, detail: String(detail).slice(0, 200)}),
+      body: JSON.stringify({node: node, type: 'tx-' + type, detail: String(detail).slice(0, 200)}),
       keepalive: true,
     });
   } catch (e) {}
@@ -5130,16 +5168,29 @@ function _txSetBtn(html, color) {
 }
 
 async function _txUpdateBtn() {
-  var btn = document.getElementById('tx-btn');
+  var btn    = document.getElementById('tx-btn');
+  var bleBtn = document.getElementById('tx-ble-connect');
   if (!btn) return;
   /* Any logged-in role may TX — account creation itself is already gated to
      admin/superuser/owner, so any account that exists has been vetted. */
   var eligible = !!window._kioskRole && window.isSecureContext && navigator.mediaDevices && window.WebSocket;
-  if (!eligible) { btn.style.display = 'none'; return; }
+  if (!eligible) {
+    btn.style.display = 'none';
+    if (bleBtn) bleBtn.style.display = 'none';
+    return;
+  }
   try {
     var r = await apiFetch('/api/tx/config?probe=1');
     btn.style.display = r.ok ? '' : 'none';
-  } catch (e) { btn.style.display = 'none'; }
+    /* Lives next to the TX button, not inside #tx-bar, specifically so it
+       can be connected *before* arming — see _txBleConnect()'s comment on
+       why establishing this BLE link only after TX's own mic capture has
+       already started turned out to matter on real hardware. */
+    if (bleBtn) bleBtn.style.display = (r.ok && navigator.bluetooth) ? '' : 'none';
+  } catch (e) {
+    btn.style.display = 'none';
+    if (bleBtn) bleBtn.style.display = 'none';
+  }
 }
 
 /* ── Recording ──────────────────────────────────────────────────────────
@@ -5699,7 +5750,6 @@ async function armTx() {
         /* Listen is the monitor path — make sure it's running */
         if (!_listenActive) _startListen();
         _txTouchIdle();
-        _txBtSync();
         _txDiag('armed', 'call confirmed');
         _txStatsSample('armed');
       });
@@ -5747,7 +5797,6 @@ function _txTeardown() {
   _txUnkey();
   clearTimeout(_tx.idleTimer);
   clearTimeout(_tx.statsTimer);
-  _txBtSync();
   var pttEl = document.getElementById('tx-ptt');
   if (pttEl) pttEl.disabled = true;
   if (_tx.session) { try { _tx.session.terminate(); } catch (e) {} _tx.session = null; }
@@ -5811,38 +5860,109 @@ function _txUnkey() {
   }
 }
 
-/* ── Bluetooth/hardware PTT button (experimental) ────────────────────────
-   Cheap Bluetooth "PTT" buttons sold for radio apps (including Tidradio's)
-   advertise working with "most PTT applications" with no per-app pairing
-   step — that's only possible if the button rides the standard Bluetooth
-   headset control (AVRCP play/pause, the same signal a wired headset's
-   inline button sends) rather than a proprietary protocol each app has to
-   support individually. That's the hook used here, via the Media Session
-   API: while armed and this box is checked, a 'play' or 'pause' media
-   action toggles TX. Toggle rather than press/hold because the OS/browser
-   only ever hands a page a single semantic action, not a raw button-down/
-   button-up pair with real timing.
-   This was implemented without the actual hardware in hand to verify
-   against, so it's opt-in and off by default — a device that behaves
-   differently (or a phone that never routes the button to the page at
-   all) should be inert, not surprising. Confirm the toggle behavior
-   before relying on it in the field. */
-function _txBtSavedPref() {
-  return localStorage.getItem('henwen-tx-bt-ptt') === '1';
+/* ── Tidradio-style BLE PTT button (direct GATT, real hold-to-transmit) ──
+   Diagnosed live against a real Tidradio TD-Q2L unit (2026-09-05): the
+   PTT-labeled button sends no standard Bluetooth media/HID signal at all —
+   confirmed by exhaustive DOM keydown + Media Session logging that never
+   once fired across repeated presses, and separately confirmed the button
+   does nothing in a normal Android media app either. (The device's other
+   buttons — Power/CH+/CH-/Volume — do send real AVRCP media keys; only the
+   PTT button itself needs this GATT-based workaround. Full writeup and a
+   standalone reference snippet: TD-Q2L.md at the repo root.)
+   Sniffed with nRF Connect: PTT state lives on one GATT characteristic that
+   directly mirrors physical button state — 0x01 while held, 0x00 when
+   released — not a toggle event, so this gives genuine press/hold semantics
+   identical to the on-screen PTT button.
+   Requires Web Bluetooth (Chrome on Android/desktop only; no Safari/Firefox
+   support) and a fresh user-gesture pairing each page load — Web Bluetooth
+   has no silent auto-reconnect on a plain page load, so there's a Connect
+   button rather than a persisted preference. Deliberately does not touch
+   audio device *selection* at all — mic/speaker routing is left to the
+   browser/OS's own default, same as any other WebRTC page; the one audio
+   knob that matters here is the Bluetooth-routing constraint choice in
+   _txBtAudioPref(), which this button's presses can't survive being on. */
+var TX_BLE_SERVICE = '89a8591d-bb19-485b-9f59-58492bc33e24';
+var TX_BLE_CHAR     = '894c8042-e841-461c-a5c9-5a73d25db08e';
+var _txBle = { device: null, char: null, statusMsg: '' };
+
+function _txBleSetStatus(msg) {
+  _txBle.statusMsg = msg || '';
+  _txBleRenderStatus();
 }
-function _txBtToggle() {
+/* The audio-routing conflict warning is rendered here rather than only at
+   connect time so that ticking the Bluetooth-audio box *after* pairing the
+   button surfaces it too — that order is at least as likely as the other. */
+function _txBleRenderStatus() {
+  var el = document.getElementById('tx-ble-status');
+  if (!el) return;
+  var connected = !!(_txBle.device && _txBle.device.gatt.connected);
+  if (connected && _txBtAudioPref()) {
+    el.textContent = (_txBle.statusMsg ? _txBle.statusMsg + ' — ' : '') +
+      'Bluetooth headset routing is on, so this button stops responding once transmit audio goes live. Uncheck it above, or key up with the on-screen PTT.';
+    el.style.color = 'var(--warn)';
+  } else {
+    el.textContent = _txBle.statusMsg;
+    el.style.color = 'var(--text2)';
+  }
+}
+function _txBleUpdateBtn() {
+  var btn = document.getElementById('tx-ble-connect');
+  if (!btn) return;
+  var connected = !!(_txBle.device && _txBle.device.gatt.connected);
+  btn.style.color = connected ? 'var(--green)' : '';
+  btn.title = connected
+    ? 'Connected to ' + (_txBle.device.name || 'PTT device') + ' — click to disconnect'
+    : "Connects directly over Bluetooth LE to a Tidradio-style PTT button's own press/release signal for true hold-to-transmit — works independently of whether TX is currently armed. Chrome only (Web Bluetooth) — confirmed against one Tidradio TD-PTT unit.";
+}
+function _txBleOnValue(e) {
+  var pressed = e.target.value.getUint8(0) === 1;
+  _txDiag('ble-value', pressed ? 'press' : 'release');
   if (!_tx.armed || !_tx.session || !_tx.session.isEstablished()) return;
-  if (_tx.keyed) _txUnkey(); else _txKey();
-  _txDiag('bt-toggle', 'keyed=' + _tx.keyed);
+  if (pressed) { if (!_tx.keyed) _txKey(); }
+  else         { if (_tx.keyed)  _txUnkey(); }
 }
-function _txBtSync() {
-  if (!('mediaSession' in navigator)) return;
-  var want = _tx.armed && _txBtSavedPref();
+function _txBleOnDisconnect() {
+  _txBleSetStatus('Disconnected');
+  _txBleUpdateBtn();
+  _txDiag('ble-disconnected', '');
+  if (_tx.keyed) _txUnkey();
+  _txBle.char = null;
+}
+async function _txBleConnect() {
+  if (_txBle.device && _txBle.device.gatt.connected) {
+    _txBle.device.gatt.disconnect();
+    return;
+  }
+  if (!navigator.bluetooth) {
+    _txBleSetStatus('Web Bluetooth not supported in this browser');
+    return;
+  }
   try {
-    navigator.mediaSession.setActionHandler('play',  want ? _txBtToggle : null);
-    navigator.mediaSession.setActionHandler('pause', want ? _txBtToggle : null);
-    navigator.mediaSession.playbackState = want ? 'playing' : 'none';
-  } catch (e) { _txDiag('bt-handler-err', e.message); }
+    /* Filtering requestDevice() by services only matches devices that
+       advertise that UUID in their BLE advertisement packet — this device's
+       custom PTT service is only visible after connecting (confirmed via
+       nRF Connect), not in its advertisement, so a services-filter picker
+       comes back empty even with the mic right next to the phone. Show
+       every nearby BLE device instead and let the user pick it by name;
+       optionalServices is what actually grants access to the PTT service
+       once connected (Chrome blocks GATT access to any service not named
+       in filters/optionalServices at requestDevice() time). */
+    var device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [TX_BLE_SERVICE] });
+    _txBle.device = device;
+    device.addEventListener('gattserverdisconnected', _txBleOnDisconnect);
+    var server = await device.gatt.connect();
+    var service = await server.getPrimaryService(TX_BLE_SERVICE);
+    var ch = await service.getCharacteristic(TX_BLE_CHAR);
+    _txBle.char = ch;
+    ch.addEventListener('characteristicvaluechanged', _txBleOnValue);
+    await ch.startNotifications();
+    _txBleSetStatus('Connected: ' + (device.name || 'PTT device'));
+    _txBleUpdateBtn();
+    _txDiag('ble-connected', device.name || '?');
+  } catch (e) {
+    _txBleSetStatus('Connect failed: ' + e.message);
+    _txDiag('ble-connect-err', e.message);
+  }
 }
 
 (function() {
@@ -5856,12 +5976,17 @@ function _txBtSync() {
     if (_tx.gainNode) _tx.gainNode.gain.value = gain.value / 100;
   });
 
-  var btChk = document.getElementById('tx-bt-ptt');
-  if (btChk) {
-    btChk.checked = _txBtSavedPref();
-    btChk.addEventListener('change', function() {
-      localStorage.setItem('henwen-tx-bt-ptt', btChk.checked ? '1' : '0');
-      _txBtSync();
+  /* Only read when the mic chain is built, so a mid-session change lands on
+     the next arm rather than silently doing nothing until a page reload —
+     said out loud in the status line, since "I ticked the box and nothing
+     happened" is otherwise indistinguishable from the feature being broken. */
+  var btAudio = document.getElementById('tx-bt-audio');
+  if (btAudio) {
+    btAudio.checked = _txBtAudioPref();
+    btAudio.addEventListener('change', function() {
+      localStorage.setItem('henwen-tx-bt-audio', btAudio.checked ? '1' : '0');
+      _txBleRenderStatus();
+      if (_tx.armed) _txStatus('Audio routing changes apply next time you arm TX', 'var(--warn)');
     });
   }
 
