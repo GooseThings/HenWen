@@ -6039,8 +6039,7 @@ function _txScanPads() {
   }
 }
 
-function _txScanSync() {
-  var want = !!(_tx.armed && _tx.session);
+function _txScanSync(want) {
   window.removeEventListener('keydown', _txScanKey, true);
   window.removeEventListener('keyup',   _txScanKey, true);
   clearInterval(_tx.padTimer);
@@ -6051,21 +6050,53 @@ function _txScanSync() {
   if (navigator.getGamepads) _tx.padTimer = setInterval(_txScanPads, 100);
 }
 
-/* Called on arm and on teardown: handlers exist only while a call is up, so
-   the headset's Fwd key keeps its normal meaning the rest of the time. */
+/* Three modes, so a button scan doesn't require holding the node keyed:
+     'ptt'  — armed: Rev toggles transmit, Fwd/play/pause release, rest log
+     'scan' — diagnostic: every action bound log-only, nothing transmits
+     'off'  — no handlers, the headset's keys keep their normal meaning
+   'scan' needs only Listen running (a page must be producing audible audio
+   to own the media session at all), not an armed transmitter — pressing
+   buttons to identify them shouldn't mean keying a repeater to do it.
+   It is opt-in via ?btscan=1 rather than on whenever Listen plays, because
+   binding these actions takes the headset's keys away from whatever they
+   would otherwise do, and this is a shared board. ?btscan=0 turns it off. */
+function _txScanEnabled() {
+  try { return localStorage.getItem('henwen-tx-btscan') === '1'; } catch (e) { return false; }
+}
+function _txMediaKeyMode() {
+  if (_tx.armed && _tx.session) return 'ptt';
+  if (_txScanEnabled() && _listenActive) return 'scan';
+  return 'off';
+}
+
+/* Called on arm and on teardown, and polled so scan mode follows Listen
+   without threading a call through every _listenActive assignment. */
+var _txMediaKeyApplied = '';
+function _txMediaKeyPoll() {
+  if (_txMediaKeyMode() !== _txMediaKeyApplied) _txMediaKeySync();
+}
+
 function _txMediaKeySync(quiet) {
   /* Before the mediaSession guard, and skipped on the quiet re-assert that
      follows every keypress: the scan's listeners are independent of Media
      Session support, and tearing them down and rebuilding them on each press
      would churn for nothing. */
-  if (!quiet) _txScanSync();
+  var mode = _txMediaKeyMode();
+  _txMediaKeyApplied = mode;
+  var want = (mode !== 'off');
+  var ptt  = (mode === 'ptt');
+  if (!quiet) _txScanSync(want);
   if (!('mediaSession' in navigator)) return;
-  var want = !!(_tx.armed && _tx.session);
   try {
-    navigator.mediaSession.setActionHandler(TX_MEDIAKEY_PTT,
-      want ? function() { _txMediaKeyAction(TX_MEDIAKEY_PTT, true); } : null);
+    /* In scan mode even the transmit keys are log-only — the whole point is
+       to identify buttons without any of them keying the node. */
+    navigator.mediaSession.setActionHandler(TX_MEDIAKEY_PTT, !want ? null :
+      (ptt ? function() { _txMediaKeyAction(TX_MEDIAKEY_PTT, true); }
+           : function() { _txDiag('scan-mediakey', TX_MEDIAKEY_PTT); }));
     TX_MEDIAKEY_RELEASE.forEach(function(a) {
-      navigator.mediaSession.setActionHandler(a, want ? function() { _txMediaKeyAction(a, false); } : null);
+      navigator.mediaSession.setActionHandler(a, !want ? null :
+        (ptt ? function() { _txMediaKeyAction(a, false); }
+             : function() { _txDiag('scan-mediakey', a); }));
     });
     var scanned = [];
     TX_MEDIAKEY_SCAN.forEach(function(a) {
@@ -6083,7 +6114,8 @@ function _txMediaKeySync(quiet) {
          to whatever played last, even while this page is the one sounding. */
       if (window.MediaMetadata) {
         navigator.mediaSession.metadata = new MediaMetadata({
-          title: 'Node ' + (_tx.node || '') + ' — press Rev to transmit',
+          title: ptt ? ('Node ' + (_tx.node || '') + ' — press Rev to transmit')
+                     : 'HenWen button scan — press any mic button',
           artist: 'HenWen',
         });
       }
@@ -6091,8 +6123,7 @@ function _txMediaKeySync(quiet) {
     } else {
       navigator.mediaSession.playbackState = 'none';
     }
-    if (!quiet) _txDiag('mediakey-handlers', want ? 'ptt=' + TX_MEDIAKEY_PTT +
-                        ' release=' + TX_MEDIAKEY_RELEASE.join(',') : 'cleared');
+    if (!quiet) _txDiag('mediakey-handlers', 'mode=' + mode);
   } catch (e) {
     _txDiag('mediakey-err', e.message);
   }
@@ -6259,6 +6290,14 @@ async function _txBleConnect() {
     localStorage.setItem('henwen-tx-gain', gain.value);
     if (_tx.gainNode) _tx.gainNode.gain.value = gain.value / 100;
   });
+
+  /* ?btscan=1 arms the diagnostic, ?btscan=0 clears it; the choice sticks so
+     the operator can reload freely mid-test without re-adding the query. */
+  try {
+    var q = new URLSearchParams(location.search).get('btscan');
+    if (q === '1' || q === '0') localStorage.setItem('henwen-tx-btscan', q);
+  } catch (e) {}
+  setInterval(_txMediaKeyPoll, 2000);
 
   var ptt = document.getElementById('tx-ptt');
   ptt.addEventListener('pointerdown',   function(e) { e.preventDefault(); _txKey(); });
