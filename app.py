@@ -2192,8 +2192,8 @@ class AMIClient:
 
     # ── AMI Command ───────────────────────────────────────────────────────────
 
-    def command(self, cmd: str) -> list:
-        log("INFO", f"[AMI] CMD: {cmd!r}")
+    def command(self, cmd: str, log_level: str = "INFO") -> list:
+        log(log_level, f"[AMI] CMD: {cmd!r}")
         action = (
             f"Action: Command\r\n"
             f"Command: {cmd}\r\n"
@@ -2302,7 +2302,7 @@ class AMIClient:
 
         # Primary: rpt show variables — RPT_RXKEYED for local keyed state,
         # RPT_ALINKS for per-link keyed state of already-connected nodes.
-        lines = self.command(f"rpt show variables {node}")
+        lines = self.command(f"rpt show variables {node}", log_level="DEBUG")
         status["raw"] = lines
         log("DEBUG", f"[AMI] rpt show variables {node} -> {lines}")
         for line in lines:
@@ -2324,7 +2324,7 @@ class AMIClient:
         # CONNECT_STATE values: ESTABLISHED (fully up), CONNECTING (handshake pending),
         # DISCONNECTING, etc.  We include all peers in "connected" so they show in the
         # UI, but expose the state so the UI can distinguish CONNECTING from ESTABLISHED.
-        lstats = self.command(f"rpt lstats {node}")
+        lstats = self.command(f"rpt lstats {node}", log_level="DEBUG")
         status["lstats"] = lstats
         log("DEBUG", f"[AMI] rpt lstats {node} -> {lstats}")
         for line in lstats:
