@@ -5109,6 +5109,17 @@ function _txBuildMicChain() {
       _txDiag('mic-source', 'want-agc=' + agc + ' label=' + (t.label || '?') +
               ' agc=' + s.autoGainControl + ' ns=' + s.noiseSuppression +
               ' aec=' + s.echoCancellation + ' rate=' + s.sampleRate);
+      /* A track label of "Default" names Chrome's default-device alias, not
+         the hardware behind it, so it can't answer "did Bluetooth routing
+         actually happen?" on its own. Listing the input devices alongside it
+         does: if no Bluetooth mic is even enumerated, the checkbox had
+         nothing to route to. Labels are only populated post-permission,
+         which is why this runs after getUserMedia rather than before. */
+      navigator.mediaDevices.enumerateDevices().then(function(ds) {
+        _txDiag('mic-devices', ds.filter(function(d) { return d.kind === 'audioinput'; })
+                                 .map(function(d) { return d.label || d.deviceId.slice(0, 8); })
+                                 .join(' | ').slice(0, 200));
+      }).catch(function() {});
     } catch (e) {}
     _tx.rawStream = raw;
     _tx.audioCtx  = new (window.AudioContext || window.webkitAudioContext)();
@@ -5702,6 +5713,45 @@ function openTx() {  /* header 🎤 TX button: arm/disarm toggle */
   armTx();
 }
 
+/* Arming stalled ~41s on one operator's network and ~1s on another's, all
+   day, with identical code — the split was purely by client IP. That gap is
+   the RFC 5389 STUN retransmission schedule run to exhaustion (requests at
+   0/0.5/1.5/3.5/7.5/15.5/31.5s, then an 8s wait, giving up at 39.5s): the
+   network silently drops UDP to the STUN server, so no reply ever comes.
+   Consistently hitting the *full* timeout rather than an intermediate one is
+   what says no response ever arrives, as opposed to a slow one — so on that
+   network there is no server-reflexive candidate to be had, and waiting for
+   it buys nothing. Media worked fine afterwards regardless, off host
+   candidates plus Asterisk's own stunaddr.
+   JsSIP 3.13.8 only resolves its SDP offer on icegatheringstatechange
+   'complete' or on an explicit ready() from its 'icecandidate' event, with
+   no timeout of its own, so the whole INVITE just waits out that 39.5s.
+   This bounds it: send as soon as the srflx candidate arrives (that's the
+   only thing STUN is here to produce — nothing to gain by waiting longer),
+   or at TX_ICE_MAX_WAIT_MS, whichever comes first. Networks where STUN
+   works get *faster* arming, not slower, since gathering no longer has to
+   fully complete first. */
+var TX_ICE_MAX_WAIT_MS = 4000;
+
+function _txBoundIceGathering(s) {
+  var ready = null, timer = null, t0 = Date.now();
+  var go = function(why) {
+    if (!ready) return;                      // already sent, or never armed
+    clearTimeout(timer);
+    var fn = ready; ready = null;
+    _txDiag('ice-ready', why + ' after ' + (Date.now() - t0) + 'ms');
+    try { fn(); } catch (e) {}
+  };
+  s.on('icecandidate', function(e) {
+    if (!ready) {
+      ready = e.ready;
+      timer = setTimeout(function() { go('timeout'); }, TX_ICE_MAX_WAIT_MS);
+    }
+    var c = (e.candidate && e.candidate.candidate) || '';
+    if (c.indexOf('typ srflx') !== -1) go('srflx');
+  });
+}
+
 async function armTx() {
   if (!window._kioskRole) { openKioskLogin(armTx, []); return; }
   _tx.armed = true;
@@ -5766,6 +5816,7 @@ async function armTx() {
         pcConfig: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] },
       });
       _tx.session = s;
+      _txBoundIceGathering(s);
       /* The call is full-duplex: Asterisk streams the node's audio (which,
          while keyed, is your own voice ~a beat behind) back down it. Listen
          is the one monitor path, so hard-disable every inbound track — not
