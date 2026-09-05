@@ -6015,9 +6015,16 @@ function _txMediaKeyAction(action, toggle) {
    enumerate that way instead). Together with the full Media Session set
    above, that is every input surface available to a web page short of
    WebHID, which needs its own permission prompt and device pick.
-   Printable single characters are skipped so this never records typing. */
+   Printable single characters are skipped during normal armed operation so
+   this never records typing — but NOT in explicit ?btscan=1 mode, where
+   everything is logged. That exemption matters: a Bluetooth PTT accessory
+   that bonds as a BLE HID keyboard typically sends an ordinary key (a
+   letter, Enter, Escape), so skipping single characters would hide exactly
+   the press/release pair the scan exists to find. Scan mode is opt-in and
+   short-lived, so logging keystrokes for its duration is the right trade. */
 function _txScanKey(e) {
-  if (e.key && e.key.length === 1) return;                       // ordinary typing
+  var scanning = (_txMediaKeyMode() === 'scan');
+  if (!scanning && e.key && e.key.length === 1) return;          // ordinary typing
   if (/^(INPUT|TEXTAREA|SELECT)$/.test((e.target || {}).tagName || '')) return;
   _txDiag('scan-key', e.type + ' key=' + e.key + ' code=' + e.code +
                       ' which=' + e.keyCode + (e.repeat ? ' repeat' : ''));
