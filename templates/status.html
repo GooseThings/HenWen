@@ -5050,7 +5050,29 @@ function _txSavedGain() {
    need to reason about. The manual gain slider below remains the one level
    control; there is deliberately no second leveller in our own graph, since
    the browser's AGC is already doing that job here. */
+/* The BLE keep-alive poll is suspended across arming. Bringing up the SIP
+   call is also when Android negotiates the classic SCO audio link to the same
+   headset, and hammering GATT at 25 reads/sec through the one radio while it
+   does that is asking for trouble — an arm was observed producing no ICE
+   candidates at all with the fast poll running. Presses aren't actionable
+   during arming anyway (nothing to key yet), so the poll costs nothing here
+   and the notifications it sustains are only needed once armed. */
+function _txBlePollPause(ms) {
+  if (!_txBle.pollTimer) return;
+  clearInterval(_txBle.pollTimer);
+  _txBle.pollTimer = null;
+  _txDiag('ble-poll-pause', ms + 'ms for call setup');
+  clearTimeout(_txBle.resumeTimer);
+  _txBle.resumeTimer = setTimeout(function() {
+    if (!_txBle.device || !_txBle.device.gatt.connected) return;
+    clearInterval(_txBle.pollTimer);
+    _txBle.pollTimer = setInterval(_txBlePollTick, TX_BLE_POLL_MS);
+    _txDiag('ble-poll-resume', 'every ' + TX_BLE_POLL_MS + 'ms');
+  }, ms);
+}
+
 function _txBuildMicChain() {
+  _txBlePollPause(TX_BLE_PAUSE_MS);
   return navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     video: false,
@@ -5691,9 +5713,24 @@ function openTx() {  /* header 🎤 TX button: arm/disarm toggle */
    works get *faster* arming, not slower, since gathering no longer has to
    fully complete first. */
 var TX_ICE_MAX_WAIT_MS = 4000;
+var TX_ICE_NO_CAND_MS  = 8000;
 
 function _txBoundIceGathering(s) {
   var ready = null, timer = null, t0 = Date.now();
+  /* The deadline below only ever armed once a first candidate had arrived,
+     because ready() is handed out by the icecandidate event and there is no
+     other way to reach it. So a PeerConnection that produces no candidates at
+     all hung indefinitely with nothing logged — observed live: mic built at
+     19:52:00, then no ice-ready, no INVITE and no error for 23s until the
+     operator gave up. Can't force the offer without ready(), but silence is
+     never the right outcome: say so and drop out of arming. */
+  setTimeout(function() {
+    if (ready !== null || !_tx.armed || _tx.session !== s) return;   // progressed
+    if (!_tx.session || _tx.session.isEstablished()) return;
+    _txDiag('ice-no-candidates', 'none after ' + TX_ICE_NO_CAND_MS + 'ms');
+    _txStatus('Could not start the call — no network candidates. Try arming again.', 'var(--red)');
+    disarmTx();
+  }, TX_ICE_NO_CAND_MS);
   var go = function(why) {
     if (!ready) return;                      // already sent, or never armed
     clearTimeout(timer);
@@ -5703,6 +5740,7 @@ function _txBoundIceGathering(s) {
   };
   s.on('icecandidate', function(e) {
     if (!ready) {
+      _txDiag('ice-first-candidate', (Date.now() - t0) + 'ms');
       ready = e.ready;
       timer = setTimeout(function() { go('timeout'); }, TX_ICE_MAX_WAIT_MS);
     }
@@ -6176,7 +6214,7 @@ var TX_BLE_EXTRA_SERVICES = [0xFFE0, 0xFF00, 0xAE30];
 var _txBle = { device: null, char: null, statusMsg: '', warn: false,
                wantConnected: false, retry: 0, retryTimer: null, autoTried: false,
                pollTimer: null, lastState: false, readFails: 0, reading: false, reads: 0,
-               readStart: 0, ticks: 0, empties: 0, serialChar: null };
+               readStart: 0, ticks: 0, empties: 0, serialChar: null, resumeTimer: null };
 
 function _txBleSetStatus(msg, warn) {
   _txBle.statusMsg = msg || '';
@@ -6220,6 +6258,7 @@ var TX_BLE_USE_NOTIFY     = true;
 var TX_BLE_SVC_TRIES      = 6;
 var TX_BLE_SVC_RETRY_MS   = 500;
 var TX_BLE_SERIAL_SERVICE = 0xFFE0;
+var TX_BLE_PAUSE_MS       = 6000;  // poll suspended across call setup
 
 
 function _txBleApply(pressed, src) {
@@ -6308,6 +6347,7 @@ function _txBleOnDisconnect() {
   _txBle.char = null;
   _txBle.serialChar = null;
   clearInterval(_txBle.pollTimer);
+  clearTimeout(_txBle.resumeTimer);
   if (_tx.keyed) _txUnkey();
   if (!_txBle.wantConnected) { _txBleSetStatus('Disconnected'); return; }
   if (_txBle.retry >= TX_BLE_RETRY_MAX) {
