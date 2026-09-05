@@ -34,7 +34,18 @@ apt-get install -y python3-venv python3-full 2>/dev/null || true
 # ── Copy files ────────────────────────────────────────────
 echo "[2/9] Installing to $INSTALL_DIR..."
 mkdir -p "$INSTALL_DIR"
-cp -r . "$INSTALL_DIR/"
+# Re-running this script from inside a checkout that already *is*
+# INSTALL_DIR (e.g. /opt/HenWen's own live git checkout, used to pick up a
+# sudoers rule added after the initial install) makes `cp -r .
+# "$INSTALL_DIR/"` a same-file no-op that cp refuses to do — under `set -e`
+# that would otherwise abort the whole script before reaching the later
+# steps (sudoers rule, firewall, service enable). Skip the copy in that one
+# case; every other file/permission/service step below still runs.
+if [ "$(pwd -P)" = "$(cd "$INSTALL_DIR" && pwd -P)" ]; then
+    echo "      Already running from $INSTALL_DIR — skipping copy."
+else
+    cp -r . "$INSTALL_DIR/"
+fi
 chmod 755 "$INSTALL_DIR"          # standard app dir: owner rwx, group rx, others rx
 chmod +x "$INSTALL_DIR/"*.sh 2>/dev/null || true
 
@@ -158,17 +169,21 @@ fi
 # ── Sudoers rule for privileged systemctl actions ─────────
 # The service runs unprivileged as User=asterisk (see HenWen.service), but
 # the Dashboard's "Restart Asterisk" button, secret-key rotation, port
-# rotation, and the "Launch Updater" button need to run `systemctl restart
+# rotation, the "Launch Updater" button, and the Settings page's "Apply"
+# button for the optional AudioSocket tap need to run `systemctl restart
 # asterisk`, `systemctl restart HenWen`, `systemctl daemon-reload`,
 # rotate_secret_key.sh / update_service_ports.sh (the only code allowed to
 # edit the root-owned unit file's SECRET_KEY/PORT/AMI_PORT lines — see
-# app.py's api_set_secret_key / api_set_ports), and (via systemd-run, so it
-# survives outside HenWen.service's own cgroup) update.sh. Without this
-# rule those actions fail with "Interactive authentication required" since
-# there's no session for polkit to prompt. Scope is intentionally limited
-# to these exact commands — do not broaden with wildcards. The updater rule
-# only works if $INSTALL_DIR is itself a git checkout of the HenWen repo —
-# update.sh no-ops with an error otherwise.
+# app.py's api_set_secret_key / api_set_ports), (via systemd-run, so it
+# survives outside HenWen.service's own cgroup) update.sh, and
+# audiosocket-tap/apply.sh (edits /etc/asterisk/modules.conf and
+# custom/extensions.conf, loads Asterisk modules live — see
+# audiosocket-tap/README.md). Without this rule those actions fail with
+# "Interactive authentication required" since there's no session for
+# polkit to prompt. Scope is intentionally limited to these exact commands
+# — do not broaden with wildcards. The updater rule only works if
+# $INSTALL_DIR is itself a git checkout of the HenWen repo — update.sh
+# no-ops with an error otherwise.
 echo "[8/9] Installing sudoers rule for restart/reload/update actions..."
 SUDOERS_FILE=/etc/sudoers.d/henwen-systemctl
 SYSTEMCTL_BIN=$(command -v systemctl || echo /bin/systemctl)
@@ -184,6 +199,7 @@ asterisk ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} restart ${SERVICE_NAME}
 asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/rotate_secret_key.sh
 asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/update_service_ports.sh
 asterisk ALL=(root) NOPASSWD: ${SYSTEMD_RUN_BIN} --unit=henwen-updater --collect ${INSTALL_DIR}/update.sh
+asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/audiosocket-tap/apply.sh
 EOF
 if visudo -c -f "${SUDOERS_FILE}.tmp" &>/dev/null; then
     chmod 440 "${SUDOERS_FILE}.tmp"

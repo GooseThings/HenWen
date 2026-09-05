@@ -2787,6 +2787,26 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
       </div>
     </div>
 
+    <div class="card" id="audiosocket-tap-settings-card" style="display:none">
+      <div class="card-header"><h2>AudioSocket Tap (Listen audio)</h2></div>
+      <div class="card-body">
+        <p class="muted" style="margin-bottom:12px">
+          Optional, opt-in low-latency capture path for the Status Board's Listen feature.
+          Without this, Listen uses AMI <span class="mono">MixMonitor</span>, which adds
+          roughly 2 seconds of latency from Asterisk's own buffered file writes. Applying this
+          swaps in a live TCP tap (<span class="mono">AudioSocket</span>) instead — additive
+          and safe to re-run; Listen automatically falls back to MixMonitor if anything about
+          the tap ever fails. See <span class="mono">audiosocket-tap/README.md</span> for
+          details.
+        </p>
+        <p id="audiosocket-tap-status" style="margin-bottom:12px;color:var(--text2)">Checking&hellip;</p>
+        <div class="btn-row">
+          <button class="btn btn-sm btn-primary" onclick="applyAudioSocketTap()">Apply AudioSocket Tap</button>
+        </div>
+        <pre id="audiosocket-tap-output" class="codeblock" style="display:none;margin-top:12px;white-space:pre-wrap;max-height:260px;overflow-y:auto"></pre>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-header"><h2>About HenWen</h2></div>
       <div class="card-body" style="line-height:1.7">
@@ -3212,7 +3232,8 @@ function showPage(id) {
   else if (id === 'kiosk-settings')   ksLoad();
   else if (id === 'ami-diag')         loadSysInfo();
   else if (id === 'ast-console')  astFetchLog();
-  else if (id === 'settings')       { loadSecretKeyStatus(); loadPortsStatus(); syncThemePicker(); mfaLoadStatus(); }
+  else if (id === 'settings')       { loadSecretKeyStatus(); loadPortsStatus(); syncThemePicker(); mfaLoadStatus();
+                                       if (window._henwenRole === 'owner') loadAudioSocketTapStatus(); }
   else if (id === 'user-mgmt')      { loadUsers(); pwResetLoad(); invitesLoad(); }
   else if (id === 'recordings')         recordingsLoad();
   else if (id === 'recording-settings') recLoad();
@@ -6437,6 +6458,10 @@ async function applyRoleNav() {
      role==='owner' check on /api/chat/log and the DELETE route. */
   var chatLogNavBtn = document.getElementById('nav-chat-log');
   if (chatLogNavBtn) chatLogNavBtn.style.display = isOwnerRole ? '' : 'none';
+  /* AudioSocket tap apply.sh needs root — owner-only, matches the backend's
+     explicit role==='owner' check on /api/audiosocket-tap/apply. */
+  var audiosocketTapCard = document.getElementById('audiosocket-tap-settings-card');
+  if (audiosocketTapCard) audiosocketTapCard.style.display = isOwnerRole ? '' : 'none';
   /* Only superuser/owner sees the higher-risk COP quick actions (node-wide link
      outage, disabling the transmit time-limit safety mechanism) — matching
      the same allowlist enforced server-side in /api/dtmf/cop. */
@@ -6537,6 +6562,48 @@ async function launchUpdater() {
     alert(err);
     log('Updater launch failed: ' + err, 'ERROR');
   }
+}
+
+async function loadAudioSocketTapStatus() {
+  var el = document.getElementById('audiosocket-tap-status');
+  if (!el) return;
+  el.textContent = 'Checking…';
+  var r = await api('/api/audiosocket-tap/status');
+  if (!r.ok) {
+    el.textContent = (r.data && r.data.error) || 'Could not check status.';
+    return;
+  }
+  if (!r.data.installed) {
+    el.innerHTML = '<span style="color:var(--warn,#e0a030)">apply.sh not found on this install '
+                  + '— pull the latest HenWen code first.</span>';
+    return;
+  }
+  el.innerHTML = r.data.applied
+    ? '<span style="color:var(--green,#3fb950)">Applied</span> — Listen uses the AudioSocket tap on this node.'
+    : 'Not applied — Listen is using the default MixMonitor path.';
+}
+
+async function applyAudioSocketTap() {
+  if (!confirm('Apply the AudioSocket tap now?\n\nThis edits /etc/asterisk/modules.conf and '
+             + 'custom/extensions.conf and loads three Asterisk modules live. It does not '
+             + 'restart Asterisk or HenWen, and Listen falls back automatically if anything '
+             + 'about the tap fails. Safe to re-run.')) return;
+  var statusEl = document.getElementById('audiosocket-tap-status');
+  var outEl = document.getElementById('audiosocket-tap-output');
+  if (statusEl) statusEl.textContent = 'Applying…';
+  var r = await api('/api/audiosocket-tap/apply', {method: 'POST'});
+  if (outEl && ((r.data && r.data.output) || '').trim()) {
+    outEl.textContent = r.data.output;
+    outEl.style.display = '';
+  }
+  if (r.ok) {
+    log('AudioSocket tap applied', 'OK');
+  } else {
+    var err = (r.data && (r.data.error || r.data.hint)) || 'Failed to apply AudioSocket tap.';
+    alert(err);
+    log('AudioSocket tap apply failed: ' + err, 'ERROR');
+  }
+  loadAudioSocketTapStatus();
 }
 
 async function checkNodeDB() {
