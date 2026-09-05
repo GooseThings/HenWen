@@ -1,23 +1,38 @@
 # Tidradio TD-Q2L Bluetooth PTT mic — reverse-engineered notes
 
-> **Status 2026-09-05 — open problem, desktop testing done, no fix yet.**
-> The PTT button works in nRF Connect on Android and cannot be read from
-> Chrome on the same phone: every `readValue()` resolves with **zero bytes**,
-> and notifications stop being delivered after the CCCD write is accepted.
-> Desktop Linux Chrome now confirmed to fail **the same way** — this is not
-> Android-specific. The one concrete lead: the `0xFFE0`/`0xFFE1` serial
-> passthrough characteristic *did* deliver real press/release values in
-> testing, where the documented PTT characteristic never has on any platform
-> — but delivery is extremely lossy (~1 cycle out of ~50 presses in one
-> session). Jump to
-> [Open problem](#open-problem-chrome-reads-return-zero-bytes) for the state
-> of play, [Desktop Chrome testing results](#desktop-chrome-linux-testing-results-2026-09-05)
-> for what changed today, and [Troubleshooting on a desktop](#troubleshooting-on-a-desktop)
-> for the standalone harness.
+> **Status 2026-09-05 — likely not a permanent bug: looks like BLE connection
+> warm-up / connection-interval variability.**
+> Everything earlier in this file describes the PTT characteristic
+> (`894c8042-...`) as unreadable from Chrome: `readValue()` resolving with
+> **zero bytes** and `characteristicvaluechanged` never firing, reproduced
+> identically on Android and desktop Linux Chrome. That description was
+> accurate for every session tested that day — until the same evening, the
+> exact same characteristic, on the exact same desktop setup, delivered
+> **150+ consecutive press/release notifications with almost no misses**.
+> Nothing in the code changed between the bad sessions and the good one.
+> The leading theory is a BLE **connection-interval warm-up**: a fresh
+> connection can start on a slow, power-saving interval where a quick
+> press-and-release falls entirely between polls and is never seen at all,
+> and either settles into a fast interval after sustained traffic or gets a
+> fast interval from the start, seemingly by luck of the connection. Native
+> apps like nRF Connect can request a high-priority interval immediately (an
+> API Web Bluetooth does not expose to JavaScript at all) — which would
+> explain why nRF Connect has been reliable from the very first press in
+> every test, while Chrome's reliability has varied session to session.
+> See [Follow-up testing: connection warm-up, not a permanent bug](#follow-up-testing-2026-09-05-connection-warm-up-not-a-permanent-bug)
+> for the full sequence (a stale-GATT-cache race fix, a Wi-Fi-off test that
+> looked conclusive and then got contradicted by a Wi-Fi-on test that worked
+> even better). [Open problem](#open-problem-chrome-reads-return-zero-bytes)
+> and [Desktop Chrome testing results](#desktop-chrome-linux-testing-results-2026-09-05)
+> below are kept as-is — they're real data, just not the final word — and
+> [Troubleshooting on a desktop](#troubleshooting-on-a-desktop) has the
+> standalone harness.
 >
 > Meanwhile HenWen ships a working-but-imperfect fallback: PTT on the **Rev**
 > media key, which is a toggle rather than hold-to-talk. Removing that
-> compromise is the entire point of getting the BLE read working.
+> compromise is the entire point of getting the BLE read working — and this
+> new finding means it may actually be reachable, with the right connection
+> warm-up strategy in HenWen's own connect code.
 
 
 No public protocol documentation exists for this device (checked as of 2026-09).
@@ -276,6 +291,8 @@ above). It works from nRF Connect and not from Chrome.
 | Chrome answers reads from an empty notification cache | Reads still return zero-length with notifications never enabled (`ble-read-empty … (notifications off)`) |
 | Our poll was wedged / not running | `ble-poll-tick` and ~7 reads/sec confirmed; failures are real resolved-but-empty values, not a stuck in-flight guard |
 | Bug is Android-specific | Desktop Linux Chrome (BlueZ) reproduces the identical zero-byte-read / silent-notify signature — see below |
+| Bug is permanent / present on every connection | Same characteristic, same desktop setup, later the same day: 150+ consecutive press/release notifications delivered with almost no misses. See [connection warm-up](#follow-up-testing-2026-09-05-connection-warm-up-not-a-permanent-bug) |
+| Wi-Fi/Bluetooth radio coexistence (AX200 shared antenna) is the cause | Looked confirmed by one Wi-Fi-off test, then contradicted by an even better result with Wi-Fi back on — see [connection warm-up](#follow-up-testing-2026-09-05-connection-warm-up-not-a-permanent-bug) |
 
 ### Not yet tried
 
@@ -363,14 +380,104 @@ With a fresh device object and full discovery, the actual test:
   Enumerate-services calls, which may themselves be disruptive to an active
   GATT session).
 
-**Net conclusion so far:** the zero-byte/silent-notify behavior on the
-documented PTT characteristic is a genuine cross-platform (Android + Linux
-desktop) Chrome/Web-Bluetooth-stack problem, not a phone-specific quirk. The
-`0xFFE0`/`0xFFE1` serial-passthrough channel is the most promising unexplored
-lead — it has now been shown capable of carrying real button-state bytes to
-Chrome, where the primary characteristic never has — but reliability needs
-much more testing before it could replace the primary characteristic in
-HenWen's code.
+**Net conclusion at this point in the day:** the zero-byte/silent-notify
+behavior on the documented PTT characteristic looked like a genuine
+cross-platform (Android + Linux desktop) Chrome/Web-Bluetooth-stack problem,
+not a phone-specific quirk, and `0xFFE0`/`0xFFE1` looked like the most
+promising lead, despite lossy delivery. **Superseded a few hours later** —
+see the follow-up section immediately below, where the primary characteristic
+turned out to work fine under the right connection conditions. Left in place
+because the empty-`properties` finding and the `chrome://bluetooth-internals`
+limitation are still real and unexplained, independent of the main mystery.
+
+## Follow-up testing, 2026-09-05: connection warm-up, not a permanent bug
+
+Same day, same desktop setup, continued testing turned up a race-condition
+fix and then a result that overturned the conclusion above.
+
+**1. `getPrimaryService()` can race GATT discovery on a never-before-seen
+device.** After a `bluetoothctl remove` (to clear a stale cache, see above),
+reconnecting produced the same `NotFoundError` — but the timestamps told a
+different story than "stale cache" this time: `gatt.connect()` resolved at
+`22:57:07.987` and the `NotFoundError` landed at `22:57:08.036`, **49ms**
+later. Real over-the-air GATT discovery of a whole attribute table takes
+hundreds of milliseconds at minimum. Chrome's `getPrimaryService()` call was
+simply racing BlueZ's own discovery on a device with zero prior cache to
+serve from. Fix, now in `TD-Q2L-test.html`: `getPrimaryServiceRetry()` wraps
+`getPrimaryService()` in retries with a 500ms backoff (6 attempts) instead of
+failing on the first miss. This is a harness/client-code bug, not a device
+or platform bug — worth carrying into HenWen's own connect logic.
+
+**2. Wi-Fi/Bluetooth coexistence looked like the answer, then wasn't.** With
+the classic BR/EDR audio link disconnected, comparing quick taps vs. held
+presses on `0xFFE1` showed **zero** deliveries during ~76 seconds of quick
+taps, then sparse hits, in a session with Wi-Fi on. Turning the laptop's
+Wi-Fi off entirely (`nmcli radio wifi off` — the Intel AX200 shares one
+antenna between Wi-Fi and Bluetooth, a known coexistence weak point) and
+re-running produced a dramatic change: dozens of clean press/release pairs
+delivered back-to-back with almost no gaps. At the time this looked like
+strong, direct confirmation that Wi-Fi contention on the shared AX200 antenna
+was the dominant cause of lost notifications.
+
+**3. That conclusion didn't survive the next test.** Wi-Fi was turned back
+on, and a fresh connection was made subscribing to **both** the primary PTT
+characteristic (`894c8042-...`) and `0xFFE1` at the same time. Result: **over
+150 consecutive press/release cycles delivered on both characteristics**,
+matching each other within single-digit milliseconds, for a full two-minute
+test — the best result of the entire day, obtained with Wi-Fi back on. This
+directly contradicts Wi-Fi state as the deciding factor: the exact condition
+blamed for the earlier failures was present during the best result of the
+day.
+
+**Revised theory: BLE connection-interval warm-up (or plain per-connection
+luck), not radio coexistence.** A BLE central and peripheral negotiate a
+"connection interval" — how often they exchange packets. A slow interval
+(commonly used to save the peripheral's battery when idle) means a quick
+press-and-release can complete entirely between two polling windows and
+never be seen by either side, not just delayed. Some stacks tighten the
+interval adaptively once sustained traffic starts flowing; separately, the
+initial interval a given connection lands on may simply vary run to run.
+Evidence this fits better than the Wi-Fi theory:
+
+- The Wi-Fi-off, `0xFFE1`-only session took **68 seconds** after
+  `startNotifications()` before the first successful delivery, then improved
+  gradually — consistent with a slow-to-fast interval transition taking time
+  to kick in.
+- The final, best session (subscribing to both characteristics, Wi-Fi on)
+  delivered its first success only **5 seconds** after subscribing, then
+  stayed reliable throughout — consistent with that particular connection
+  landing on a fast interval quickly, for reasons not yet isolated (more
+  simultaneous GATT traffic? plain variance?).
+- **Native BLE clients can request a high-priority connection interval
+  immediately after connecting** (e.g. Android's
+  `BluetoothGatt.requestConnectionPriority()`) — an API **Web Bluetooth does
+  not expose to JavaScript at all**. This cleanly explains why nRF Connect
+  has been 100% reliable in every test in this document, from the very first
+  press, on the same hardware where Chrome has ranged from 0% to
+  near-perfect: nRF Connect can force a fast interval on connect; a Chrome
+  page has no equivalent lever and is at the mercy of whatever interval the
+  connection happens to negotiate or drift into.
+
+**This means the primary PTT characteristic is not permanently broken in
+Chrome** — every earlier "zero bytes / silent notify" result in this
+document was real, but apparently connection-state-dependent rather than an
+unconditional platform limitation. The practical question for HenWen is no
+longer "is this characteristic readable from Chrome," but "how do we get (or
+wait for) a good connection interval before relying on it."
+
+**Not yet done:**
+- Capture the actual negotiated connection interval per session (e.g. via
+  `btmon`/`hcidump`) to confirm the interval-length theory directly instead
+  of inferring it from delivery timing alone.
+- Test whether deliberately generating GATT traffic immediately after
+  connect (e.g. a burst of reads on some characteristic, before the user's
+  first real PTT press) reliably shortens the time-to-fast-interval, which
+  would turn this into an actionable warm-up step in HenWen's own connect
+  code rather than a wait-and-hope.
+- Repeat the two-characteristics-at-once test a few more times to see how
+  often a fresh connection lands on a fast interval immediately vs. needs
+  time to get there — the sample size so far is one good session against
+  several bad ones.
 
 ## Troubleshooting on a desktop
 
@@ -480,7 +587,12 @@ muting did.
   characteristic on this device (2026-09-05 finding, see desktop testing
   results) — whether that's specific to this BlueZ version, this device, or
   a broader Chromium-on-Linux Web Bluetooth bug worth reporting upstream.
-- Whether `0xFFE1`'s partial success (real button values delivered, but only
-  ~1 cycle per ~50 presses) can be made reliable enough to use, or whether
-  it's subject to the same radio-contention flakiness as the primary
-  characteristic and therefore not actually a viable replacement.
+  Still true even in the session where notifications worked perfectly, so
+  it's independent of the connection-interval question.
+- Whether the connection-interval warm-up theory (see follow-up testing
+  section) is actually correct, and if so, whether HenWen can reliably force
+  or speed up a fast interval (e.g. a burst of GATT traffic right after
+  connect) rather than getting one only by chance.
+- What made the one good session land on a fast interval in 5 seconds while
+  other sessions took over a minute or never got there in the test window —
+  sample size is currently one good session against several bad ones.
