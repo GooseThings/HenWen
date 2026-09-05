@@ -10,8 +10,8 @@ That turned out to be only half true: see below.
 
 | Button | Behavior |
 |---|---|
-| CH+ | Standard AVRCP media key — previous track |
-| CH− | Standard AVRCP media key — next track |
+| Fwd (CH+) | Standard AVRCP media key — arrives as **`previoustrack`** (labelling is inverted vs. the media semantics). Long press is the mic's own Noise Reduction toggle, so it is not a free key. |
+| Rev (CH−) | Standard AVRCP media key — arrives as **`nexttrack`**. Not tied to any on-device function; the one genuinely free key. |
 | Volume + / − | Standard AVRCP media key — volume up/down |
 | Power (momentary press) | Standard AVRCP media key — play/pause (toggle) |
 | Power (long press) | Powers the mic off |
@@ -155,34 +155,56 @@ of Android/Chrome versions handles the radio-sharing better.
 
 ## Known-working reference implementation
 
-HenWen (`/opt/HenWen`, this repo) implements the PTT-button path for its
-browser TX feature in `templates/status.html` — see `_txBleConnect()` /
-`_txBleOnValue()` (search for `TX_BLE_SERVICE`). A "BLE PTT" button next to
-TX on the Status Board does the user-gesture pairing; it sits outside the
-TX bar so the link can be established before TX is armed, and every
-press/release is reported to the server log as `tx-ble-value` via
-`/api/audio/client-log`, so `journalctl -u HenWen -f` alone is enough to
-confirm the button is being seen — no browser devtools needed.
+HenWen (`/opt/HenWen`, this repo) drives PTT from the **Rev media key**, not
+from the proprietary BLE characteristic — see `_txMediaKeySync()` /
+`_txMediaKeyAction()` in `templates/status.html`. Confirmed working on real
+hardware 2026-09-05: repeated presses alternate cleanly, every press
+delivered.
 
-It deliberately does not attempt manual audio device selection, and does not
-manipulate `getUserMedia` constraints to steer routing either. Pairing the
-phone to the Q2L already makes Android use it for mic and speaker; HenWen
-requests the plain WebRTC defaults (the AEC+NS+AGC trio any calling site
-asks for) and lets that happen.
+The BLE GATT path documented above is real and correctly implemented
+(`_txBleConnect()`), but in field use it never once delivered a press —
+it connects, subscribes successfully, then drops on its own. Since the Q2L
+is a plain Bluetooth headset to Android and its Fwd/Rev/Vol±/Play-Pause
+buttons are ordinary AVRCP keys the phone already handles, riding a media
+key is both simpler and far more reliable. The BLE code is kept for
+explicit, manual use and for anyone wanting to pursue the PTT-labelled
+button, but it is not the path in use.
 
-A checkbox briefly existed to switch between routed-Bluetooth and own-mic
-capture, built on the mutual-exclusion premise above. When that premise
-turned out to be wrong the checkbox went with it — it made the operator
-reason about a tradeoff that isn't reliably there, and the constraint
-fiddling behind it caused its own problems (opting out of `echoCancellation`
-lands Chrome on Android's heavily-processed VOICE_COMMUNICATION capture
-path; a local compressor added to compensate for the resulting level drop
-then overdrove the input by ~3x once the processing came back out).
+### Two non-obvious requirements for media keys to arrive
 
-The lesson worth keeping: on this device, don't fight the OS's own audio
-routing. Ask for the defaults, leave routing alone, and treat the BLE PTT
-link as something to reconnect when it drops rather than something to
-protect by starving the audio path.
+An earlier attempt (commit 2d374a3, bound to play/pause) concluded media
+keys never reach the page. They do, but only under both of these:
+
+1. **The page must own the system media session**, which on Android means it
+   must actually be producing audible audio. HenWen's Listen stream through
+   its `<audio>` element earns that, and arming TX ensures Listen is running.
+   Setting `navigator.mediaSession.metadata` as well is what makes Android
+   surface it as the active media notification, rather than leaving the
+   headset's keys attached to whatever app played audio last.
+
+2. **The page must stay audible for the whole time you need keys.** This one
+   cost a day. HenWen muted its Listen element while transmitting (a
+   radio-style RX mute). Muting makes the page inaudible, Android hands the
+   media session away, and *no further media-key events are delivered* — so
+   the first press keyed the transmitter and nothing could release it. The
+   symptom reads exactly like a stuck button; the log showed no second event
+   arriving at all. Fix: duck to a near-zero volume (0.0001) instead of
+   muting. Inaudible in practice, still audible as far as the media session
+   is concerned.
+
+### Toggle semantics, and the safety that needs
+
+A media key is a single semantic action with no press/hold pair, so this is
+necessarily press-to-key / press-again-to-unkey, not hold-to-talk — the one
+thing the BLE characteristic would have done better, since it reports live
+button state. That makes a latched transmitter possible, so HenWen binds
+`previoustrack`/`play`/`pause` as **release-only**: any other button on the
+mic clears a stuck transmit, none of them can start one. A watchdog also
+unkeys at the node's own TOT, or 120s if none is configured.
+
+Binding play/pause has a second purpose: it stops the Power button pausing
+Listen while armed, which would drop the media session for the same reason
+muting did.
 
 ## Open questions / untested
 
@@ -191,6 +213,9 @@ protect by starving the audio path.
 - Whether the BLE-advertising-window flakiness and the audio/BLE radio
   conflict are related symptoms of the same underlying combo-chip
   limitation, or independent issues.
-- Exact byte layout/keycodes for the CH+/CH−/Volume/Power media keys — only
+- Exact byte layout/keycodes for the Fwd/Rev/Volume/Power media keys — only
   their functional effect was observed, not sniffed at the protocol level
   (unnecessary, since they already work via standard OS media-key APIs).
+- Why the BLE GATT link connects and subscribes successfully but delivers no
+  notifications in field use, when nRF Connect sees every press. Moot for
+  HenWen now that PTT rides a media key, but unexplained.
