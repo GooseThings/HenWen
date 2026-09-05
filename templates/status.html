@@ -5065,30 +5065,31 @@ function _txBtAudioPref() {
   return localStorage.getItem('henwen-tx-bt-audio') === '1';
 }
 
-/* Local speech leveller, used only when the browser's own AGC is off.
-   Turning AGC off is what keeps Chrome out of SCO (and therefore keeps the
-   BLE PTT button alive), but it also means the capture runs at whatever raw
-   level the phone's built-in mic produces — which is both quiet and, once
-   it hits Opus and then the repeater at that level, dull. This is the
-   missing AGC put back where it can't do any harm: a WebAudio compressor
-   plus fixed makeup gain lives entirely inside our own graph, so unlike the
-   getUserMedia constraint it has no bearing on Chrome's routing decision.
-   Threshold/ratio are set limiter-ish rather than gentle — the makeup gain
-   is doing the real lifting and the compressor is there to stop the peaks
-   it lifts from clipping. Skipped entirely when the browser AGC is on,
-   since stacking two levellers is how you get pumping. */
-function _txAddLeveller(ctx, input) {
+/* Safety limiter on the own-mic path, used only when the browser's own AGC
+   is off. This started life as a leveller with +11 dB of makeup gain, on the
+   theory that an AGC-less capture would be too quiet — true while the
+   platform's VOICE_COMMUNICATION processing was still in the path, and
+   wrong once that came out: the raw capture turned out to be plenty hot, so
+   the makeup was simply overdriving. Measured by the operator's own slider,
+   which had to come down from a habitual 65-70% to 22% — a factor of ~3
+   against a 3.5x makeup, i.e. the makeup was all of it.
+   So no makeup at all now, and the threshold sits high enough to stay out of
+   the way of normal speech instead of compressing it — heavy compression on
+   every syllable was itself a candidate for the squashed/dull character.
+   What's left is a true safety limiter: inaudible until something actually
+   approaches clipping, which is the failure the manual-gain design has
+   always been exposed to. Placed after the gain slider so it's the last
+   thing before transmit and holds regardless of where that slider sits.
+   Skipped when the browser AGC is on, since stacking two is how you pump. */
+function _txAddLimiter(ctx, input) {
   var comp = ctx.createDynamicsCompressor();
-  comp.threshold.value = -24;
-  comp.knee.value      = 12;
-  comp.ratio.value     = 12;
-  comp.attack.value    = 0.005;
-  comp.release.value   = 0.3;
-  var makeup = ctx.createGain();
-  makeup.gain.value = 3.5;          // ~+11 dB, the compressor's missing makeup stage
+  comp.threshold.value = -6;        // peaks only; normal speech passes untouched
+  comp.knee.value      = 6;
+  comp.ratio.value     = 20;        // limiter, not a compressor
+  comp.attack.value    = 0.003;
+  comp.release.value   = 0.25;
   input.connect(comp);
-  comp.connect(makeup);
-  return makeup;
+  return comp;
 }
 
 /* Capture processing, and why the two modes ask for opposite things.
@@ -5149,10 +5150,10 @@ function _txBuildMicChain() {
     _tx.analyser.fftSize = 1024;
     var dest = _tx.audioCtx.createMediaStreamDestination();
     src.connect(_tx.gainNode);
-    /* Leveller sits after the manual slider so the slider stays the coarse
+    /* Limiter sits after the manual slider so the slider stays the level
        control, and before the analyser so the meter keeps showing what
        actually transmits rather than what went in. */
-    var tail = bt ? _tx.gainNode : _txAddLeveller(_tx.audioCtx, _tx.gainNode);
+    var tail = bt ? _tx.gainNode : _txAddLimiter(_tx.audioCtx, _tx.gainNode);
     tail.connect(_tx.analyser);
     tail.connect(dest);
     _txStartMeter();
