@@ -5019,6 +5019,7 @@ async function removeFavorite(node) {
    page is a secure context (mic capture requires HTTPS). */
 var _tx = { ua: null, session: null, keyed: false, armed: false, idleTimer: null,
             node: '', statsTimer: null, totSec: 0, keyWatchdog: null, duckedFrom: null,
+            padTimer: null, padState: {},
             audioCtx: null, gainNode: null, analyser: null, rawStream: null, meterTimer: null };
 var _TX_IDLE_HANGUP_MS = 5 * 60 * 1000;  // auto-disarm after 5 min without keying
 
@@ -5966,6 +5967,18 @@ function _txUnkey() {
 var TX_MEDIAKEY_PTT      = 'nexttrack';
 var TX_MEDIAKEY_RELEASE  = ['previoustrack', 'play', 'pause'];
 var TX_MEDIAKEY_MAX_KEY_MS = 120000;
+/* Every remaining Media Session action, bound purely to log that it fired.
+   The earlier conclusion that the PTT-labelled button emits no standard
+   signal rested on a scan that only ever registered play/pause — and a
+   handler only fires for an action explicitly registered, so anything else
+   the button might send would have looked identical to silence. Registering
+   the whole set removes that blind spot. Unsupported names throw at
+   setActionHandler(), so each is attempted individually and the ones that
+   take are logged: that list is also a record of what this browser
+   actually supports. */
+var TX_MEDIAKEY_SCAN = ['stop', 'seekbackward', 'seekforward', 'seekto', 'skipad',
+                        'togglemicrophone', 'togglecamera', 'hangup',
+                        'previousslide', 'nextslide', 'enterpictureinpicture'];
 
 function _txMediaKeyWatchdog() {
   clearTimeout(_tx.keyWatchdog);
@@ -5989,9 +6002,63 @@ function _txMediaKeyAction(action, toggle) {
   _txMediaKeySync(true);   // re-assert the session; see _txMuteListen
 }
 
+/* ── Input scan: find a momentary PTT signal ─────────────────────────────
+   A media key is a single semantic action with no down/up pair, which is why
+   PTT is currently a toggle — and a toggle can latch a transmitter, which is
+   not an acceptable resting state for a repeater. The device's PTT-labelled
+   button is momentary in hardware, so if it surfaces to the browser at all
+   it should arrive as a press and a release, and that would give real
+   hold-to-talk.
+   This logs every remaining channel a page can observe, while armed only:
+   raw key events (a Bluetooth remote enumerating as an HID keyboard sends
+   these, with real keydown/keyup pairs), and the Gamepad API (some remotes
+   enumerate that way instead). Together with the full Media Session set
+   above, that is every input surface available to a web page short of
+   WebHID, which needs its own permission prompt and device pick.
+   Printable single characters are skipped so this never records typing. */
+function _txScanKey(e) {
+  if (e.key && e.key.length === 1) return;                       // ordinary typing
+  if (/^(INPUT|TEXTAREA|SELECT)$/.test((e.target || {}).tagName || '')) return;
+  _txDiag('scan-key', e.type + ' key=' + e.key + ' code=' + e.code +
+                      ' which=' + e.keyCode + (e.repeat ? ' repeat' : ''));
+}
+
+function _txScanPads() {
+  if (!navigator.getGamepads) return;
+  var pads = navigator.getGamepads() || [];
+  for (var i = 0; i < pads.length; i++) {
+    var p = pads[i];
+    if (!p) continue;
+    var prev = _tx.padState[p.index] || [];
+    for (var b = 0; b < p.buttons.length; b++) {
+      var down = !!(p.buttons[b] && p.buttons[b].pressed);
+      if (down !== !!prev[b]) _txDiag('scan-pad', p.id.slice(0, 40) + ' btn' + b + '=' + (down ? 'down' : 'up'));
+      prev[b] = down;
+    }
+    _tx.padState[p.index] = prev;
+  }
+}
+
+function _txScanSync() {
+  var want = !!(_tx.armed && _tx.session);
+  window.removeEventListener('keydown', _txScanKey, true);
+  window.removeEventListener('keyup',   _txScanKey, true);
+  clearInterval(_tx.padTimer);
+  _tx.padState = {};
+  if (!want) return;
+  window.addEventListener('keydown', _txScanKey, true);
+  window.addEventListener('keyup',   _txScanKey, true);
+  if (navigator.getGamepads) _tx.padTimer = setInterval(_txScanPads, 100);
+}
+
 /* Called on arm and on teardown: handlers exist only while a call is up, so
    the headset's Fwd key keeps its normal meaning the rest of the time. */
 function _txMediaKeySync(quiet) {
+  /* Before the mediaSession guard, and skipped on the quiet re-assert that
+     follows every keypress: the scan's listeners are independent of Media
+     Session support, and tearing them down and rebuilding them on each press
+     would churn for nothing. */
+  if (!quiet) _txScanSync();
   if (!('mediaSession' in navigator)) return;
   var want = !!(_tx.armed && _tx.session);
   try {
@@ -6000,6 +6067,16 @@ function _txMediaKeySync(quiet) {
     TX_MEDIAKEY_RELEASE.forEach(function(a) {
       navigator.mediaSession.setActionHandler(a, want ? function() { _txMediaKeyAction(a, false); } : null);
     });
+    var scanned = [];
+    TX_MEDIAKEY_SCAN.forEach(function(a) {
+      try {
+        navigator.mediaSession.setActionHandler(a, want ? function() {
+          _txDiag('scan-mediakey', a);     // log only — never keys or unkeys
+        } : null);
+        scanned.push(a);
+      } catch (e) {}                        // not supported by this browser
+    });
+    if (want && !quiet) _txDiag('scan-registered', scanned.join(',') || 'none');
     if (want) {
       /* Claiming the media session explicitly. Without metadata Android may
          leave the notification (and therefore the headset's keys) attached
