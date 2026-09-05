@@ -1,13 +1,19 @@
 # Tidradio TD-Q2L Bluetooth PTT mic — reverse-engineered notes
 
-> **Status 2026-09-05 — open problem, handed off for desktop testing.**
+> **Status 2026-09-05 — open problem, desktop testing done, no fix yet.**
 > The PTT button works in nRF Connect on Android and cannot be read from
 > Chrome on the same phone: every `readValue()` resolves with **zero bytes**,
 > and notifications stop being delivered after the CCCD write is accepted.
-> Everything else about the device is understood. Jump to
+> Desktop Linux Chrome now confirmed to fail **the same way** — this is not
+> Android-specific. The one concrete lead: the `0xFFE0`/`0xFFE1` serial
+> passthrough characteristic *did* deliver real press/release values in
+> testing, where the documented PTT characteristic never has on any platform
+> — but delivery is extremely lossy (~1 cycle out of ~50 presses in one
+> session). Jump to
 > [Open problem](#open-problem-chrome-reads-return-zero-bytes) for the state
-> of play, and [Troubleshooting on a desktop](#troubleshooting-on-a-desktop)
-> for what to try next and the standalone harness to try it with.
+> of play, [Desktop Chrome testing results](#desktop-chrome-linux-testing-results-2026-09-05)
+> for what changed today, and [Troubleshooting on a desktop](#troubleshooting-on-a-desktop)
+> for the standalone harness.
 >
 > Meanwhile HenWen ships a working-but-imperfect fallback: PTT on the **Rev**
 > media key, which is a toggle rather than hold-to-talk. Removing that
@@ -269,22 +275,102 @@ above). It works from nRF Connect and not from Chrome.
 | The device stops notifying under Bluetooth-audio load | nRF Connect receives every press reliably, including with audio active |
 | Chrome answers reads from an empty notification cache | Reads still return zero-length with notifications never enabled (`ble-read-empty … (notifications off)`) |
 | Our poll was wedged / not running | `ble-poll-tick` and ~7 reads/sec confirmed; failures are real resolved-but-empty values, not a stuck in-flight guard |
+| Bug is Android-specific | Desktop Linux Chrome (BlueZ) reproduces the identical zero-byte-read / silent-notify signature — see below |
 
 ### Not yet tried
 
-- **Desktop Chrome.** A different Web Bluetooth implementation from Android's.
-  This is the obvious next environment and the reason for the harness below.
-- **`chrome://bluetooth-internals`** → Devices → Inspect → read the
-  characteristic directly. Takes application code out of the picture entirely:
-  empty there too means the bug is in Chrome/Android, not in any caller.
-- **Clearing Android's GATT attribute cache** (Bluetooth off/on, or forget the
-  device). A stale cache produces exactly this signature — handles resolve,
-  reads succeed, values come back empty.
-- **The `0xFFE0` service.** Very likely an HM-10-style serial passthrough; it
-  may carry the same button events over a different transport. Declared in the
-  harness's `optionalServices` so it can be enumerated immediately.
 - **Reading with a longer MTU / after a delay**, in case the zero-length
   response is a negotiation artefact.
+- **A different OS's Web Bluetooth stack** (Windows/macOS use their native
+  BLE stacks, not BlueZ) — would tell us whether this is BlueZ-specific
+  rather than Chrome-specific.
+- **Filing a Chromium bug** about the empty-`properties` finding below, since
+  that reproduces on every characteristic on every service, not just the PTT
+  one, and looks like a GATT-discovery bug independent of the read/notify
+  problem.
+
+## Desktop Chrome (Linux) testing results, 2026-09-05
+
+Tested on a Debian 13 laptop, Intel AX200 adapter, Google Chrome 151, BlueZ
+5.82. Three platform-setup issues had to be cleared before the actual
+zero-byte question could even be tested:
+
+1. **`navigator.bluetooth` was `undefined`** out of the box. Web Bluetooth is
+   not on by default in Linux Chrome the way it is on Windows/macOS/ChromeOS/
+   Android — it needed `chrome://flags/#enable-experimental-web-platform-features`
+   set to Enabled, then a relaunch, before `requestDevice()` existed at all.
+2. **`getPrimaryService(SERVICE_UUID)` threw `NotFoundError`** on the first
+   connect after that, even though the device genuinely has that service.
+   Cause: this device's LE address had already been touched once by
+   `bluetoothctl` (for an unrelated pairing test) and disconnected quickly,
+   leaving BlueZ with a **stale, incomplete cached GATT attribute table** for
+   that address — `bluetoothctl info` showed only `0xFFE0` cached, not the
+   PTT service. Fix: `bluetoothctl remove <addr>` to forget the device
+   entirely, then reconnect fresh from the page so BlueZ redoes full
+   discovery. This is the desktop-Linux equivalent of the "clearing Android's
+   GATT attribute cache" theory from the list above — confirmed as a real
+   failure mode, just triggered here by a `bluetoothctl` session rather than
+   normal use.
+3. **The classic BR/EDR audio instance is a separate device** from the LE
+   GATT one (confirmed: different MAC, `29:D7:1F:7A:E3:47` vs
+   `29:D7:1F:9C:4E:58`) and needed its own pairing to stop the mic's
+   unconnected-blink LED — via `bluetoothctl`, this required switching the
+   agent to `NoInputNoOutput` (Just Works) first; the default `DisplayYesNo`
+   agent produced a numeric-comparison passkey prompt the device doesn't
+   actually support, which failed with `Authentication Failed (0x05)`. Not
+   relevant to the PTT bug itself, just a prerequisite for a clean setup.
+
+With a fresh device object and full discovery, the actual test:
+
+- **`byteLength` came back `0`** holding PTT and reading `894c8042-...` —
+  identical to the Android result. This rules out "Android-specific bug" per
+  the doc's own decision tree above.
+- **Subscribing to `894c8042-...` and pressing PTT produced zero
+  `characteristicvaluechanged` events**, again matching Android exactly.
+- **`chrome://bluetooth-internals`** turned out not to be the clean
+  bypass the original plan assumed: its Devices list is populated by its own
+  scan, and a device already GATT-connected via a page (and therefore not
+  currently advertising) doesn't show up there to Inspect. It disappeared
+  from the list entirely when attempting to inspect it, even though
+  `bluetoothctl info` confirmed the LE link was still `Connected: yes` the
+  whole time. Not a disconnect — a limitation of that internals page for
+  this use case. Untried: connecting *from* `bluetooth-internals` directly
+  (its own "New Connection" flow) rather than expecting it to show a
+  page-initiated connection.
+- **New finding, not previously documented:** `chr.properties` reports
+  **empty (`{}` / no flags true) for every characteristic on every service**,
+  not just the PTT one — `894c8042`, `ffe1`, `ff01`, `ff02`, `ff21`, `ff22`,
+  `ae01`, `ae02` all came back with an empty properties object via both
+  `getCharacteristic()` and `getCharacteristics()`. A real device does not
+  have zero properties on every characteristic; this looks like Chrome/BlueZ
+  on Linux failing to surface the GATT characteristic property flags at all,
+  a distinct bug from the zero-byte read/notify problem. Doesn't fully
+  explain the read/notify failures (Chrome does not appear to gate
+  `readValue()`/`startNotifications()` on client-side property flags), but
+  is a second, independently reproducible platform bug worth reporting
+  upstream.
+- **`0xFFE0` backup service — partial success.** Its notify characteristic is
+  `0xFFE1` (confirmed via `bluetoothctl`, matching the doc's original guess).
+  Subscribing to it and pressing PTT **did** produce real notifications
+  twice in one session — `byteLength=1 value=01` then, half a second later,
+  `byteLength=1 value=00` (each logged twice, i.e. delivered as a duplicate
+  pair) — out of roughly 50 button presses attempted. This is the first time
+  *any* characteristic on this device has delivered button state to Chrome
+  on any platform. But the loss rate (~1 full cycle in 50 presses) is severe,
+  consistent with the radio-contention flakiness already documented above
+  rather than a clean working channel. Not yet retried as a longer, isolated
+  session (i.e. subscribe once and leave it running, without intermixing
+  Enumerate-services calls, which may themselves be disruptive to an active
+  GATT session).
+
+**Net conclusion so far:** the zero-byte/silent-notify behavior on the
+documented PTT characteristic is a genuine cross-platform (Android + Linux
+desktop) Chrome/Web-Bluetooth-stack problem, not a phone-specific quirk. The
+`0xFFE0`/`0xFFE1` serial-passthrough channel is the most promising unexplored
+lead — it has now been shown capable of carrying real button-state bytes to
+Chrome, where the primary characteristic never has — but reliability needs
+much more testing before it could replace the primary characteristic in
+HenWen's code.
 
 ## Troubleshooting on a desktop
 
@@ -318,6 +404,11 @@ The single question to answer first: **hold the button down and read — does
 - **0** → Chrome cannot read this characteristic on any platform, and the
   remaining avenues are `chrome://bluetooth-internals`, then the `0xFFE0`
   serial service.
+
+**Answered 2026-09-05: it's `0` on desktop too** — see
+[Desktop Chrome (Linux) testing results](#desktop-chrome-linux-testing-results-2026-09-05)
+above for the full readout and what to try next (`0xFFE0`/`0xFFE1`, longer
+sustained subscribe sessions, other OS's native BLE stacks).
 
 ## Known-working reference implementation
 
@@ -385,3 +476,11 @@ muting did.
 - Why the BLE GATT link connects and subscribes successfully but delivers no
   notifications in field use, when nRF Connect sees every press. Moot for
   HenWen now that PTT rides a media key, but unexplained.
+- Why Chrome/BlueZ on Linux reports empty `properties` for every
+  characteristic on this device (2026-09-05 finding, see desktop testing
+  results) — whether that's specific to this BlueZ version, this device, or
+  a broader Chromium-on-Linux Web Bluetooth bug worth reporting upstream.
+- Whether `0xFFE1`'s partial success (real button values delivered, but only
+  ~1 cycle per ~50 presses) can be made reliable enough to use, or whether
+  it's subject to the same radio-contention flakiness as the primary
+  characteristic and therefore not actually a viable replacement.
