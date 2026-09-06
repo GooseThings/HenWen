@@ -184,7 +184,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
 /* TX/Listen/Rec cycle through longer active-state labels (e.g. "TX
    arming…", "Reconnecting...", "Rec Stop (12:34)") than their resting
-   "TX"/"Listen"/"Rec" text. Without nowrap above, a button narrower than
+   "ARM TX"/"Listen"/"Rec" text. Without nowrap above, a button narrower than
    its longest label would wrap that text onto a second line internally,
    growing just that one button's height mid-interaction — jarring since
    its neighbors don't move. nowrap fixes the internal wrap; the extra
@@ -346,6 +346,22 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   padding: 16px 12px; display: flex; flex-direction: column;
   gap: 8px; overflow: hidden; min-height: 0;
 }
+/* Node-wide audio controls (ARM TX / Listen / Rec / My Recordings), sitting
+   under the node's identity block. flex-wrap because every one of them is
+   conditional — role, TX support, the can_record flag — so the row's width
+   varies, and a narrowed column should drop a button to a second line
+   rather than have the card clip it (the card is overflow:hidden).
+   margin-top:auto is deliberately NOT used: the card is sized to its content
+   by dashFitNodeCard(), so there's no slack to push against, and pinning to
+   the bottom of a stretched card would fight that measurement. */
+.node-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; flex-shrink: 0; }
+/* Sits directly under the buttons and only matters while Listen is running —
+   dimmed to 0.4 until then by _listenSetBtn(), same as when it lived in the
+   Connected Nodes header. No border/padding of its own here: in that old
+   home it was a full-width strip separating the header from the node list,
+   whereas here it's just the last row of this card's own stack. */
+#listen-vol-row { display: flex; align-items: center; gap: 8px; opacity: 0.4;
+  flex-shrink: 0; transition: opacity .15s; }
 /* Info-left / status-right grid, used on every width (see the mobile media
    query below for the phone-tuned size overrides layered on top of this same
    structure). Was originally mobile-only: the desktop card used a single
@@ -1290,6 +1306,23 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       <div id="node-info">
         <div style="color:var(--text2);font-size:.9rem">Loading&hellip;</div>
       </div>
+      <!-- Node-wide audio controls: these act on the node itself (listen to
+           it, record it, transmit through it), not on any one connected
+           peer, which is why they live here rather than in the Connected
+           Nodes header they used to share with the disconnect buttons.
+           Every one of them can be hidden (role/permission/capability), so
+           .node-controls collapses to nothing rather than leaving an empty
+           strip — and dashFitNodeCard() re-measures whenever that changes. -->
+      <div class="node-controls">
+        <button class="btn-icon" id="tx-btn" onclick="openTx()" style="display:none" title="Transmit from your microphone through this node"><svg class="icon"><use href="#icon-mic"></use></svg> ARM TX</button>
+        <button class="btn-icon" id="listen-btn" onclick="toggleListen()" title="Stream live audio from this node — expect ~1 second delay"><svg class="icon"><use href="#icon-headphones"></use></svg> Listen</button>
+        <button class="btn-icon" id="record-btn" onclick="toggleRecord()" style="display:none" title="Record this node's audio to a file"><svg class="icon" style="color:var(--red,#f85149)"><use href="#icon-circle"></use></svg> Rec</button>
+        <button class="btn-icon" id="myrec-btn" onclick="openMyRecordingsModal()" style="display:none" title="View, rename, download, or delete your saved recordings"><svg class="icon"><use href="#icon-folder-open"></use></svg></button>
+      </div>
+      <div id="listen-vol-row">
+        <span style="font-size:0.78rem;color:var(--text2);flex-shrink:0;display:flex;align-items:center;gap:4px" title="Listen volume"><svg class="icon"><use href="#icon-volume-2"></use></svg> Volume</span>
+        <input type="range" id="listen-volume" min="0" max="100" value="100" disabled title="Listen volume — separate from your device's system volume" style="flex:1">
+      </div>
     </div>
 
     <!-- Connected nodes -->
@@ -1299,18 +1332,13 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <span class="dash-header-grip" draggable="true" title="Drag to move"
               ondragstart="dashDragStart(event,'connected')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
         <span class="card-title">Connected Nodes</span>
-        <span style="margin-left:auto;display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:6px;row-gap:6px">
-          <button class="btn-icon" id="tx-btn" onclick="openTx()" style="display:none" title="Transmit from your microphone through this node"><svg class="icon"><use href="#icon-mic"></use></svg> TX</button>
-          <button class="btn-icon" id="listen-btn" onclick="toggleListen()" title="Stream live audio from this node — expect ~1 second delay"><svg class="icon"><use href="#icon-headphones"></use></svg> Listen</button>
-          <button class="btn-icon" id="record-btn" onclick="toggleRecord()" style="display:none" title="Record this node's audio to a file"><svg class="icon" style="color:var(--red,#f85149)"><use href="#icon-circle"></use></svg> Rec</button>
-          <button class="btn-icon" id="myrec-btn" onclick="openMyRecordingsModal()" style="display:none" title="View, rename, download, or delete your saved recordings"><svg class="icon"><use href="#icon-folder-open"></use></svg></button>
+        <span style="margin-left:auto;display:flex;align-items:center;gap:6px">
           <button class="dash-hide-btn" onclick="toggleDashHide('connected',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
         </span>
       </div>
-      <div id="listen-vol-row" style="display:flex;align-items:center;gap:8px;padding:7px 18px;border-bottom:1px solid var(--border);opacity:0.4">
-        <span style="font-size:0.78rem;color:var(--text2);flex-shrink:0;display:flex;align-items:center;gap:4px" title="Listen volume"><svg class="icon"><use href="#icon-volume-2"></use></svg> Volume</span>
-        <input type="range" id="listen-volume" min="0" max="100" value="100" disabled title="Listen volume — separate from your device's system volume" style="flex:1">
-      </div>
+      <!-- Stays here, unlike the ARM TX button that raises it (now in the
+           Node card): this is the PTT control itself, and it wants the width
+           for its mic meter/gain row plus room for #tx-status's messages. -->
       <div id="tx-bar" style="display:none">
         <button id="tx-ptt" disabled>
           <div><svg class="icon"><use href="#icon-mic"></use></svg> PTT &mdash; hold to transmit&ensp;<span class="tx-ptt-space-hint" style="font-size:0.7rem;font-weight:400">(or hold Space &middot; keys in ~&frac12;s)</span></div>
@@ -5193,11 +5221,15 @@ async function _txUpdateBtn() {
   /* Any logged-in role may TX — account creation itself is already gated to
      admin/superuser/owner, so any account that exists has been vetted. */
   var eligible = !!window._kioskRole && window.isSecureContext && navigator.mediaDevices && window.WebSocket;
-  if (!eligible) { btn.style.display = 'none'; return; }
+  if (!eligible) { btn.style.display = 'none'; dashFitNodeCard(); return; }
   try {
     var r = await apiFetch('/api/tx/config?probe=1');
     btn.style.display = r.ok ? '' : 'none';
   } catch (e) { btn.style.display = 'none'; }
+  /* This button lives in the Node card, which is sized to its contents —
+     showing/hiding it changes how many grid rows that card needs, and a
+     login/logout shouldn't leave the card a poll cycle out of step. */
+  dashFitNodeCard();
 }
 
 /* ── Recording ──────────────────────────────────────────────────────────
@@ -5221,6 +5253,7 @@ async function _recordUpdateBtn() {
   if (!window._kioskRole) {
     btn.style.display = 'none';
     if (mrBtn) mrBtn.style.display = 'none';
+    dashFitNodeCard();
     return;
   }
   try {
@@ -5233,6 +5266,7 @@ async function _recordUpdateBtn() {
     btn.style.display = 'none';
     if (mrBtn) mrBtn.style.display = 'none';
   }
+  dashFitNodeCard();   /* same reason as _txUpdateBtn's — see there */
 }
 
 function _recordSetBtn(html, color, disabled) {
@@ -5737,7 +5771,7 @@ async function armTx() {
     var cfg = await r.json();
     if (!r.ok || !cfg.enabled) {
       _txStatus(cfg.error || 'Browser transmit is not configured on this server', 'var(--red)');
-      _txSetBtn('<svg class="icon"><use href="#icon-mic"></use></svg> TX', '');
+      _txSetBtn('<svg class="icon"><use href="#icon-mic"></use></svg> ARM TX', '');
       _tx.armed = false;
       return;
     }
@@ -5865,7 +5899,7 @@ function _txTeardown() {
   if (_tx.session) { try { _tx.session.terminate(); } catch (e) {} _tx.session = null; }
   if (_tx.ua)      { try { _tx.ua.stop(); }           catch (e) {} _tx.ua = null; }
   _txReleaseMic();
-  _txSetBtn('<svg class="icon"><use href="#icon-mic"></use></svg> TX', '');
+  _txSetBtn('<svg class="icon"><use href="#icon-mic"></use></svg> ARM TX', '');
 }
 
 function disarmTx() {
@@ -6863,12 +6897,14 @@ function dashApply() {
 }
 
 /* ── Node card auto-fit ──────────────────────────────────────────────────
-   The Node card holds three lines of text and a status badge and nothing
-   else, so any fixed row span is wrong at most window heights: too tall and
-   it's mostly dead space, too short and the text is silently clipped (the
-   card is overflow:hidden). Measure what the content actually needs, give
-   the Node/Map split exactly that many rows, and hand the rest of the left
-   column to the map — which does want every pixel it can get.
+   The Node card holds three lines of text, a status badge and a row of audio
+   controls, and how much of that is on screen changes with who's logged in
+   (ARM TX needs a role and a TX-capable server, Rec/My Recordings need the
+   can_record flag), so any fixed row span is wrong at most window heights:
+   too tall and it's mostly dead space, too short and content is silently
+   clipped (the card is overflow:hidden). Measure what it actually needs,
+   give the Node/Map split exactly that many rows, and hand the rest of the
+   left column to the map — which does want every pixel it can get.
 
    Default layout only (`_dashTree` still null). Once someone has dragged or
    resized anything, the node/map boundary is their answer, and re-fitting on
@@ -6898,20 +6934,30 @@ function dashFitNodeCard() {
   var card = dashCardEl('node'), mapEl = dashCardEl('map');
   var split = dashNodeMapSplit(DASH_DEFAULT_TREE);
   if (!area || !card || !mapEl || !split) return;
-  var last = card.lastElementChild;
-  if (!last) return;
   var ch = area.clientHeight;
   var cellH = (ch - (DASH_ROWS - 1) * DASH_GAP) / DASH_ROWS;
   if (!(cellH > 0)) return;
 
   /* Content height, not the card's own height: the card is stretched to fill
      its grid area, so offsetHeight/scrollHeight would just report back the
-     space we're trying to reclaim. The flex column is top-aligned, so the
-     bottom of its last child plus the card's own bottom padding/border is
-     what it genuinely needs (both rects are border-box, so the top border is
-     already inside the difference). */
+     space we're trying to reclaim. The lowest child's bottom edge plus the
+     card's own bottom padding/border is what it genuinely needs (both rects
+     are border-box, so the top border is already inside the difference).
+     The lowest *rendered* child, not simply the last one: a display:none
+     child reports an all-zero rect, and the controls below #node-info can
+     each be hidden by role/permission — the volume row is even the last
+     child while Listen is unavailable to that viewer. Taking the max keeps
+     that from measuring the card as needing no room at all. */
+  var cardTop = card.getBoundingClientRect().top;
+  var contentBottom = 0;
+  for (var i = 0; i < card.children.length; i++) {
+    var r = card.children[i].getBoundingClientRect();
+    if (!r.width && !r.height) continue;   /* display:none */
+    if (r.bottom - cardTop > contentBottom) contentBottom = r.bottom - cardTop;
+  }
+  if (!contentBottom) return;
   var cs = getComputedStyle(card);
-  var need = last.getBoundingClientRect().bottom - card.getBoundingClientRect().top
+  var need = contentBottom
              + (parseFloat(cs.paddingBottom) || 0)
              + (parseFloat(cs.borderBottomWidth) || 0);
   /* n rows are n cells plus the n-1 gaps between them. */
