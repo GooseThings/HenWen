@@ -1278,8 +1278,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <span class="card-title">Connected Nodes</span>
         <span style="margin-left:auto;display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:6px;row-gap:6px">
           <button class="btn-icon" id="tx-btn" onclick="openTx()" style="display:none" title="Transmit from your microphone through this node"><svg class="icon"><use href="#icon-mic"></use></svg> TX</button>
-          <button class="btn-icon" id="tx-ble-connect" onclick="_txBleConnect()" style="display:none"
-                  title="Connects directly over Bluetooth LE to a Tidradio-style PTT button's own press/release signal for true hold-to-transmit — works independently of whether TX is currently armed. Chrome only (Web Bluetooth) — confirmed against one Tidradio TD-PTT unit.">BLE PTT</button>
           <button class="btn-icon" id="listen-btn" onclick="toggleListen()" title="Stream live audio from this node — expect ~1 second delay"><svg class="icon"><use href="#icon-headphones"></use></svg> Listen</button>
           <button class="btn-icon" id="record-btn" onclick="toggleRecord()" style="display:none" title="Record this node's audio to a file"><svg class="icon" style="color:var(--red,#f85149)"><use href="#icon-circle"></use></svg> Rec</button>
           <button class="btn-icon" id="myrec-btn" onclick="openMyRecordingsModal()" style="display:none" title="View, rename, download, or delete your saved recordings"><svg class="icon"><use href="#icon-folder-open"></use></svg></button>
@@ -1292,7 +1290,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       </div>
       <div id="tx-bar" style="display:none">
         <button id="tx-ptt" disabled>
-          <div><svg class="icon"><use href="#icon-mic"></use></svg> PTT &mdash; hold to transmit&ensp;<span class="tx-ptt-space-hint" style="font-size:0.7rem;font-weight:400">(or hold Space, or press Rev on a Bluetooth mic &middot; keys in ~&frac12;s)</span></div>
+          <div><svg class="icon"><use href="#icon-mic"></use></svg> PTT &mdash; hold to transmit&ensp;<span class="tx-ptt-space-hint" style="font-size:0.7rem;font-weight:400">(or hold Space &middot; keys in ~&frac12;s)</span></div>
           <div id="tx-ptt-tot" style="font-size:0.7rem;font-weight:400;opacity:.8;display:none"></div>
         </button>
         <div id="tx-audio-row">
@@ -1301,7 +1299,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
           <input type="range" id="tx-gain" min="0" max="200" value="100" title="Microphone gain">
           <span id="tx-gain-val" style="font-size:0.7rem;color:var(--text2);width:3em;flex-shrink:0">100%</span>
         </div>
-        <div id="tx-ble-status" style="font-size:0.72rem;color:var(--text2);padding:4px 0 0"></div>
         <div id="tx-status" style="font-size:0.75rem;color:var(--accent);min-height:1em"></div>
       </div>
       <div class="connector-warn-bar" id="connector-warn-bar" style="display:none">
@@ -5018,8 +5015,7 @@ async function removeFavorite(node) {
    is hidden unless that endpoint says the feature is configured AND the
    page is a secure context (mic capture requires HTTPS). */
 var _tx = { ua: null, session: null, keyed: false, armed: false, idleTimer: null,
-            node: '', statsTimer: null, totSec: 0, keyWatchdog: null, duckedFrom: null,
-            padTimer: null, padState: {},
+            node: '', statsTimer: null,
             audioCtx: null, gainNode: null, analyser: null, rawStream: null, meterTimer: null };
 var _TX_IDLE_HANGUP_MS = 5 * 60 * 1000;  // auto-disarm after 5 min without keying
 
@@ -5035,44 +5031,18 @@ function _txSavedGain() {
   return (v >= 0 && v <= 200) ? v : 100;
 }
 
-/* One capture path, asking for nothing unusual.
-   Pairing the phone to the Q2L already makes Android route its mic and
-   speaker to it — that is the platform's own behaviour, and the operator's
-   other apps get it for free. So this asks for the plain WebRTC defaults
-   (the AEC+NS+AGC trio every other calling site requests) and lets that
-   routing happen, rather than opting out of a constraint and landing on a
-   capture path that never engages Bluetooth at all.
-   There was briefly a checkbox here that switched between routed-Bluetooth
-   and own-mic capture, on the premise from TD-Q2L.md that Bluetooth audio
-   and the BLE PTT button were mutually exclusive. Field use contradicted
-   that premise — mic, speaker and PTT button were all working together —
-   so the split was removed rather than kept as a setting nobody should
-   need to reason about. The manual gain slider below remains the one level
-   control; there is deliberately no second leveller in our own graph, since
-   the browser's AGC is already doing that job here. */
-/* The BLE keep-alive poll is suspended across arming. Bringing up the SIP
-   call is also when Android negotiates the classic SCO audio link to the same
-   headset, and hammering GATT at 25 reads/sec through the one radio while it
-   does that is asking for trouble — an arm was observed producing no ICE
-   candidates at all with the fast poll running. Presses aren't actionable
-   during arming anyway (nothing to key yet), so the poll costs nothing here
-   and the notifications it sustains are only needed once armed. */
-function _txBlePollPause(ms) {
-  if (!_txBle.pollTimer) return;
-  clearInterval(_txBle.pollTimer);
-  _txBle.pollTimer = null;
-  _txDiag('ble-poll-pause', ms + 'ms for call setup');
-  clearTimeout(_txBle.resumeTimer);
-  _txBle.resumeTimer = setTimeout(function() {
-    if (!_txBle.device || !_txBle.device.gatt.connected) return;
-    clearInterval(_txBle.pollTimer);
-    _txBle.pollTimer = setInterval(_txBlePollTick, TX_BLE_POLL_MS);
-    _txDiag('ble-poll-resume', 'every ' + TX_BLE_POLL_MS + 'ms');
-  }, ms);
-}
-
+/* One capture path, asking for nothing unusual: the plain WebRTC defaults
+   every other calling site requests. Opting any one of the trio out drops
+   Chromium's Android backend into a capture path that never engages
+   Bluetooth routing at all, so a paired headset stops being used for the
+   call — asking for the defaults is what lets the platform route audio
+   wherever the operator has already pointed it.
+   The manual gain slider below is the one level control; there is
+   deliberately no second leveller in our own graph, since the browser's AGC
+   is already doing that job. (autoGainControl was previously forced off here
+   to fix clipping on one specific headset mic — if that returns, lower the
+   slider before reaching for the constraint, which costs Bluetooth routing.) */
 function _txBuildMicChain() {
-  _txBlePollPause(TX_BLE_PAUSE_MS);
   return navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     video: false,
@@ -5080,20 +5050,19 @@ function _txBuildMicChain() {
     /* Which mic actually got picked, and which processing Chrome actually
        applied, are the two facts that decide whether this sounds right —
        and both are decided by the browser, not by what we asked for. Log
-       the resolved values so "am I on the Bluetooth mic or the phone's
-       own?" is a journalctl line rather than a guess: the track label
-       names the device, and getSettings() reports whether SCO-implying
-       processing really engaged. */
+       the resolved values so "which mic is this actually using, and with
+       what processing?" is a journalctl line rather than a guess — the one
+       question behind most "my audio sounds wrong" reports. */
     try {
       var t = raw.getAudioTracks()[0], s = (t.getSettings && t.getSettings()) || {};
       _txDiag('mic-source', 'label=' + (t.label || '?') +
               ' agc=' + s.autoGainControl + ' ns=' + s.noiseSuppression +
               ' aec=' + s.echoCancellation + ' rate=' + s.sampleRate);
       /* A track label of "Default" names Chrome's default-device alias, not
-         the hardware behind it, so it can't say on its own whether the Q2L
-         is what got used. Listing the input devices alongside it does.
-         Labels are only populated post-permission, which is why this runs
-         after getUserMedia rather than before. */
+         the hardware behind it, so on its own it can't say which mic was
+         actually used. Listing the input devices alongside it can. Labels
+         are only populated post-permission, which is why this runs after
+         getUserMedia rather than before. */
       navigator.mediaDevices.enumerateDevices().then(function(ds) {
         _txDiag('mic-devices', ds.filter(function(d) { return d.kind === 'audioinput'; })
                                  .map(function(d) { return d.label || d.deviceId.slice(0, 8); })
@@ -5142,11 +5111,9 @@ function _txStartMeter() {
    log (was DTMF actually sent? was the mic track live? was the outbound RTP
    audio level non-zero?) without browser devtools open. */
 function _txDiag(type, detail) {
-  /* _tx.node is only set once armTx()'s config fetch resolves — but BLE PTT
-     can now connect and report events (ble-connected, ble-value on every
-     press/release) before TX is ever armed, so fall back to the board's own
-     local node number rather than going silent for anything that happens
-     pre-arm. */
+  /* _tx.node is only set once armTx()'s config fetch resolves, so fall back
+     to the board's own local node number rather than going silent for
+     anything reported before that point. */
   var node = _tx.node || (window._lastBoardNodes && window._lastBoardNodes[0] && window._lastBoardNodes[0].node) || '';
   if (!node) return;
   try {
@@ -5196,35 +5163,16 @@ function _txSetBtn(html, color) {
 }
 
 async function _txUpdateBtn() {
-  var btn    = document.getElementById('tx-btn');
-  var bleBtn = document.getElementById('tx-ble-connect');
+  var btn = document.getElementById('tx-btn');
   if (!btn) return;
   /* Any logged-in role may TX — account creation itself is already gated to
      admin/superuser/owner, so any account that exists has been vetted. */
   var eligible = !!window._kioskRole && window.isSecureContext && navigator.mediaDevices && window.WebSocket;
-  if (!eligible) {
-    btn.style.display = 'none';
-    if (bleBtn) bleBtn.style.display = 'none';
-    return;
-  }
+  if (!eligible) { btn.style.display = 'none'; return; }
   try {
     var r = await apiFetch('/api/tx/config?probe=1');
     btn.style.display = r.ok ? '' : 'none';
-    /* Lives next to the TX button, not inside #tx-bar, specifically so it
-       can be connected *before* arming — see _txBleConnect()'s comment on
-       why establishing this BLE link only after TX's own mic capture has
-       already started turned out to matter on real hardware. */
-    if (bleBtn) bleBtn.style.display = (r.ok && navigator.bluetooth) ? '' : 'none';
-    /* Deliberately not auto-attaching the BLE link here. Transmit now rides
-       the headset's AVRCP media keys, which share the same classic radio the
-       BLE GATT link was observed contending with — reaching for that link
-       unprompted on every board load risks breaking the path that works to
-       chase one that never delivered a press. The BLE PTT button is still
-       there for anyone who wants to try it explicitly. */
-  } catch (e) {
-    btn.style.display = 'none';
-    if (bleBtn) bleBtn.style.display = 'none';
-  }
+  } catch (e) { btn.style.display = 'none'; }
 }
 
 /* ── Recording ──────────────────────────────────────────────────────────
@@ -5770,8 +5718,7 @@ async function armTx() {
     }
     await _loadJsSIP();
     if (!_tx.armed) return;  // disarmed while loading
-    _tx.node   = cfg.node;
-    _tx.totSec = (typeof cfg.tot_sec === 'number' && cfg.tot_sec > 0) ? cfg.tot_sec : 0;
+    _tx.node = cfg.node;
 
     var totEl = document.getElementById('tx-ptt-tot');
     if (totEl) {
@@ -5841,7 +5788,6 @@ async function armTx() {
         /* Listen is the monitor path — make sure it's running */
         if (!_listenActive) _startListen();
         _txTouchIdle();
-        _txMediaKeySync();
         _txDiag('armed', 'call confirmed');
         _txStatsSample('armed');
       });
@@ -5887,7 +5833,6 @@ function _txReleaseMic() {
    readable. Listen is left exactly as the user has it (just unmuted). */
 function _txTeardown() {
   _txUnkey();
-  _txMediaKeySync();
   clearTimeout(_tx.idleTimer);
   clearTimeout(_tx.statsTimer);
   var pttEl = document.getElementById('tx-ptt');
@@ -5916,27 +5861,11 @@ function _txTouchIdle() {
 
 /* Mute Listen only while keyed — the radio-style RX mute. Restored on
    unkey so the operator hears their own repeater tail as confirmation. */
-/* Ducked to near-silence rather than muted outright, deliberately.
-   Android routes a headset's media keys to whichever page owns the system
-   media session, and a page only holds that while it is actually producing
-   audible audio — muting the element makes it inaudible, so keying up was
-   handing the media session away at exactly the moment the operator needed
-   the next press to come back. That matches the observed failure precisely:
-   the first press keyed, and no further media-key event ever arrived.
-   A very low volume is inaudible in practice while keeping the element
-   audible as far as the media session is concerned. The operator's own
-   Listen volume is captured and restored, so this never fights the slider. */
-var _TX_DUCK_VOLUME = 0.0001;
+/* Mute Listen only while keyed — the radio-style RX mute. Restored on
+   unkey so the operator hears their own repeater tail as confirmation. */
 function _txMuteListen(muted) {
   var a = document.getElementById('node-audio');
-  if (!a) return;
-  if (muted) {
-    if (_tx.duckedFrom === null || _tx.duckedFrom === undefined) _tx.duckedFrom = a.volume;
-    a.volume = _TX_DUCK_VOLUME;
-  } else if (_tx.duckedFrom !== null && _tx.duckedFrom !== undefined) {
-    a.volume = _tx.duckedFrom;
-    _tx.duckedFrom = null;
-  }
+  if (a) a.muted = muted;
 }
 
 function _txKey() {
@@ -5960,7 +5889,6 @@ function _txKey() {
 
 function _txUnkey() {
   if (!_tx.keyed) return;
-  clearTimeout(_tx.keyWatchdog);
   _tx.keyed = false;
   var b = document.getElementById('tx-ptt');
   if (b) b.classList.remove('tx');
@@ -5969,576 +5897,6 @@ function _txUnkey() {
     _txStatus('');
     _txTouchIdle();
     try { _tx.session.sendDTMF('#', { duration: 100, interToneGap: 70 }); } catch (e) {}
-  }
-}
-
-/* ── Hardware media-key PTT (the Fwd button on a Bluetooth PTT mic) ──────
-   The Q2L presents itself to Android as an ordinary Bluetooth headset, and
-   its Fwd / Rev / Vol± / Play-Pause buttons are real AVRCP media keys the
-   phone already recognises — only the PTT-labelled button is proprietary
-   (see TD-Q2L.md). So rather than fight for the proprietary one over BLE,
-   this binds transmit to a media key the platform already delivers.
-
-   Two things have to be true for a page to receive those keys, and the
-   earlier attempt at this (commit 2d374a3, on play/pause) had neither
-   reliably: the page must own the system media session, which on Android
-   means it must actually be playing audio — Listen playing through the
-   #node-audio element is what earns it, and armTx() already ensures Listen
-   is running — and it must have registered a handler for that specific
-   action. Setting metadata as well is what makes Android surface it as the
-   active media notification, which is what routes the headset's keys here
-   rather than to whichever app played audio last.
-
-   Fwd and Rev are BOTH bound to transmit for now. TD-Q2L.md's button table
-   records this device's forward-labelled key arriving as 'previoustrack'
-   and its reverse-labelled one as 'nexttrack' — the labelling is inverted
-   relative to the media semantics — so binding both means the operator's
-   Fwd button works whichever way round it actually lands, and the
-   tx-mediakey log line says which one fired so this can be narrowed later.
-
-   A media key is a single semantic action with no press/hold pair, so this
-   is necessarily a toggle: press to key, press again to unkey. That makes a
-   stuck transmitter possible in a way the hold-to-talk controls aren't, so
-   a watchdog unkeys on its own — at the node's own time-out timer when
-   there is one, otherwise a conservative default. Asterisk's TOT is the
-   real backstop, but it shouldn't be the only one. */
-var TX_MEDIAKEY_PTT      = 'nexttrack';
-var TX_MEDIAKEY_RELEASE  = ['previoustrack', 'play', 'pause'];
-var TX_MEDIAKEY_MAX_KEY_MS = 120000;
-/* Every remaining Media Session action, bound purely to log that it fired.
-   The earlier conclusion that the PTT-labelled button emits no standard
-   signal rested on a scan that only ever registered play/pause — and a
-   handler only fires for an action explicitly registered, so anything else
-   the button might send would have looked identical to silence. Registering
-   the whole set removes that blind spot. Unsupported names throw at
-   setActionHandler(), so each is attempted individually and the ones that
-   take are logged: that list is also a record of what this browser
-   actually supports. */
-var TX_MEDIAKEY_SCAN = ['stop', 'seekbackward', 'seekforward', 'seekto', 'skipad',
-                        'togglemicrophone', 'togglecamera', 'hangup',
-                        'previousslide', 'nextslide', 'enterpictureinpicture'];
-
-function _txMediaKeyWatchdog() {
-  clearTimeout(_tx.keyWatchdog);
-  var ms = _tx.totSec ? (_tx.totSec * 1000) : TX_MEDIAKEY_MAX_KEY_MS;
-  _tx.keyWatchdog = setTimeout(function() {
-    if (!_tx.keyed) return;
-    _txUnkey();
-    _txStatus('Unkeyed automatically — media-key PTT is a toggle, press again to transmit', 'var(--warn)');
-    _txDiag('mediakey-watchdog', 'auto-unkey after ' + ms + 'ms');
-  }, ms);
-}
-
-/* toggle=true only for the PTT key. Every other bound key can release but
-   never key, so a stuck transmit can be cleared by any button on the mic
-   without any of them being able to start one unexpectedly. */
-function _txMediaKeyAction(action, toggle) {
-  _txDiag('mediakey', action + (toggle ? '' : ' (release-only)') + ' keyed=' + _tx.keyed);
-  if (!_tx.armed || !_tx.session || !_tx.session.isEstablished()) return;
-  if (_tx.keyed)   { _txUnkey(); }
-  else if (toggle) { _txKey(); _txMediaKeyWatchdog(); }
-  _txMediaKeySync(true);   // re-assert the session; see _txMuteListen
-}
-
-/* ── Input scan: find a momentary PTT signal ─────────────────────────────
-   A media key is a single semantic action with no down/up pair, which is why
-   PTT is currently a toggle — and a toggle can latch a transmitter, which is
-   not an acceptable resting state for a repeater. The device's PTT-labelled
-   button is momentary in hardware, so if it surfaces to the browser at all
-   it should arrive as a press and a release, and that would give real
-   hold-to-talk.
-   This logs every remaining channel a page can observe, while armed only:
-   raw key events (a Bluetooth remote enumerating as an HID keyboard sends
-   these, with real keydown/keyup pairs), and the Gamepad API (some remotes
-   enumerate that way instead). Together with the full Media Session set
-   above, that is every input surface available to a web page short of
-   WebHID, which needs its own permission prompt and device pick.
-   Printable single characters are skipped during normal armed operation so
-   this never records typing — but NOT in explicit ?btscan=1 mode, where
-   everything is logged. That exemption matters: a Bluetooth PTT accessory
-   that bonds as a BLE HID keyboard typically sends an ordinary key (a
-   letter, Enter, Escape), so skipping single characters would hide exactly
-   the press/release pair the scan exists to find. Scan mode is opt-in and
-   short-lived, so logging keystrokes for its duration is the right trade. */
-function _txScanKey(e) {
-  var scanning = (_txMediaKeyMode() === 'scan');
-  if (!scanning && e.key && e.key.length === 1) return;          // ordinary typing
-  if (/^(INPUT|TEXTAREA|SELECT)$/.test((e.target || {}).tagName || '')) return;
-  _txDiag('scan-key', e.type + ' key=' + e.key + ' code=' + e.code +
-                      ' which=' + e.keyCode + (e.repeat ? ' repeat' : ''));
-}
-
-function _txScanPads() {
-  if (!navigator.getGamepads) return;
-  var pads = navigator.getGamepads() || [];
-  for (var i = 0; i < pads.length; i++) {
-    var p = pads[i];
-    if (!p) continue;
-    var prev = _tx.padState[p.index] || [];
-    for (var b = 0; b < p.buttons.length; b++) {
-      var down = !!(p.buttons[b] && p.buttons[b].pressed);
-      if (down !== !!prev[b]) _txDiag('scan-pad', p.id.slice(0, 40) + ' btn' + b + '=' + (down ? 'down' : 'up'));
-      prev[b] = down;
-    }
-    _tx.padState[p.index] = prev;
-  }
-}
-
-function _txScanSync(want) {
-  window.removeEventListener('keydown', _txScanKey, true);
-  window.removeEventListener('keyup',   _txScanKey, true);
-  clearInterval(_tx.padTimer);
-  _tx.padState = {};
-  if (!want) return;
-  window.addEventListener('keydown', _txScanKey, true);
-  window.addEventListener('keyup',   _txScanKey, true);
-  if (navigator.getGamepads) _tx.padTimer = setInterval(_txScanPads, 100);
-}
-
-/* Three modes, so a button scan doesn't require holding the node keyed:
-     'ptt'  — armed: Rev toggles transmit, Fwd/play/pause release, rest log
-     'scan' — diagnostic: every action bound log-only, nothing transmits
-     'off'  — no handlers, the headset's keys keep their normal meaning
-   'scan' needs only Listen running (a page must be producing audible audio
-   to own the media session at all), not an armed transmitter — pressing
-   buttons to identify them shouldn't mean keying a repeater to do it.
-   It is opt-in via ?btscan=1 rather than on whenever Listen plays, because
-   binding these actions takes the headset's keys away from whatever they
-   would otherwise do, and this is a shared board. ?btscan=0 turns it off. */
-function _txScanEnabled() {
-  try { return localStorage.getItem('henwen-tx-btscan') === '1'; } catch (e) { return false; }
-}
-function _txMediaKeyMode() {
-  if (_tx.armed && _tx.session) return 'ptt';
-  if (_txScanEnabled() && _listenActive) return 'scan';
-  return 'off';
-}
-
-/* Called on arm and on teardown, and polled so scan mode follows Listen
-   without threading a call through every _listenActive assignment. */
-var _txMediaKeyApplied = '';
-function _txMediaKeyPoll() {
-  if (_txMediaKeyMode() !== _txMediaKeyApplied) _txMediaKeySync();
-  _txBleRenderStatus();   // the BLE warning depends on armed state, not just link state
-}
-
-function _txMediaKeySync(quiet) {
-  /* Before the mediaSession guard, and skipped on the quiet re-assert that
-     follows every keypress: the scan's listeners are independent of Media
-     Session support, and tearing them down and rebuilding them on each press
-     would churn for nothing. */
-  var mode = _txMediaKeyMode();
-  _txMediaKeyApplied = mode;
-  var want = (mode !== 'off');
-  var ptt  = (mode === 'ptt');
-  if (!quiet) _txScanSync(want);
-  if (!('mediaSession' in navigator)) return;
-  try {
-    /* In scan mode even the transmit keys are log-only — the whole point is
-       to identify buttons without any of them keying the node. */
-    navigator.mediaSession.setActionHandler(TX_MEDIAKEY_PTT, !want ? null :
-      (ptt ? function() { _txMediaKeyAction(TX_MEDIAKEY_PTT, true); }
-           : function() { _txDiag('scan-mediakey', TX_MEDIAKEY_PTT); }));
-    TX_MEDIAKEY_RELEASE.forEach(function(a) {
-      navigator.mediaSession.setActionHandler(a, !want ? null :
-        (ptt ? function() { _txMediaKeyAction(a, false); }
-             : function() { _txDiag('scan-mediakey', a); }));
-    });
-    var scanned = [];
-    TX_MEDIAKEY_SCAN.forEach(function(a) {
-      try {
-        navigator.mediaSession.setActionHandler(a, want ? function() {
-          _txDiag('scan-mediakey', a);     // log only — never keys or unkeys
-        } : null);
-        scanned.push(a);
-      } catch (e) {}                        // not supported by this browser
-    });
-    if (want && !quiet) _txDiag('scan-registered', scanned.join(',') || 'none');
-    if (want) {
-      /* Claiming the media session explicitly. Without metadata Android may
-         leave the notification (and therefore the headset's keys) attached
-         to whatever played last, even while this page is the one sounding. */
-      if (window.MediaMetadata) {
-        navigator.mediaSession.metadata = new MediaMetadata({
-          title: ptt ? ('Node ' + (_tx.node || '') + ' — press Rev to transmit')
-                     : 'HenWen button scan — press any mic button',
-          artist: 'HenWen',
-        });
-      }
-      navigator.mediaSession.playbackState = 'playing';
-    } else {
-      navigator.mediaSession.playbackState = 'none';
-    }
-    if (!quiet) _txDiag('mediakey-handlers', 'mode=' + mode);
-  } catch (e) {
-    _txDiag('mediakey-err', e.message);
-  }
-}
-
-/* ── Tidradio-style BLE PTT button (direct GATT, real hold-to-transmit) ──
-   Diagnosed live against a real Tidradio TD-Q2L unit (2026-09-05): the
-   PTT-labeled button sends no standard Bluetooth media/HID signal at all —
-   confirmed by exhaustive DOM keydown + Media Session logging that never
-   once fired across repeated presses, and separately confirmed the button
-   does nothing in a normal Android media app either. (The device's other
-   buttons — Power/CH+/CH-/Volume — do send real AVRCP media keys; only the
-   PTT button itself needs this GATT-based workaround. Full writeup and a
-   standalone reference snippet: TD-Q2L.md at the repo root.)
-   Sniffed with nRF Connect: PTT state lives on one GATT characteristic that
-   directly mirrors physical button state — 0x01 while held, 0x00 when
-   released — not a toggle event, so this gives genuine press/hold semantics
-   identical to the on-screen PTT button.
-   Requires Web Bluetooth (Chrome on Android/desktop only; no Safari/Firefox
-   support) and a fresh user-gesture pairing each page load — Web Bluetooth
-   has no silent auto-reconnect on a plain page load, so there's a Connect
-   button. Nothing here auto-connects: transmit rides the headset's AVRCP
-   media keys now (see _txMediaKeySync), and this link shares the same radio,
-   so it is only established when someone explicitly asks for it. Deliberately
-   does not touch audio device selection at all: pairing the phone to the Q2L
-   already routes its mic and speaker there, and that is the OS's job.
-   On the radio-contention problem, the field evidence is broader than the
-   original TD-Q2L.md writeup concluded: that writeup pinned it on SCO
-   capture, but the link has also been seen dropping with Bluetooth capture
-   routing *off*, which points at Bluetooth audio activity in general rather
-   than the mic path specifically — Listen's own playback routes to a
-   connected headset over A2DP regardless of what TX captures from. It also
-   does now produce a real gattserverdisconnected (the writeup recorded none),
-   which is what makes the reconnect below possible at all. Unresolved; the
-   ble-connected/ble-disconnected/ble-value log trail is there to pin it. */
-var TX_BLE_SERVICE = '89a8591d-bb19-485b-9f59-58492bc33e24';
-var TX_BLE_CHAR     = '894c8042-e841-461c-a5c9-5a73d25db08e';
-/* The LE instance's other services, from an nRF Connect dump. Listed in
-   optionalServices so they can be inspected without re-pairing: 0xFFE0 is
-   almost certainly the HM-10-style serial passthrough, the obvious backup
-   if the PTT characteristic stays unreadable from Chrome. */
-var TX_BLE_EXTRA_SERVICES = [0xFFE0, 0xFF00, 0xAE30];
-var _txBle = { device: null, char: null, statusMsg: '', warn: false,
-               wantConnected: false, retry: 0, retryTimer: null, autoTried: false,
-               pollTimer: null, lastState: false, readFails: 0, reading: false, reads: 0,
-               readStart: 0, ticks: 0, empties: 0, serialChar: null, resumeTimer: null };
-
-function _txBleSetStatus(msg, warn) {
-  _txBle.statusMsg = msg || '';
-  _txBle.warn = !!warn;
-  _txBleRenderStatus();
-}
-/* Confirmed by controlled test (TD-Q2L.md): with the keep-alive poll running
-   identically throughout, presses are delivered reliably while TX is idle and
-   not at all while TX is armed. Arming is what brings up the classic SCO audio
-   link to the same headset, and this device cannot carry both. Say so plainly
-   rather than leaving a connected-looking button that silently does nothing —
-   the operator needs to know to reach for Rev or the on-screen PTT instead. */
-function _txBleRenderStatus() {
-  var el = document.getElementById('tx-ble-status');
-  if (!el) return;
-  var connected = !!(_txBle.device && _txBle.device.gatt.connected);
-  if (connected && _tx.armed) {
-    el.textContent = 'PTT button is connected but will not respond while transmit audio ' +
-                     'is routed to it over Bluetooth — key with Rev or the on-screen PTT.';
-    el.style.color = 'var(--warn)';
-    return;
-  }
-  el.textContent = _txBle.statusMsg;
-  el.style.color = _txBle.warn ? 'var(--warn)' : 'var(--text2)';
-}
-function _txBleUpdateBtn() {
-  var btn = document.getElementById('tx-ble-connect');
-  if (!btn) return;
-  var connected = !!(_txBle.device && _txBle.device.gatt.connected);
-  btn.style.color = connected ? 'var(--green)' : '';
-  btn.title = connected
-    ? 'Connected to ' + (_txBle.device.name || 'PTT device') + ' — click to disconnect'
-    : "Connects directly over Bluetooth LE to a Tidradio-style PTT button's own press/release signal for true hold-to-transmit — works independently of whether TX is currently armed. Chrome only (Web Bluetooth) — confirmed against one Tidradio TD-PTT unit.";
-}
-/* Notifications are not the only way to read this characteristic, and on
-   this device they are the unreliable one. Confirmed with nRF Connect while
-   subscribed: pressing PTT flips the value 0x00 -> 0x01 -> 0x00 every time,
-   so the peripheral notifies correctly and it is Chrome's Web Bluetooth that
-   stops delivering — HenWen's own log has the CCCD write accepted
-   ('subscribed') followed by no events at all for a run of presses.
-   The characteristic is READ as well as NOTIFY, so rather than fight that,
-   poll it. At 150ms the worst-case added latency on a press is well under
-   what a PTT feels, and it needs nothing from the notification path. Both
-   sources feed _txBleApply(), which de-duplicates on the last known state,
-   so whichever arrives first wins and notifications remain a free speed-up
-   on any device where they do work — the log line says which delivered it.
-   This is what makes real press-and-hold possible: the value mirrors live
-   button state, so it gives a genuine down/up pair, unlike the media-key
-   toggle that is the only alternative on standard APIs. */
-var TX_BLE_POLL_MS       = 40;
-var TX_BLE_READ_FAIL_MAX = 5;
-var TX_BLE_READ_STALL_MS  = 1500;
-var TX_BLE_USE_NOTIFY     = true;
-var TX_BLE_SVC_TRIES      = 6;
-var TX_BLE_SVC_RETRY_MS   = 500;
-var TX_BLE_SERIAL_SERVICE = 0xFFE0;
-var TX_BLE_PAUSE_MS       = 6000;  // poll suspended across call setup
-
-
-function _txBleApply(pressed, src) {
-  if (pressed === _txBle.lastState) return;
-  _txBle.lastState = pressed;
-  _txDiag('ble-value', (pressed ? 'press' : 'release') + ' via ' + src);
-  if (!_tx.armed || !_tx.session || !_tx.session.isEstablished()) return;
-  if (pressed) { if (!_tx.keyed) _txKey(); }
-  else         { if (_tx.keyed)  _txUnkey(); }
-}
-
-function _txBleOnValue(e) {
-  _txBleApply(e.target.value.getUint8(0) === 1, 'notify');
-}
-
-/* A read that keeps failing is the only honest signal that a link has died
-   without raising gattserverdisconnected — the exact "connected but deaf"
-   state this device was originally documented as producing. Forcing a
-   disconnect hands it to the existing reconnect path rather than sitting
-   there believing a dead link is fine. */
-function _txBlePollTick() {
-  if (!_txBle.char || !_txBle.device || !_txBle.device.gatt.connected) return;
-  /* Timestamped rather than a bare in-flight boolean. A readValue() promise
-     that never settles — which is what the log pointed at: poll started, no
-     read logged, no read failure logged either — wedges a boolean guard
-     permanently and silently kills polling for the rest of the session.
-     A stale in-flight read is abandoned and retried instead. */
-  if (_txBle.reading && (Date.now() - _txBle.readStart) < TX_BLE_READ_STALL_MS) return;
-  if (_txBle.reading) _txDiag('ble-read-stall', 'abandoning read after ' + TX_BLE_READ_STALL_MS + 'ms');
-  _txBle.reading   = true;
-  _txBle.readStart = Date.now();
-  if (_txBle.ticks === 0) _txDiag('ble-poll-tick', 'first read issued');
-  _txBle.ticks++;
-  /* readValue() can also throw synchronously (Chrome rejects overlapping
-     GATT operations), which would escape the interval callback entirely and
-     leave the guard set — same silent death, different cause. */
-  try {
-    _txBle.char.readValue().then(function(v) {
-      _txBle.reading = false;
-      /* A zero-length DataView is what this device actually returns, so it
-         gets handled as a state rather than reached by throwing out of
-         getUint8() — which previously landed in the catch below, after the
-         failure counter had already been reset, logging "#1" forever at
-         7/sec and never reaching the disconnect threshold. */
-      if (!v || v.byteLength < 1) {
-        _txBle.empties++;
-        if (_txBle.empties === 1 || _txBle.empties % 2000 === 0) {
-          _txDiag('ble-read-empty', '#' + _txBle.empties + ' zero-length read' +
-                  (TX_BLE_USE_NOTIFY ? ' (notifications on)' : ' (notifications off)'));
-        }
-        if (_txBle.empties === 60) {
-          _txBleSetStatus('PTT button link is up but returning no data — press still unreadable', true);
-        }
-        return;
-      }
-      _txBle.readFails = 0;
-      _txBle.empties   = 0;
-      var raw = v.getUint8(0);
-      if (_txBle.reads === 0 || _txBle.reads % 200 === 0) {
-        _txDiag('ble-poll-read', '#' + _txBle.reads + ' value=0x' + ('0' + raw.toString(16)).slice(-2));
-      }
-      _txBle.reads++;
-      _txBleApply(raw === 1, 'poll');
-    }).catch(function(err) {
-      _txBle.reading = false;
-      _txBle.readFails++;
-      /* Throttled hard: at 150ms an unthrottled log floods the journal and
-         trips the client-log rate limit, which then hides everything else. */
-      if (_txBle.readFails === 1 || _txBle.readFails % 100 === 0) {
-        _txDiag('ble-read-err', '#' + _txBle.readFails + ' ' + (err.name || '') + ' ' + err.message);
-      }
-      if (_txBle.readFails === TX_BLE_READ_FAIL_MAX) {
-        try { _txBle.device.gatt.disconnect(); } catch (e) {}
-      }
-    });
-  } catch (e) {
-    _txBle.reading = false;
-    _txDiag('ble-read-throw', (e.name || '') + ' ' + e.message);
-  }
-}
-
-function _txBleOnDisconnect() {
-  _txDiag('ble-disconnected', 'wanted=' + _txBle.wantConnected);
-  _txBleUpdateBtn();
-  if (_tx.keyed) _txUnkey();   // never leave the node keyed on a dropped link
-  _txBle.char = null;
-  _txBle.serialChar = null;
-  clearInterval(_txBle.pollTimer);
-  clearTimeout(_txBle.resumeTimer);
-  if (_tx.keyed) _txUnkey();
-  if (!_txBle.wantConnected) { _txBleSetStatus('Disconnected'); return; }
-  if (_txBle.retry >= TX_BLE_RETRY_MAX) {
-    _txBle.wantConnected = false;
-    _txBleSetStatus('PTT button disconnected — gave up after ' + TX_BLE_RETRY_MAX +
-                    ' tries. The on-screen PTT still works; tap BLE PTT to retry the button.', true);
-    return;
-  }
-  var delay = Math.min(30000, 1000 * Math.pow(2, _txBle.retry));  // 1s,2s,4s… capped at 30s
-  _txBle.retry++;
-  _txBleSetStatus('Link dropped — reconnecting (' + _txBle.retry + '/' + TX_BLE_RETRY_MAX + ')…');
-  clearTimeout(_txBle.retryTimer);
-  _txBle.retryTimer = setTimeout(function() {
-    if (!_txBle.wantConnected || !_txBle.device) return;
-    _txBleAttach(_txBle.device).catch(function(e) {
-      _txDiag('ble-reconnect-err', e.message);
-      _txBleOnDisconnect();      // failed attempt counts as another drop
-    });
-  }, delay);
-}
-
-/* Connect + subscribe, shared by the initial pairing and every reconnect. */
-/* getPrimaryService() races the platform's GATT discovery on a device with no
-   cached attribute table. Measured on desktop Linux: gatt.connect() resolved
-   and NotFoundError landed 49ms later — far too fast for a real over-the-air
-   discovery of a whole attribute table to have run and genuinely not found the
-   service. Retry instead of believing the first miss. */
-async function _txBleService(server, uuid) {
-  var lastErr;
-  for (var i = 0; i < TX_BLE_SVC_TRIES; i++) {
-    try { return await server.getPrimaryService(uuid); }
-    catch (e) {
-      lastErr = e;
-      if (e.name !== 'NotFoundError') throw e;
-      _txDiag('ble-svc-retry', uuid + ' miss ' + (i + 1) + '/' + TX_BLE_SVC_TRIES);
-      await new Promise(function(r) { setTimeout(r, TX_BLE_SVC_RETRY_MS); });
-    }
-  }
-  throw lastErr;
-}
-
-/* 0xFFE1, on the 0xFFE0 serial-passthrough service, carries the same button
-   byte as the primary characteristic — in the best desktop session both
-   delivered every press within single-digit milliseconds of each other. It is
-   subscribed as a redundant second source rather than a fallback: whichever
-   arrives first wins, and _txBleApply() drops the duplicate. Failure here is
-   logged and ignored, since the primary path must not depend on it. */
-async function _txBleAttachSerial(server) {
-  try {
-    var svc = await _txBleService(server, TX_BLE_SERIAL_SERVICE);
-    var cs  = await svc.getCharacteristics();
-    /* Properties come back empty for every characteristic on Chrome/BlueZ
-       (a separate, reproducible platform bug — see TD-Q2L.md), so pick by
-       UUID and fall back to the first characteristic rather than filtering
-       on .notify, which cannot be trusted to be populated. */
-    var ch = cs.filter(function(c) { return c.uuid.indexOf('ffe1') !== -1; })[0] || cs[0];
-    if (!ch) return;
-    ch.addEventListener('characteristicvaluechanged', function(e) {
-      var v = e.target.value;
-      if (!v || v.byteLength < 1) return;
-      var raw = v.getUint8(0);
-      /* A serial passthrough can carry anything; only 0x00/0x01 are button
-         state, so anything else is somebody else's traffic. */
-      if (raw === 0 || raw === 1) _txBleApply(raw === 1, 'ffe1');
-    });
-    await ch.startNotifications();
-    _txBle.serialChar = ch;
-    _txDiag('ble-serial', 'subscribed ' + ch.uuid.slice(0, 8));
-  } catch (e) {
-    _txDiag('ble-serial-err', (e.name || '') + ' ' + e.message);
-  }
-}
-
-async function _txBleAttach(device) {
-  var server  = await device.gatt.connect();
-  var service = await _txBleService(server, TX_BLE_SERVICE);
-  /* Enumerate rather than assume. Chrome returning a zero-length read from a
-     characteristic nRF Connect reads correctly would be explained by there
-     being more than one characteristic under this UUID, or by the properties
-     Chrome sees differing from what nRF reports — both visible here and
-     neither visible from getCharacteristic() alone. */
-  try {
-    var all = await service.getCharacteristics();
-    _txDiag('ble-chars', all.map(function(c) {
-      var p = c.properties || {};
-      return c.uuid.slice(0, 8) +
-             (p.read ? '+r' : '') + (p.notify ? '+n' : '') +
-             (p.write ? '+w' : '') + (p.writeWithoutResponse ? '+W' : '') +
-             (p.indicate ? '+i' : '');
-    }).join(' ').slice(0, 190));
-  } catch (e) { _txDiag('ble-chars-err', e.message); }
-  var ch      = await service.getCharacteristic(TX_BLE_CHAR);
-  _txBle.char = ch;
-  ch.addEventListener('characteristicvaluechanged', _txBleOnValue);
-  /* Notifications back on. Desktop testing (TD-Q2L.md, follow-up section)
-     eventually got 150+ consecutive press/release events out of this exact
-     characteristic with nothing in the code changed from the sessions that
-     got none — so the zero-byte reads and silent notifications were
-     connection-state-dependent, not an unconditional Chrome limitation.
-     Both sources feed _txBleApply(), which de-duplicates, so subscribing
-     costs nothing and wins whenever it works. */
-  if (TX_BLE_USE_NOTIFY) {
-    try { await ch.startNotifications(); } catch (e) { _txDiag('ble-notify-err', e.message); }
-  }
-  _txBle.lastState = false;
-  _txBle.readFails = 0;
-  _txBle.reading   = false;
-  _txBle.reads     = 0;
-  _txBle.ticks     = 0;
-  _txBle.readStart = 0;
-  _txBle.empties   = 0;
-  /* The poll is a keep-alive, not a data source. On this device the reads
-     themselves are useless — they come back zero-length every time — but the
-     GATT traffic they generate is the only lever a page has over the BLE
-     connection interval, since Web Bluetooth exposes no equivalent of
-     BluetoothGatt.requestConnectionPriority(). A slow, power-saving interval
-     is what makes a quick press-and-release complete entirely between two
-     polling windows and never be seen at all.
-     This was a 3s warm-up that then settled to 150ms, and the phone log made
-     that look wrong in one shot: two clean press/release pairs delivered by
-     notification during the 40ms warm-up — the first button state the phone
-     had ever produced — and nothing at all after 'settled to 150ms' fired
-     one second later. So the fast rate is not a warm-up, it is the operating
-     rate, for as long as the link is up. It is only up while an operator has
-     deliberately connected a PTT button, so the cost is bounded. */
-  clearInterval(_txBle.pollTimer);
-  _txBle.pollTimer = setInterval(_txBlePollTick, TX_BLE_POLL_MS);
-  /* Explicit marker that the polling build is what the browser is actually
-     running. Without it, a stale page and a live page that simply saw no
-     presses produce identical logs — which cost a debugging round. */
-  _txDiag('ble-poll-start', 'keep-alive every ' + TX_BLE_POLL_MS + 'ms');
-  _txBleAttachSerial(server);   // redundant second source, never awaited
-  _txBle.retry = 0;
-  _txBleSetStatus('Connected: ' + (device.name || 'PTT device') + ' — polling button');
-  _txBleUpdateBtn();
-  /* Logged after startNotifications() resolves, so this line means the CCCD
-     write was accepted — if presses still don't arrive after it, the
-     subscription is fine and the radio is dropping the notifications. */
-  _txDiag('ble-connected', (device.name || '?') + ' subscribed');
-}
-
-async function _txBleConnect() {
-  clearTimeout(_txBle.retryTimer);
-  if (_txBle.device && _txBle.device.gatt.connected) {
-    _txBle.wantConnected = false;      // explicit user disconnect, don't retry
-    clearInterval(_txBle.pollTimer);
-    _txBle.device.gatt.disconnect();
-    return;
-  }
-  if (!navigator.bluetooth) {
-    _txBleSetStatus('Web Bluetooth not supported in this browser');
-    return;
-  }
-  try {
-    /* Filtering requestDevice() by services only matches devices that
-       advertise that UUID in their BLE advertisement packet — this device's
-       custom PTT service is only visible after connecting (confirmed via
-       nRF Connect), not in its advertisement, so a services-filter picker
-       comes back empty even with the mic right next to the phone. Show
-       every nearby BLE device instead and let the user pick it by name;
-       optionalServices is what actually grants access to the PTT service
-       once connected (Chrome blocks GATT access to any service not named
-       in filters/optionalServices at requestDevice() time). */
-    var device = _txBle.device;
-    if (!device) {
-      device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true,
-                 optionalServices: [TX_BLE_SERVICE].concat(TX_BLE_EXTRA_SERVICES) });
-      _txBle.device = device;
-      device.addEventListener('gattserverdisconnected', _txBleOnDisconnect);
-    }
-    _txBle.wantConnected = true;
-    _txBle.retry = 0;
-    await _txBleAttach(device);
-  } catch (e) {
-    _txBle.wantConnected = false;
-    _txBleSetStatus('Connect failed: ' + e.message);
-    _txDiag('ble-connect-err', e.message);
   }
 }
 
@@ -6552,14 +5910,6 @@ async function _txBleConnect() {
     localStorage.setItem('henwen-tx-gain', gain.value);
     if (_tx.gainNode) _tx.gainNode.gain.value = gain.value / 100;
   });
-
-  /* ?btscan=1 arms the diagnostic, ?btscan=0 clears it; the choice sticks so
-     the operator can reload freely mid-test without re-adding the query. */
-  try {
-    var q = new URLSearchParams(location.search).get('btscan');
-    if (q === '1' || q === '0') localStorage.setItem('henwen-tx-btscan', q);
-  } catch (e) {}
-  setInterval(_txMediaKeyPoll, 2000);
 
   var ptt = document.getElementById('tx-ptt');
   ptt.addEventListener('pointerdown',   function(e) { e.preventDefault(); _txKey(); });
@@ -6692,11 +6042,7 @@ function _listenSetBtn(html, color, disabled) {
   vol.value = saved;
   audio.volume = saved / 100;
   vol.addEventListener('input', function() {
-    /* While keyed the element is ducked (see _txMuteListen), so a change
-       made mid-transmission has to land on the value that gets restored,
-       not on the live element — otherwise unkeying would undo it. */
-    if (_tx.duckedFrom !== null && _tx.duckedFrom !== undefined) _tx.duckedFrom = vol.value / 100;
-    else audio.volume = vol.value / 100;
+    audio.volume = vol.value / 100;
     localStorage.setItem('henwen-listen-volume', vol.value);
   });
 })();

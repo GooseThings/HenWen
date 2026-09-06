@@ -1,5 +1,33 @@
 # Tidradio TD-Q2L Bluetooth PTT mic — reverse-engineered notes
 
+> ## ABANDONED 2026-09-05 — no TD-Q2L code remains in HenWen
+>
+> The integration was dropped and every trace removed from
+> `templates/status.html`: the BLE/GATT client, the media-key PTT binding,
+> the input scanner, and the connection/keep-alive machinery. Browser TX is
+> back to the on-screen PTT button and the Space key, both of which are true
+> press-and-hold.
+>
+> **Why it was dropped.** The mic's PTT button emits no standard signal, so
+> the only route to it is a proprietary BLE characteristic — and that
+> characteristic goes silent the moment Bluetooth audio is in use, which is
+> the whole point of owning the mic. Binding transmit to the Rev media key
+> worked around the silence but could only ever be press-to-toggle, and a
+> latching transmitter is the wrong resting state for a repeater.
+>
+> **This file is kept as the record, not as a plan.** Everything below is
+> accurate and hard-won, including several conclusions that were reached and
+> later overturned — the sequence is left visible on purpose. Read it before
+> attempting this device, or a similar one, again.
+>
+> **The one thing that would change the answer:** an accessory with separate
+> BLE and Classic Bluetooth radios rather than a single combo chip. Every
+> software avenue is closed — including a native Android app, ruled out by
+> direct test rather than by argument (see the end of the settled section).
+>
+> `TD-Q2L-test.html` beside this file is a standalone Web Bluetooth harness,
+> independent of HenWen, if anyone wants to probe this or another unit.
+
 > **Status 2026-09-05 — settled. BLE PTT works, but not while the mic's own
 > audio is in use.**
 > The BLE link is solid once a fast connection interval is held: 19
