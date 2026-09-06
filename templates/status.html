@@ -1535,7 +1535,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <span id="f-active-users-wrap" style="position:relative;display:flex;align-items:center;gap:8px">
       <span id="f-active-users-toggle">Logged in: <strong id="f-active-users">—</strong></span>
       <span id="kiosk-username" style="display:none;color:var(--text2)"></span>
-      <div id="f-active-users-panel" style="display:none;position:absolute;bottom:100%;left:0;margin-bottom:6px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;min-width:170px;max-width:260px;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:50;font-size:0.78rem;line-height:1.6"></div>
+      <div id="f-active-users-panel" style="display:none;position:absolute;bottom:100%;left:0;margin-bottom:6px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;min-width:170px;max-width:260px;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:2000;font-size:0.78rem;line-height:1.6"></div>
     </span>
     <span><a href="https://github.com/GooseThings/HenWen" target="_blank" rel="noopener"
              style="color:var(--text2);text-decoration:none" title="HenWen on GitHub">HenWen{% if henwen_version and henwen_version != 'unknown' %} {{ henwen_version }}{% endif %}</a></span>
