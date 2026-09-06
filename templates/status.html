@@ -349,6 +349,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   padding: 16px 12px; display: flex; flex-direction: column;
   gap: 8px; overflow: hidden; min-height: 0;
+  justify-content: center;
 }
 /* Node-wide audio controls (Arm TX / Listen / Rec), sitting under the node's
    identity block. flex-wrap because every one of them is conditional — role,
@@ -357,9 +358,14 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
    the card clip it (the card is overflow:hidden). My Recordings used to live
    here too but moved up to the header's button row — it's account-scoped
    self-service, not really a control over *this* node's audio.
-   margin-top:auto is deliberately NOT used: the card is sized to its content
-   by dashFitNodeCard(), so there's no slack to push against, and pinning to
-   the bottom of a stretched card would fight that measurement. */
+   margin-top:auto is deliberately NOT used on this row: the card is sized to
+   its content by dashFitNodeCard(), so there's normally no slack to push
+   against. There's still a little left over — the row-span it lands on has
+   to be a whole number of the grid's row lines, so the fitted height rounds
+   up to the next line and leaves a few px of slack — which is why .node-card
+   itself uses justify-content:center rather than the default top alignment,
+   so that leftover splits evenly above and below the stack instead of all
+   landing under the volume slider as a lopsided gap. */
 .node-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; flex-shrink: 0; }
 /* Sits directly under the buttons and only matters while Listen is running —
    dimmed to 0.4 until then by _listenSetBtn(), same as when it lived in the
