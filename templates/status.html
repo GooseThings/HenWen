@@ -343,36 +343,55 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
    content needs rather than stretching to the bottom of the window. The
    span below is only what's painted until the first board refresh — it must
    stay in step with DASH_DEFAULT_TREE's node/map ratio (6/24), same
-   invariant as every other default here. ── */
+   invariant as every other default here.
+
+   The card itself carries no padding of its own — .card-header uses its
+   ordinary shared style (padding/border-bottom) exactly like every other
+   card's header (Connected Nodes, Favorites, Map, ...), so Node's header
+   inset matches theirs instead of compounding with a second, card-level
+   padding on top of it (a mismatch this app used to have: the header's own
+   padding was zeroed out here and the card's uniform 16px padding stood in
+   for it, making Node's top inset consistently bigger than every other
+   card's). All of the actual "pad the content, absorb the auto-fit
+   leftover" work happens one level down, in .node-body, below. ── */
 .node-card {
   grid-column: 1 / span 4; grid-row: 1 / span 6;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+  display: flex; flex-direction: column; overflow: hidden; min-height: 0;
+}
+/* Everything below the header: the identity block, audio controls, and
+   volume slider. This is the flex child that actually gets padded and
+   centered — kept separate from .node-card/.card-header specifically so
+   the header's inset can stay identical to every other card's (see the
+   comment on .node-card above) while this part still absorbs the auto-fit
+   system's leftover slack on its own.
+   margin-top:auto is deliberately NOT used on the controls row: the card is
+   sized to its content by dashFitNodeCard(), so there's normally no slack
+   to push against. There's still a little left over — the row-span it
+   lands on has to be a whole number of the grid's row lines, so the fitted
+   height rounds up to the next line and leaves some slack, and how much
+   scales with the viewport (a taller content area means a taller row, so
+   the same 1-row-line overshoot is a bigger number of px). Concentrating
+   100% of that at either end reads badly at some screen size — pinned to
+   the bottom, it reads as an oversized gap between the volume slider and
+   the Map card's own header inset below; pinned to the top, it reads as an
+   oversized gap above the identity block on a tall enough viewport.
+   justify-content:center is the option that's never *egregiously* wrong at
+   any one size: worst case is half the slack on each side, rather than all
+   of it landing in one visibly oversized spot. */
+.node-body {
   padding: 16px 12px; display: flex; flex-direction: column;
-  gap: 8px; overflow: hidden; min-height: 0;
+  gap: 8px; overflow: hidden; min-height: 0; flex: 1;
   justify-content: center;
 }
 /* Node-wide audio controls (Arm TX / Listen / Rec), sitting under the node's
    identity block. flex-wrap because every one of them is conditional — role,
    TX support, the can_record flag — so the row's width varies, and a
    narrowed column should drop a button to a second line rather than have
-   the card clip it (the card is overflow:hidden). My Recordings used to live
-   here too but moved up to the header's button row — it's account-scoped
-   self-service, not really a control over *this* node's audio.
-   margin-top:auto is deliberately NOT used on this row: the card is sized to
-   its content by dashFitNodeCard(), so there's normally no slack to push
-   against. There's still a little left over — the row-span it lands on has
-   to be a whole number of the grid's row lines, so the fitted height rounds
-   up to the next line and leaves some slack, and how much scales with the
-   viewport (a taller content area means a taller row, so the same
-   1-row-line overshoot is a bigger number of px). Concentrating 100% of
-   that at either end reads badly at some screen size — pinned to the
-   bottom (the default), it reads as an oversized gap between the volume
-   slider and the Map card's own header inset below; pinned to the top
-   (tried and reverted here), it reads as an oversized gap above "NODE" on
-   a tall enough viewport. .node-card uses justify-content:center as the
-   option that's never *egregiously* wrong at any one size: worst case is
-   half the slack on each side, rather than all of it landing in one visibly
-   oversized spot. */
+   the card clip it (.node-body is overflow:hidden). My Recordings used to
+   live here too but moved up to the header's button row — it's
+   account-scoped self-service, not really a control over *this* node's
+   audio. */
 .node-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; flex-shrink: 0; }
 /* Sits directly under the buttons and only matters while Listen is running —
    dimmed to 0.4 until then by _listenSetBtn(), same as when it lived in the
@@ -1314,30 +1333,32 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <!-- Node status: top of the left column, Map directly below it -->
     <div class="node-card dash-card" data-dash-id="node"
          ondragover="dashDragOver(event)" ondragleave="dashDragLeave(event)" ondrop="dashDrop(event,'node')">
-      <div class="card-header" style="padding:0 0 8px">
+      <div class="card-header">
         <span class="dash-header-grip" draggable="true" title="Drag to move"
               ondragstart="dashDragStart(event,'node')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
         <span class="card-title">Node</span>
         <button class="dash-hide-btn" onclick="toggleDashHide('node',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
       </div>
-      <div id="node-info">
-        <div style="color:var(--text2);font-size:.9rem">Loading&hellip;</div>
-      </div>
-      <!-- Node-wide audio controls: these act on the node itself (listen to
-           it, record it, transmit through it), not on any one connected
-           peer, which is why they live here rather than in the Connected
-           Nodes header they used to share with the disconnect buttons.
-           Every one of them can be hidden (role/permission/capability), so
-           .node-controls collapses to nothing rather than leaving an empty
-           strip — and dashFitNodeCard() re-measures whenever that changes. -->
-      <div class="node-controls" id="node-controls">
-        <button class="btn-icon" id="tx-btn" onclick="openTx()" style="display:none" title="Transmit from your microphone through this node"><svg class="icon"><use href="#icon-mic"></use></svg> Arm TX</button>
-        <button class="btn-icon" id="listen-btn" onclick="toggleListen()" title="Stream live audio from this node — expect ~1 second delay"><svg class="icon"><use href="#icon-headphones"></use></svg> Listen</button>
-        <button class="btn-icon" id="record-btn" onclick="toggleRecord()" style="display:none" title="Record this node's audio to a file"><svg class="icon" style="color:var(--red,#f85149)"><use href="#icon-circle"></use></svg> Rec</button>
-      </div>
-      <div id="listen-vol-row">
-        <span style="font-size:0.78rem;color:var(--text2);flex-shrink:0;display:flex;align-items:center;gap:4px" title="Listen volume"><svg class="icon"><use href="#icon-volume-2"></use></svg> Volume</span>
-        <input type="range" id="listen-volume" min="0" max="100" value="100" disabled title="Listen volume — separate from your device's system volume" style="flex:1">
+      <div class="node-body" id="node-body">
+        <div id="node-info">
+          <div style="color:var(--text2);font-size:.9rem">Loading&hellip;</div>
+        </div>
+        <!-- Node-wide audio controls: these act on the node itself (listen to
+             it, record it, transmit through it), not on any one connected
+             peer, which is why they live here rather than in the Connected
+             Nodes header they used to share with the disconnect buttons.
+             Every one of them can be hidden (role/permission/capability), so
+             .node-controls collapses to nothing rather than leaving an empty
+             strip — and dashFitNodeCard() re-measures whenever that changes. -->
+        <div class="node-controls" id="node-controls">
+          <button class="btn-icon" id="tx-btn" onclick="openTx()" style="display:none" title="Transmit from your microphone through this node"><svg class="icon"><use href="#icon-mic"></use></svg> Arm TX</button>
+          <button class="btn-icon" id="listen-btn" onclick="toggleListen()" title="Stream live audio from this node — expect ~1 second delay"><svg class="icon"><use href="#icon-headphones"></use></svg> Listen</button>
+          <button class="btn-icon" id="record-btn" onclick="toggleRecord()" style="display:none" title="Record this node's audio to a file"><svg class="icon" style="color:var(--red,#f85149)"><use href="#icon-circle"></use></svg> Rec</button>
+        </div>
+        <div id="listen-vol-row">
+          <span style="font-size:0.78rem;color:var(--text2);flex-shrink:0;display:flex;align-items:center;gap:4px" title="Listen volume"><svg class="icon"><use href="#icon-volume-2"></use></svg> Volume</span>
+          <input type="range" id="listen-volume" min="0" max="100" value="100" disabled title="Listen volume — separate from your device's system volume" style="flex:1">
+        </div>
       </div>
     </div>
 
@@ -7056,12 +7077,15 @@ function dashFindParentSplit(tree, target) {
    of whether flex-wrap has already wrapped the row onto a second line, so
    summing the currently-*shown* children (role/permission/capability gate
    several of them via display:none — see the .node-controls doc comment)
-   plus the row's own gaps and the card's horizontal padding/border gives the
-   true one-line floor, independent of how narrow the column currently is. */
+   plus the row's own gaps gives the one-line floor; .node-body's horizontal
+   padding and .node-card's own border add the rest, since the padding and
+   the border live on different elements now (see the .node-card/.node-body
+   split above) — independent of how narrow the column currently is. */
 function dashNodeButtonsMinPx() {
   var row = document.getElementById('node-controls');
   var card = dashCardEl('node');
-  if (!row || !card) return 0;
+  var body = document.getElementById('node-body');
+  if (!row || !card || !body) return 0;
   var total = 0, count = 0;
   for (var i = 0; i < row.children.length; i++) {
     var el = row.children[i];
@@ -7071,52 +7095,59 @@ function dashNodeButtonsMinPx() {
   }
   if (!count) return 0;
   total += (count - 1) * (parseFloat(getComputedStyle(row).gap) || 0);
-  var cs = getComputedStyle(card);
-  total += (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0)
-         + (parseFloat(cs.borderLeftWidth) || 0) + (parseFloat(cs.borderRightWidth) || 0);
+  var bodyCs = getComputedStyle(body), cardCs = getComputedStyle(card);
+  total += (parseFloat(bodyCs.paddingLeft) || 0) + (parseFloat(bodyCs.paddingRight) || 0)
+         + (parseFloat(cardCs.borderLeftWidth) || 0) + (parseFloat(cardCs.borderRightWidth) || 0);
   return total;
 }
 
-/* Total pixel height the Node card's own content needs — the full span from
-   the topmost child's top edge to the lowest child's bottom edge, plus the
-   card's own padding/border on both ends. Shared by dashFitNodeCard()'s
-   exact-fit (default layout only) and dashUpdateNodeMinHeight()'s floor
-   (every layout) below, so there's exactly one place that knows how to
-   measure this.
+/* Total pixel height the Node card's own content needs — the header's own
+   (border-box) height, plus the full span from .node-body's topmost child's
+   top edge to its lowest child's bottom edge, plus .node-body's own
+   padding, plus .node-card's own top/bottom border. Shared by
+   dashFitNodeCard()'s exact-fit (default layout only) and
+   dashUpdateNodeMinHeight()'s floor (every layout) below, so there's
+   exactly one place that knows how to measure this.
 
    Content height, not the card's own height: the card is stretched to fill
    its grid area, so offsetHeight/scrollHeight would just report back the
-   space we're trying to reclaim. Measuring the topmost/lowest *rendered*
-   child's edges (not simply the first/last) matters twice over: a
-   display:none child reports an all-zero rect, and the controls below
+   space we're trying to reclaim. Measuring .node-body's topmost/lowest
+   *rendered* child's edges (not simply the first/last) matters twice over:
+   a display:none child reports an all-zero rect, and the controls below
    #node-info can each be hidden by role/permission — the volume row is even
    the last child while Listen is unavailable to that viewer, so both ends
    need a real min()/max() rather than assuming DOM order survives.
 
-   Deliberately independent of .node-card's own justify-content: taking the
-   span between the extreme child edges, rather than anchoring off the
-   card's own top (as if content were always top-aligned), is what keeps
-   this correct under flex-end too — with content bottom-anchored, a card
-   shorter than its content overflows *upward* past the card's own top edge,
-   and measuring from the card's top would silently undercount everything
-   above it (exactly the bug this replaced: the card measured itself too
-   short, which pushed the shortfall even further above the visible box on
-   the next pass instead of correcting it). */
+   Deliberately independent of .node-body's own justify-content: taking the
+   span between the extreme child edges, rather than anchoring off
+   .node-body's own top (as if content were always top-aligned), is what
+   keeps this correct regardless of which alignment .node-body uses — with
+   content bottom-anchored, a body shorter than its content overflows
+   *upward* past its own top edge, and measuring from that top edge would
+   silently undercount everything above it (a bug this shape once had: the
+   card measured itself too short, which pushed the shortfall even further
+   out of frame on the next pass instead of correcting it). The header's own
+   height is measured separately (via offsetHeight, a fixed quantity — the
+   header never stretches or absorbs slack) since it's a *sibling* of
+   .node-body now, not one of the children this loop walks. */
 function dashNodeContentMinPx() {
   var card = dashCardEl('node');
-  if (!card) return 0;
+  var header = card && card.querySelector('.card-header');
+  var body = document.getElementById('node-body');
+  if (!card || !header || !body) return 0;
   var contentTop = null, contentBottom = null;
-  for (var i = 0; i < card.children.length; i++) {
-    var r = card.children[i].getBoundingClientRect();
+  for (var i = 0; i < body.children.length; i++) {
+    var r = body.children[i].getBoundingClientRect();
     if (!r.width && !r.height) continue;   /* display:none */
     if (contentTop === null || r.top < contentTop) contentTop = r.top;
     if (contentBottom === null || r.bottom > contentBottom) contentBottom = r.bottom;
   }
   if (contentTop === null) return 0;
-  var cs = getComputedStyle(card);
-  return (contentBottom - contentTop)
-       + (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.borderTopWidth) || 0)
-       + (parseFloat(cs.paddingBottom) || 0) + (parseFloat(cs.borderBottomWidth) || 0);
+  var bodyCs = getComputedStyle(body), cardCs = getComputedStyle(card);
+  return header.offsetHeight
+       + (contentBottom - contentTop)
+       + (parseFloat(bodyCs.paddingTop) || 0) + (parseFloat(bodyCs.paddingBottom) || 0)
+       + (parseFloat(cardCs.borderTopWidth) || 0) + (parseFloat(cardCs.borderBottomWidth) || 0);
 }
 
 /* Re-measures the Node card's floors — button-row width and full-content
