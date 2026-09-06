@@ -170,12 +170,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
   max-height: 44px; max-width: 220px; object-fit: contain; pointer-events: none;
 }
-/* Clock frame lives in .bars-row now (see #clock-bar), styled like the
-   weather/net frames next to it — .clock-time deliberately sets no
-   font-size of its own so it inherits .weather-bar's, keeping it visually
-   matched to the weather ticker text. */
-.clock-time { font-variant-numeric: tabular-nums; font-weight: 600; }
-
 .btn-icon { background: var(--bg3); border: 1px solid var(--border); color: var(--text2);
   border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 0.82rem;
   text-decoration: none; display: inline-flex; align-items: center; gap: 4px;
@@ -184,7 +178,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
 /* TX/Listen/Rec cycle through longer active-state labels (e.g. "TX
    arming…", "Reconnecting...", "Rec Stop (12:34)") than their resting
-   "TX"/"Listen"/"Rec" text. Without nowrap above, a button narrower than
+   "Arm TX"/"Listen"/"Rec" text. Without nowrap above, a button narrower than
    its longest label would wrap that text onto a second line internally,
    growing just that one button's height mid-interaction — jarring since
    its neighbors don't move. nowrap fixes the internal wrap; the extra
@@ -307,12 +301,20 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .nws-alert-item.nws-sev-advisory strong { color: var(--warn); }
 @keyframes nws-scroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
 
-/* ── Content area: Node info | Connected/Map | Favorites/Chat | Latest Activity ──
+/* ── Content area: Node/Map | Connected Nodes | Favorites ──
    A 12-col x 24-row grid built from `fr` tracks, not fixed px, so it always
    fills exactly the space .content-area has (same "fits the viewport, never
    scrolls" behavior the old fixed 4-column grid had) regardless of screen
-   size. The cards' default positions below reproduce the old layout's
-   proportions in that coordinate space. Once the user drags/resizes a card
+   size. The cards' default positions below must stay in sync with
+   DASH_DEFAULT_TREE + DASH_DEFAULT_HIDDEN in the JS: they're what a
+   first-time visitor sees before anything is dragged (see dashApply()'s
+   `if (_dashTree)` guard), so a *visible* card is written at its rendered
+   default — Global Node Activity, Meshtastic and Chat are hidden out of the
+   box, so Connected Nodes and Favorites are given the full spans that
+   collapsed space frees up, exactly as dashWalk() would compute them. The
+   hidden three keep their in-tree coordinates instead (they only ever apply
+   if unhidden, and dashUnhide() hands the job to the tree first anyway).
+   Once the user drags/resizes a card
    (see the Dashboard grid section further down), JS takes over with inline
    grid-column/grid-row on that card — inline style always wins over these
    stylesheet defaults, and on mobile .content-area switches to display:flex
@@ -322,15 +324,56 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   gap: 10px; flex: 1; min-height: 0; position: relative;
 }
 
-.connected-card { grid-column: 4 / span 6; grid-row: 1 / span 13; }
+.connected-card { grid-column: 5 / span 5; grid-row: 1 / span 24; }
 
-/* ── Node status card: left column, full height ── */
+/* ── Node status card: top of the left column, with the map below it.
+   The card's own frame always fills its grid cell exactly (same as every
+   other card here) — it's the *cell itself* that's kept fit to the card's
+   content, on both axes, rather than the card being sized independently of
+   it. Column width: dashFitNodeCard() shrinks the node/map column to the
+   button row's width (handing the reclaimed columns to the rest of the
+   dashboard), floored so a divider drag can never pull it in narrower than
+   that row needs (see dashMinLinesForSubtree()/dashUpdateNodeMinWidth() in
+   the JS). Row height: dashFitNodeCard() shrinks the row split to the card's
+   full measured content height, giving the leftover rows to the Map below —
+   and if the Map is hidden (or Node ends up with no sibling under it at
+   all), dashWalk()'s fold takes the card's own non-greedy floor instead of
+   the usual "hidden side's space goes entirely to its sibling" rule (see
+   DASH_NON_GREEDY/dashSubtreeGreedy()), so Node still only claims what its
+   content needs rather than stretching to the bottom of the window. The
+   span below is only what's painted until the first board refresh — it must
+   stay in step with DASH_DEFAULT_TREE's node/map ratio (6/24), same
+   invariant as every other default here. ── */
 .node-card {
-  grid-column: 1 / span 3; grid-row: 1 / span 24;
+  grid-column: 1 / span 4; grid-row: 1 / span 6;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   padding: 16px 12px; display: flex; flex-direction: column;
   gap: 8px; overflow: hidden; min-height: 0;
+  justify-content: center;
 }
+/* Node-wide audio controls (Arm TX / Listen / Rec), sitting under the node's
+   identity block. flex-wrap because every one of them is conditional — role,
+   TX support, the can_record flag — so the row's width varies, and a
+   narrowed column should drop a button to a second line rather than have
+   the card clip it (the card is overflow:hidden). My Recordings used to live
+   here too but moved up to the header's button row — it's account-scoped
+   self-service, not really a control over *this* node's audio.
+   margin-top:auto is deliberately NOT used on this row: the card is sized to
+   its content by dashFitNodeCard(), so there's normally no slack to push
+   against. There's still a little left over — the row-span it lands on has
+   to be a whole number of the grid's row lines, so the fitted height rounds
+   up to the next line and leaves a few px of slack — which is why .node-card
+   itself uses justify-content:center rather than the default top alignment,
+   so that leftover splits evenly above and below the stack instead of all
+   landing under the volume slider as a lopsided gap. */
+.node-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; flex-shrink: 0; }
+/* Sits directly under the buttons and only matters while Listen is running —
+   dimmed to 0.4 until then by _listenSetBtn(), same as when it lived in the
+   Connected Nodes header. No border/padding of its own here: in that old
+   home it was a full-width strip separating the header from the node list,
+   whereas here it's just the last row of this card's own stack. */
+#listen-vol-row { display: flex; align-items: center; gap: 8px; opacity: 0.4;
+  flex-shrink: 0; transition: opacity .15s; }
 /* Info-left / status-right grid, used on every width (see the mobile media
    query below for the phone-tuned size overrides layered on top of this same
    structure). Was originally mobile-only: the desktop card used a single
@@ -559,11 +602,14 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .nr-tl-bar.on { height: 100%; background: var(--danger); box-shadow: 0 0 3px rgba(224,68,68,.7); }
 .nr-tl-bar.empty { background: transparent; }
 
-/* ── Activity panel: sits under Connected Nodes, right of the map — Meshtastic
-   (below) splits this column's bottom half the same way Chat splits off
-   under Favorites, so span 11 became span 7 here to make room. ── */
+/* ── Global Node Activity panel: sits under Connected Nodes in the middle
+   column, with Meshtastic splitting off below it. Hidden by default
+   (DASH_DEFAULT_HIDDEN) like Meshtastic and Chat, so these coordinates are
+   its in-tree placement rather than a rendered default — and since
+   dashUnhide() calls dashEnsureCustom() first, the tree's inline placement
+   is what actually applies once it's turned back on. ── */
 .activity-card {
-  grid-column: 7 / span 3; grid-row: 14 / span 7;
+  grid-column: 5 / span 5; grid-row: 14 / span 7;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
@@ -593,9 +639,12 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .act-badge.local  { background: rgba(63,185,80,.15); color: var(--green); }
 .act-badge.global { background: rgba(88,166,255,.12); color: var(--accent); }
 
-/* ── Meshtastic panel: split off under Activity, same column ── */
+/* ── Meshtastic panel: split off under Activity, same column. Hidden by
+   default (DASH_DEFAULT_HIDDEN) — these coordinates only ever apply if it's
+   unhidden, and dashUnhide() calls dashEnsureCustom() first, so in practice
+   the tree's inline placement wins. Kept in sync with the tree anyway. ── */
 .meshtastic-card {
-  grid-column: 7 / span 3; grid-row: 21 / span 4;
+  grid-column: 5 / span 5; grid-row: 21 / span 4;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
@@ -612,7 +661,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .mesh-text { font-size: 0.78rem; color: var(--text); word-wrap: break-word; margin-top: 1px; }
 
 /* ── Map ── */
-.map-card { grid-column: 4 / span 3; grid-row: 14 / span 11; min-height: 0;
+.map-card { grid-column: 1 / span 4; grid-row: 7 / span 18; min-height: 0;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; }
 #map { flex: 1; background: #0d1117; }
@@ -648,10 +697,12 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .map-ctl-subrow { margin-left: 22px; }
 .popup-node-link { color: var(--accent); font-weight: 600; text-decoration: none; }
 
-/* ── Favorites sidebar (top 2/3 of the right column; Chat takes the bottom
-   third below it — see .chat-card and DASH_DEFAULT_TREE) ── */
+/* ── Favorites sidebar: the whole right column by default. Chat still splits
+   off its bottom third in the tree (see .chat-card and DASH_DEFAULT_TREE)
+   but is hidden out of the box, so the default span here is the full 24
+   rows that collapse frees up. ── */
 .favorites-card {
-  grid-column: 10 / span 3; grid-row: 1 / span 16;
+  grid-column: 10 / span 3; grid-row: 1 / span 24;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
@@ -792,9 +843,9 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 #listen-volume { width: 70px; accent-color: var(--accent); flex-shrink: 0; }
 #listen-volume:disabled { cursor: not-allowed; }
 
-/* Transmit / Monitor mode badge in node rows */
+/* Monitor-only mode badge in node rows — TX is the default, so it's the only
+   mode worth flagging (see refreshBoard()'s modeBadge). */
 .mode-badge { font-size: 0.65rem; padding: 1px 6px; border-radius: 3px; font-weight: 600; white-space: nowrap; }
-.mode-badge.tx  { background: rgba(63,185,80,.1);  color: var(--green); }
 .mode-badge.mon { background: rgba(88,166,255,.1); color: var(--accent); }
 
 /* toast notification */
@@ -855,12 +906,12 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   .header-menu-items #kiosk-user-bar { flex-direction: column; align-items: stretch; width: 100%; gap: 6px; }
   .header-menu-label { display: inline; margin-left: 10px; }
 
-  /* Time/weather bars hidden entirely on mobile (issue #35) — not just
-     collapsed, since there's no header affordance to tap here the way
-     cards have. #net-bar shares the .weather-bar class but is untouched:
-     it's its own independent net-reminder toggle, already hidden unless a
-     net is actually due today. */
-  #clock-bar, #weather-bar { display: none !important; }
+  /* Weather bar hidden entirely on mobile (issue #35) — not just collapsed,
+     since there's no header affordance to tap here the way cards have.
+     #net-bar shares the .weather-bar class but is untouched: it's its own
+     independent net-reminder toggle, already hidden unless a net is
+     actually due today. */
+  #weather-bar { display: none !important; }
   .weather-bar { min-height: 0; overflow: visible; }
   /* The "|" separator only reads right on a single ticker line, which never
      happens at this width — hide it and force .weather-items onto its own
@@ -896,7 +947,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
   /* Fewer visible cards by default (issue #35): Node + Connected Nodes are
      what a phone visitor checks first (see the ordering comment above) and
-     always stay expanded. Map/Latest Activity/Meshtastic/Chat are hidden
+     always stay expanded. Map/Global Node Activity/Meshtastic/Chat are hidden
      outright on mobile (not just collapsed — there's nothing to tap to get
      them back; a phone visitor who wants those checks the desktop site).
      Favorites is the one exception left collapsible rather than hidden:
@@ -1192,6 +1243,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
              connect path); the net-schedule calendar is always visible. -->
         <button class="btn-icon" id="node-search-btn" onclick="openSearchModal()" title="Search the AllStar and EchoLink directories for nodes to connect to" style="display:none"><svg class="icon"><use href="#icon-search"></use></svg><span class="header-menu-label">Search</span></button>
         <button class="btn-icon" id="net-cal-btn" onclick="openNetModal()" title="Net Schedule — scheduled net reminders"><svg class="icon"><use href="#icon-calendar-days"></use></svg><span class="header-menu-label">Net Schedule</span></button>
+        <button class="btn-icon" id="myrec-btn" onclick="openMyRecordingsModal()" style="display:none" title="View, rename, download, or delete your saved recordings"><svg class="icon"><use href="#icon-folder-open"></use></svg><span class="header-menu-label">My Recordings</span></button>
         <div id="kiosk-user-bar" style="display:none;align-items:center;gap:6px;font-size:0.75rem;flex-shrink:0">
           <button class="btn-icon" onclick="openAccountModal()" title="Change your password or set up two-factor authentication"><svg class="icon"><use href="#icon-user"></use></svg><span class="header-menu-label">Account</span></button>
           <button class="btn-icon" onclick="kioskLogout()" title="Logout"><svg class="icon"><use href="#icon-door-open"></use></svg><span class="header-menu-label">Logout</span></button>
@@ -1216,12 +1268,9 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     </div>
   </header>
 
-  <!-- Clock + weather bar + net-schedule reminder bar: separate frames so a
+  <!-- Weather bar + net-schedule reminder bar: separate frames so a
        due/soon net only colors its own box, not the weather ticker too. -->
   <div class="bars-row">
-    <div class="weather-bar" id="clock-bar">
-      <div class="clock-time" id="clock">--:--:--</div>
-    </div>
     <div class="weather-bar" id="weather-bar">
       <div id="weather-content">
         <span class="weather-loading">Loading weather&hellip;</span>
@@ -1255,7 +1304,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <!-- Shows which pane a dragged card will dock into (edge = split, center = swap). -->
     <div id="dash-drop-indicator" class="dash-drop-indicator" style="display:none"></div>
 
-    <!-- Node status: full-height column matching Latest Activity / Favorites -->
+    <!-- Node status: top of the left column, Map directly below it -->
     <div class="node-card dash-card" data-dash-id="node"
          ondragover="dashDragOver(event)" ondragleave="dashDragLeave(event)" ondrop="dashDrop(event,'node')">
       <div class="card-header" style="padding:0 0 8px">
@@ -1267,6 +1316,22 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       <div id="node-info">
         <div style="color:var(--text2);font-size:.9rem">Loading&hellip;</div>
       </div>
+      <!-- Node-wide audio controls: these act on the node itself (listen to
+           it, record it, transmit through it), not on any one connected
+           peer, which is why they live here rather than in the Connected
+           Nodes header they used to share with the disconnect buttons.
+           Every one of them can be hidden (role/permission/capability), so
+           .node-controls collapses to nothing rather than leaving an empty
+           strip — and dashFitNodeCard() re-measures whenever that changes. -->
+      <div class="node-controls" id="node-controls">
+        <button class="btn-icon" id="tx-btn" onclick="openTx()" style="display:none" title="Transmit from your microphone through this node"><svg class="icon"><use href="#icon-mic"></use></svg> Arm TX</button>
+        <button class="btn-icon" id="listen-btn" onclick="toggleListen()" title="Stream live audio from this node — expect ~1 second delay"><svg class="icon"><use href="#icon-headphones"></use></svg> Listen</button>
+        <button class="btn-icon" id="record-btn" onclick="toggleRecord()" style="display:none" title="Record this node's audio to a file"><svg class="icon" style="color:var(--red,#f85149)"><use href="#icon-circle"></use></svg> Rec</button>
+      </div>
+      <div id="listen-vol-row">
+        <span style="font-size:0.78rem;color:var(--text2);flex-shrink:0;display:flex;align-items:center;gap:4px" title="Listen volume"><svg class="icon"><use href="#icon-volume-2"></use></svg> Volume</span>
+        <input type="range" id="listen-volume" min="0" max="100" value="100" disabled title="Listen volume — separate from your device's system volume" style="flex:1">
+      </div>
     </div>
 
     <!-- Connected nodes -->
@@ -1276,18 +1341,13 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <span class="dash-header-grip" draggable="true" title="Drag to move"
               ondragstart="dashDragStart(event,'connected')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
         <span class="card-title">Connected Nodes</span>
-        <span style="margin-left:auto;display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:6px;row-gap:6px">
-          <button class="btn-icon" id="tx-btn" onclick="openTx()" style="display:none" title="Transmit from your microphone through this node"><svg class="icon"><use href="#icon-mic"></use></svg> TX</button>
-          <button class="btn-icon" id="listen-btn" onclick="toggleListen()" title="Stream live audio from this node — expect ~1 second delay"><svg class="icon"><use href="#icon-headphones"></use></svg> Listen</button>
-          <button class="btn-icon" id="record-btn" onclick="toggleRecord()" style="display:none" title="Record this node's audio to a file"><svg class="icon" style="color:var(--red,#f85149)"><use href="#icon-circle"></use></svg> Rec</button>
-          <button class="btn-icon" id="myrec-btn" onclick="openMyRecordingsModal()" style="display:none" title="View, rename, download, or delete your saved recordings"><svg class="icon"><use href="#icon-folder-open"></use></svg></button>
+        <span style="margin-left:auto;display:flex;align-items:center;gap:6px">
           <button class="dash-hide-btn" onclick="toggleDashHide('connected',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
         </span>
       </div>
-      <div id="listen-vol-row" style="display:flex;align-items:center;gap:8px;padding:7px 18px;border-bottom:1px solid var(--border);opacity:0.4">
-        <span style="font-size:0.78rem;color:var(--text2);flex-shrink:0;display:flex;align-items:center;gap:4px" title="Listen volume"><svg class="icon"><use href="#icon-volume-2"></use></svg> Volume</span>
-        <input type="range" id="listen-volume" min="0" max="100" value="100" disabled title="Listen volume — separate from your device's system volume" style="flex:1">
-      </div>
+      <!-- Stays here, unlike the Arm TX button that raises it (now in the
+           Node card): this is the PTT control itself, and it wants the width
+           for its mic meter/gain row plus room for #tx-status's messages. -->
       <div id="tx-bar" style="display:none">
         <button id="tx-ptt" disabled>
           <div><svg class="icon"><use href="#icon-mic"></use></svg> PTT &mdash; hold to transmit&ensp;<span class="tx-ptt-space-hint" style="font-size:0.7rem;font-weight:400">(or hold Space &middot; keys in ~&frac12;s)</span></div>
@@ -1391,13 +1451,13 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       <div id="map"></div>
     </div>
 
-    <!-- Latest Activity: under Connected Nodes, right of the map, matching the map's height -->
+    <!-- Global Node Activity: under Connected Nodes in the middle column -->
     <div class="activity-card dash-card" data-dash-id="activity"
          ondragover="dashDragOver(event)" ondragleave="dashDragLeave(event)" ondrop="dashDrop(event,'activity')">
       <div class="card-header">
         <span class="dash-header-grip" draggable="true" title="Drag to move"
               ondragstart="dashDragStart(event,'activity')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
-        <span class="card-title">Latest Activity</span>
+        <span class="card-title">Global Node Activity</span>
         <span class="card-count" id="act-count"></span>
         <button class="dash-hide-btn" style="margin-left:auto" onclick="toggleDashHide('activity',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
       </div>
@@ -1475,7 +1535,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <span id="f-active-users-wrap" style="position:relative;display:flex;align-items:center;gap:8px">
       <span id="f-active-users-toggle">Logged in: <strong id="f-active-users">—</strong></span>
       <span id="kiosk-username" style="display:none;color:var(--text2)"></span>
-      <div id="f-active-users-panel" style="display:none;position:absolute;bottom:100%;left:0;margin-bottom:6px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;min-width:170px;max-width:260px;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:50;font-size:0.78rem;line-height:1.6"></div>
+      <div id="f-active-users-panel" style="display:none;position:absolute;bottom:100%;left:0;margin-bottom:6px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;min-width:170px;max-width:260px;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:2000;font-size:0.78rem;line-height:1.6"></div>
     </span>
     <span><a href="https://github.com/GooseThings/HenWen" target="_blank" rel="noopener"
              style="color:var(--text2);text-decoration:none" title="HenWen on GitHub">HenWen{% if henwen_version and henwen_version != 'unknown' %} {{ henwen_version }}{% endif %}</a></span>
@@ -1795,16 +1855,15 @@ function relTime(ts) {
 var _clockFormat = '24';
 var _clockTZ     = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 // Declared here (not down with the rest of the net-schedule code below) because
-// tickClock() calls updateWeatherNetBadge() on its very first, synchronous
+// tickSecond() calls updateWeatherNetBadge() on its very first, synchronous
 // invocation — before script execution would otherwise reach that later var
 // statement — and a var's assignment (unlike its hoisted declaration) only
 // takes effect when execution actually reaches that line.
 var _nets = [];
 
-/* Shared by the header clock (nowStr(), always "now") and the chat panel
-   (an arbitrary message timestamp) so both honor the same admin-configured
-   Kiosk Settings clock format/timezone instead of two independent notions
-   of "local time". */
+/* Used by the chat panel to render an arbitrary message timestamp honoring
+   the same admin-configured Kiosk Settings clock format/timezone as the rest
+   of the board, instead of a second, independent notion of "local time". */
 function formatClockTime(date) {
   try {
     var parts = new Intl.DateTimeFormat('en-US', {
@@ -1826,16 +1885,15 @@ function formatClockTime(date) {
     return String(date.getHours()).padStart(2,'0')+':'+String(date.getMinutes()).padStart(2,'0')+':'+String(date.getSeconds()).padStart(2,'0');
   }
 }
-function nowStr() { return formatClockTime(new Date()); }
-
-/* ── Clock ── */
-function tickClock() {
-  document.getElementById('clock').textContent = nowStr();
+/* Once-a-second heartbeat — no visible clock left to tick (the board doesn't
+   show one), but the weather/net-schedule badge and an open net-schedule
+   modal both still need a live "now" to compare against. */
+function tickSecond() {
   updateWeatherNetBadge();
   var netModal = document.getElementById('net-modal-overlay');
   if (netModal && netModal.style.display !== 'none') renderNetList();
 }
-setInterval(tickClock, 1000); tickClock();
+setInterval(tickSecond, 1000); tickSecond();
 
 /* Load clock format + timezone + club logo from kiosk settings */
 fetch('/api/kiosk/settings').then(function(r){ return r.ok ? r.json() : null; }).then(function(d){
@@ -1896,7 +1954,7 @@ var MAP_WORLD_OFFSETS = [-360, 0, 360];
 
 /* Maps 'asl:<node>' / 'aprs:<callsign>' -> the single marker (world-copy
    offset 0, the true-longitude one) representing that entry, so clicking a
-   row in the "Latest Activity" list can fly the map to it and reopen its
+   row in the "Global Node Activity" list can fly the map to it and reopen its
    popup — see focusActivityPin(). Partitioned by key prefix rather than two
    separate objects since updateMap() and clearAprsMarkers() rebuild their
    own halves independently and on different cadences. */
@@ -1935,7 +1993,7 @@ var _mapDirty           = false;  /* data changed while a popup was open */
       phone; Node and Connected Nodes (what a visitor checks first) always
       stay expanded. Its open/closed state persists per-browser in
       localStorage, so it stays open across reloads once opened. Map,
-      Latest Activity, Meshtastic, and Chat are hidden outright on mobile
+      Global Node Activity, Meshtastic, and Chat are hidden outright on mobile
       instead (see the CSS, not collapsible at all) — a phone visitor who
       wants those uses the desktop site. */
 var MOBILE_BREAKPOINT_QUERY  = '(max-width: 860px)';
@@ -2440,7 +2498,7 @@ function clearAprsMarkers() {
 }
 
 function renderAprsMarkers(stations) {
-  /* Feeds both the map layer (below) and the "Latest Activity" list
+  /* Feeds both the map layer (below) and the "Global Node Activity" list
      (_lastAprsPoints, merged in by renderActivityList()) from the same
      fetch — see the note at the top of the activity-feed section. */
   var now = Date.now() / 1000;
@@ -2902,7 +2960,7 @@ function onIssPassCountChange(v) {
   issRecomputePasses();
 }
 
-/* Clicking the background of a "Latest Activity" row flies the map to that
+/* Clicking the background of a "Global Node Activity" row flies the map to that
    entry's pin and reopens its popup — key is 'asl:<node>' or
    'aprs:<callsign>', looked up in _actMarkerIndex (populated by updateMap()'s
    activity-pins loop and renderAprsMarkers()). Silently does nothing if the
@@ -3819,9 +3877,11 @@ async function refreshBoard() {
         var isConn = (c.connect_state || 'ESTABLISHED') === 'ESTABLISHED';
         if (typeof c.connect_elapsed_sec === 'number') meta.push('Connected: <strong>' + _histDuration(c.connect_elapsed_sec) + '</strong>');
         meta.push('Keyups: <strong>' + (c.keyups || 0) + '</strong>');
+        /* TX is the default mode for a connected node, so it doesn't need a
+           badge — only the exceptional case (monitor-only, no transmit) is
+           worth flagging. */
         var modeBadge = '';
-        if (c.mode === 'T') modeBadge = '<span class="mode-badge tx">TX enabled</span>';
-        else if (c.mode === 'R') modeBadge = '<span class="mode-badge mon">Monitor Only</span>';
+        if (c.mode === 'R') modeBadge = '<span class="mode-badge mon">Monitor Only</span>';
         var idleBadge = '';
         if (c.permanent === false && c.no_timeout !== true && typeof c.idle_elapsed === 'number') {
           var mins = Math.floor(c.idle_elapsed / 60);
@@ -3896,6 +3956,12 @@ async function refreshBoard() {
 
     /* Keep favorites sidebar in sync with connected state */
     renderFavorites();
+
+    /* Last, once every DOM write above has landed: the Node card's height is
+       measured from what this refresh just wrote into it (callsign/location
+       wrapping, the ONLINE/OFFLINE badge, the LOCKED row), and doing it here
+       costs one layout flush instead of one per intervening mutation. */
+    dashFitNodeCard();
   } catch(e) { markServerUnreachable(); }
 }
 
@@ -3991,7 +4057,7 @@ function updateActiveUsersToggle() {
 }
 
 /* ── Activity feed + map ──
-   Two independent data sources feed the "Latest Activity" list: ASL keyed/
+   Two independent data sources feed the "Global Node Activity" list: ASL keyed/
    global activity (_lastActivityPoints, refreshed by refreshActivity() on
    its normal short cadence) and APRS stations (_lastAprsPoints, refreshed
    by fetchAprsStations()/renderAprsMarkers() on the much slower APRS_POLL_MS
@@ -4246,10 +4312,10 @@ function appendChatMessages(msgs) {
        than relTime()'s "2m ago", which was only ever computed once at
        render time and never updated afterward, so it silently went stale
        (a message would say "just now" forever once rendered). An absolute
-       clock reading has no such staleness problem. Uses the same
-       formatClockTime()/_clockTZ/_clockFormat the header clock uses, so
-       chat times track whatever format/timezone the admin has configured
-       for this board rather than a second, independent notion of "local". */
+       clock reading has no such staleness problem. Uses formatClockTime()/
+       _clockTZ/_clockFormat so chat times track whatever format/timezone the
+       admin has configured for this board rather than a second, independent
+       notion of "local". */
     var ts = document.createElement('span');
     ts.className = 'chat-ts';
     ts.textContent = '[' + formatClockTime(new Date(m.ts * 1000)) + ']';
@@ -5164,11 +5230,15 @@ async function _txUpdateBtn() {
   /* Any logged-in role may TX — account creation itself is already gated to
      admin/superuser/owner, so any account that exists has been vetted. */
   var eligible = !!window._kioskRole && window.isSecureContext && navigator.mediaDevices && window.WebSocket;
-  if (!eligible) { btn.style.display = 'none'; return; }
+  if (!eligible) { btn.style.display = 'none'; dashFitNodeCard(); return; }
   try {
     var r = await apiFetch('/api/tx/config?probe=1');
     btn.style.display = r.ok ? '' : 'none';
   } catch (e) { btn.style.display = 'none'; }
+  /* This button lives in the Node card, which is sized to its contents —
+     showing/hiding it changes how many grid rows that card needs, and a
+     login/logout shouldn't leave the card a poll cycle out of step. */
+  dashFitNodeCard();
 }
 
 /* ── Recording ──────────────────────────────────────────────────────────
@@ -5192,6 +5262,7 @@ async function _recordUpdateBtn() {
   if (!window._kioskRole) {
     btn.style.display = 'none';
     if (mrBtn) mrBtn.style.display = 'none';
+    dashFitNodeCard();
     return;
   }
   try {
@@ -5204,6 +5275,7 @@ async function _recordUpdateBtn() {
     btn.style.display = 'none';
     if (mrBtn) mrBtn.style.display = 'none';
   }
+  dashFitNodeCard();   /* same reason as _txUpdateBtn's — see there */
 }
 
 function _recordSetBtn(html, color, disabled) {
@@ -5708,7 +5780,7 @@ async function armTx() {
     var cfg = await r.json();
     if (!r.ok || !cfg.enabled) {
       _txStatus(cfg.error || 'Browser transmit is not configured on this server', 'var(--red)');
-      _txSetBtn('<svg class="icon"><use href="#icon-mic"></use></svg> TX', '');
+      _txSetBtn('<svg class="icon"><use href="#icon-mic"></use></svg> Arm TX', '');
       _tx.armed = false;
       return;
     }
@@ -5836,7 +5908,7 @@ function _txTeardown() {
   if (_tx.session) { try { _tx.session.terminate(); } catch (e) {} _tx.session = null; }
   if (_tx.ua)      { try { _tx.ua.stop(); }           catch (e) {} _tx.ua = null; }
   _txReleaseMic();
-  _txSetBtn('<svg class="icon"><use href="#icon-mic"></use></svg> TX', '');
+  _txSetBtn('<svg class="icon"><use href="#icon-mic"></use></svg> Arm TX', '');
 }
 
 function disarmTx() {
@@ -6532,6 +6604,10 @@ window.addEventListener('resize', function() {
   clearTimeout(_mapResizeTimer);
   _mapResizeTimer = setTimeout(function() {
     if (_map) _map.invalidateSize();
+    /* Row heights are `fr` tracks, so a taller/shorter window changes how
+       many rows the Node card's (unchanged) text needs — re-fit before
+       re-applying, not just on the next board refresh. */
+    dashFitNodeCard();
     dashApply();   /* re-apply a saved custom layout if the window crossed the mobile breakpoint live */
   }, 200);
 });
@@ -6591,33 +6667,55 @@ window.addEventListener('resize', function() {
 var DASH_COLS = 12, DASH_ROWS = 24;
 var DASH_GAP = 10;             /* must match .content-area's CSS `gap` */
 var DASH_MIN_CS = 2, DASH_MIN_RS = 3;
+/* Leaves that should never grow beyond their own measured minimum (see
+   dashMinLinesForSubtree()) when a sibling folds hidden space onto them —
+   every other card on this dashboard is "greedy" (Map, Favorites, etc. all
+   want whatever extra room they can get), but Node's whole point is to stay
+   exactly as big as its own content, even when the Map beneath it is hidden
+   and would otherwise leave it the entire column to itself. See
+   dashSubtreeGreedy() and dashWalkFolded(). */
+var DASH_NON_GREEDY = {node: true};
 var DASH_CARD_IDS = ['node', 'connected', 'map', 'activity', 'favorites', 'chat', 'meshtastic'];
 var DASH_CARD_TITLES = {node: 'Node', connected: 'Connected Nodes',
-  map: 'Map', activity: 'Latest Activity', favorites: 'Favorites', chat: 'Chat',
+  map: 'Map', activity: 'Global Node Activity', favorites: 'Favorites', chat: 'Chat',
   meshtastic: 'Meshtastic'};
-var DASH_STORE_KEY = 'henwen-dash-layout-v7';
+/* Bumped whenever the default layout itself changes, not just when the card
+   set does: dashLoadSaved() only rejects a saved tree that's structurally
+   stale (a missing/unknown id), so an existing visitor's localStorage would
+   otherwise pin them to the previous default forever. */
+var DASH_STORE_KEY = 'henwen-dash-layout-v9';
 
-/* Ratios reproduce the original fixed 4-column layout's proportions — see
-   dashWalk()'s doc comment for how a {dir,ratio} node maps to grid lines.
-   Chat is split off underneath Favorites (2/3 favorites, 1/3 chat) — both
-   are the "personal, opt-in" panels, as opposed to the four core status
-   panels above, so grouping them keeps the core view's proportions from
-   being squeezed by a 7th competitor. Meshtastic is split off underneath
-   Activity the same way (7/11 activity, 4/11 meshtastic) — both are
-   scrolling feeds of small discrete entries, so pairing them keeps that
-   same rhythm going. */
+/* Three visible columns by default: Node with the Map under it on the left,
+   Connected Nodes (alone, filling the column) in the middle, Favorites down
+   the right — see dashWalk()'s doc comment for how a {dir,ratio} node maps
+   to grid lines. The left column gets 4 of the 12 columns rather than the 3
+   the Node card used to have to itself, since the map underneath it is the
+   one card that actually wants width.
+
+   The tree below still describes all seven cards in their full arrangement —
+   Global Node Activity under Connected Nodes (13/24 vs 11/24), Meshtastic
+   under that (7/11 vs 4/11), Chat under Favorites (2/3 vs 1/3). Those three
+   are just hidden by default (see DASH_DEFAULT_HIDDEN), which collapses
+   their space into the sibling above until someone turns them back on from
+   the hidden-panels menu. Keeping them as leaves in their old spots means
+   unhiding restores exactly these proportions with no tree surgery. */
 var DASH_DEFAULT_TREE = {
-  type: 'split', dir: 'col', ratio: 0.25,
-  a: {type: 'leaf', id: 'node'},
-  b: {type: 'split', dir: 'col', ratio: 2 / 3,
+  type: 'split', dir: 'col', ratio: 1 / 3,
+  /* The node/map ratio is a starting value only — dashFitNodeCard() replaces
+     it with a measurement of the Node card's actual text height on the first
+     board refresh (and rewrites it on resize). Keep it in step with
+     .node-card/.map-card's stylesheet row spans, which are what's painted
+     until that first measurement lands. */
+  a: {type: 'split', dir: 'row', ratio: 6 / 24,
+    a: {type: 'leaf', id: 'node'},
+    b: {type: 'leaf', id: 'map'}
+  },
+  b: {type: 'split', dir: 'col', ratio: 5 / 8,
     a: {type: 'split', dir: 'row', ratio: 13 / 24,
       a: {type: 'leaf', id: 'connected'},
-      b: {type: 'split', dir: 'col', ratio: 0.5,
-        a: {type: 'leaf', id: 'map'},
-        b: {type: 'split', dir: 'row', ratio: 7 / 11,
-          a: {type: 'leaf', id: 'activity'},
-          b: {type: 'leaf', id: 'meshtastic'}
-        }
+      b: {type: 'split', dir: 'row', ratio: 7 / 11,
+        a: {type: 'leaf', id: 'activity'},
+        b: {type: 'leaf', id: 'meshtastic'}
       }
     },
     b: {type: 'split', dir: 'row', ratio: 16 / 24,
@@ -6627,17 +6725,76 @@ var DASH_DEFAULT_TREE = {
   }
 };
 
+/* Cards hidden out of the box — the kiosk's default view is this node and
+   its own traffic (Node, Connected Nodes, Map, Favorites), and all three of
+   these are feeds of somebody else's: network-wide keyups, an unrelated LoRa
+   mesh, and a chat that needs a login to even post. Not a removal: each
+   keeps its leaf in the tree above and shows up in the header's
+   hidden-panels menu for a one-click restore. Only consulted when there's no
+   saved layout at all — once anything is saved, that state is authoritative,
+   so re-hiding is never forced on someone who explicitly unhid them. */
+var DASH_DEFAULT_HIDDEN = {activity: true, chat: true, meshtastic: true};
+
 var _dashTree = null;   /* null = no customization yet; CSS stylesheet defaults apply untouched */
-var _dashHidden = {};
+var _dashHidden = Object.assign({}, DASH_DEFAULT_HIDDEN);
 var _dashHiddenMenuOpen = false;
 var _dashEditOn = false;
 var _dashDragId = null;
 var _dashDividerDrag = null;
 var _dashDividerNodes = [];   /* rebuilt by dashWalk() each render; index matches the DOM .dash-divider els (DASH_CARD_IDS.length - 1 of them) */
 
+/* Measured pixel-size floors dashWalk()'s clamp honors on top of the generic
+   DASH_MIN_CS/DASH_MIN_RS, keyed by axis then card id — today only
+   'node' is ever populated, in both axes (see dashUpdateNodeMinWidth()/
+   dashUpdateNodeMinHeight()), so every other card keeps the plain
+   DASH_MIN_CS/DASH_MIN_RS floor it always had. */
+var _dashMinPx = {col: {}, row: {}};
+
 function dashSupported() { return window.matchMedia('(min-width: 861px)').matches; }
 function dashClamp(n, lo, hi) { n = parseInt(n, 10); if (isNaN(n)) n = lo; return Math.max(lo, Math.min(hi, n)); }
 function dashCardEl(id) { return document.querySelector('.dash-card[data-dash-id="' + id + '"]'); }
+/* Current pixel size of one grid cell along the given axis. */
+function dashCellSize(axis) {
+  var area = document.getElementById('content-area');
+  if (!area) return 0;
+  if (axis === 'col') {
+    var cw = area.clientWidth;
+    return cw ? (cw - (DASH_COLS - 1) * DASH_GAP) / DASH_COLS : 0;
+  }
+  var ch = area.clientHeight;
+  return ch ? (ch - (DASH_ROWS - 1) * DASH_GAP) / DASH_ROWS : 0;
+}
+/* Minimum line-span (columns for axis 'col', rows for axis 'row') a single
+   leaf must keep: the generic DASH_MIN_CS/DASH_MIN_RS floor, or a bigger one
+   if _dashMinPx has a measured pixel requirement for this id on this axis
+   (converted to lines at the current cell size — the same conversion
+   dashDividerStart() already does for drag deltas). */
+function dashMinLineFor(axis, id) {
+  var genericMin = axis === 'col' ? DASH_MIN_CS : DASH_MIN_RS;
+  var px = _dashMinPx[axis][id];
+  if (!px) return genericMin;
+  var cell = dashCellSize(axis);
+  if (!(cell > 0)) return genericMin;
+  return Math.max(genericMin, Math.ceil((px + DASH_GAP) / (cell + DASH_GAP)));
+}
+/* Minimum lines (along the given axis) an entire subtree needs, so a leaf's
+   own floor (see dashMinLineFor()) propagates correctly through however the
+   tree is currently arranged (cards are freely draggable — see
+   dashMoveCard()). A split in the *same* direction as the axis being asked
+   about sums both sides (they sit side by side along that axis, so both
+   sizes are spent); a split across the other axis takes the max (both sides
+   share the same span along this axis, just laid out at different positions
+   on the other one). A fully-hidden side needs nothing, mirroring
+   dashWalk()'s own "fold hidden side's space into its sibling" handling. */
+function dashMinLinesForSubtree(axis, node) {
+  if (dashSubtreeHidden(node)) return 0;
+  if (node.type === 'leaf') return dashMinLineFor(axis, node.id);
+  var aHidden = dashSubtreeHidden(node.a), bHidden = dashSubtreeHidden(node.b);
+  if (aHidden) return dashMinLinesForSubtree(axis, node.b);
+  if (bHidden) return dashMinLinesForSubtree(axis, node.a);
+  var a = dashMinLinesForSubtree(axis, node.a), b = dashMinLinesForSubtree(axis, node.b);
+  return node.dir === axis ? (a + b) : Math.max(a, b);
+}
 function dashDividerEl(idx) { return document.querySelector('.dash-divider[data-divider-idx="' + idx + '"]'); }
 
 /* ── Tree surgery (pure functions — each returns a new tree rather than
@@ -6709,6 +6866,17 @@ function dashSubtreeHidden(node) {
   return dashSubtreeHidden(node.a) && dashSubtreeHidden(node.b);
 }
 
+/* True if `node` should expand to fill space reclaimed from a hidden
+   sibling (see dashWalkFolded()) — every leaf is greedy except the ones
+   listed in DASH_NON_GREEDY, and a subtree counts as greedy only if both
+   its sides are (one non-greedy leaf anywhere inside caps the whole
+   subtree at its own minimum, rather than letting it stretch on that
+   leaf's behalf). */
+function dashSubtreeGreedy(node) {
+  if (node.type === 'leaf') return !DASH_NON_GREEDY[node.id];
+  return dashSubtreeGreedy(node.a) && dashSubtreeGreedy(node.b);
+}
+
 /* ── Render: walk the tree, assigning each leaf a {col,cs,row,rs} rect in
    the 12x24 grid and collecting one descriptor per internal (split) node
    for the divider overlay — see the module doc comment above for how a
@@ -6727,18 +6895,41 @@ function dashWalk(node, colStart, colEnd, rowStart, rowEnd, rects, dividers) {
      at least one visible card, and every recursive call below only
      descends into a side that isn't fully hidden), so at most one of
      aHidden/bHidden is true. */
-  if (aHidden) { dashWalk(node.b, colStart, colEnd, rowStart, rowEnd, rects, dividers); return; }
-  if (bHidden) { dashWalk(node.a, colStart, colEnd, rowStart, rowEnd, rects, dividers); return; }
+  if (aHidden) { dashWalkFolded(node, node.b, colStart, colEnd, rowStart, rowEnd, rects, dividers); return; }
+  if (bHidden) { dashWalkFolded(node, node.a, colStart, colEnd, rowStart, rowEnd, rects, dividers); return; }
   if (node.dir === 'col') {
-    var c = dashClamp(Math.round(colStart + (colEnd - colStart) * node.ratio), colStart + DASH_MIN_CS, colEnd - DASH_MIN_CS);
+    var c = dashClamp(Math.round(colStart + (colEnd - colStart) * node.ratio),
+      colStart + dashMinLinesForSubtree('col', node.a), colEnd - dashMinLinesForSubtree('col', node.b));
     dividers.push({node: node, dir: 'v', colStart: c, colEnd: c, rowStart: rowStart, rowEnd: rowEnd, range: {colStart: colStart, colEnd: colEnd, rowStart: rowStart, rowEnd: rowEnd}});
     dashWalk(node.a, colStart, c, rowStart, rowEnd, rects, dividers);
     dashWalk(node.b, c, colEnd, rowStart, rowEnd, rects, dividers);
   } else {
-    var r = dashClamp(Math.round(rowStart + (rowEnd - rowStart) * node.ratio), rowStart + DASH_MIN_RS, rowEnd - DASH_MIN_RS);
+    var r = dashClamp(Math.round(rowStart + (rowEnd - rowStart) * node.ratio),
+      rowStart + dashMinLinesForSubtree('row', node.a), rowEnd - dashMinLinesForSubtree('row', node.b));
     dividers.push({node: node, dir: 'h', colStart: colStart, colEnd: colEnd, rowStart: r, rowEnd: r, range: {colStart: colStart, colEnd: colEnd, rowStart: rowStart, rowEnd: rowEnd}});
     dashWalk(node.a, colStart, colEnd, rowStart, r, rects, dividers);
     dashWalk(node.b, colStart, colEnd, r, rowEnd, rects, dividers);
+  }
+}
+
+/* Hands the range freed up by a hidden sibling to `survivor` — the whole
+   range, same as always, unless survivor is non-greedy (see
+   dashSubtreeGreedy()), in which case it only gets its own measured minimum
+   along the split's own axis (node.dir) and the rest of the range is simply
+   never assigned to anything, rendering as empty space rather than
+   stretching the survivor to fill it. This is what keeps the Node card from
+   ballooning to the window's full height when the Map beneath it is
+   hidden — see DASH_NON_GREEDY. */
+function dashWalkFolded(node, survivor, colStart, colEnd, rowStart, rowEnd, rects, dividers) {
+  if (dashSubtreeGreedy(survivor)) {
+    dashWalk(survivor, colStart, colEnd, rowStart, rowEnd, rects, dividers);
+    return;
+  }
+  var need = dashMinLinesForSubtree(node.dir, survivor);
+  if (node.dir === 'col') {
+    dashWalk(survivor, colStart, colStart + need, rowStart, rowEnd, rects, dividers);
+  } else {
+    dashWalk(survivor, colStart, colEnd, rowStart, rowStart + need, rects, dividers);
   }
 }
 
@@ -6781,14 +6972,21 @@ function dashApply() {
   dashWalk(_dashTree || DASH_DEFAULT_TREE, 1, DASH_COLS + 1, 1, DASH_ROWS + 1, rects, dividers);
   _dashDividerNodes = dividers;
 
-  if (_dashTree) {
-    DASH_CARD_IDS.forEach(function(id) {
-      var el = dashCardEl(id); if (!el) return;
-      var r = rects[id]; if (!r) return;
-      el.style.gridColumn = r.col + ' / span ' + r.cs;
-      el.style.gridRow = r.row + ' / span ' + r.rs;
-    });
-  }
+  /* Always write the walked rects, even on the still-default (un-customized)
+     layout: DASH_DEFAULT_TREE's ratios are kept in step with the CSS
+     stylesheet defaults (see its own doc comment), so this is a no-op change
+     from those defaults ordinarily — except when dashMinLinesForSubtree()'s
+     floor (e.g. the Node card's button row or its full content height, see
+     dashUpdateNodeMinWidth()/dashUpdateNodeMinHeight()) forces a boundary
+     wider or taller than the ratio alone would give it. That floor needs to
+     hold before anyone has ever dragged a divider, not just after, so this
+     can no longer be skipped while _dashTree is still null. */
+  DASH_CARD_IDS.forEach(function(id) {
+    var el = dashCardEl(id); if (!el) return;
+    var r = rects[id]; if (!r) return;
+    el.style.gridColumn = r.col + ' / span ' + r.cs;
+    el.style.gridRow = r.row + ' / span ' + r.rs;
+  });
   /* dashWalk() already folded any hidden leaf's space into its sibling (see
      its own doc comment), so the actual card element just needs to go
      display:none — nothing to reflow here, its rect was never reserved.
@@ -6803,6 +7001,170 @@ function dashApply() {
     el.classList.toggle('dash-fully-hidden', !!_dashHidden[id]);
   });
   dashPositionDividers();
+}
+
+/* ── Node card auto-fit ──────────────────────────────────────────────────
+   The Node card holds three lines of text, a status badge and a row of audio
+   controls, and how much of that is on screen changes with who's logged in
+   (Arm TX needs a role and a TX-capable server, Rec needs the can_record
+   flag), so any fixed row span is wrong at most window heights:
+   too tall and it's mostly dead space, too short and content is silently
+   clipped (the card is overflow:hidden). Measure what it actually needs,
+   give the Node/Map row split exactly that many rows (handing the rest of
+   the left column to the map — which does want every pixel it can get) and
+   the node/map *column* split exactly the button row's width (handing the
+   rest to the other cards — Connected Nodes, Favorites, etc. — instead of
+   leaving the Map wider than Node needs to be).
+
+   Default layout only (`_dashTree` still null). Once someone has dragged or
+   resized anything, the node/map boundaries are their answer, and re-fitting
+   on the next board refresh would pull them back out from under them a
+   second later. The fitted ratios are written into DASH_DEFAULT_TREE itself,
+   not just onto the cards, so when the layout does become custom —
+   dashEnsureCustom() clones exactly that tree — the boundaries stay where
+   they already are instead of jumping back to the pre-measurement default.
+   (Hiding the Map entirely is a separate mechanism — see DASH_NON_GREEDY/
+   dashWalkFolded() — since at that point there's no row split left to fit.) */
+var _dashFitRows = null, _dashFitCols = null;
+
+/* The split whose two children are the node and map leaves, wherever it sits
+   in `node`; null if they aren't siblings (nothing to fit against). */
+function dashNodeMapSplit(node) {
+  if (!node || node.type !== 'split') return null;
+  if (node.dir === 'row' && node.a.type === 'leaf' && node.a.id === 'node'
+      && node.b.type === 'leaf' && node.b.id === 'map') return node;
+  return dashNodeMapSplit(node.a) || dashNodeMapSplit(node.b);
+}
+
+/* The immediate parent split of `target` (a node reference, found by
+   identity) within `tree`; null if `target` is the root or isn't found. */
+function dashFindParentSplit(tree, target) {
+  if (!tree || tree.type !== 'split') return null;
+  if (tree.a === target || tree.b === target) return tree;
+  return dashFindParentSplit(tree.a, target) || dashFindParentSplit(tree.b, target);
+}
+
+/* Total pixel width the Node card's button row (#node-controls) needs on one
+   line. Each button's own offsetWidth is intrinsic to its content regardless
+   of whether flex-wrap has already wrapped the row onto a second line, so
+   summing the currently-*shown* children (role/permission/capability gate
+   several of them via display:none — see the .node-controls doc comment)
+   plus the row's own gaps and the card's horizontal padding/border gives the
+   true one-line floor, independent of how narrow the column currently is. */
+function dashNodeButtonsMinPx() {
+  var row = document.getElementById('node-controls');
+  var card = dashCardEl('node');
+  if (!row || !card) return 0;
+  var total = 0, count = 0;
+  for (var i = 0; i < row.children.length; i++) {
+    var el = row.children[i];
+    if (!el.offsetWidth && !el.offsetHeight) continue;   /* display:none */
+    total += el.offsetWidth;
+    count++;
+  }
+  if (!count) return 0;
+  total += (count - 1) * (parseFloat(getComputedStyle(row).gap) || 0);
+  var cs = getComputedStyle(card);
+  total += (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0)
+         + (parseFloat(cs.borderLeftWidth) || 0) + (parseFloat(cs.borderRightWidth) || 0);
+  return total;
+}
+
+/* Total pixel height the Node card's own content needs — every child's
+   bottom edge (relative to the card's border-box top) plus the card's own
+   bottom padding/border. Shared by dashFitNodeCard()'s exact-fit (default
+   layout only) and dashUpdateNodeMinHeight()'s floor (every layout) below,
+   so there's exactly one place that knows how to measure this.
+
+   Content height, not the card's own height: the card is stretched to fill
+   its grid area, so offsetHeight/scrollHeight would just report back the
+   space we're trying to reclaim. The lowest child's bottom edge plus the
+   card's own bottom padding/border is what it genuinely needs (both rects
+   are border-box, so the top border is already inside the difference).
+   The lowest *rendered* child, not simply the last one: a display:none
+   child reports an all-zero rect, and the controls below #node-info can
+   each be hidden by role/permission — the volume row is even the last
+   child while Listen is unavailable to that viewer. Taking the max keeps
+   that from measuring the card as needing no room at all. */
+function dashNodeContentMinPx() {
+  var card = dashCardEl('node');
+  if (!card) return 0;
+  var cardTop = card.getBoundingClientRect().top;
+  var contentBottom = 0;
+  for (var i = 0; i < card.children.length; i++) {
+    var r = card.children[i].getBoundingClientRect();
+    if (!r.width && !r.height) continue;   /* display:none */
+    if (r.bottom - cardTop > contentBottom) contentBottom = r.bottom - cardTop;
+  }
+  if (!contentBottom) return 0;
+  var cs = getComputedStyle(card);
+  return contentBottom + (parseFloat(cs.paddingBottom) || 0) + (parseFloat(cs.borderBottomWidth) || 0);
+}
+
+/* Re-measures the Node card's floors — button-row width and full-content
+   height — and, if either changed, re-walks the tree so dashWalk()'s column/
+   row clamps pick it up. Unlike the exact-fit sizing below, both of these run
+   regardless of whether the layout is still the default or has been dragged/
+   customized: a divider drag narrower than the buttons need, or a saved
+   layout that predates content the card now shows (e.g. a role grant that
+   revealed a button, or this app's own past button-height/label changes), are
+   exactly the cases this guards against — cell-rounding at some window sizes
+   landing a hair short of dashFitNodeCard()'s own exact-fit rows is another,
+   for the height floor specifically (see its issue: the volume slider's
+   bottom edge clipped by the card's border at certain resolutions). */
+function dashUpdateNodeMinWidth() {
+  if (!dashSupported()) return;
+  var px = dashNodeButtonsMinPx();
+  if (px === _dashMinPx.col.node) return;
+  _dashMinPx.col.node = px;
+  dashApply();
+}
+function dashUpdateNodeMinHeight() {
+  if (!dashSupported()) return;
+  var px = dashNodeContentMinPx();
+  if (px === _dashMinPx.row.node) return;
+  _dashMinPx.row.node = px;
+  dashApply();
+}
+
+function dashFitNodeCard() {
+  dashUpdateNodeMinWidth();
+  dashUpdateNodeMinHeight();
+  if (!dashSupported() || _dashTree) return;
+  /* Neither can actually be hidden while _dashTree is null (hiding calls
+     dashEnsureCustom() first), but the math below assumes both are on
+     screen, so don't rely on that from a distance — Map hidden is handled
+     separately, by dashWalkFolded()'s non-greedy fold, not here. */
+  if (_dashHidden['node'] || _dashHidden['map']) return;
+  var rowSplit = dashNodeMapSplit(DASH_DEFAULT_TREE);
+  if (!rowSplit) return;
+  var changed = false;
+
+  var needH = _dashMinPx.row.node;
+  if (needH) {
+    var cellH = dashCellSize('row');
+    if (cellH > 0) {
+      /* n rows are n cells plus the n-1 gaps between them. */
+      var rows = Math.ceil((needH + DASH_GAP) / (cellH + DASH_GAP));
+      rows = Math.max(DASH_MIN_RS, Math.min(DASH_ROWS - DASH_MIN_RS, rows));
+      if (rows !== _dashFitRows) { _dashFitRows = rows; rowSplit.ratio = rows / DASH_ROWS; changed = true; }
+    }
+  }
+
+  var needW = _dashMinPx.col.node;
+  var colSplit = dashFindParentSplit(DASH_DEFAULT_TREE, rowSplit);
+  if (needW && colSplit && colSplit.dir === 'col') {
+    var cellW = dashCellSize('col');
+    if (cellW > 0) {
+      var cols = Math.ceil((needW + DASH_GAP) / (cellW + DASH_GAP));
+      cols = Math.max(DASH_MIN_CS, Math.min(DASH_COLS - DASH_MIN_CS, cols));
+      if (cols !== _dashFitCols) { _dashFitCols = cols; colSplit.ratio = cols / DASH_COLS; changed = true; }
+    }
+  }
+
+  if (!changed) return;   /* nothing moved — skip the reflow and Leaflet's resize */
+  dashApply();   /* re-walk so both dividers follow whichever boundary just moved */
+  setTimeout(function() { if (_map) _map.invalidateSize(); }, 50);
 }
 
 function dashPositionDividers() {
@@ -7108,7 +7470,7 @@ setInterval(refreshNwsAlerts, 60000);  /* NWS alert ticker every 60s — well un
                                           promptly after a config change */
 setInterval(fetchNets,       60000);   /* net schedule list every 60s — the weather-bar
                                           badge/highlight itself re-derives every second
-                                          from tickClock(), this just catches edits made
+                                          from tickSecond(), this just catches edits made
                                           from another browser/tab */
 </script>
 </body>
