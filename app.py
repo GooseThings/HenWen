@@ -8313,16 +8313,31 @@ def _start_broadcast(node):
     # only (p=0.95). A node with a brief hot peak (a burst, static crack, a
     # CTCSS blip) but otherwise soft speech gets normalized against that
     # peak and the underlying speech never comes up — the peak-based gain
-    # calc has nothing to do with perceived loudness. r=0.3 makes dynaudnorm
+    # calc has nothing to do with perceived loudness. r>0 makes dynaudnorm
     # also target average loudness (RMS) per frame, taking the more
-    # conservative of the peak- and RMS-based gain (still capped by m=6), so
+    # conservative of the peak- and RMS-based gain (still capped by m), so
     # a quiet stretch gets boosted toward a consistent level instead of only
-    # reacting to its own peak. Tradeoff: RMS-based gain will also amplify
-    # background noise/static during a weak-signal or no-speech stretch more
-    # than peak-only did — if that's audible as noise pumping on your
-    # traffic, lower r (toward 0) before touching m or p. Not yet verified
-    # against real repeater audio with weak/hot nodes side by side — this is
-    # a starting value, not a measured optimum.
+    # reacting to its own peak.
+    #
+    # m=6:r=0.3 (this feature's initial values) then produced its own live
+    # complaint: audible "click click click pop click" during peaky traffic
+    # (bursts of static, repeated hot syllables). Root cause: r=0.3 chases a
+    # quiet stretch up toward target RMS using as much as m=6x (+15.6dB) of
+    # gain; the instant a real peak arrives, that gain has to collapse back
+    # down over dynaudnorm's f*g=250ms smoothing window, and alimiter's brick
+    # wall catches whatever's still hot on top of that collapse — the
+    # audible result is the gain visibly (audibly) yo-yoing on every peak,
+    # not a single ffmpeg bug. Confirmed locally (synthetic FIFO harness per
+    # the audio-pipeline-local-test-technique memory): a sustained soft tone
+    # driven up to +14.5dB steady-state gain under m=6:r=0.3 has nowhere to
+    # go but back down hard on the next loud peak. m=4:r=0.2 caps that same
+    # steady-state boost at +11dB — most of the intended loudness-evening
+    # benefit from issue #34, with a smaller worst-case swing to recover
+    # from when a peak hits, i.e. less to "click" about. Clip safety is
+    # unaffected either way (alimiter's limit=0.85 brick wall doesn't depend
+    # on m/r; re-verified against the clipped-tone fixture below at these
+    # values, 0 clipped samples). If clicking on peaks is still audible
+    # after this, lower r further toward 0 before touching m or p.
     ffmpeg_cmd = [
         'ffmpeg', '-loglevel', 'warning',
         '-probesize', '32',
@@ -8330,7 +8345,7 @@ def _start_broadcast(node):
         '-fflags', '+nobuffer',
         '-f', 's16le', '-ar', '8000', '-ac', '1', '-channel_layout', 'mono',
         '-i', fifo_out_path,
-        '-af', 'dynaudnorm=f=50:g=5:p=0.95:m=6:r=0.3,'
+        '-af', 'dynaudnorm=f=50:g=5:p=0.95:m=4:r=0.2,'
                'alimiter=limit=0.85:attack=5:release=50:level=false',
         '-ar', '48000',        # resample to Opus native rate before encoding
         '-c:a', 'libopus', '-b:a', '24k',
