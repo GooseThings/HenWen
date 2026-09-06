@@ -362,10 +362,17 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
    its content by dashFitNodeCard(), so there's normally no slack to push
    against. There's still a little left over — the row-span it lands on has
    to be a whole number of the grid's row lines, so the fitted height rounds
-   up to the next line and leaves a few px of slack — which is why .node-card
-   itself uses justify-content:center rather than the default top alignment,
-   so that leftover splits evenly above and below the stack instead of all
-   landing under the volume slider as a lopsided gap. */
+   up to the next line and leaves some slack, and how much scales with the
+   viewport (a taller content area means a taller row, so the same
+   1-row-line overshoot is a bigger number of px). Concentrating 100% of
+   that at either end reads badly at some screen size — pinned to the
+   bottom (the default), it reads as an oversized gap between the volume
+   slider and the Map card's own header inset below; pinned to the top
+   (tried and reverted here), it reads as an oversized gap above "NODE" on
+   a tall enough viewport. .node-card uses justify-content:center as the
+   option that's never *egregiously* wrong at any one size: worst case is
+   half the slack on each side, rather than all of it landing in one visibly
+   oversized spot. */
 .node-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; flex-shrink: 0; }
 /* Sits directly under the buttons and only matters while Listen is running —
    dimmed to 0.4 until then by _listenSetBtn(), same as when it lived in the
@@ -7070,35 +7077,46 @@ function dashNodeButtonsMinPx() {
   return total;
 }
 
-/* Total pixel height the Node card's own content needs — every child's
-   bottom edge (relative to the card's border-box top) plus the card's own
-   bottom padding/border. Shared by dashFitNodeCard()'s exact-fit (default
-   layout only) and dashUpdateNodeMinHeight()'s floor (every layout) below,
-   so there's exactly one place that knows how to measure this.
+/* Total pixel height the Node card's own content needs — the full span from
+   the topmost child's top edge to the lowest child's bottom edge, plus the
+   card's own padding/border on both ends. Shared by dashFitNodeCard()'s
+   exact-fit (default layout only) and dashUpdateNodeMinHeight()'s floor
+   (every layout) below, so there's exactly one place that knows how to
+   measure this.
 
    Content height, not the card's own height: the card is stretched to fill
    its grid area, so offsetHeight/scrollHeight would just report back the
-   space we're trying to reclaim. The lowest child's bottom edge plus the
-   card's own bottom padding/border is what it genuinely needs (both rects
-   are border-box, so the top border is already inside the difference).
-   The lowest *rendered* child, not simply the last one: a display:none
-   child reports an all-zero rect, and the controls below #node-info can
-   each be hidden by role/permission — the volume row is even the last
-   child while Listen is unavailable to that viewer. Taking the max keeps
-   that from measuring the card as needing no room at all. */
+   space we're trying to reclaim. Measuring the topmost/lowest *rendered*
+   child's edges (not simply the first/last) matters twice over: a
+   display:none child reports an all-zero rect, and the controls below
+   #node-info can each be hidden by role/permission — the volume row is even
+   the last child while Listen is unavailable to that viewer, so both ends
+   need a real min()/max() rather than assuming DOM order survives.
+
+   Deliberately independent of .node-card's own justify-content: taking the
+   span between the extreme child edges, rather than anchoring off the
+   card's own top (as if content were always top-aligned), is what keeps
+   this correct under flex-end too — with content bottom-anchored, a card
+   shorter than its content overflows *upward* past the card's own top edge,
+   and measuring from the card's top would silently undercount everything
+   above it (exactly the bug this replaced: the card measured itself too
+   short, which pushed the shortfall even further above the visible box on
+   the next pass instead of correcting it). */
 function dashNodeContentMinPx() {
   var card = dashCardEl('node');
   if (!card) return 0;
-  var cardTop = card.getBoundingClientRect().top;
-  var contentBottom = 0;
+  var contentTop = null, contentBottom = null;
   for (var i = 0; i < card.children.length; i++) {
     var r = card.children[i].getBoundingClientRect();
     if (!r.width && !r.height) continue;   /* display:none */
-    if (r.bottom - cardTop > contentBottom) contentBottom = r.bottom - cardTop;
+    if (contentTop === null || r.top < contentTop) contentTop = r.top;
+    if (contentBottom === null || r.bottom > contentBottom) contentBottom = r.bottom;
   }
-  if (!contentBottom) return 0;
+  if (contentTop === null) return 0;
   var cs = getComputedStyle(card);
-  return contentBottom + (parseFloat(cs.paddingBottom) || 0) + (parseFloat(cs.borderBottomWidth) || 0);
+  return (contentBottom - contentTop)
+       + (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.borderTopWidth) || 0)
+       + (parseFloat(cs.paddingBottom) || 0) + (parseFloat(cs.borderBottomWidth) || 0);
 }
 
 /* Re-measures the Node card's floors — button-row width and full-content
