@@ -5021,20 +5021,50 @@ var _TX_IDLE_HANGUP_MS = 5 * 60 * 1000;  // auto-disarm after 5 min without keyi
 
 /* Mic gain: the browser's autoGainControl drove a headset mic to hard
    clipping (media-source audioLevel pinned at 1.000, "much too loud" on a
-   parrot test), so AGC is off and level is set manually with this slider —
-   the mic runs through a WebAudio gain stage before it enters the call,
-   with a post-gain analyser feeding the level meter (what the meter shows
-   is what transmits). Persisted per browser. */
+   parrot test), so AGC is off by default and level is set manually with
+   this slider — the mic runs through a WebAudio gain stage before it
+   enters the call, with a post-gain analyser feeding the level meter (what
+   the meter shows is what transmits). Persisted per browser. */
 function _txSavedGain() {
   var v = parseInt(localStorage.getItem('henwen-tx-gain') || '100', 10);
   return (v >= 0 && v <= 200) ? v : 100;
 }
 
+/* AGC stays off; the manual gain slider above is the level control. Worth
+   recording what turning it on costs and buys, since it was tried and
+   reverted: Chromium's Android backend only engages Bluetooth audio routing
+   when getUserMedia asks for the full default AEC+NS+AGC trio, so opting AGC
+   out means a paired headset's mic and speaker are not used for the call at
+   all. Turning it on restored that routing — and re-introduced the clipping
+   the slider exists to avoid (see _txSavedGain above). Off is the status quo
+   until someone wants headset routing badly enough to re-tune the level. */
 function _txBuildMicChain() {
   return navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false },
     video: false,
   }).then(function(raw) {
+    /* Which mic actually got picked, and which processing Chrome actually
+       applied, are the two facts that decide whether this sounds right —
+       and both are decided by the browser, not by what we asked for. Log
+       the resolved values so "which mic is this actually using, and with
+       what processing?" is a journalctl line rather than a guess — the one
+       question behind most "my audio sounds wrong" reports. */
+    try {
+      var t = raw.getAudioTracks()[0], s = (t.getSettings && t.getSettings()) || {};
+      _txDiag('mic-source', 'label=' + (t.label || '?') +
+              ' agc=' + s.autoGainControl + ' ns=' + s.noiseSuppression +
+              ' aec=' + s.echoCancellation + ' rate=' + s.sampleRate);
+      /* A track label of "Default" names Chrome's default-device alias, not
+         the hardware behind it, so on its own it can't say which mic was
+         actually used. Listing the input devices alongside it can. Labels
+         are only populated post-permission, which is why this runs after
+         getUserMedia rather than before. */
+      navigator.mediaDevices.enumerateDevices().then(function(ds) {
+        _txDiag('mic-devices', ds.filter(function(d) { return d.kind === 'audioinput'; })
+                                 .map(function(d) { return d.label || d.deviceId.slice(0, 8); })
+                                 .join(' | ').slice(0, 200));
+      }).catch(function() {});
+    } catch (e) {}
     _tx.rawStream = raw;
     _tx.audioCtx  = new (window.AudioContext || window.webkitAudioContext)();
     var src  = _tx.audioCtx.createMediaStreamSource(raw);
@@ -5077,11 +5107,15 @@ function _txStartMeter() {
    log (was DTMF actually sent? was the mic track live? was the outbound RTP
    audio level non-zero?) without browser devtools open. */
 function _txDiag(type, detail) {
-  if (!_tx.node) return;
+  /* _tx.node is only set once armTx()'s config fetch resolves, so fall back
+     to the board's own local node number rather than going silent for
+     anything reported before that point. */
+  var node = _tx.node || (window._lastBoardNodes && window._lastBoardNodes[0] && window._lastBoardNodes[0].node) || '';
+  if (!node) return;
   try {
     apiFetch('/api/audio/client-log', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({node: _tx.node, type: 'tx-' + type, detail: String(detail).slice(0, 200)}),
+      body: JSON.stringify({node: node, type: 'tx-' + type, detail: String(detail).slice(0, 200)}),
       keepalive: true,
     });
   } catch (e) {}
@@ -5821,6 +5855,8 @@ function _txTouchIdle() {
   }, _TX_IDLE_HANGUP_MS);
 }
 
+/* Mute Listen only while keyed — the radio-style RX mute. Restored on
+   unkey so the operator hears their own repeater tail as confirmation. */
 /* Mute Listen only while keyed — the radio-style RX mute. Restored on
    unkey so the operator hears their own repeater tail as confirmation. */
 function _txMuteListen(muted) {

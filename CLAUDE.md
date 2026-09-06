@@ -162,6 +162,21 @@ The login callsign (`aprs_is_callsign`) is a Manager > Kiosk Settings field (`/a
 
 The frontend's radius slider (1-200mi, default 25) and on/off state are plain `localStorage` prefs, same pattern as the Radar/tile-style toggles; a thin circle outline on the map traces the selected radius around the resolved center. Markers render as a small purple circle (`makeAprsIcon()`), deliberately not the teardrop node-pin or gold hosted-node star, fading with age the same way the global-activity pins do (`aprsPinStyle()`, mirroring `globalPinStyle()`), and live in their own `_aprsMarkers` array on a separate 5-minute poll timer (`APRS_POLL_MS`) so they're untouched by `updateMap()`'s much more frequent node/activity marker rebuild.
 
+### Hardware notes (`docs/`)
+
+`docs/td-q2l/` holds the reverse-engineering record for a Tidradio TD-Q2L
+Bluetooth PTT mic, plus a standalone Web Bluetooth test harness. **The
+integration was attempted and abandoned** — no TD-Q2L code remains in the
+app. Read it before attempting any Bluetooth PTT accessory: it documents
+that the mic's PTT button emits no signal reachable by a web page (verified
+against all 15 Media Session actions, DOM key events and the Gamepad API,
+with a live control), that its proprietary BLE characteristic goes silent
+whenever Bluetooth audio is in use, and that a native Android app does not
+help either — nRF Connect, which already calls `requestConnectionPriority()`,
+receives nothing during a call, placing the conflict in the Bluetooth
+controller's scheduling of one shared radio. Several conclusions in that file
+were reached and later overturned; the sequence is left visible on purpose.
+
 ### Templates
 
 - `templates/status.html` — kiosk/status board (`/` and `/status` routes); self-contained SPA with embedded JS (~1800 lines). Contains the live audio player, network map, weather bar, and global activity feed. Accessible without login.
