@@ -332,9 +332,16 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
 .connected-card { grid-column: 5 / span 5; grid-row: 1 / span 24; }
 
-/* ── Node status card: top of the left column, with the map below it ── */
+/* ── Node status card: top of the left column, with the map below it.
+   The row span here is only what's painted until the first board refresh —
+   dashFitNodeCard() then measures the card's actual text and shrinks it to
+   fit, giving the leftover rows to the map. It's set low deliberately so
+   that first paint is already close to the fitted result rather than
+   collapsing visibly a moment later; it must stay in step with
+   DASH_DEFAULT_TREE's node/map ratio (6/24), same invariant as every other
+   default here. ── */
 .node-card {
-  grid-column: 1 / span 4; grid-row: 1 / span 12;
+  grid-column: 1 / span 4; grid-row: 1 / span 6;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   padding: 16px 12px; display: flex; flex-direction: column;
   gap: 8px; overflow: hidden; min-height: 0;
@@ -626,7 +633,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .mesh-text { font-size: 0.78rem; color: var(--text); word-wrap: break-word; margin-top: 1px; }
 
 /* ── Map ── */
-.map-card { grid-column: 1 / span 4; grid-row: 13 / span 12; min-height: 0;
+.map-card { grid-column: 1 / span 4; grid-row: 7 / span 18; min-height: 0;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; }
 #map { flex: 1; background: #0d1117; }
@@ -3912,6 +3919,12 @@ async function refreshBoard() {
 
     /* Keep favorites sidebar in sync with connected state */
     renderFavorites();
+
+    /* Last, once every DOM write above has landed: the Node card's height is
+       measured from what this refresh just wrote into it (callsign/location
+       wrapping, the ONLINE/OFFLINE badge, the LOCKED row), and doing it here
+       costs one layout flush instead of one per intervening mutation. */
+    dashFitNodeCard();
   } catch(e) { markServerUnreachable(); }
 }
 
@@ -6548,6 +6561,10 @@ window.addEventListener('resize', function() {
   clearTimeout(_mapResizeTimer);
   _mapResizeTimer = setTimeout(function() {
     if (_map) _map.invalidateSize();
+    /* Row heights are `fr` tracks, so a taller/shorter window changes how
+       many rows the Node card's (unchanged) text needs — re-fit before
+       re-applying, not just on the next board refresh. */
+    dashFitNodeCard();
     dashApply();   /* re-apply a saved custom layout if the window crossed the mobile breakpoint live */
   }, 200);
 });
@@ -6633,7 +6650,12 @@ var DASH_STORE_KEY = 'henwen-dash-layout-v9';
    unhiding restores exactly these proportions with no tree surgery. */
 var DASH_DEFAULT_TREE = {
   type: 'split', dir: 'col', ratio: 1 / 3,
-  a: {type: 'split', dir: 'row', ratio: 0.5,
+  /* The node/map ratio is a starting value only — dashFitNodeCard() replaces
+     it with a measurement of the Node card's actual text height on the first
+     board refresh (and rewrites it on resize). Keep it in step with
+     .node-card/.map-card's stylesheet row spans, which are what's painted
+     until that first measurement lands. */
+  a: {type: 'split', dir: 'row', ratio: 6 / 24,
     a: {type: 'leaf', id: 'node'},
     b: {type: 'leaf', id: 'map'}
   },
@@ -6838,6 +6860,74 @@ function dashApply() {
     el.classList.toggle('dash-fully-hidden', !!_dashHidden[id]);
   });
   dashPositionDividers();
+}
+
+/* ── Node card auto-fit ──────────────────────────────────────────────────
+   The Node card holds three lines of text and a status badge and nothing
+   else, so any fixed row span is wrong at most window heights: too tall and
+   it's mostly dead space, too short and the text is silently clipped (the
+   card is overflow:hidden). Measure what the content actually needs, give
+   the Node/Map split exactly that many rows, and hand the rest of the left
+   column to the map — which does want every pixel it can get.
+
+   Default layout only (`_dashTree` still null). Once someone has dragged or
+   resized anything, the node/map boundary is their answer, and re-fitting on
+   the next board refresh would pull it back out from under them a second
+   later. The fitted ratio is written into DASH_DEFAULT_TREE itself, not just
+   onto the two cards, so when the layout does become custom — dashEnsureCustom()
+   clones exactly that tree — the boundary stays where it already is instead
+   of jumping back to the pre-measurement default. */
+var _dashFitRows = null;
+
+/* The split whose two children are the node and map leaves, wherever it sits
+   in `node`; null if they aren't siblings (nothing to fit against). */
+function dashNodeMapSplit(node) {
+  if (!node || node.type !== 'split') return null;
+  if (node.dir === 'row' && node.a.type === 'leaf' && node.a.id === 'node'
+      && node.b.type === 'leaf' && node.b.id === 'map') return node;
+  return dashNodeMapSplit(node.a) || dashNodeMapSplit(node.b);
+}
+
+function dashFitNodeCard() {
+  if (!dashSupported() || _dashTree) return;
+  /* Neither can actually be hidden while _dashTree is null (hiding calls
+     dashEnsureCustom() first), but the row math below assumes both are on
+     screen, so don't rely on that from a distance. */
+  if (_dashHidden['node'] || _dashHidden['map']) return;
+  var area = document.getElementById('content-area');
+  var card = dashCardEl('node'), mapEl = dashCardEl('map');
+  var split = dashNodeMapSplit(DASH_DEFAULT_TREE);
+  if (!area || !card || !mapEl || !split) return;
+  var last = card.lastElementChild;
+  if (!last) return;
+  var ch = area.clientHeight;
+  var cellH = (ch - (DASH_ROWS - 1) * DASH_GAP) / DASH_ROWS;
+  if (!(cellH > 0)) return;
+
+  /* Content height, not the card's own height: the card is stretched to fill
+     its grid area, so offsetHeight/scrollHeight would just report back the
+     space we're trying to reclaim. The flex column is top-aligned, so the
+     bottom of its last child plus the card's own bottom padding/border is
+     what it genuinely needs (both rects are border-box, so the top border is
+     already inside the difference). */
+  var cs = getComputedStyle(card);
+  var need = last.getBoundingClientRect().bottom - card.getBoundingClientRect().top
+             + (parseFloat(cs.paddingBottom) || 0)
+             + (parseFloat(cs.borderBottomWidth) || 0);
+  /* n rows are n cells plus the n-1 gaps between them. */
+  var rows = Math.ceil((need + DASH_GAP) / (cellH + DASH_GAP));
+  rows = Math.max(DASH_MIN_RS, Math.min(DASH_ROWS - DASH_MIN_RS, rows));
+  if (rows === _dashFitRows) return;   /* nothing moved — skip the reflow and Leaflet's resize */
+  _dashFitRows = rows;
+
+  split.ratio = rows / DASH_ROWS;
+  /* Exactly what dashApply() would write for this ratio; it can't do it
+     itself here because a null _dashTree deliberately leaves the other five
+     cards to the stylesheet. */
+  card.style.gridRow = '1 / span ' + rows;
+  mapEl.style.gridRow = (1 + rows) + ' / span ' + (DASH_ROWS - rows);
+  dashApply();   /* re-walk so the node/map divider follows the boundary it just moved */
+  setTimeout(function() { if (_map) _map.invalidateSize(); }, 50);
 }
 
 function dashPositionDividers() {
