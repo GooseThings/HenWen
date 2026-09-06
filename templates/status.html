@@ -307,18 +307,20 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .nws-alert-item.nws-sev-advisory strong { color: var(--warn); }
 @keyframes nws-scroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
 
-/* ── Content area: Node/Map | Connected/Activity | Favorites ──
+/* ── Content area: Node/Map | Connected Nodes | Favorites ──
    A 12-col x 24-row grid built from `fr` tracks, not fixed px, so it always
    fills exactly the space .content-area has (same "fits the viewport, never
    scrolls" behavior the old fixed 4-column grid had) regardless of screen
    size. The cards' default positions below must stay in sync with
    DASH_DEFAULT_TREE + DASH_DEFAULT_HIDDEN in the JS: they're what a
    first-time visitor sees before anything is dragged (see dashApply()'s
-   `if (_dashTree)` guard), so they're written as the *rendered* default —
-   Chat and Meshtastic are hidden out of the box, so Favorites and Latest
-   Activity are given the full spans their hidden siblings' collapsed space
-   frees up, exactly as dashWalk() would compute them. Once the user
-   drags/resizes a card
+   `if (_dashTree)` guard), so a *visible* card is written at its rendered
+   default — Global Node Activity, Meshtastic and Chat are hidden out of the
+   box, so Connected Nodes and Favorites are given the full spans that
+   collapsed space frees up, exactly as dashWalk() would compute them. The
+   hidden three keep their in-tree coordinates instead (they only ever apply
+   if unhidden, and dashUnhide() hands the job to the tree first anyway).
+   Once the user drags/resizes a card
    (see the Dashboard grid section further down), JS takes over with inline
    grid-column/grid-row on that card — inline style always wins over these
    stylesheet defaults, and on mobile .content-area switches to display:flex
@@ -328,7 +330,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   gap: 10px; flex: 1; min-height: 0; position: relative;
 }
 
-.connected-card { grid-column: 5 / span 5; grid-row: 1 / span 13; }
+.connected-card { grid-column: 5 / span 5; grid-row: 1 / span 24; }
 
 /* ── Node status card: top of the left column, with the map below it ── */
 .node-card {
@@ -565,12 +567,14 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .nr-tl-bar.on { height: 100%; background: var(--danger); box-shadow: 0 0 3px rgba(224,68,68,.7); }
 .nr-tl-bar.empty { background: transparent; }
 
-/* ── Activity panel: sits under Connected Nodes in the middle column.
-   Meshtastic (below) still splits this column's bottom off in the tree, but
-   it's hidden by default, so the stylesheet default here is the full
-   span 11 that collapse frees up. ── */
+/* ── Global Node Activity panel: sits under Connected Nodes in the middle
+   column, with Meshtastic splitting off below it. Hidden by default
+   (DASH_DEFAULT_HIDDEN) like Meshtastic and Chat, so these coordinates are
+   its in-tree placement rather than a rendered default — and since
+   dashUnhide() calls dashEnsureCustom() first, the tree's inline placement
+   is what actually applies once it's turned back on. ── */
 .activity-card {
-  grid-column: 5 / span 5; grid-row: 14 / span 11;
+  grid-column: 5 / span 5; grid-row: 14 / span 7;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
@@ -908,7 +912,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
   /* Fewer visible cards by default (issue #35): Node + Connected Nodes are
      what a phone visitor checks first (see the ordering comment above) and
-     always stay expanded. Map/Latest Activity/Meshtastic/Chat are hidden
+     always stay expanded. Map/Global Node Activity/Meshtastic/Chat are hidden
      outright on mobile (not just collapsed — there's nothing to tap to get
      them back; a phone visitor who wants those checks the desktop site).
      Favorites is the one exception left collapsible rather than hidden:
@@ -1403,13 +1407,13 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       <div id="map"></div>
     </div>
 
-    <!-- Latest Activity: under Connected Nodes in the middle column -->
+    <!-- Global Node Activity: under Connected Nodes in the middle column -->
     <div class="activity-card dash-card" data-dash-id="activity"
          ondragover="dashDragOver(event)" ondragleave="dashDragLeave(event)" ondrop="dashDrop(event,'activity')">
       <div class="card-header">
         <span class="dash-header-grip" draggable="true" title="Drag to move"
               ondragstart="dashDragStart(event,'activity')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
-        <span class="card-title">Latest Activity</span>
+        <span class="card-title">Global Node Activity</span>
         <span class="card-count" id="act-count"></span>
         <button class="dash-hide-btn" style="margin-left:auto" onclick="toggleDashHide('activity',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
       </div>
@@ -1908,7 +1912,7 @@ var MAP_WORLD_OFFSETS = [-360, 0, 360];
 
 /* Maps 'asl:<node>' / 'aprs:<callsign>' -> the single marker (world-copy
    offset 0, the true-longitude one) representing that entry, so clicking a
-   row in the "Latest Activity" list can fly the map to it and reopen its
+   row in the "Global Node Activity" list can fly the map to it and reopen its
    popup — see focusActivityPin(). Partitioned by key prefix rather than two
    separate objects since updateMap() and clearAprsMarkers() rebuild their
    own halves independently and on different cadences. */
@@ -1947,7 +1951,7 @@ var _mapDirty           = false;  /* data changed while a popup was open */
       phone; Node and Connected Nodes (what a visitor checks first) always
       stay expanded. Its open/closed state persists per-browser in
       localStorage, so it stays open across reloads once opened. Map,
-      Latest Activity, Meshtastic, and Chat are hidden outright on mobile
+      Global Node Activity, Meshtastic, and Chat are hidden outright on mobile
       instead (see the CSS, not collapsible at all) — a phone visitor who
       wants those uses the desktop site. */
 var MOBILE_BREAKPOINT_QUERY  = '(max-width: 860px)';
@@ -2452,7 +2456,7 @@ function clearAprsMarkers() {
 }
 
 function renderAprsMarkers(stations) {
-  /* Feeds both the map layer (below) and the "Latest Activity" list
+  /* Feeds both the map layer (below) and the "Global Node Activity" list
      (_lastAprsPoints, merged in by renderActivityList()) from the same
      fetch — see the note at the top of the activity-feed section. */
   var now = Date.now() / 1000;
@@ -2914,7 +2918,7 @@ function onIssPassCountChange(v) {
   issRecomputePasses();
 }
 
-/* Clicking the background of a "Latest Activity" row flies the map to that
+/* Clicking the background of a "Global Node Activity" row flies the map to that
    entry's pin and reopens its popup — key is 'asl:<node>' or
    'aprs:<callsign>', looked up in _actMarkerIndex (populated by updateMap()'s
    activity-pins loop and renderAprsMarkers()). Silently does nothing if the
@@ -4003,7 +4007,7 @@ function updateActiveUsersToggle() {
 }
 
 /* ── Activity feed + map ──
-   Two independent data sources feed the "Latest Activity" list: ASL keyed/
+   Two independent data sources feed the "Global Node Activity" list: ASL keyed/
    global activity (_lastActivityPoints, refreshed by refreshActivity() on
    its normal short cadence) and APRS stations (_lastAprsPoints, refreshed
    by fetchAprsStations()/renderAprsMarkers() on the much slower APRS_POLL_MS
@@ -6605,28 +6609,28 @@ var DASH_GAP = 10;             /* must match .content-area's CSS `gap` */
 var DASH_MIN_CS = 2, DASH_MIN_RS = 3;
 var DASH_CARD_IDS = ['node', 'connected', 'map', 'activity', 'favorites', 'chat', 'meshtastic'];
 var DASH_CARD_TITLES = {node: 'Node', connected: 'Connected Nodes',
-  map: 'Map', activity: 'Latest Activity', favorites: 'Favorites', chat: 'Chat',
+  map: 'Map', activity: 'Global Node Activity', favorites: 'Favorites', chat: 'Chat',
   meshtastic: 'Meshtastic'};
 /* Bumped whenever the default layout itself changes, not just when the card
    set does: dashLoadSaved() only rejects a saved tree that's structurally
    stale (a missing/unknown id), so an existing visitor's localStorage would
    otherwise pin them to the previous default forever. */
-var DASH_STORE_KEY = 'henwen-dash-layout-v8';
+var DASH_STORE_KEY = 'henwen-dash-layout-v9';
 
 /* Three visible columns by default: Node with the Map under it on the left,
-   Connected Nodes with Latest Activity under it in the middle, Favorites
-   down the right — see dashWalk()'s doc comment for how a {dir,ratio} node
-   maps to grid lines. The left column gets 4 of the 12 columns rather than
-   the 3 the Node card used to have to itself, since the map underneath it
-   is the one card that actually wants width.
+   Connected Nodes (alone, filling the column) in the middle, Favorites down
+   the right — see dashWalk()'s doc comment for how a {dir,ratio} node maps
+   to grid lines. The left column gets 4 of the 12 columns rather than the 3
+   the Node card used to have to itself, since the map underneath it is the
+   one card that actually wants width.
 
-   Chat is still split off underneath Favorites (2/3 favorites, 1/3 chat) and
-   Meshtastic underneath Activity (7/11 activity, 4/11 meshtastic) — the tree
-   shape is unchanged there, both are just hidden by default now (see
-   DASH_DEFAULT_HIDDEN), which collapses their space into the sibling above
-   until someone turns them back on from the hidden-panels menu. Keeping them
-   as leaves in the same spots means unhiding restores exactly the old
-   proportions with no tree surgery. */
+   The tree below still describes all seven cards in their full arrangement —
+   Global Node Activity under Connected Nodes (13/24 vs 11/24), Meshtastic
+   under that (7/11 vs 4/11), Chat under Favorites (2/3 vs 1/3). Those three
+   are just hidden by default (see DASH_DEFAULT_HIDDEN), which collapses
+   their space into the sibling above until someone turns them back on from
+   the hidden-panels menu. Keeping them as leaves in their old spots means
+   unhiding restores exactly these proportions with no tree surgery. */
 var DASH_DEFAULT_TREE = {
   type: 'split', dir: 'col', ratio: 1 / 3,
   a: {type: 'split', dir: 'row', ratio: 0.5,
@@ -6648,14 +6652,15 @@ var DASH_DEFAULT_TREE = {
   }
 };
 
-/* Cards hidden out of the box — the kiosk's default view is the four core
-   status panels, and these two are opt-in feeds (kiosk chat needs a login to
-   even post; Meshtastic is an unrelated network's traffic). Not a removal:
-   both keep their leaf in the tree above and show up in the header's
+/* Cards hidden out of the box — the kiosk's default view is this node and
+   its own traffic (Node, Connected Nodes, Map, Favorites), and all three of
+   these are feeds of somebody else's: network-wide keyups, an unrelated LoRa
+   mesh, and a chat that needs a login to even post. Not a removal: each
+   keeps its leaf in the tree above and shows up in the header's
    hidden-panels menu for a one-click restore. Only consulted when there's no
    saved layout at all — once anything is saved, that state is authoritative,
    so re-hiding is never forced on someone who explicitly unhid them. */
-var DASH_DEFAULT_HIDDEN = {chat: true, meshtastic: true};
+var DASH_DEFAULT_HIDDEN = {activity: true, chat: true, meshtastic: true};
 
 var _dashTree = null;   /* null = no customization yet; CSS stylesheet defaults apply untouched */
 var _dashHidden = Object.assign({}, DASH_DEFAULT_HIDDEN);
