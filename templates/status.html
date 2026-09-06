@@ -178,16 +178,13 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
 /* TX/Listen/Rec cycle through longer active-state labels (e.g. "TX
    arming…", "Reconnecting...", "Rec Stop (12:34)") than their resting
-   "ARM TX"/"Listen"/"Rec" text. Without nowrap above, a button narrower than
+   "Arm TX"/"Listen"/"Rec" text. Without nowrap above, a button narrower than
    its longest label would wrap that text onto a second line internally,
    growing just that one button's height mid-interaction — jarring since
    its neighbors don't move. nowrap fixes the internal wrap; the extra
    padding/font-size here gives these three enough room that the longest
-   states actually fit, so the row reflows (if anything) instead. myrec-btn
-   has no label to grow, but shares the same padding/font-size so its
-   icon-only button sits at the same height as its three siblings in
-   .node-controls instead of the shorter default .btn-icon size. */
-#tx-btn, #listen-btn, #record-btn, #myrec-btn { padding: 8px 13px; font-size: 0.88rem; }
+   states actually fit, so the row reflows (if anything) instead. */
+#tx-btn, #listen-btn, #record-btn { padding: 8px 13px; font-size: 0.88rem; }
 
 /* Header's utility row (search/net-schedule/login/layout-edit/fullscreen/
    manager) — lives in .header-actions, on the right of .header-brand via
@@ -353,11 +350,13 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   padding: 16px 12px; display: flex; flex-direction: column;
   gap: 8px; overflow: hidden; min-height: 0;
 }
-/* Node-wide audio controls (ARM TX / Listen / Rec / My Recordings), sitting
-   under the node's identity block. flex-wrap because every one of them is
-   conditional — role, TX support, the can_record flag — so the row's width
-   varies, and a narrowed column should drop a button to a second line
-   rather than have the card clip it (the card is overflow:hidden).
+/* Node-wide audio controls (Arm TX / Listen / Rec), sitting under the node's
+   identity block. flex-wrap because every one of them is conditional — role,
+   TX support, the can_record flag — so the row's width varies, and a
+   narrowed column should drop a button to a second line rather than have
+   the card clip it (the card is overflow:hidden). My Recordings used to live
+   here too but moved up to the header's button row — it's account-scoped
+   self-service, not really a control over *this* node's audio.
    margin-top:auto is deliberately NOT used: the card is sized to its content
    by dashFitNodeCard(), so there's no slack to push against, and pinning to
    the bottom of a stretched card would fight that measurement. */
@@ -1238,6 +1237,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
              connect path); the net-schedule calendar is always visible. -->
         <button class="btn-icon" id="node-search-btn" onclick="openSearchModal()" title="Search the AllStar and EchoLink directories for nodes to connect to" style="display:none"><svg class="icon"><use href="#icon-search"></use></svg><span class="header-menu-label">Search</span></button>
         <button class="btn-icon" id="net-cal-btn" onclick="openNetModal()" title="Net Schedule — scheduled net reminders"><svg class="icon"><use href="#icon-calendar-days"></use></svg><span class="header-menu-label">Net Schedule</span></button>
+        <button class="btn-icon" id="myrec-btn" onclick="openMyRecordingsModal()" style="display:none" title="View, rename, download, or delete your saved recordings"><svg class="icon"><use href="#icon-folder-open"></use></svg><span class="header-menu-label">My Recordings</span></button>
         <div id="kiosk-user-bar" style="display:none;align-items:center;gap:6px;font-size:0.75rem;flex-shrink:0">
           <button class="btn-icon" onclick="openAccountModal()" title="Change your password or set up two-factor authentication"><svg class="icon"><use href="#icon-user"></use></svg><span class="header-menu-label">Account</span></button>
           <button class="btn-icon" onclick="kioskLogout()" title="Logout"><svg class="icon"><use href="#icon-door-open"></use></svg><span class="header-menu-label">Logout</span></button>
@@ -1318,10 +1318,9 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
            .node-controls collapses to nothing rather than leaving an empty
            strip — and dashFitNodeCard() re-measures whenever that changes. -->
       <div class="node-controls" id="node-controls">
-        <button class="btn-icon" id="tx-btn" onclick="openTx()" style="display:none" title="Transmit from your microphone through this node"><svg class="icon"><use href="#icon-mic"></use></svg> ARM TX</button>
+        <button class="btn-icon" id="tx-btn" onclick="openTx()" style="display:none" title="Transmit from your microphone through this node"><svg class="icon"><use href="#icon-mic"></use></svg> Arm TX</button>
         <button class="btn-icon" id="listen-btn" onclick="toggleListen()" title="Stream live audio from this node — expect ~1 second delay"><svg class="icon"><use href="#icon-headphones"></use></svg> Listen</button>
         <button class="btn-icon" id="record-btn" onclick="toggleRecord()" style="display:none" title="Record this node's audio to a file"><svg class="icon" style="color:var(--red,#f85149)"><use href="#icon-circle"></use></svg> Rec</button>
-        <button class="btn-icon" id="myrec-btn" onclick="openMyRecordingsModal()" style="display:none" title="View, rename, download, or delete your saved recordings"><svg class="icon"><use href="#icon-folder-open"></use></svg></button>
       </div>
       <div id="listen-vol-row">
         <span style="font-size:0.78rem;color:var(--text2);flex-shrink:0;display:flex;align-items:center;gap:4px" title="Listen volume"><svg class="icon"><use href="#icon-volume-2"></use></svg> Volume</span>
@@ -1340,7 +1339,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
           <button class="dash-hide-btn" onclick="toggleDashHide('connected',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
         </span>
       </div>
-      <!-- Stays here, unlike the ARM TX button that raises it (now in the
+      <!-- Stays here, unlike the Arm TX button that raises it (now in the
            Node card): this is the PTT control itself, and it wants the width
            for its mic meter/gain row plus room for #tx-status's messages. -->
       <div id="tx-bar" style="display:none">
@@ -5775,7 +5774,7 @@ async function armTx() {
     var cfg = await r.json();
     if (!r.ok || !cfg.enabled) {
       _txStatus(cfg.error || 'Browser transmit is not configured on this server', 'var(--red)');
-      _txSetBtn('<svg class="icon"><use href="#icon-mic"></use></svg> ARM TX', '');
+      _txSetBtn('<svg class="icon"><use href="#icon-mic"></use></svg> Arm TX', '');
       _tx.armed = false;
       return;
     }
@@ -5903,7 +5902,7 @@ function _txTeardown() {
   if (_tx.session) { try { _tx.session.terminate(); } catch (e) {} _tx.session = null; }
   if (_tx.ua)      { try { _tx.ua.stop(); }           catch (e) {} _tx.ua = null; }
   _txReleaseMic();
-  _txSetBtn('<svg class="icon"><use href="#icon-mic"></use></svg> ARM TX', '');
+  _txSetBtn('<svg class="icon"><use href="#icon-mic"></use></svg> Arm TX', '');
 }
 
 function disarmTx() {
@@ -7001,8 +7000,8 @@ function dashApply() {
 /* ── Node card auto-fit ──────────────────────────────────────────────────
    The Node card holds three lines of text, a status badge and a row of audio
    controls, and how much of that is on screen changes with who's logged in
-   (ARM TX needs a role and a TX-capable server, Rec/My Recordings need the
-   can_record flag), so any fixed row span is wrong at most window heights:
+   (Arm TX needs a role and a TX-capable server, Rec needs the can_record
+   flag), so any fixed row span is wrong at most window heights:
    too tall and it's mostly dead space, too short and content is silently
    clipped (the card is overflow:hidden). Measure what it actually needs,
    give the Node/Map row split exactly that many rows (handing the rest of
