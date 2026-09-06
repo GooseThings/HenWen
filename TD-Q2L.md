@@ -1,39 +1,28 @@
 # Tidradio TD-Q2L Bluetooth PTT mic — reverse-engineered notes
 
-> **Status 2026-09-05 — likely not a permanent bug: looks like BLE connection
-> warm-up / connection-interval variability.**
-> Everything earlier in this file describes the PTT characteristic
-> (`894c8042-...`) as unreadable from Chrome: `readValue()` resolving with
-> **zero bytes** and `characteristicvaluechanged` never firing, reproduced
-> identically on Android and desktop Linux Chrome. That description was
-> accurate for every session tested that day — until the same evening, the
-> exact same characteristic, on the exact same desktop setup, delivered
-> **150+ consecutive press/release notifications with almost no misses**.
-> Nothing in the code changed between the bad sessions and the good one.
-> The leading theory is a BLE **connection-interval warm-up**: a fresh
-> connection can start on a slow, power-saving interval where a quick
-> press-and-release falls entirely between polls and is never seen at all,
-> and either settles into a fast interval after sustained traffic or gets a
-> fast interval from the start, seemingly by luck of the connection. Native
-> apps like nRF Connect can request a high-priority interval immediately (an
-> API Web Bluetooth does not expose to JavaScript at all) — which would
-> explain why nRF Connect has been reliable from the very first press in
-> every test, while Chrome's reliability has varied session to session.
-> See [Follow-up testing: connection warm-up, not a permanent bug](#follow-up-testing-2026-09-05-connection-warm-up-not-a-permanent-bug)
-> for the full sequence (a stale-GATT-cache race fix, a Wi-Fi-off test that
-> looked conclusive and then got contradicted by a Wi-Fi-on test that worked
-> even better). [Open problem](#open-problem-chrome-reads-return-zero-bytes)
-> and [Desktop Chrome testing results](#desktop-chrome-linux-testing-results-2026-09-05)
-> below are kept as-is — they're real data, just not the final word — and
-> [Troubleshooting on a desktop](#troubleshooting-on-a-desktop) has the
-> standalone harness.
->
-> Meanwhile HenWen ships a working-but-imperfect fallback: PTT on the **Rev**
-> media key, which is a toggle rather than hold-to-talk. Removing that
-> compromise is the entire point of getting the BLE read working — and this
-> new finding means it may actually be reachable, with the right connection
-> warm-up strategy in HenWen's own connect code.
-
+> **Status 2026-09-05 — settled. BLE PTT works, but not while the mic's own
+> audio is in use.**
+> The BLE link is solid once a fast connection interval is held: 19
+> consecutive clean press/release pairs on the phone, where every earlier
+> session got none. Web Bluetooth exposes no
+> `requestConnectionPriority()`, so the only lever a page has is sustained
+> GATT traffic — HenWen polls the characteristic every 40ms purely as a
+> keep-alive (the reads themselves return zero bytes on this device and are
+> discarded; **notifications** carry the button).
+> But delivery stops dead whenever TX is armed, which is when the classic
+> SCO audio link to the same headset comes up. Controlled test, poll rate
+> held constant: 11 pairs delivered idle, none armed, 3 pairs delivered idle
+> again. `0xFFE1` went silent at the same time, so it is the radio, not the
+> characteristic.
+> **Consequence:** since routing audio through the headset is the point of
+> owning it, the **Rev media key** is HenWen's transmit control — AVRCP rides
+> through an active SCO link where GATT does not. The cost is that Rev is a
+> toggle, not press-and-hold. The BLE path is kept for anyone not routing
+> audio to the Bluetooth device, and the TX bar now says plainly when a
+> connected PTT button will not respond.
+> See [Settled: BLE notifications and SCO audio cannot coexist](#settled-2026-09-05-ble-notifications-and-sco-audio-cannot-coexist).
+> Sections above it are kept as the working record — real data, several
+> superseded conclusions, including one retraction that was itself wrong.
 
 No public protocol documentation exists for this device (checked as of 2026-09).
 Tidradio markets it as compatible with "most PTT applications" without a
@@ -545,6 +534,51 @@ the button; the poll is what appears to keep them flowing.**
 Acted on: the 40ms rate is no longer a warm-up that settles, it is the
 operating rate for as long as the link is up. The link only exists while an
 operator has deliberately connected a PTT button, so the cost is bounded.
+
+## Settled, 2026-09-05: BLE notifications and SCO audio cannot coexist
+
+With the keep-alive poll holding a fast connection interval, the variable
+that had been confounding every previous test was finally controlled — the
+poll ran at 40ms throughout all of the following, and the only thing that
+changed was whether TX was armed.
+
+| Window | TX state | Deliberate presses delivered |
+|---|---|---|
+| 19:55:56–19:56:09 | idle | **11 pairs**, every one |
+| 19:56:11–19:56:27 | **armed** | none |
+| 19:56:33–19:56:36 | idle again | **3 pairs**, immediately |
+| 20:01:49–20:02:09 | **armed**, 5 deliberate presses | none |
+
+Arming is what brings up the classic SCO audio link to the same headset. So
+the original mutual-exclusion claim in this file was right after all, and the
+retraction partway through was wrong — though reasonably made at the time:
+the operator reported mic, speaker and PTT all working together, which was
+true, but in a window where TX was not armed and no SCO link was up.
+
+`0xFFE1` was subscribed simultaneously and went equally silent, so this is
+not specific to the PTT characteristic. It is the radio.
+
+**What this settles, and what it costs.** Hold-to-talk over BLE is reachable
+on this device — 19 consecutive clean press/release pairs proves the link
+itself is solid once a fast connection interval is held — but *not while the
+mic's own audio is in use*. Since routing audio through the headset is the
+entire point of owning it, the practical answer for HenWen is that the **Rev
+media key stays the transmit control**: AVRCP rides through an active SCO
+link without trouble, where GATT does not. The cost is that Rev is a toggle
+rather than press-and-hold, with the guards described further down.
+
+The BLE path is kept and is genuinely useful for anyone *not* routing audio
+to the Bluetooth device — and HenWen now says plainly in the TX bar when a
+connected PTT button will not respond, rather than leaving it looking live.
+
+### Still open
+
+- Whether a two-radio accessory (separate BLE and Classic chips) avoids this
+  entirely. Nothing here suggests a software fix exists for a single-chip one.
+- Whether the connection interval can be held fast *and* SCO kept happy by
+  polling more slowly — 40ms was picked because it worked, not because it was
+  the minimum that works. A slower keep-alive that still holds the interval
+  might leave enough radio time for SCO.
 
 ## Troubleshooting on a desktop
 

@@ -6119,6 +6119,7 @@ function _txMediaKeyMode() {
 var _txMediaKeyApplied = '';
 function _txMediaKeyPoll() {
   if (_txMediaKeyMode() !== _txMediaKeyApplied) _txMediaKeySync();
+  _txBleRenderStatus();   // the BLE warning depends on armed state, not just link state
 }
 
 function _txMediaKeySync(quiet) {
@@ -6221,9 +6222,22 @@ function _txBleSetStatus(msg, warn) {
   _txBle.warn = !!warn;
   _txBleRenderStatus();
 }
+/* Confirmed by controlled test (TD-Q2L.md): with the keep-alive poll running
+   identically throughout, presses are delivered reliably while TX is idle and
+   not at all while TX is armed. Arming is what brings up the classic SCO audio
+   link to the same headset, and this device cannot carry both. Say so plainly
+   rather than leaving a connected-looking button that silently does nothing —
+   the operator needs to know to reach for Rev or the on-screen PTT instead. */
 function _txBleRenderStatus() {
   var el = document.getElementById('tx-ble-status');
   if (!el) return;
+  var connected = !!(_txBle.device && _txBle.device.gatt.connected);
+  if (connected && _tx.armed) {
+    el.textContent = 'PTT button is connected but will not respond while transmit audio ' +
+                     'is routed to it over Bluetooth — key with Rev or the on-screen PTT.';
+    el.style.color = 'var(--warn)';
+    return;
+  }
   el.textContent = _txBle.statusMsg;
   el.style.color = _txBle.warn ? 'var(--warn)' : 'var(--text2)';
 }
