@@ -5609,6 +5609,61 @@ function openTx() {  /* header 🎤 TX button: arm/disarm toggle */
   armTx();
 }
 
+/* Arming stalled ~41s on one operator's network and ~1s on another's, all
+   day, with identical code — the split was purely by client IP. That gap is
+   the RFC 5389 STUN retransmission schedule run to exhaustion (requests at
+   0/0.5/1.5/3.5/7.5/15.5/31.5s, then an 8s wait, giving up at 39.5s): the
+   network silently drops UDP to the STUN server, so no reply ever comes.
+   Consistently hitting the *full* timeout rather than an intermediate one is
+   what says no response ever arrives, as opposed to a slow one — so on that
+   network there is no server-reflexive candidate to be had, and waiting for
+   it buys nothing. Media worked fine afterwards regardless, off host
+   candidates plus Asterisk's own stunaddr.
+   JsSIP 3.13.8 only resolves its SDP offer on icegatheringstatechange
+   'complete' or on an explicit ready() from its 'icecandidate' event, with
+   no timeout of its own, so the whole INVITE just waits out that 39.5s.
+   This bounds it: send as soon as the srflx candidate arrives (that's the
+   only thing STUN is here to produce — nothing to gain by waiting longer),
+   or at TX_ICE_MAX_WAIT_MS, whichever comes first. Networks where STUN
+   works get *faster* arming, not slower, since gathering no longer has to
+   fully complete first. */
+var TX_ICE_MAX_WAIT_MS = 4000;
+var TX_ICE_NO_CAND_MS  = 8000;
+
+function _txBoundIceGathering(s) {
+  var ready = null, timer = null, t0 = Date.now();
+  /* The deadline below only ever armed once a first candidate had arrived,
+     because ready() is handed out by the icecandidate event and there is no
+     other way to reach it. So a PeerConnection that produces no candidates at
+     all hung indefinitely with nothing logged — observed live: mic built at
+     19:52:00, then no ice-ready, no INVITE and no error for 23s until the
+     operator gave up. Can't force the offer without ready(), but silence is
+     never the right outcome: say so and drop out of arming. */
+  setTimeout(function() {
+    if (ready !== null || !_tx.armed || _tx.session !== s) return;   // progressed
+    if (!_tx.session || _tx.session.isEstablished()) return;
+    _txDiag('ice-no-candidates', 'none after ' + TX_ICE_NO_CAND_MS + 'ms');
+    _txStatus('Could not start the call — no network candidates. Try arming again.', 'var(--red)');
+    disarmTx();
+  }, TX_ICE_NO_CAND_MS);
+  var go = function(why) {
+    if (!ready) return;                      // already sent, or never armed
+    clearTimeout(timer);
+    var fn = ready; ready = null;
+    _txDiag('ice-ready', why + ' after ' + (Date.now() - t0) + 'ms');
+    try { fn(); } catch (e) {}
+  };
+  s.on('icecandidate', function(e) {
+    if (!ready) {
+      _txDiag('ice-first-candidate', (Date.now() - t0) + 'ms');
+      ready = e.ready;
+      timer = setTimeout(function() { go('timeout'); }, TX_ICE_MAX_WAIT_MS);
+    }
+    var c = (e.candidate && e.candidate.candidate) || '';
+    if (c.indexOf('typ srflx') !== -1) go('srflx');
+  });
+}
+
 async function armTx() {
   if (!window._kioskRole) { openKioskLogin(armTx, []); return; }
   _tx.armed = true;
@@ -5673,6 +5728,7 @@ async function armTx() {
         pcConfig: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] },
       });
       _tx.session = s;
+      _txBoundIceGathering(s);
       /* The call is full-duplex: Asterisk streams the node's audio (which,
          while keyed, is your own voice ~a beat behind) back down it. Listen
          is the one monitor path, so hard-disable every inbound track — not
