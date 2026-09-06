@@ -20,6 +20,10 @@
 > toggle, not press-and-hold. The BLE path is kept for anyone not routing
 > audio to the Bluetooth device, and the TX bar now says plainly when a
 > connected PTT button will not respond.
+> A native Android app would not help: nRF Connect, which already uses
+> `requestConnectionPriority()`, receives nothing either while a call is
+> active — so this is the Bluetooth controller scheduling one shared radio,
+> below the application layer, not a Chrome or Web Bluetooth limitation.
 > See [Settled: BLE notifications and SCO audio cannot coexist](#settled-2026-09-05-ble-notifications-and-sco-audio-cannot-coexist).
 > Sections above it are kept as the working record — real data, several
 > superseded conclusions, including one retraction that was itself wrong.
@@ -571,14 +575,38 @@ The BLE path is kept and is genuinely useful for anyone *not* routing audio
 to the Bluetooth device — and HenWen now says plainly in the TX bar when a
 connected PTT button will not respond, rather than leaving it looking live.
 
+### A native Android app would not fix it either — tested, 2026-09-05
+
+The obvious escape hatch was to stop fighting Web Bluetooth and write a
+native app, since Android exposes
+`BluetoothGatt.requestConnectionPriority(CONNECTION_PRIORITY_HIGH)` — the
+API that asks for a fast connection interval, which Web Bluetooth does not
+expose to JavaScript in any form, and the single best explanation for why
+nRF Connect had been reliable from the first press where Chrome was not.
+
+**Tested before writing anything.** Every previous nRF Connect test had been
+run with no SCO link active, so the one condition that matters had never
+actually been checked. Run properly — a live call using the Q2L for audio,
+with nRF Connect connected and subscribed to `894c8042-…` alongside it —
+**nRF Connect receives no notifications either.**
+
+That settles the layer this lives at. nRF Connect is a native client already
+using every lever an Android app has, including connection priority. If it
+gets nothing while SCO is up, no app anyone writes gets anything either: the
+conflict is in the Bluetooth controller's scheduling of a single shared
+radio, below the application layer entirely. It is not a Chrome bug, not a
+Web Bluetooth limitation, and not something HenWen can code around.
+
+This also closes the remaining tuning idea — polling more slowly to leave
+radio time for SCO. No client-side strategy can matter when the best-case
+native client gets zero.
+
 ### Still open
 
-- Whether a two-radio accessory (separate BLE and Classic chips) avoids this
-  entirely. Nothing here suggests a software fix exists for a single-chip one.
-- Whether the connection interval can be held fast *and* SCO kept happy by
-  polling more slowly — 40ms was picked because it worked, not because it was
-  the minimum that works. A slower keep-alive that still holds the interval
-  might leave enough radio time for SCO.
+- Whether a **two-radio accessory** (separate BLE and Classic Bluetooth
+  chips, rather than one combo chip) avoids this. That is the only remaining
+  route to hold-to-talk with Bluetooth audio, and it is a hardware purchase
+  rather than anything to build.
 
 ## Troubleshooting on a desktop
 
