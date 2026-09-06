@@ -5024,27 +5024,23 @@ var _TX_IDLE_HANGUP_MS = 5 * 60 * 1000;  // auto-disarm after 5 min without keyi
    parrot test), so AGC is off by default and level is set manually with
    this slider — the mic runs through a WebAudio gain stage before it
    enters the call, with a post-gain analyser feeding the level meter (what
-   the meter shows is what transmits). Persisted per browser, and applied on
-   top of the browser's own AGC as a further trim if a mic runs hot. */
+   the meter shows is what transmits). Persisted per browser. */
 function _txSavedGain() {
   var v = parseInt(localStorage.getItem('henwen-tx-gain') || '100', 10);
   return (v >= 0 && v <= 200) ? v : 100;
 }
 
-/* One capture path, asking for nothing unusual: the plain WebRTC defaults
-   every other calling site requests. Opting any one of the trio out drops
-   Chromium's Android backend into a capture path that never engages
-   Bluetooth routing at all, so a paired headset stops being used for the
-   call — asking for the defaults is what lets the platform route audio
-   wherever the operator has already pointed it.
-   The manual gain slider below is the one level control; there is
-   deliberately no second leveller in our own graph, since the browser's AGC
-   is already doing that job. (autoGainControl was previously forced off here
-   to fix clipping on one specific headset mic — if that returns, lower the
-   slider before reaching for the constraint, which costs Bluetooth routing.) */
+/* AGC stays off; the manual gain slider above is the level control. Worth
+   recording what turning it on costs and buys, since it was tried and
+   reverted: Chromium's Android backend only engages Bluetooth audio routing
+   when getUserMedia asks for the full default AEC+NS+AGC trio, so opting AGC
+   out means a paired headset's mic and speaker are not used for the call at
+   all. Turning it on restored that routing — and re-introduced the clipping
+   the slider exists to avoid (see _txSavedGain above). Off is the status quo
+   until someone wants headset routing badly enough to re-tune the level. */
 function _txBuildMicChain() {
   return navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false },
     video: false,
   }).then(function(raw) {
     /* Which mic actually got picked, and which processing Chrome actually
