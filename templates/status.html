@@ -146,6 +146,17 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   display: flex; flex-direction: column;
   height: 100vh; padding: 16px 20px 12px; gap: 10px;
 }
+/* Wraps the weather/net bars, NWS alert bar, and .content-area in a <main>
+   landmark (accessibility only — .header/.footer are already <header>/
+   <footer>, but nothing marked the primary content region, so screen
+   readers/keyboard users had no way to jump past the header). Mirrors
+   .board's own display:flex/flex-direction:column/gap so this extra
+   nesting level is layout-invisible: .board-main takes the flex:1 +
+   min-height:0 that .content-area's own rules already relied on to fill
+   the remaining viewport height, and the 10px gap here replaces the one
+   .board's own `gap` used to provide between these three elements when
+   they were its direct children. */
+.board-main { display: flex; flex-direction: column; flex: 1; min-height: 0; gap: 10px; }
 
 /* ── Header ── */
 .header {
@@ -1339,6 +1350,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     </div>
   </header>
 
+  <main class="board-main">
+
   <!-- Weather bar + net-schedule reminder bar: separate frames so a
        due/soon net only colors its own box, not the weather ticker too. -->
   <div class="bars-row">
@@ -1602,6 +1615,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     </div>
 
   </div>
+
+  </main>
 
   <!-- Footer -->
   <footer class="footer">
