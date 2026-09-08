@@ -1819,6 +1819,14 @@ function nodeLink(node, cssClass) {
   if (_ECHOLINK_NODE_RE.test(String(node))) {
     return '<span class="' + cssClass + '">' + esc(node) + '</span><span class="el-badge" title="EchoLink node">EL</span>';
   }
+  /* Not every connected peer is a node number. A Web Transceiver client shows
+     up under its callsign (issue #74), and stats.allstarlink.org indexes nodes
+     only — so pointing one at /stats/NT0Y is a guaranteed dead link. QRZ is
+     both valid and more useful for a callsign, and callsignLink() already
+     handles the SSID/modifier stripping that needs. */
+  if (CALLSIGN_RE.test(String(node).toUpperCase())) {
+    return callsignLink(node, cssClass);
+  }
   return '<a class="' + cssClass + '" href="https://stats.allstarlink.org/stats/' +
     encodeURIComponent(node) + '" target="_blank" rel="noopener">' + esc(node) + '</a>';
 }
