@@ -41,6 +41,14 @@ cd /opt/HenWen
 sudo bash install.sh   # copies files to /opt/HenWen, installs venv, enables service
 ```
 
+**Uninstall:**
+```bash
+sudo bash uninstall.sh                # asks whether to delete data/credentials
+sudo bash uninstall.sh --purge        # delete them, no prompt
+sudo bash uninstall.sh --keep-data    # keep them, no prompt
+```
+`install.sh` deliberately preserves `/etc/asterisk/henwen.db` so an in-place reinstall doesn't wipe the operator's accounts and config. The consequence nobody expected was that uninstall-then-reinstall silently restored working admin logins from before (issue #80) — the DB holds every password hash, TOTP secret and recovery code, plus the saved Broadcastify/YouTube/Discord/IRC/Meshtastic/ntfy/Pushover credentials. So `uninstall.sh` now asks before deleting that (and the TX SIP secret, recordings, TTS voices, uploaded sounds), defaulting to **keep** since deletion is irreversible, and a non-interactive run without `--purge` always keeps. It removes the `henwen-systemctl` sudoers rule unconditionally, though — a standing passwordless-root grant pointing at paths under a now-deleted `/opt/HenWen` is not something to leave behind. `rpt.conf`, its backups, and any Apache vhost/certificate from `setup-https.sh` are deliberately never touched.
+
 There is no linter configuration. Unit tests exist under `tests/` — see **Testing** below.
 
 ## Testing
