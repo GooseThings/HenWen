@@ -415,16 +415,23 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
    app's many color themes (see :root above) is active rather than baking
    in one palette's hex values.
    .btn-active is toggled by _txSetBtn()/_listenSetBtn()/_recordSetBtn()
-   exactly when each one's inline text color is set to its own active-state
-   color (TX armed/Listen active = their own tint; Rec active is already
-   red) — see those functions. Text/icon color while active still comes
-   from that same inline style, not from this rule, so the two always
-   agree. */
+   exactly when each one's inline text color is set — TX armed/Listen active
+   pass their own tint as that sentinel value, see those functions. Text/icon
+   color while active is forced to --text rather than the raw tint though:
+   text-colored-as-background-tint against a background that's itself a
+   mix of that same tint reliably fails WCAG contrast (verified 2.2–2.3:1 in
+   the default theme, i.e. Lighthouse's aria-command-name/color-contrast
+   findings on issue #86) — --text is chosen per-theme specifically to
+   contrast against that theme's own backgrounds, so pairing it with a
+   tint-mixed background reliably does much better (4.96–6.2:1 here). The
+   idle-state 14%→8% mix below is the same fix applied to the untinted
+   text2-on-idle-background pairing (TX's own idle state measured 4.47:1,
+   just under the 4.5:1 minimum). */
 #tx-btn     { --btn-tint: var(--warn); }
 #listen-btn { --btn-tint: var(--green); }
 #record-btn { --btn-tint: var(--danger); }
 .node-controls .btn-icon {
-  background: color-mix(in srgb, var(--btn-tint) 14%, var(--bg3));
+  background: color-mix(in srgb, var(--btn-tint) 8%, var(--bg3));
   border-color: color-mix(in srgb, var(--btn-tint) 38%, var(--border));
 }
 .node-controls .btn-icon.btn-active {
@@ -5340,8 +5347,13 @@ function _txSetBtn(html, color) {
   var btn = document.getElementById('tx-btn');
   if (btn) {
     btn.innerHTML = html;
-    btn.style.color = color || '';
-    btn.classList.toggle('btn-active', color === 'var(--warn)');
+    /* color is also the active-state sentinel (see .node-controls .btn-icon
+       comment above) — the *displayed* text color while active is forced to
+       --text rather than the raw tint for contrast, but the sentinel check
+       itself still compares against the tint value passed in. */
+    var active = (color === 'var(--warn)');
+    btn.style.color = active ? 'var(--text)' : (color || '');
+    btn.classList.toggle('btn-active', active);
   }
 }
 
@@ -6210,9 +6222,13 @@ function _listenSetBtn(html, color, disabled) {
   var btn = document.getElementById('listen-btn');
   if (!btn) return;
   btn.innerHTML = html;
-  btn.style.color = color || '';
-  btn.disabled = !!disabled;
+  /* color is also the active-state sentinel (see .node-controls .btn-icon
+     comment above) — the *displayed* text color while active is forced to
+     --text rather than the raw tint for contrast, but the sentinel check
+     itself still compares against the tint value passed in. */
   var active = (color === 'var(--green)');
+  btn.style.color = active ? 'var(--text)' : (color || '');
+  btn.disabled = !!disabled;
   btn.classList.toggle('btn-active', active);
   var volRow = document.getElementById('listen-vol-row');
   if (volRow) volRow.style.opacity = active ? '1' : '0.4';
