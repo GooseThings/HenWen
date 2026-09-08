@@ -21,15 +21,44 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# ── Python check ─────────────────────────────────────────
+# ── Required system packages ──────────────────────────────
+# python3 itself, plus the venv module (python3-venv/python3-full) needed
+# to create the app's virtualenv -- Debian/Ubuntu ship python3 without
+# ensurepip by default, so `python3 -m venv` fails outright without it.
+# Rather than silently apt-get installing whatever's missing, state what's
+# needed and ask before touching the system -- and always apt-get update
+# first, so a stale package list doesn't 404 mid-install (as it did on an
+# out-of-date Debian 12 box: idle-python3.11/python3.11-venv/etc. all
+# 404'd, `python3 -m venv` then failed for real, and the venv module's own
+# error message told the user to re-run the exact apt-get install that had
+# already just failed).
+NEED_PKGS=()
 if ! command -v python3 &>/dev/null; then
-    echo "[1/9] Installing Python 3..."
-    apt-get install -y python3 python3-pip python3-venv python3-full
-else
-    echo "[1/9] Python 3 found: $(python3 --version)"
+    NEED_PKGS+=(python3 python3-pip)
+fi
+if ! python3 -c "import ensurepip" &>/dev/null; then
+    NEED_PKGS+=(python3-venv python3-full)
 fi
 
-apt-get install -y python3-venv python3-full 2>/dev/null || true
+if [ ${#NEED_PKGS[@]} -gt 0 ]; then
+    echo "[1/9] Missing required package(s): ${NEED_PKGS[*]}"
+    DO_INSTALL=1
+    if [ -t 0 ]; then
+        read -p "      Install via apt-get now? [Y/n]: " REPLY
+        [[ "$REPLY" =~ ^[Nn] ]] && DO_INSTALL=0
+    fi
+    if [ "$DO_INSTALL" -ne 1 ]; then
+        echo "      Skipped. Install these manually, then re-run this script:"
+        echo "        sudo apt-get update && sudo apt-get install -y ${NEED_PKGS[*]}"
+        exit 1
+    fi
+    echo "      Running apt-get update..."
+    apt-get update
+    echo "      Installing: ${NEED_PKGS[*]}"
+    apt-get install -y "${NEED_PKGS[@]}"
+else
+    echo "[1/9] Python 3 found: $(python3 --version), venv module available."
+fi
 
 # ── Copy files ────────────────────────────────────────────
 echo "[2/9] Installing to $INSTALL_DIR..."
@@ -249,6 +278,10 @@ if systemctl is-active --quiet "$SERVICE_NAME"; then
     # it's opt-in and skipped entirely on a non-interactive install.
     if [ -t 0 ]; then
         echo ""
+        echo "  Note: skip this if HenWen will run behind an existing reverse proxy"
+        echo "  (e.g. nginx, Caddy, or another Apache instance) that already terminates"
+        echo "  HTTPS for you -- this step provisions its own standalone Apache +"
+        echo "  Let's Encrypt HTTPS listener, which isn't what you want in that case."
         read -p "  Set up HTTPS now for the browser TX button? Requires a public hostname pointed at this box. [y/N]: " SETUP_HTTPS
         if [[ "$SETUP_HTTPS" =~ ^[Yy] ]]; then
             bash "$INSTALL_DIR/tx-spike/setup-https.sh" || echo "  HTTPS setup failed — you can re-run it later: sudo bash $INSTALL_DIR/tx-spike/setup-https.sh"
