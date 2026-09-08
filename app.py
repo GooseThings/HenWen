@@ -1211,6 +1211,13 @@ def check_auth():
                         'api_nets_list',
                         'forgot_password', 'reset_password_page', 'accept_invite',
                         'login_2fa', 'api_login_2fa'}
+    # The public *pages* (as opposed to the public JSON endpoints) that get
+    # bounced to the first-run setup screen while no account exists yet.
+    # Deliberately only these three: the login page fetches several of the
+    # public /api/* endpoints above to render itself, so redirecting the
+    # whole of _PUBLIC would break the very screen this is trying to reach.
+    _SETUP_PAGES     = {'status_board', 'status_board_redirect',
+                        'status_board_accessible'}
     # Any logged-in user (superuser / admin / user) — live audio requires a
     # session (previously public, letting anyone on the network listen and
     # spawn server-side encoder/relay processes with no authentication).
@@ -1238,6 +1245,23 @@ def check_auth():
     is_public = endpoint in _PUBLIC
 
     if not is_auth_configured():
+        # Before any account exists, the *only* page worth showing is the
+        # first-run "Create Account" screen — and the kiosk board is public,
+        # so without this it renders normally and gives a brand-new owner no
+        # hint that setup is even pending. install.sh prints
+        # "Open your browser: http://<ip>:5000", i.e. it sends every new
+        # operator to '/' specifically, which was the one URL that never
+        # surfaced setup: /henwen-manager already redirected here, and
+        # /api/* already 503s with setup_url below, but '/' answered 200
+        # with a normal-looking board. Reported as issue #69 ("Web interface
+        # is shown, but 1st run doesn't appear, so I have no
+        # username/password setup"). Redirecting the board *pages* (not the
+        # public JSON endpoints — the login page itself needs those) closes
+        # that gap without changing anything post-setup, since
+        # is_auth_configured() is True from the moment the owner account is
+        # created.
+        if endpoint in _SETUP_PAGES:
+            return redirect(url_for('login'))
         if is_public:
             return None
         if request.path.startswith('/api/'):

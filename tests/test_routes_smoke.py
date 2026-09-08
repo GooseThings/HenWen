@@ -33,6 +33,47 @@ def test_login_page_offers_setup_mode_before_first_account(client):
     assert b"setup" in resp.data.lower() or resp.status_code == 200
 
 
+class TestFirstRunBoardRedirect:
+    """Issue #69: on a brand-new install the kiosk board is public, so '/'
+    rendered a normal-looking board and gave the owner no hint that setup
+    was pending -- and install.sh sends every new operator to exactly that
+    URL ("Open your browser: http://<ip>:5000"). /henwen-manager already
+    redirected to /login and /api/* already 503'd, so '/' was the one way in
+    that silently hid the first-run screen."""
+
+    BOARD_PAGES = ["/", "/status", "/accessible"]
+
+    def test_board_pages_redirect_to_setup_before_first_account(self, client):
+        for path in self.BOARD_PAGES:
+            resp = client.get(path)
+            assert resp.status_code == 302, f"{path} should bounce to setup"
+            assert resp.headers["Location"].endswith("/login"), path
+
+    def test_redirect_lands_on_the_create_account_screen(self, client):
+        resp = client.get("/", follow_redirects=True)
+        assert resp.status_code == 200
+        assert b"Create Account" in resp.data
+        assert b"No account exists yet" in resp.data
+
+    def test_public_json_endpoints_are_not_redirected(self, client):
+        """The login page renders against these, so bouncing the whole of
+        _PUBLIC would break the screen this redirect exists to reach."""
+        for path in ["/api/csrf-token", "/api/session", "/api/status/board"]:
+            resp = client.get(path)
+            assert resp.status_code == 200, f"{path} must stay reachable during setup"
+
+    def test_board_is_public_again_once_an_account_exists(self, client, create_user):
+        """Post-setup behaviour must be completely unchanged: the board is a
+        kiosk display and stays readable without logging in."""
+        create_user("owner1", role="owner")
+        assert client.get("/").status_code == 200
+        assert client.get("/accessible").status_code == 200
+        # /status keeps its own permanent redirect to '/', not the setup bounce
+        resp = client.get("/status")
+        assert resp.status_code == 301
+        assert resp.headers["Location"].endswith("/")
+
+
 class TestFirstRunAccountCreation:
     def test_creates_owner_account_and_logs_in(self, client):
         resp = client.post("/login", data={
