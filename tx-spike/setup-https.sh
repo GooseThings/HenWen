@@ -121,6 +121,11 @@ fi
 
 # ── Install Apache + certbot ───────────────────────────────
 echo "[2/7] Installing Apache and certbot..."
+# apt-get update first -- a stale package list here 404s the same way it did
+# for install.sh's python3-venv install (see install.sh's own comment on
+# this), and this step is unattended (--non-interactive certbot below), so
+# there's no later error message pointing back at a fix.
+apt-get update
 apt-get install -y apache2 certbot python3-certbot-apache
 a2enmod ssl proxy proxy_http proxy_wstunnel headers rewrite >/dev/null
 
