@@ -3841,6 +3841,30 @@ function _drawFavicon(state) {
 var _lastBoardOk = Date.now();   /* seeded at load so the watchdog doesn't fire before the first fetch has even had a chance to land */
 var BOARD_STALE_MS = 8000;       /* ~4 missed 2s polls (see the refreshBoard interval below) before flagging the server unreachable */
 
+/* One failed poll is not an outage. refreshBoard() used to call
+   markServerUnreachable() on the very first failure, which contradicted the
+   8s/~4-poll tolerance the watchdog right below it was deliberately built
+   with — so a single dropped request produced a visible OFFLINE blink even
+   though the next poll, 2s later, succeeded. On any real network (a phone on
+   WiFi across a house, to a Pi) the occasional dropped fetch is normal, and
+   every one of them flashed the badge. Reported in issue #69 as OFFLINE
+   flashing roughly every 15 seconds on an otherwise healthy node; the same
+   install stopped showing it once the board was reached over a different
+   URL/network path, which is the signature of transport blips rather than
+   anything the server did.
+   Tolerating BOARD_FAIL_TOLERANCE consecutive failures lines this path up
+   with the watchdog: a genuine outage is still surfaced within ~6s, while a
+   one-off blip is absorbed. */
+var BOARD_FAIL_TOLERANCE = 3;
+var _boardFailStreak = 0;
+
+function noteBoardFailure(why) {
+  _boardFailStreak++;
+  if (_boardFailStreak >= BOARD_FAIL_TOLERANCE) markServerUnreachable();
+  else console.debug('[board] poll failed (' + _boardFailStreak + '/' +
+                     BOARD_FAIL_TOLERANCE + ', not flagging yet):', why);
+}
+
 function markServerUnreachable() {
   var dot = document.querySelector('.keyed-dot');
   var label = document.querySelector('.keyed-label');
@@ -3856,12 +3880,23 @@ function boardWatchdog() {
 }
 
 async function refreshBoard() {
+  var data;
+  /* Split deliberately: only the fetch/parse below is evidence about whether
+     the server is reachable. Everything after it is rendering, and a bug in
+     rendering must not be reported as the node being offline — see the second
+     catch at the end of this function. */
   try {
     var r = await apiFetch('/api/status/board', {cache: 'no-store'});
-    if (!r.ok) { markServerUnreachable(); return; }
-    var data = await r.json();
-    _lastBoardOk = Date.now();
+    if (!r.ok) { noteBoardFailure('HTTP ' + r.status); return; }
+    data = await r.json();
+  } catch (e) {
+    noteBoardFailure(e);
+    return;
+  }
+  _lastBoardOk     = Date.now();
+  _boardFailStreak = 0;
 
+  try {
     /* Node card */
     var nodes = data.nodes || [];
     window._lastBoardNodes = nodes;
@@ -4028,7 +4063,15 @@ async function refreshBoard() {
        wrapping, the ONLINE/OFFLINE badge, the LOCKED row), and doing it here
        costs one layout flush instead of one per intervening mutation. */
     dashFitNodeCard();
-  } catch(e) { markServerUnreachable(); }
+  } catch (e) {
+    /* A rendering bug is not a reachability problem. This catch used to call
+       markServerUnreachable(), so a null element or a Leaflet error anywhere
+       in the ~165 lines above told the operator their node was OFFLINE — and
+       swallowed the actual error silently, so nothing ever got fixed. Report
+       it where a developer can see it and leave the badge alone: the fetch
+       succeeded, so the server is demonstrably reachable. */
+    console.error('[board] render failed:', e);
+  }
 }
 
 /* Generic "Xh Ym"/"Xm"/"Xs" duration formatter — shared by the APRS station
