@@ -821,9 +821,15 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .fav-loc  { font-size: 0.67rem; color: var(--text2); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
 .fav-actions { display: flex; flex-direction: column; gap: 3px; align-items: stretch; width: fit-content; }
+/* min-width/min-height/padding push the actual click target to ~24x24px
+   (was ~11x10px, failing Lighthouse's target-size audit both on its own
+   size and its clearance from the callsign link/Disconnect button next to
+   it) while display:inline-flex centering keeps the small "X" glyph itself
+   visually unchanged — the box grows around it, not the text. */
 .fav-del-btn { background: none; border: none; color: var(--text2); cursor: pointer;
-  font-size: 0.65rem; padding: 0 0 0 2px; margin-left: auto; opacity: 0.45;
-  line-height: 1; flex-shrink: 0; }
+  font-size: 0.65rem; margin-left: auto; opacity: 0.45; line-height: 1; flex-shrink: 0;
+  padding: 6px; min-width: 24px; min-height: 24px; box-sizing: border-box;
+  display: inline-flex; align-items: center; justify-content: center; }
 .fav-del-btn:hover { color: #f85149; opacity: 1; }
 .fav-sort-controls { margin-left: auto; display: flex; gap: 4px; align-items: center; }
 .fav-sort-select { font-size: 0.66rem; padding: 2px 4px; border-radius: 4px; border: 1px solid var(--border);
