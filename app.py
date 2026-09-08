@@ -2452,6 +2452,7 @@ def _poll_loop():
     global _ami_last_error
     log("INFO", f"[AMI-POLL] Background poller started (interval={POLL_INTERVAL}s)")
     while True:
+        _cycle_start = time.time()
         try:
             content = read_conf_file(RPT_CONF_PATH)
             nodes   = get_node_numbers(content) if content else []
@@ -2680,6 +2681,25 @@ def _poll_loop():
         except Exception as outer:
             log("ERROR", f"[AMI-POLL] Unexpected outer error: {outer}")
 
+        # A cycle that *raises* is logged above; a cycle that merely takes too
+        # long is just as damaging and used to be invisible. Everything after
+        # the AMI reads -- _check_alerts() (ntfy/Pushover/Discord/IRC pushes),
+        # _check_asterisk_dns_health(), the deferred DB writes -- does network
+        # and disk I/O inline, so one slow call here delays the next cache
+        # write. Once the gap passes CACHE_TTL, get_cached_status() starts
+        # reporting stale=True and the kiosk's badge drops to OFFLINE until the
+        # loop catches up: a flapping badge with nothing at all in the journal
+        # to explain it (issue #69). Warn once per slow cycle, with the
+        # duration, so that shows up as a cause rather than a mystery.
+        _cycle_elapsed = time.time() - _cycle_start
+        if _cycle_elapsed > CACHE_TTL:
+            log("WARN", f"[AMI-POLL] Poll cycle took {_cycle_elapsed:.1f}s "
+                        f"(> AMI_CACHE_TTL={CACHE_TTL}s) — node status was stale for "
+                        f"part of it, so the kiosk badge may have shown OFFLINE")
+        elif _cycle_elapsed > POLL_INTERVAL * 5:
+            log("DEBUG", f"[AMI-POLL] Slow poll cycle: {_cycle_elapsed:.1f}s "
+                         f"(interval={POLL_INTERVAL}s)")
+
         time.sleep(POLL_INTERVAL)
 
 
@@ -2687,6 +2707,59 @@ def start_poller():
     t = threading.Thread(target=_poll_loop, name="ami-poller", daemon=True)
     t.start()
     log("INFO", "[AMI-POLL] Poller thread launched")
+
+
+# ── Status-board health logging ──────────────────────────────────────────────
+# The kiosk's ONLINE/OFFLINE badge is computed client-side, in status.html,
+# from three server-reported flags:  asterisk_active && ami_connected && !stale.
+# When it flapped there was nothing in the journal identifying which of the
+# three had dropped: the AMI pool logs its own disconnects, but a stale node
+# cache or a failed `systemctl is-active` left no trace at all, so an operator
+# reporting "it flashes OFFLINE every 15 seconds" had nothing to send that
+# could narrow it down (issue #69).
+#
+# Logged on transition only. The board is polled every 2s by every open kiosk,
+# so a line per request would bury the journal; a node that stays healthy logs
+# once and then goes quiet. State is process-wide rather than per-viewer, which
+# is what makes that dedup work no matter how many kiosks are watching.
+_board_health_prev = {}          # {node_str: bool} — last logged health per node
+_board_health_lock = threading.Lock()
+
+
+def _log_board_health(node, asterisk_active, ami_connected, cached):
+    """Log ONLINE/OFFLINE transitions of the kiosk health badge, naming the
+    reason.
+
+    The `healthy` expression here deliberately mirrors status.html's own; if
+    that one changes, this has to change with it, or the journal will start
+    disagreeing with the badge it exists to explain.
+    """
+    stale   = bool(cached.get("stale", True))
+    healthy = bool(asterisk_active) and bool(ami_connected) and not stale
+    key     = str(node)
+
+    with _board_health_lock:
+        if _board_health_prev.get(key) == healthy:
+            return
+        _board_health_prev[key] = healthy
+
+    if healthy:
+        log("INFO", f"[BOARD-HEALTH] node {key}: ONLINE")
+        return
+
+    reasons = []
+    if not asterisk_active:
+        reasons.append("asterisk not active (systemctl is-active said so)")
+    if not ami_connected:
+        reasons.append("AMI pool disconnected")
+    if stale:
+        age = cached.get("age")
+        if age is None:
+            reasons.append(f"no AMI data yet ({cached.get('error') or 'cache empty'})")
+        else:
+            reasons.append(f"AMI cache stale (age={age}s > AMI_CACHE_TTL={CACHE_TTL}s) "
+                           f"— the poller has not written this node for that long")
+    log("WARN", f"[BOARD-HEALTH] node {key}: OFFLINE — " + "; ".join(reasons))
 
 
 def get_cached_status(node: str) -> dict:
@@ -7061,6 +7134,11 @@ def api_status_board():
             "locked":     node in locked_nodes,
             "locked_by":  locked_nodes.get(node, {}).get("locked_by"),
         })
+
+        # Explain the kiosk's ONLINE/OFFLINE badge in the journal when it
+        # changes — see _log_board_health(). Same three inputs the frontend
+        # uses, read here where all three are already in hand.
+        _log_board_health(node, ast_status["active"], _ami_connected, cached)
 
     resp = jsonify({
         "nodes":            node_data,
