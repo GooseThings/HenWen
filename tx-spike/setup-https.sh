@@ -120,13 +120,49 @@ else
 fi
 
 # ── Install Apache + certbot ───────────────────────────────
-echo "[2/7] Installing Apache and certbot..."
-# apt-get update first -- a stale package list here 404s the same way it did
-# for install.sh's python3-venv install (see install.sh's own comment on
-# this), and this step is unattended (--non-interactive certbot below), so
-# there's no later error message pointing back at a fix.
-apt-get update
-apt-get install -y apache2 certbot python3-certbot-apache
+echo "[2/7] Checking for Apache and certbot..."
+# Ask before touching the system, mirroring install.sh's own dependency
+# prompt (see its NEED_PKGS block). Answering "yes" to *set up HTTPS* is
+# not the same as consenting to apt-get pulling in three packages, and
+# this script shouldn't treat it as such -- reported as issue #75.
+#
+# Only the genuinely-missing packages are named and installed, so a re-run
+# on a box that already has them prompts for nothing and changes nothing.
+# dpkg-query's Status field is the check rather than `dpkg -s`, which also
+# succeeds for a removed-but-not-purged package still holding config files.
+HTTPS_PKGS=(apache2 certbot python3-certbot-apache)
+NEED_HTTPS_PKGS=()
+for pkg in "${HTTPS_PKGS[@]}"; do
+    dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q '^install ok installed$' \
+        || NEED_HTTPS_PKGS+=("$pkg")
+done
+
+if [ ${#NEED_HTTPS_PKGS[@]} -gt 0 ]; then
+    echo "      HTTPS setup needs these package(s): ${NEED_HTTPS_PKGS[*]}"
+    DO_HTTPS_INSTALL=1
+    if [ -t 0 ]; then
+        read -p "      Install via apt-get now? [Y/n]: " REPLY
+        [[ "$REPLY" =~ ^[Nn] ]] && DO_HTTPS_INSTALL=0
+    fi
+    if [ "$DO_HTTPS_INSTALL" -ne 1 ]; then
+        echo "      Skipped — HTTPS is not set up, and the browser TX button will"
+        echo "      stay hidden until it is. Everything else works over plain HTTP."
+        echo "      To do it yourself later:"
+        echo "        sudo apt-get update && sudo apt-get install -y ${NEED_HTTPS_PKGS[*]}"
+        echo "        sudo bash $0 $HOSTNAME_ARG $EMAIL_ARG"
+        exit 1
+    fi
+    # apt-get update first -- a stale package list here 404s the same way it did
+    # for install.sh's python3-venv install (see install.sh's own comment on
+    # this), and this step is unattended (--non-interactive certbot below), so
+    # there's no later error message pointing back at a fix.
+    echo "      Running apt-get update..."
+    apt-get update
+    echo "      Installing: ${NEED_HTTPS_PKGS[*]}"
+    apt-get install -y "${NEED_HTTPS_PKGS[@]}"
+else
+    echo "      Already installed: ${HTTPS_PKGS[*]}"
+fi
 a2enmod ssl proxy proxy_http proxy_wstunnel headers rewrite >/dev/null
 
 if [ "$HTTPS_PORT" != "443" ]; then
