@@ -405,6 +405,32 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
    within its now-wider box. Scoped to .node-controls rather than .btn-icon
    itself for exactly that reason. */
 .node-controls .btn-icon { flex: 1 1 0; justify-content: center; }
+/* Each button gets its own identity color rather than the neutral gray
+   every other .btn-icon in the app uses — amber for TX (mic/on-air
+   caution), green for Listen (matches the "Mute" active-state color this
+   button already used before it had a background of its own), red for Rec
+   (matches the record icon's own dot, already red at rest). color-mix()
+   derives both the idle tint and the brighter .btn-active state from the
+   same --btn-tint variable, so this automatically follows whichever of the
+   app's many color themes (see :root above) is active rather than baking
+   in one palette's hex values.
+   .btn-active is toggled by _txSetBtn()/_listenSetBtn()/_recordSetBtn()
+   exactly when each one's inline text color is set to its own active-state
+   color (TX armed/Listen active = their own tint; Rec active is already
+   red) — see those functions. Text/icon color while active still comes
+   from that same inline style, not from this rule, so the two always
+   agree. */
+#tx-btn     { --btn-tint: var(--warn); }
+#listen-btn { --btn-tint: var(--green); }
+#record-btn { --btn-tint: var(--danger); }
+.node-controls .btn-icon {
+  background: color-mix(in srgb, var(--btn-tint) 14%, var(--bg3));
+  border-color: color-mix(in srgb, var(--btn-tint) 38%, var(--border));
+}
+.node-controls .btn-icon.btn-active {
+  background: color-mix(in srgb, var(--btn-tint) 55%, var(--bg3));
+  border-color: var(--btn-tint);
+}
 /* Sits directly under the buttons and only matters while Listen is running —
    dimmed to 0.4 until then by _listenSetBtn(), same as when it lived in the
    Connected Nodes header. No border/padding of its own here: in that old
@@ -5261,7 +5287,11 @@ function _txStatus(s, color) {
 
 function _txSetBtn(html, color) {
   var btn = document.getElementById('tx-btn');
-  if (btn) { btn.innerHTML = html; btn.style.color = color || ''; }
+  if (btn) {
+    btn.innerHTML = html;
+    btn.style.color = color || '';
+    btn.classList.toggle('btn-active', color === 'var(--warn)');
+  }
 }
 
 async function _txUpdateBtn() {
@@ -5324,6 +5354,7 @@ function _recordSetBtn(html, color, disabled) {
   btn.innerHTML = html;
   btn.style.color = color || '';
   btn.disabled = !!disabled;
+  btn.classList.toggle('btn-active', color === 'var(--red,#f85149)');
 }
 
 function toggleRecord() {
@@ -5891,7 +5922,7 @@ async function armTx() {
            blank at rest and still used for genuinely new info (TRANSMITTING
            while keyed, errors, disconnects). */
         _txStatus('');
-        _txSetBtn('<svg class="icon"><use href="#icon-mic"></use></svg> TX armed', 'var(--green)');
+        _txSetBtn('<svg class="icon"><use href="#icon-mic"></use></svg> TX armed', 'var(--warn)');
         document.getElementById('tx-ptt').disabled = false;
         /* Listen is the monitor path — make sure it's running */
         if (!_listenActive) _startListen();
@@ -6131,6 +6162,7 @@ function _listenSetBtn(html, color, disabled) {
   btn.style.color = color || '';
   btn.disabled = !!disabled;
   var active = (color === 'var(--green)');
+  btn.classList.toggle('btn-active', active);
   var volRow = document.getElementById('listen-vol-row');
   if (volRow) volRow.style.opacity = active ? '1' : '0.4';
   var vol = document.getElementById('listen-volume');
