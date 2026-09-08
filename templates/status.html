@@ -393,6 +393,18 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
    account-scoped self-service, not really a control over *this* node's
    audio. */
 .node-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; flex-shrink: 0; }
+/* The row's own width comes from #node-info next to it (.node-body's
+   widest child, since the identity block's node number/callsign text is
+   normally wider than three small buttons) — without this, the buttons sat
+   left-aligned at their own natural width and left a blank strip on the
+   right up to that width. flex:1 1 0 divides whatever width the row
+   actually has evenly across however many buttons are currently visible
+   (role/permission/capability can hide any of them), and justify-content
+   here (.btn-icon has none of its own, since it's used all over the app for
+   buttons that should stay content-sized) centers each button's icon+label
+   within its now-wider box. Scoped to .node-controls rather than .btn-icon
+   itself for exactly that reason. */
+.node-controls .btn-icon { flex: 1 1 0; justify-content: center; }
 /* Sits directly under the buttons and only matters while Listen is running —
    dimmed to 0.4 until then by _listenSetBtn(), same as when it lived in the
    Connected Nodes header. No border/padding of its own here: in that old
@@ -443,7 +455,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   0%,100% { box-shadow: 0 0 24px rgba(63,185,80,.65), 0 0 56px rgba(63,185,80,.25); }
   50%      { box-shadow: 0 0 38px rgba(63,185,80,.9),  0 0 75px rgba(63,185,80,.4);  }
 }
-.keyed-label { font-size: 1rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+.keyed-label { font-size: 0.8rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
   color: var(--text2); }
 .keyed-label.healthy { color: var(--green); }
 .keyed-label.down { color: var(--danger); }
@@ -7080,12 +7092,25 @@ function dashFindParentSplit(tree, target) {
    plus the row's own gaps gives the one-line floor; .node-body's horizontal
    padding and .node-card's own border add the rest, since the padding and
    the border live on different elements now (see the .node-card/.node-body
-   split above) — independent of how narrow the column currently is. */
+   split above) — independent of how narrow the column currently is.
+
+   The buttons are flex:1 1 0 (see .node-controls .btn-icon) so they can
+   grow past their own natural width to fill out the row — normally wider
+   than their combined natural width, since #node-info's identity text is
+   usually the widest thing in the card. offsetWidth alone would report that
+   *grown* width, not the true one-line floor, so the row is temporarily
+   forced to shrink-wrap (width:max-content) before measuring: a flex
+   container's max-content size comes from its items' own preferred sizes,
+   ignoring flex-grow, giving back each button's real minimum. Reverted
+   immediately after, and the whole thing happens within one synchronous
+   call — nothing paints in between, so there's no visible flicker. */
 function dashNodeButtonsMinPx() {
   var row = document.getElementById('node-controls');
   var card = dashCardEl('node');
   var body = document.getElementById('node-body');
   if (!row || !card || !body) return 0;
+  var prevWidth = row.style.width;
+  row.style.width = 'max-content';
   var total = 0, count = 0;
   for (var i = 0; i < row.children.length; i++) {
     var el = row.children[i];
@@ -7093,6 +7118,7 @@ function dashNodeButtonsMinPx() {
     total += el.offsetWidth;
     count++;
   }
+  row.style.width = prevWidth;
   if (!count) return 0;
   total += (count - 1) * (parseFloat(getComputedStyle(row).gap) || 0);
   var bodyCs = getComputedStyle(body), cardCs = getComputedStyle(card);
