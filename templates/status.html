@@ -2591,7 +2591,7 @@ function renderAprsMarkers(stations) {
   clearAprsMarkers();
   stations.forEach(function(s) {
     var style = aprsPinStyle(s.age_sec || 0);
-    var m = L.marker([s.lat, s.lon], {icon: makeAprsIcon(style.color, style.opacity)})
+    var m = L.marker([s.lat, s.lon], {icon: makeAprsIcon(style.color, style.opacity), title: s.callsign || 'APRS station'})
       .bindPopup('<b>' + aprsFiLink(s.callsign, 'popup-node-link') + '</b><br>' +
                  (s.comment ? esc(s.comment) + '<br>' : '') +
                  '<small>' + s.distance_mi + ' mi &mdash; heard ' + _histDuration(s.age_sec) + ' ago</small>');
@@ -2987,7 +2987,7 @@ function issUpdatePosition() {
 
   if (!_issMarkers.length) {
     MAP_WORLD_OFFSETS.forEach(function() {
-      _issMarkers.push(L.marker([lat, lon], { icon: makeIssIcon(), zIndexOffset: 500 }).addTo(_map));
+      _issMarkers.push(L.marker([lat, lon], { icon: makeIssIcon(), zIndexOffset: 500, title: 'ISS (ZARYA)' }).addTo(_map));
     });
   }
   _issMarkers.forEach(function(m, i) {
@@ -3079,7 +3079,7 @@ function updateMap() {
     if (n.lat == null || n.lon == null) return;
     allPinned.push(n);
     MAP_WORLD_OFFSETS.forEach(function(off) {
-      var m = L.marker([n.lat, n.lon + off], {icon:makeStarIcon('#ffd700'), zIndexOffset:1000})
+      var m = L.marker([n.lat, n.lon + off], {icon:makeStarIcon('#ffd700'), zIndexOffset:1000, title:(n.callsign || n.node) + ' (this server)'})
         .bindPopup('<b><svg class="icon"><use href="#icon-star"></use></svg> ' + (n.callsign ? callsignLink(n.callsign, 'popup-node-link') : esc(n.node)) + '</b><br>' +
                    esc(n.location||'') + '<br><small>Node ' + nodeLink(n.node, 'popup-node-link') + ' &mdash; this server</small>');
       m.addTo(_map); _markers.push(m);
@@ -3091,7 +3091,7 @@ function updateMap() {
     if (c.lat == null || c.lon == null) return;
     allPinned.push(c);
     MAP_WORLD_OFFSETS.forEach(function(off) {
-      var m = L.marker([c.lat, c.lon + off], {icon:makeIcon('#e74c3c'), zIndexOffset:500})
+      var m = L.marker([c.lat, c.lon + off], {icon:makeIcon('#e74c3c'), zIndexOffset:500, title:(c.callsign || c.node) + ' (connected)'})
         .bindPopup('<b>' + (c.callsign ? callsignLink(c.callsign, 'popup-node-link') : esc(c.node)) + '</b><br>' +
                    esc(c.location||'') + '<br><small>Node ' + nodeLink(c.node, 'popup-node-link') + ' &mdash; connected</small>');
       m.addTo(_map); _markers.push(m);
@@ -3123,7 +3123,7 @@ function updateMap() {
         '</div>'
       : '';
     MAP_WORLD_OFFSETS.forEach(function(off) {
-      var m = L.marker([p.lat, p.lon + off], {icon:makeIcon(color, opacity)})
+      var m = L.marker([p.lat, p.lon + off], {icon:makeIcon(color, opacity), title:(p.callsign || p.node) + (p.type==='local' ? ' (keyed)' : ' (online)')})
         .bindPopup('<b>' + (p.callsign ? callsignLink(p.callsign, 'popup-node-link') : esc(p.node)) + '</b><br>' +
                    esc(p.location||'') + '<br><small>Node ' + nodeLink(p.node, 'popup-node-link') +
                    (p.type==='local' ? ' &mdash; keyed' : ' &mdash; online') + '</small>' +
