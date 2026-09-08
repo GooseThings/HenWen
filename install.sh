@@ -1,7 +1,9 @@
 #!/bin/bash
 # HenWen - Installer
 # https://www.github.com/GooseThings/HenWen/
-# Run as root: sudo bash install.sh
+# Run as root — either `sudo bash install.sh`, or `bash install.sh` from a
+# root shell. sudo is a convenience here, not a dependency: this script only
+# ever requires EUID 0 and never invokes sudo itself.
 set -e
 
 INSTALL_DIR="/opt/HenWen"
@@ -17,7 +19,13 @@ echo ""
 
 # ── Root check ────────────────────────────────────────────
 if [ "$EUID" -ne 0 ]; then
-    echo "ERROR: Please run as root: sudo bash install.sh"
+    echo "ERROR: install.sh must run as root."
+    echo ""
+    echo "  With sudo:     sudo bash install.sh"
+    echo "  Without sudo:  su -   then   bash install.sh"
+    echo ""
+    echo "  (sudo is not required to install or run HenWen — see the"
+    echo "   Installation guide's \"Does HenWen need sudo?\" section.)"
     exit 1
 fi
 
@@ -230,7 +238,20 @@ asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/update_service_ports.sh
 asterisk ALL=(root) NOPASSWD: ${SYSTEMD_RUN_BIN} --unit=henwen-updater --collect ${INSTALL_DIR}/update.sh
 asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/audiosocket-tap/apply.sh
 EOF
-if visudo -c -f "${SUDOERS_FILE}.tmp" &>/dev/null; then
+# visudo ships as part of the sudo package, so "no visudo" means sudo simply
+# isn't installed on this box — a legitimate choice, not an error. Say so
+# plainly instead of reporting it as a failed validation, which is what the
+# single else-branch used to do and which read like something had gone wrong
+# with the install (issue #70).
+if ! command -v visudo >/dev/null 2>&1; then
+    rm -f "${SUDOERS_FILE}.tmp"
+    echo "      sudo is not installed — skipping this rule."
+    echo "      HenWen installs and runs normally without it. The only things"
+    echo "      that stop working are the Manager UI buttons needing root:"
+    echo "      Restart Asterisk/HenWen, Launch Updater, rotate SECRET_KEY,"
+    echo "      change ports. Do those from a root shell instead, or install"
+    echo "      sudo and re-run install.sh."
+elif visudo -c -f "${SUDOERS_FILE}.tmp" &>/dev/null; then
     chmod 440 "${SUDOERS_FILE}.tmp"
     mv "${SUDOERS_FILE}.tmp" "$SUDOERS_FILE"
     echo "      Installed $SUDOERS_FILE"

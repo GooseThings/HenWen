@@ -31,6 +31,8 @@ cd HenWen
 sudo bash install.sh
 ```
 
+No `sudo` on the box? It isn't required — run the same thing from a root shell (`su -`, then `bash install.sh`). See [Does HenWen need sudo?](https://github.com/GooseThings/HenWen/wiki/Installation#does-henwen-need-sudo) for what that does and doesn't change.
+
 Then open `http://YOUR_NODE_IP:5000` to create your Owner account. The installer runs AMI setup for you interactively — full walkthrough (AMI setup, rotating the secret key, verifying rpt.conf, updating) is in the **[Installation guide](https://github.com/GooseThings/HenWen/wiki/Installation)**.
 
 ## Documentation
