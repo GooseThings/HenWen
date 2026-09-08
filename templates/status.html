@@ -1311,7 +1311,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   <!-- Header -->
   <header class="header">
     <div class="header-brand">
-      <img class="header-logo" src="/static/logo-512.png" alt="HenWen">
+      <img class="header-logo" src="/static/logo-128.png" alt="HenWen">
       <strong>HenWen</strong> <span>KIOSK</span><span class="header-brand-mobile-suffix"> Mobile</span>
     </div>
     <img class="header-club-logo" id="club-logo-img" alt="" style="display:none">
@@ -3843,7 +3843,7 @@ function _drawFavicon(state) {
        drawing nothing before the image is ready. */
     var img = new Image();
     img.onload = function() { _faviconLogo = img; _drawFavicon(_faviconState); };
-    img.src = '/static/logo-512.png';
+    img.src = '/static/logo-128.png';
     return;
   }
   if (!_faviconCanvas) { _faviconCanvas = document.createElement('canvas'); _faviconCanvas.width = 64; _faviconCanvas.height = 64; }
@@ -3950,7 +3950,7 @@ async function refreshBoard() {
         (n.location ? '<div class="node-location">' + esc(n.location) + '</div>' : '') +
         '<div class="keyed-wrap">' +
           '<div class="keyed-dot ' + (healthy ? 'healthy' : 'down') + '">' +
-            '<img class="keyed-dot-logo" src="/static/logo-512.png" alt="">' +
+            '<img class="keyed-dot-logo" src="/static/logo-128.png" alt="">' +
           '</div>' +
           '<div class="keyed-label ' + (healthy ? 'healthy' : 'down') + '">' + (healthy ? 'ONLINE' : 'OFFLINE') + '</div>' +
         '</div>' +
