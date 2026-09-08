@@ -42,6 +42,16 @@ you're wiring that path up by hand instead of via Apache).
   `/etc/apache2/sites-enabled/henwen-ssl.conf` — the exact path `apply.sh`
   and `check-ports.sh` expect — even though certbot's own naming
   convention would otherwise call it `henwen-le-ssl.conf`.
+  **Other apps on the box are preserved.** The vhost proxies `/` to HenWen,
+  which would otherwise swallow every other URL on that hostname (issue
+  #77: Allmon3 and AllScan started 404ing, while still working by raw IP
+  since an IP doesn't match `ServerName`). So before claiming the hostname
+  it scans the default `DocumentRoot` and emits `ProxyPass /<dir> !` for
+  each directory already there, above the catch-all, and prints what it
+  preserved. A directory whose name collides with one of HenWen's own URLs
+  (`api`, `status`, `login`, `static`, …) can't be excluded without
+  breaking HenWen, so those are reported as a warning instead and stay
+  reachable by IP.
 - `modules.snippet` — PJSIP/WebRTC module loads appended to `modules.conf`
   (ASL3 SIP-phone guide's set + websocket transport + SRTP)
 - `pjsip.snippet` — WS transport + one `henwen-tx` endpoint (`webrtc=yes`,
