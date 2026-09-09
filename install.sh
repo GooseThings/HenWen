@@ -199,7 +199,35 @@ if [ -f /etc/systemd/system/asl3-rpt-editor.service ]; then
     rm -f /etc/systemd/system/asl3-rpt-editor.service
 fi
 
-cp "$INSTALL_DIR/HenWen.service" /etc/systemd/system/
+SERVICE_FILE_DEST="/etc/systemd/system/${SERVICE_NAME}.service"
+
+# Every checked-in HenWen.service ships the same placeholder
+# SECRET_KEY=henwen-change-me-in-production -- a plain `cp` would leave
+# every fresh install signing session cookies with that identical,
+# publicly-known key until an admin happens to notice the Dashboard's
+# warning and rotates it by hand (issue #115). Generate a real random one
+# here instead, the same way the in-app rotation route does
+# (secrets.token_hex(32)), so a fresh install is secure by default. If
+# this is a reinstall over an already-rotated key, preserve that existing
+# key rather than clobbering it back to the placeholder -- same
+# preserve-across-reinstall reasoning as henwen.db above, and it avoids
+# silently invalidating every logged-in session on a routine reinstall.
+PREV_SECRET_KEY=""
+if [ -f "$SERVICE_FILE_DEST" ]; then
+    PREV_SECRET_KEY=$(sed -n 's/^Environment="\?SECRET_KEY=\([^"]*\)"\?[[:space:]]*$/\1/p' "$SERVICE_FILE_DEST" | head -1)
+fi
+
+cp "$INSTALL_DIR/HenWen.service" "$SERVICE_FILE_DEST"
+
+if [ -n "$PREV_SECRET_KEY" ] && [ "$PREV_SECRET_KEY" != "henwen-change-me-in-production" ]; then
+    echo "      Preserving existing SECRET_KEY from previous install."
+    NEW_SECRET_KEY="$PREV_SECRET_KEY"
+else
+    echo "      Generating a random SECRET_KEY for this install."
+    NEW_SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+fi
+sed -i "s|^Environment=\"\?SECRET_KEY=.*|Environment=\"SECRET_KEY=${NEW_SECRET_KEY}\"|" "$SERVICE_FILE_DEST"
+
 systemctl daemon-reload
 
 # ── Cap systemd journal size ──────────────────────────────
