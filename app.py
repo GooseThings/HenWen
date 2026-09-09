@@ -4385,9 +4385,51 @@ def start_echolink_directory_poller():
 WTTR_URL         = "https://wttr.in/{}?format=j1"
 WEATHER_INTERVAL = 600.0   # 10 minutes per location
 
+# How old wttr.in's own current_condition reading can be before this app
+# stops presenting it as live (issue #29: the weather bar kept showing
+# conditions -- e.g. heavy rain -- hours after they'd actually cleared).
+# Re-fetching more often than WEATHER_INTERVAL wouldn't have helped: our own
+# cache was never more than 10 minutes old, but wttr.in's upstream provider
+# can go a long time between updates for a given station regardless of how
+# often it's polled, and that staleness was never surfaced to the viewer.
+WEATHER_SOURCE_STALE_MIN = 150.0   # 2.5h -- past a station's normal update cadence, short of flagging every minor lag
+
 _weather_cache      = {}   # {location: {"data": dict, "ts": float}}
 _weather_last_good  = {}   # {location: dict}  — last successful fetch, never overwritten by errors
 _weather_lock       = threading.Lock()
+
+
+def _weather_observation_age_minutes(observation_time: str) -> float | None:
+    """How many minutes old wttr.in's current_condition reading is.
+
+    wttr.in's "observation_time" (e.g. "04:41 PM") looks like a location-
+    local wall-clock time -- it isn't. Verified live against three widely
+    separated locations (New York, Tokyo, and a Michigan station near the
+    US Eastern/Central boundary): in every case the field matched the
+    current UTC clock, not local time, regardless of the queried location's
+    actual timezone. So this compares it directly against UTC now, with no
+    per-location offset at all -- an earlier version of this function
+    estimated a per-location offset from longitude assuming the field was
+    local time, which was wrong and produced false "stale" positives for
+    any station not near UTC+0 (confirmed live for a Michigan location that
+    was actually current).
+
+    Returns None when observation_time is missing/unparseable, in which
+    case the caller should skip the staleness check rather than guess.
+    """
+    try:
+        obs_t = datetime.strptime(observation_time.strip(), "%I:%M %p").time()
+    except (ValueError, AttributeError):
+        return None
+    now_utc = datetime.utcnow()
+    obs_dt = now_utc.replace(hour=obs_t.hour, minute=obs_t.minute, second=0, microsecond=0)
+    delta_min = (now_utc - obs_dt).total_seconds() / 60.0
+    # observation_time is only a time-of-day, not a date, so a delta near
+    # +/-24h almost always means the observation is actually from just
+    # before/after a UTC midnight rollover, not nearly a full day old --
+    # wrap into (-720, 720] minutes before taking the magnitude.
+    delta_min = ((delta_min + 720) % 1440) - 720
+    return abs(delta_min)
 
 
 def _fetch_weather(location: str) -> dict:
@@ -4395,6 +4437,10 @@ def _fetch_weather(location: str) -> dict:
 
     On failure, returns the last successful data with stale=True rather than
     an error, so the weather bar stays useful during transient outages.
+    stale=True is also set on an otherwise-successful fetch whose own
+    current_condition reading looks old (see _weather_observation_age_minutes
+    and issue #29) — wttr.in returning 200 doesn't guarantee its station has
+    reported anything new recently.
     """
     if not location or not location.strip():
         return {"error": "No location configured for this node"}
@@ -4437,6 +4483,13 @@ def _fetch_weather(location: str) -> dict:
         _sr, _ss = astro.get("sunrise", ""), astro.get("sunset", "")
         if _sr and _ss and _sr == _ss:
             _sr = _ss = ""
+        # wttr.in staying reachable and returning 200 doesn't mean the
+        # *station* it's reporting on has updated recently — see issue #29
+        # and the WEATHER_SOURCE_STALE_MIN comment above.
+        obs_age   = _weather_observation_age_minutes(cc.get("observation_time", ""))
+        src_stale = obs_age is not None and obs_age > WEATHER_SOURCE_STALE_MIN
+        if src_stale:
+            log("WARN", f"[WEATHER] '{loc}' observation is ~{obs_age:.0f} min old — flagging stale instead of showing it as current")
         data = {
             "location": loc,
             "temp_f":   cc.get("temp_F", ""),
@@ -4450,7 +4503,7 @@ def _fetch_weather(location: str) -> dict:
             "moon_phase":        astro.get("moon_phase", ""),
             "moon_illumination": astro.get("moon_illumination", ""),
             "error":    None,
-            "stale":    False,
+            "stale":    src_stale,
         }
         with _weather_lock:
             _weather_cache[loc]     = {"data": data, "ts": time.time()}
