@@ -10,6 +10,8 @@ of them: it's baked into that same shared WebM ffmpeg
 scope decision, not an oversight. These tests exercise the config/
 validation/permission surface, not the audio pipelines themselves.
 """
+import subprocess
+
 import pytest
 
 import app
@@ -288,12 +290,23 @@ class TestWsAudioStatus:
         _login(client, "admin1")
         assert client.post("/api/ws-audio/apply").status_code == 403
 
-    def test_apply_fails_cleanly_without_passwordless_sudo(self, client, create_user):
-        # No sudoers rule exists in the test environment -- confirms this
-        # degrades to a clean 500 with a readable error rather than hanging
-        # or raising an unhandled exception.
+    def test_apply_fails_cleanly_without_passwordless_sudo(self, client, create_user, monkeypatch):
+        # Simulates sudo -n's real failure mode (no NOPASSWD rule) via a
+        # mocked subprocess.run rather than actually invoking sudo -- driving
+        # the real subprocess is only safe when the test process itself
+        # lacks passwordless sudo, which isn't guaranteed (e.g. root, or CI
+        # running as root, where `sudo -n` succeeds unconditionally and this
+        # test previously patched a live Apache vhost for real -- see PR #106
+        # review). Confirms the route degrades to a clean 500 with a
+        # readable error rather than hanging or raising unhandled.
         create_user("owner1", role="owner")
         _login(client, "owner1")
+        monkeypatch.setattr(
+            app.subprocess, "run",
+            lambda *a, **k: subprocess.CompletedProcess(
+                args=a[0] if a else [], returncode=1,
+                stdout="", stderr="sudo: a password is required\n"),
+        )
         resp = client.post("/api/ws-audio/apply")
         assert resp.status_code == 500
         assert "error" in resp.get_json()

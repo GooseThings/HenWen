@@ -8,7 +8,19 @@ streams raw Opus packets to browsers over a plain WebSocket instead of
 muxing into a container and serving over chunked HTTP, trading the WebM
 path's AGC/robustness for substantially lower latency. Selected per-install
 via the `rx_audio_config` setting (see app.py's `_validate_rx_audio_path()`)
-— this module is only ever spawned/used when that setting is `'lowlatency'`.
+— but this *process* runs unconditionally from the moment HenWen starts
+(app.py's `start_audio_ws_relay()`/`_audio_ws_relay_supervisor_loop()`),
+regardless of that setting; only the browser WebSocket handshake
+(`_authorize_ws()` below, gated on `rx_audio_config.path == 'lowlatency'`)
+and the per-node ffmpeg spawn actually depend on it. Kept always-on rather
+than started/stopped per setting change because idle cost is genuinely
+near-zero — both listener loops below block in `accept()` with no polling,
+and PCM frames dual-written by every legacy MixMonitor broadcast
+(`audio_relay.py`) are a dict-lookup no-op here (`_feed_node_pcm()`) until a
+real low-latency WS client attaches — and because RX Diagnostics and the
+settings-change reload signal (`_signal_audio_ws_relay_reload()`) both
+already assume this process is always there to check/signal. See CLAUDE.md's
+"Background threads" section for the Pi Zero 2 W hardware-cost reasoning.
 
 This file holds both the WebSocket wire protocol (the opening HTTP-Upgrade
 handshake, RFC 6455 §4, and binary frame encode/decode, RFC 6455 §5.2) and
