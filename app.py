@@ -10718,6 +10718,8 @@ def api_ws_audio_apply():
 
 @app.route("/api/settings/secret_key")
 def api_get_secret_key():
+    if session.get('role') not in ('superuser', 'owner'):
+        return jsonify({"error": "Superuser access required"}), 403
     return jsonify({
         "is_default":         SECRET_KEY in DEFAULT_SECRET_KEYS,
         "service_file":       SERVICE_FILE_PATH,
@@ -10813,6 +10815,9 @@ def api_set_secret_key():
     sent before the restart is triggered (from a background thread) so the
     browser actually receives it before the worker process is replaced.
     """
+    if session.get('role') not in ('superuser', 'owner'):
+        return jsonify({"error": "Superuser access required"}), 403
+
     data    = request.json or {}
     new_key = str(data.get("secret_key", "")).strip()
 
