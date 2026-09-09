@@ -1390,6 +1390,45 @@ def _no_cache_auth_pages(resp):
     return resp
 
 
+@app.after_request
+def _security_headers(resp):
+    """
+    Baseline security headers applied to every response, regardless of
+    whether this install ever ran tx-spike/setup-https.sh's optional
+    Apache vhost — doing it here in Flask means every install gets these,
+    not just the subset that's HTTPS-fronted.
+
+    X-Frame-Options and Cross-Origin-Opener-Policy apply unconditionally:
+    neither depends on the connection being HTTPS, and this app has no
+    legitimate reason to be framed by another origin or to expose
+    window.opener to one (every outbound link this app opens in a new
+    tab already uses rel="noopener").
+
+    Strict-Transport-Security is only added when this specific request
+    actually arrived over HTTPS (request.is_secure — already corrected
+    for the Apache TLS proxy case by _LocalProxyFix above, same as
+    _SchemeAwareSessionInterface relies on). Asserting HSTS for an
+    install that's never served this app over TLS at all would be
+    actively wrong, and browsers ignore the header on a plain HTTP
+    response anyway. max-age is a conservative 180 days, with neither
+    includeSubDomains (a self-hosted box may share its domain with
+    unrelated subdomains) nor preload (a much bigger, harder-to-reverse
+    commitment than a self-hosted appliance app should make on an
+    owner's behalf).
+
+    A full Content-Security-Policy is deliberately NOT set here: this
+    app's templates use inline <script>/<style> throughout, so enabling
+    CSP in enforcement mode needs its own pass to inventory nonce/hash
+    requirements first rather than being bundled into this general
+    header-hardening pass.
+    """
+    resp.headers.setdefault('X-Frame-Options', 'SAMEORIGIN')
+    resp.headers.setdefault('Cross-Origin-Opener-Policy', 'same-origin')
+    if request.is_secure:
+        resp.headers.setdefault('Strict-Transport-Security', 'max-age=15552000')
+    return resp
+
+
 # ── Auth hardening helpers ───────────────────────────────────────────────────
 # Shared by /login, /api/login, /login/2fa, /api/login/2fa, and every
 # "set a new password" route below.
