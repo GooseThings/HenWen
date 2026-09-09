@@ -1359,7 +1359,17 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   <!-- Header -->
   <header class="header">
     <div class="header-brand">
-      <img class="header-logo" src="/static/logo-128.png" alt="HenWen">
+      <!-- logo-96.png, not logo-128.png: this is the largest on-screen use
+           (48px, 31px on the phone breakpoint), and it's also the one
+           fetched on the critical rendering path (visible immediately at
+           boot, unlike the favicon badge/keyed-dot below which only draw in
+           later once board data or a connection exists). Lighthouse's
+           image-delivery insight flagged this exact <img> on
+           henwen.ironicsandwich.com (issue #104) for shipping the full
+           128px asset here. logo-128.png stays put for _drawFavicon()'s 64px
+           canvas draw and .keyed-dot-logo, which still need the extra
+           headroom this one doesn't. -->
+      <img class="header-logo" src="/static/logo-96.png" alt="HenWen">
       <strong>HenWen</strong> <span>KIOSK</span><span class="header-brand-mobile-suffix"> Mobile</span>
     </div>
     <img class="header-club-logo" id="club-logo-img" alt="" style="display:none">
