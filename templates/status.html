@@ -7,6 +7,20 @@
 <title>HenWen Kiosk</title>
 <link id="dyn-favicon" rel="icon" type="image/x-icon" href="/static/favicon.ico">
 <script>(function(){var t=localStorage.getItem('henwen-theme')||localStorage.getItem('asl3ez-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- Warms up the connection to both CDN origins as early as possible in
+     <head> parsing — DNS/TCP/TLS handshake overlaps with the rest of the
+     page instead of only starting once the parser reaches each resource's
+     own tag below. Doesn't change load/execution order or timing of the
+     resources themselves (unlike defer/async, which risks breaking the
+     inline <script> at the bottom of body that uses L./satellite. as soon
+     as it runs), just shortens the connection-setup portion of the
+     render-blocking critical path Lighthouse's render-blocking-insight
+     flagged for leaflet.min.css/leaflet.min.js. crossorigin is required
+     for the browser to actually reuse the preconnected connection for a
+     CORS-fetched resource like these (font/style/script requests from a
+     third-party origin are anonymous-mode CORS requests by default here). -->
+<link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
 <style>
 html[data-theme="midnight"] {
