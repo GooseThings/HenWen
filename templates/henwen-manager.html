@@ -1897,6 +1897,27 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
       </div>
     </div>
 
+    <div class="card">
+      <div class="card-header"><h2>Low-Latency Path Requirements</h2></div>
+      <div class="card-body">
+        <p class="muted" style="margin-bottom:8px">
+          Everything the Low-Latency RX Audio Path (below) needs to actually work for a
+          browser that isn't on this box's own localhost:
+        </p>
+        <ul style="margin:0 0 10px 20px;padding:0;color:var(--text2);font-size:0.9rem;line-height:1.7">
+          <li><span class="mono">ffmpeg</span> with a <span class="mono">libopus</span> encoder</li>
+          <li>The low-latency relay process (<span class="mono">audio_ws_relay.py</span>) running — HenWen starts this on its own</li>
+          <li>Apache installed and fronting HenWen, with the <span class="mono">/ws-audio</span> WebSocket proxy applied (<span class="mono">ws-audio/apply.sh</span>) — required because gunicorn's own worker threads can't do WebSocket upgrades, so this is the only way a browser on another machine can reach the relay at all</li>
+          <li>"Low-Latency" actually selected below, not just Apache being ready</li>
+          <li>A browser with <span class="mono">WebSocket</span>, <span class="mono">AudioDecoder</span> (WebCodecs), <span class="mono">AudioContext</span>, and <span class="mono">AudioWorkletNode</span> support — checked client-side only; unsupported browsers fall back to the plain, higher-latency <span class="mono">&lt;audio&gt;</span> tag automatically</li>
+        </ul>
+        <p class="muted" style="margin:0;font-size:0.85rem">
+          "Run Checks" above verifies everything server-side, plus a single rollup row
+          summarizing whether the path is actually ready to use right now.
+        </p>
+      </div>
+    </div>
+
     <div class="card" id="audiosocket-tap-settings-card" style="display:none">
       <div class="card-header"><h2>AudioSocket Tap (Listen audio)</h2></div>
       <div class="card-body">

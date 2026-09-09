@@ -176,3 +176,66 @@ class TestRxDiagnosticsChecks:
         assert c["status"] == "pass"
         assert "lowlatency" in c["detail"]
         assert "on" in c["detail"]
+
+
+class TestLowLatencyReadyRollup:
+    """The 'Low-latency path ready to use' rollup check -- pass only when
+    ffmpeg/libopus, the relay process, and the Apache proxy are all in
+    place; warn naming whichever prerequisite(s) are missing otherwise."""
+
+    def _make_ready(self, monkeypatch, tmp_path):
+        """Satisfies all three underlying conditions."""
+        monkeypatch.setattr(app.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+
+        class _Proc:
+            stdout = "... libopus ..."
+
+        monkeypatch.setattr(app.subprocess, "run", lambda *a, **k: _Proc())
+
+        class _FakeProc:
+            def poll(self):
+                return None
+
+        monkeypatch.setattr(app, "_audio_ws_relay_proc", _FakeProc())
+
+        conf = tmp_path / "henwen.conf"
+        conf.write_text("; " + app.WS_AUDIO_MARKER + "\n")
+        monkeypatch.setattr(app, "WS_AUDIO_APACHE_CONF_CANDIDATES", (str(conf),))
+
+    def test_passes_when_all_prerequisites_met(self, client, create_user, monkeypatch, tmp_path):
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        self._make_ready(monkeypatch, tmp_path)
+        body = client.get("/api/rx/diagnostics").get_json()
+        c = _find(body["checks"], "Low-latency path ready to use")
+        assert c["status"] == "pass"
+
+    def test_warns_naming_missing_ffmpeg(self, client, create_user, monkeypatch, tmp_path):
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        self._make_ready(monkeypatch, tmp_path)
+        monkeypatch.setattr(app.shutil, "which", lambda name: None)
+        body = client.get("/api/rx/diagnostics").get_json()
+        c = _find(body["checks"], "Low-latency path ready to use")
+        assert c["status"] == "warn"
+        assert "ffmpeg/libopus" in c["detail"]
+
+    def test_warns_naming_missing_relay(self, client, create_user, monkeypatch, tmp_path):
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        self._make_ready(monkeypatch, tmp_path)
+        monkeypatch.setattr(app, "_audio_ws_relay_proc", None)
+        body = client.get("/api/rx/diagnostics").get_json()
+        c = _find(body["checks"], "Low-latency path ready to use")
+        assert c["status"] == "warn"
+        assert "relay process" in c["detail"]
+
+    def test_warns_naming_missing_proxy(self, client, create_user, monkeypatch, tmp_path):
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        self._make_ready(monkeypatch, tmp_path)
+        monkeypatch.setattr(app, "WS_AUDIO_APACHE_CONF_CANDIDATES", (str(tmp_path / "nope.conf"),))
+        body = client.get("/api/rx/diagnostics").get_json()
+        c = _find(body["checks"], "Low-latency path ready to use")
+        assert c["status"] == "warn"
+        assert "Apache /ws-audio proxy" in c["detail"]

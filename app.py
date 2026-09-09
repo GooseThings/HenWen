@@ -7719,6 +7719,7 @@ def api_rx_diagnostics():
             "detail": detail,
         })
 
+    has_opus = False
     if not shutil.which('ffmpeg'):
         add("ffmpeg installed", False, "ffmpeg not found in PATH")
     else:
@@ -7800,6 +7801,18 @@ def api_rx_diagnostics():
                 channel if channel else f"No active Asterisk channel found for node {node} "
                 "(harmless if Asterisk hasn't started it yet)",
                 warn=not channel)
+
+    missing = []
+    if not has_opus:
+        missing.append("ffmpeg/libopus")
+    if not relay_alive:
+        missing.append("relay process")
+    if not proxy_applied:
+        missing.append("Apache /ws-audio proxy")
+    add("Low-latency path ready to use", not missing,
+        "All prerequisites met" if not missing else
+        "Missing: " + ", ".join(missing) + " — see Low-Latency Path Requirements above",
+        warn=bool(missing))
 
     add("Current RX audio settings", True,
         f"Path: {cfg['path']}, AGC: {'on' if cfg['agc_enabled'] else 'off'}")
