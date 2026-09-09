@@ -1060,6 +1060,12 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
      dropdown, opened/positioned by toggleHeaderMenu() the same way the map
      options menu works (see .map-ctl-dropdown). */
   #header-menu-btn { display: flex !important; }
+  /* Fullscreen (issue #123): shown directly in the header instead of buried
+     a tap deeper inside the hamburger — see the HTML comment by
+     #header-fs-btn. Its in-menu twin (#header-fs-menu-btn) is hidden here
+     so mobile only ever offers the one copy. */
+  #header-fs-btn { display: flex !important; }
+  #header-fs-menu-btn { display: none !important; }
   .header-menu-items {
     display: none; position: fixed; flex-direction: column; gap: 6px;
     background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
@@ -1417,6 +1423,14 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <source type="audio/webm; codecs=opus">
       </audio>
       <button class="btn-icon" id="kiosk-login-btn" onclick="openKioskLogin()" style="display:none">Login</button>
+      <!-- Fullscreen (issue #123): the copy folded into the hamburger below
+           still covers desktop, but on mobile that means two extra taps
+           (open menu, then Fullscreen) for what's usually the very first
+           thing a kiosk-mounted phone needs. This one lives outside the
+           fold like Login above, hidden on desktop (redundant with the
+           menu copy there) and forced visible by the mobile media query,
+           which also hides #header-fs-menu-btn so it isn't offered twice. -->
+      <button class="btn-icon" id="header-fs-btn" onclick="toggleFS()" title="Fullscreen" style="display:none"><svg class="icon"><use href="#icon-maximize"></use></svg></button>
       <!-- Everything else folds into a single hamburger menu on mobile (see
            #header-menu-btn / .header-menu-items below) — desktop keeps them
            as a plain inline row via display:contents, so this wrapper is
@@ -1445,7 +1459,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
           <div id="dash-hidden-menu" style="display:none;position:fixed;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:6px;min-width:170px;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:50;font-size:0.78rem"></div>
         </div>
         <button class="btn-icon" id="dash-edit-btn" onclick="toggleDashEditMode()" title="Rearrange, resize, or hide the panels below"><svg class="icon"><use href="#icon-layout-dashboard"></use></svg></button>
-        <button class="btn-icon" onclick="toggleFS()" title="Fullscreen"><svg class="icon"><use href="#icon-maximize"></use></svg><span class="header-menu-label">Fullscreen</span></button>
+        <button class="btn-icon" id="header-fs-menu-btn" onclick="toggleFS()" title="Fullscreen"><svg class="icon"><use href="#icon-maximize"></use></svg><span class="header-menu-label">Fullscreen</span></button>
         <a class="btn-icon" href="/accessible" title="Accessible View — larger text and screen-reader support">Accessible</a>
         <a class="btn-icon" id="manager-link-btn" href="/henwen-manager" target="_blank" rel="noopener" title="Manager"><svg class="icon"><use href="#icon-book-open"></use></svg><span class="header-menu-label">Manager</span></a>
       </div>
@@ -2123,7 +2137,16 @@ fetch('/api/kiosk/settings').then(function(r){ return r.ok ? r.json() : null; })
 
 /* ── Fullscreen ── */
 function toggleFS() {
-  if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(function(){});
+  if (!document.fullscreenElement) {
+    /* Toast fires on the entry request itself, not on the later
+       fullscreenchange handler below — that handler also runs for Esc/
+       back-gesture exits, which shouldn't re-announce anything, and it's
+       the wake lock (not fullscreen) that's the surprising side effect
+       worth flagging (issue #123). */
+    document.documentElement.requestFullscreen().then(function() {
+      sbToast('Fullscreen enabled — screen won’t time out while active', true);
+    }).catch(function(){});
+  }
   else document.exitFullscreen().catch(function(){});
 }
 
