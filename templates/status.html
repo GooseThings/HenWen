@@ -3394,7 +3394,7 @@ async function refreshWeather() {
     else if (w.temp_c) temp = w.temp_c + '°C';
 
     var html = '<span class="weather-location"><svg class="icon"><use href="#icon-cloud-sun"></use></svg> ' + esc(w.location) + '</span>';
-    if (w.stale) html += '<span class="weather-item" title="Weather service unreachable — showing last known data" style="color:var(--text2)">(stale)</span>';
+    if (w.stale) html += '<span class="weather-item" title="Weather service unreachable, or its station hasn\'t reported a fresh reading recently — showing the last data available, which may not reflect current conditions" style="color:var(--text2)">(stale)</span>';
     html += '<span class="weather-sep">|</span>';
     html += '<div class="weather-items">';
     if (w.desc)     html += '<span class="weather-item"><strong>' + esc(w.desc) + '</strong></span>';
