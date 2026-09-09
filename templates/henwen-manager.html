@@ -4060,6 +4060,21 @@ async function loadStanzaEditor(sectionName, elId, apiUrl, loadingLabel, fallbac
   var s    = r.data.settings || {};
   var html = '';
 
+  // Active keys that don't match any known rpt.conf directive but closely
+  // resemble one (e.g. 'totimer' instead of 'totime', issue #117) — these
+  // are silently ignored by Asterisk, so a value here that looks like it's
+  // controlling a setting actually isn't doing anything at all.
+  var typoWarnings = r.data.key_typo_warnings || [];
+  if (typoWarnings.length) {
+    html += '<div class="alert alert-warn" style="margin-bottom:12px">'
+          + typoWarnings.map(function(w) {
+              return '&#9888; <code>' + esc(w.key) + ' = ' + esc(w.value) + '</code> is not a recognized '
+                   + 'rpt.conf setting &mdash; Asterisk ignores it entirely. Did you mean '
+                   + '<code>' + esc(w.likely) + '</code>?';
+            }).join('<br>')
+          + '</div>';
+  }
+
   NODE_SECS.forEach(function(sec, i) {
     var open = i === 0 ? ' open' : '';
     html += '<div class="card" style="margin-bottom:12px">'

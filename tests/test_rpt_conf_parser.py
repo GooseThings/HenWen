@@ -160,6 +160,35 @@ class TestUpdateSettingInContent:
         assert app._parse_kv_lines(stanzas["b"]["lines"])["foo"]["value"] == "1"
 
 
+class TestFindKeyTypos:
+    def test_flags_totimer_as_likely_totime(self):
+        """issue #117: 'totimer = 300000' (an extra trailing 'r') is not a
+        real app_rpt directive, so Asterisk silently ignores it -- the node
+        keeps whatever totime it inherits/defaults to, with no indication
+        anywhere that the override the owner thinks is active isn't."""
+        settings = app.parse_stanza_settings(
+            "[628280](node-main)\ntotimer = 300000\n", "628280")
+        warnings = app.find_key_typos(settings)
+        assert warnings == [{"key": "totimer", "value": "300000", "likely": "totime"}]
+
+    def test_recognized_key_is_not_flagged(self):
+        settings = app.parse_stanza_settings("[x]\ntotime = 180000\n", "x")
+        assert app.find_key_typos(settings) == []
+
+    def test_commented_unknown_key_is_not_flagged(self):
+        # A disabled/commented line has no effect on Asterisk either way,
+        # so there's nothing here to silently be going wrong.
+        settings = app.parse_stanza_settings("[x]\n;totimer = 300000\n", "x")
+        assert app.find_key_typos(settings) == []
+
+    def test_unrelated_unknown_key_is_not_flagged(self):
+        # SETTINGS_SCHEMA isn't an exhaustive list of every valid app_rpt
+        # directive, so a key that isn't a close match to anything known
+        # must not be flagged as a typo.
+        settings = app.parse_stanza_settings("[x]\nsome_custom_directive = 1\n", "x")
+        assert app.find_key_typos(settings) == []
+
+
 class TestValidateSetting:
     def test_unknown_key_always_passes(self):
         assert app.validate_setting("some_totally_unknown_key", "anything") is None

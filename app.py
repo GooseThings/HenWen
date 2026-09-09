@@ -5103,6 +5103,31 @@ _BOOL_VALUES   = frozenset(["0", "1", "yes", "no", "true", "false", "on", "off"]
 _NONEMPTY_TYPES = frozenset(["nonempty", "id_sound", "dtmf_char", "identifier"])
 
 
+def find_key_typos(settings):
+    """
+    Flag active (uncommented) keys in a stanza's effective settings that
+    aren't recognized by SETTINGS_SCHEMA but closely resemble one that is —
+    e.g. 'totimer' typed instead of 'totime' (issue #117: a live
+    'totimer = 300000' line that Asterisk's config parser silently ignores,
+    since app_rpt never looks up an unrecognized directive name — there's no
+    "unknown key" warning surfaced anywhere. The node's real totime stayed
+    at its inherited/default value the whole time, and the owner had no way
+    to see why toggling the Manager UI's totime field appeared to do
+    nothing: they were never looking at the setting actually in effect).
+    Cutoff 0.82 is deliberately strict — SETTINGS_SCHEMA doesn't claim to be
+    an exhaustive list of every valid app_rpt directive, so this is a soft
+    "did you mean" nudge, not a validation error, and never blocks a save.
+    """
+    warnings = []
+    for key, info in settings.items():
+        if key in SETTINGS_SCHEMA or info.get("commented"):
+            continue
+        match = difflib.get_close_matches(key, SETTINGS_SCHEMA.keys(), n=1, cutoff=0.82)
+        if match:
+            warnings.append({"key": key, "value": info.get("value", ""), "likely": match[0]})
+    return warnings
+
+
 def validate_setting(key, value):
     """Return None if value is acceptable for key, otherwise an error string."""
     schema = SETTINGS_SCHEMA.get(key)
@@ -5578,7 +5603,8 @@ def api_get_node_conf(node):
                 break
     usage     = get_node_template_usage(content)
     templates = [t for t, nodes in usage.items() if node in nodes]
-    return jsonify({"node": node, "settings": settings, "templates": templates})
+    return jsonify({"node": node, "settings": settings, "templates": templates,
+                    "key_typo_warnings": find_key_typos(settings)})
 
 
 @app.route("/api/conf/templates")
@@ -5611,7 +5637,8 @@ def api_get_template_conf(name):
         return jsonify({"error": f"Template [{name}] not found in rpt.conf"}), 404
     settings = parse_stanza_settings(content, name)
     usage    = get_node_template_usage(content)
-    return jsonify({"template": name, "settings": settings, "used_by": usage.get(name, [])})
+    return jsonify({"template": name, "settings": settings, "used_by": usage.get(name, []),
+                    "key_typo_warnings": find_key_typos(settings)})
 
 
 @app.route("/api/conf/macros")
