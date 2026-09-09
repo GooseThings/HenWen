@@ -6955,8 +6955,26 @@ function _doStartListenMSE(audio, node) {
         function pump() {
           if (ctrl.signal.aborted) return;
           reader.read().then(function(result) {
-            if (result.done || ctrl.signal.aborted) {
+            if (ctrl.signal.aborted) {
               try { ms.endOfStream(); } catch(e) {}
+              return;
+            }
+            if (result.done) {
+              /* Server closed the stream cleanly -- e.g. the broadcast's
+                 GeneratorExit/shutdown sentinel path in api_audio_stream()
+                 fires when Asterisk or HenWen itself restarts out from
+                 under a listener. That's not a fetch error (no exception,
+                 nothing for the catch() below to see), so it needs the same
+                 reset-and-reconnect handling here or the button is left
+                 stuck showing "Mute" with nothing actually playing
+                 (issue #116). */
+              try { ms.endOfStream(); } catch(e) {}
+              console.warn('[AUDIO] stream ended (server closed connection)');
+              if (_listenActive) {
+                _listenActive = false;
+                _listenSetBtn('Reconnecting...', 'var(--text2)', true);
+                setTimeout(function() { if (!_listenActive) _startListen(); }, 3000);
+              }
               return;
             }
             var nowA = _now();
