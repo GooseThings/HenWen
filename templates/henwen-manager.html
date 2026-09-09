@@ -680,6 +680,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     <button class="nav-item" onclick="showPage('conn-history')">Conn. History</button>
     <button class="nav-item" onclick="showPage('ami-diag')">AMI Diagnostics</button>
     <button class="nav-item" onclick="showPage('tx-diag')">TX Diagnostics</button>
+    <button class="nav-item" onclick="showPage('rx-diag')">RX Diagnostics</button>
     <button class="nav-item" id="nav-ast-console" onclick="showPage('ast-console')">Asterisk Console</button>
 
     <div class="nav-section">rpt.conf Editor</div>
@@ -1872,6 +1873,50 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
       </div>
     </div>
 
+  </section>
+
+  <!-- RX Diagnostics -->
+  <section class="page" id="page-rx-diag">
+    <div class="page-title">RX Diagnostics</div>
+    <div class="page-sub">Checks everything the Status Board's Listen (receive) feature needs, end to end.</div>
+
+    <div class="card">
+      <div class="card-header">
+        <h2>Run Checks</h2>
+        <div class="btn-row">
+          <button class="btn btn-primary" id="rx-diag-btn" onclick="runRxDiagnostics()">Run Diagnostics</button>
+        </div>
+      </div>
+      <div class="card-body">
+        <p style="margin-bottom:10px;color:var(--text2);font-size:0.9rem">
+          Covers RX capture (AudioSocket tap vs. MixMonitor fallback), ffmpeg/libopus, the
+          Low-Latency path's relay process and Apache proxy, and whether each configured
+          node's Asterisk channel currently resolves. Nothing is changed on the system.
+        </p>
+        <div id="rx-diag-out"><span class="muted">Click Run Diagnostics to check RX readiness.</span></div>
+      </div>
+    </div>
+
+    <div class="card" id="audiosocket-tap-settings-card" style="display:none">
+      <div class="card-header"><h2>AudioSocket Tap (Listen audio)</h2></div>
+      <div class="card-body">
+        <p class="muted" style="margin-bottom:12px">
+          Optional, opt-in low-latency capture path for the Status Board's Listen feature.
+          Without this, Listen uses AMI <span class="mono">MixMonitor</span>, which adds
+          roughly 2 seconds of latency from Asterisk's own buffered file writes. Applying this
+          swaps in a live TCP tap (<span class="mono">AudioSocket</span>) instead — additive
+          and safe to re-run; Listen automatically falls back to MixMonitor if anything about
+          the tap ever fails. See <span class="mono">audiosocket-tap/README.md</span> for
+          details.
+        </p>
+        <p id="audiosocket-tap-status" style="margin-bottom:12px;color:var(--text2)">Checking&hellip;</p>
+        <div class="btn-row">
+          <button class="btn btn-sm btn-primary" onclick="applyAudioSocketTap()">Apply AudioSocket Tap</button>
+        </div>
+        <pre id="audiosocket-tap-output" class="codeblock" style="display:none;margin-top:12px;white-space:pre-wrap;max-height:260px;overflow-y:auto"></pre>
+      </div>
+    </div>
+
     <div class="card" id="rx-audio-path-card" style="display:none">
       <div class="card-header"><h2>RX Audio Path (Listen audio)</h2></div>
       <div class="card-body">
@@ -2832,25 +2877,6 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
       </div>
     </div>
 
-    <div class="card" id="audiosocket-tap-settings-card" style="display:none">
-      <div class="card-header"><h2>AudioSocket Tap (Listen audio)</h2></div>
-      <div class="card-body">
-        <p class="muted" style="margin-bottom:12px">
-          Optional, opt-in low-latency capture path for the Status Board's Listen feature.
-          Without this, Listen uses AMI <span class="mono">MixMonitor</span>, which adds
-          roughly 2 seconds of latency from Asterisk's own buffered file writes. Applying this
-          swaps in a live TCP tap (<span class="mono">AudioSocket</span>) instead — additive
-          and safe to re-run; Listen automatically falls back to MixMonitor if anything about
-          the tap ever fails. See <span class="mono">audiosocket-tap/README.md</span> for
-          details.
-        </p>
-        <p id="audiosocket-tap-status" style="margin-bottom:12px;color:var(--text2)">Checking&hellip;</p>
-        <div class="btn-row">
-          <button class="btn btn-sm btn-primary" onclick="applyAudioSocketTap()">Apply AudioSocket Tap</button>
-        </div>
-        <pre id="audiosocket-tap-output" class="codeblock" style="display:none;margin-top:12px;white-space:pre-wrap;max-height:260px;overflow-y:auto"></pre>
-      </div>
-    </div>
 
     <div class="card">
       <div class="card-header"><h2>About HenWen</h2></div>
@@ -3277,9 +3303,8 @@ function showPage(id) {
   else if (id === 'kiosk-settings')   ksLoad();
   else if (id === 'ami-diag')         loadSysInfo();
   else if (id === 'ast-console')  astFetchLog();
-  else if (id === 'settings')       { loadSecretKeyStatus(); loadPortsStatus(); syncThemePicker(); mfaLoadStatus();
-                                       if (window._henwenRole === 'owner') loadAudioSocketTapStatus(); }
-  else if (id === 'tx-diag')        { if (window._henwenRole === 'owner') loadRxAudioPathStatus(); }
+  else if (id === 'settings')       { loadSecretKeyStatus(); loadPortsStatus(); syncThemePicker(); mfaLoadStatus(); }
+  else if (id === 'rx-diag')         { if (window._henwenRole === 'owner') { loadAudioSocketTapStatus(); loadRxAudioPathStatus(); } }
   else if (id === 'user-mgmt')      { loadUsers(); pwResetLoad(); invitesLoad(); }
   else if (id === 'recordings')         recordingsLoad();
   else if (id === 'recording-settings') recLoad();
@@ -5400,6 +5425,49 @@ async function runTxDiagnostics() {
   if (s.fail) log('TX diagnostics: ' + s.pass + ' pass, ' + s.fail + ' fail, ' + s.warn + ' warn.', 'ERROR');
   else if (s.warn) log('TX diagnostics: ' + s.pass + ' pass, ' + s.warn + ' warn.', 'WARN');
   else log('TX diagnostics: all ' + s.pass + ' checks passed.', 'OK');
+}
+
+/* ── RX Diagnostics ───────────────────────────────────────────────────────── */
+async function runRxDiagnostics() {
+  var btn = document.getElementById('rx-diag-btn');
+  var el  = document.getElementById('rx-diag-out');
+  btn.disabled = true;
+  el.innerHTML = '<span class="muted"><span class="spinner"></span> Running checks...</span>';
+  log('Running RX diagnostics...', 'INFO');
+
+  var r = await api('/api/rx/diagnostics');
+  btn.disabled = false;
+
+  if (!r.ok) {
+    el.innerHTML = '<div class="alert alert-danger">' + esc(r.data.error || 'Diagnostics failed') + '</div>';
+    log('RX diagnostics failed: ' + (r.data.error || 'unknown'), 'ERROR');
+    return;
+  }
+
+  var d = r.data;
+  var s = d.summary || {pass: 0, fail: 0, warn: 0};
+  var badgeClass = {pass: 'badge-ok', fail: 'badge-err', warn: 'badge-warn'};
+  var badgeLabel = {pass: 'PASS', fail: 'FAIL', warn: 'WARN'};
+
+  var html = '<div style="margin-bottom:12px">'
+    + '<span class="badge badge-ok" style="margin-right:6px">' + s.pass + ' pass</span>'
+    + (s.fail ? '<span class="badge badge-err" style="margin-right:6px">' + s.fail + ' fail</span>' : '')
+    + (s.warn ? '<span class="badge badge-warn">' + s.warn + ' warn</span>' : '')
+    + '</div>';
+  html += '<table class="tbl"><tbody>';
+  (d.checks || []).forEach(function(c) {
+    html += '<tr><td>' + esc(c.label) + '</td><td style="text-align:right"><span class="badge '
+      + (badgeClass[c.status] || 'badge-unk') + '">' + (badgeLabel[c.status] || c.status) + '</span></td></tr>';
+    if (c.detail && c.detail !== c.label) {
+      html += '<tr><td colspan="2" class="muted" style="font-size:0.82rem;padding-top:0">' + esc(c.detail) + '</td></tr>';
+    }
+  });
+  html += '</tbody></table>';
+  el.innerHTML = html;
+
+  if (s.fail) log('RX diagnostics: ' + s.pass + ' pass, ' + s.fail + ' fail, ' + s.warn + ' warn.', 'ERROR');
+  else if (s.warn) log('RX diagnostics: ' + s.pass + ' pass, ' + s.warn + ' warn.', 'WARN');
+  else log('RX diagnostics: all ' + s.pass + ' checks passed.', 'OK');
 }
 
 async function loadSysInfo() {

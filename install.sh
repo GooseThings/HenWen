@@ -49,7 +49,7 @@ if ! python3 -c "import ensurepip" &>/dev/null; then
 fi
 
 if [ ${#NEED_PKGS[@]} -gt 0 ]; then
-    echo "[1/9] Missing required package(s): ${NEED_PKGS[*]}"
+    echo "[1/10] Missing required package(s): ${NEED_PKGS[*]}"
     DO_INSTALL=1
     if [ -t 0 ]; then
         read -p "      Install via apt-get now? [Y/n]: " REPLY
@@ -65,11 +65,11 @@ if [ ${#NEED_PKGS[@]} -gt 0 ]; then
     echo "      Installing: ${NEED_PKGS[*]}"
     apt-get install -y "${NEED_PKGS[@]}"
 else
-    echo "[1/9] Python 3 found: $(python3 --version), venv module available."
+    echo "[1/10] Python 3 found: $(python3 --version), venv module available."
 fi
 
 # ── Copy files ────────────────────────────────────────────
-echo "[2/9] Installing to $INSTALL_DIR..."
+echo "[2/10] Installing to $INSTALL_DIR..."
 mkdir -p "$INSTALL_DIR"
 # Re-running this script from inside a checkout that already *is*
 # INSTALL_DIR (e.g. /opt/HenWen's own live git checkout, used to pick up a
@@ -87,13 +87,13 @@ chmod 755 "$INSTALL_DIR"          # standard app dir: owner rwx, group rx, other
 chmod +x "$INSTALL_DIR/"*.sh 2>/dev/null || true
 
 # ── Virtual environment ───────────────────────────────────
-echo "[3/9] Creating Python virtual environment..."
+echo "[3/10] Creating Python virtual environment..."
 python3 -m venv "$INSTALL_DIR/venv"
 "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
 "$INSTALL_DIR/venv/bin/pip" install --quiet flask gunicorn flask-wtf flask-limiter piper-tts
 
 # ── rpt_backups directory ─────────────────────────────────
-echo "[4/9] Creating backup directory..."
+echo "[4/10] Creating backup directory..."
 mkdir -p /etc/asterisk/rpt_backups
 chown asterisk:asterisk /etc/asterisk/rpt_backups
 chmod 750 /etc/asterisk/rpt_backups
@@ -122,7 +122,7 @@ if [ -f /etc/asterisk/henwen.db ]; then
 fi
 
 # ── Verify rpt.conf accessible ────────────────────────────
-echo "[5/9] Checking rpt.conf..."
+echo "[5/10] Checking rpt.conf..."
 if [ -f /etc/asterisk/rpt.conf ]; then
     echo "      Found: /etc/asterisk/rpt.conf"
     ls -la /etc/asterisk/rpt.conf
@@ -138,7 +138,7 @@ fi
 # hasn't been loaded yet on a freshly installed system. Fix what we can
 # here rather than making the user discover it later via a silent Listen
 # button.
-echo "[6/9] Verifying Asterisk MixMonitor module..."
+echo "[6/10] Verifying Asterisk MixMonitor module..."
 MODULES_CONF="/etc/asterisk/modules.conf"
 if [ -f "$MODULES_CONF" ] && grep -qE '^\s*noload\s*=>\s*app_mixmonitor\.so' "$MODULES_CONF"; then
     echo "      Found 'noload => app_mixmonitor.so' in modules.conf — disabling that line."
@@ -166,8 +166,30 @@ else
     echo "      only covers the modules.conf blacklist, not a missing .so file)."
 fi
 
+# ── Optional: AudioSocket tap (low-latency Listen audio) ──
+# Purely additive and self-falling-back (see audiosocket-tap/README.md) --
+# safe to apply unconditionally on every fresh install so new installs get
+# low-latency Listen audio without a manual Settings-page step. Needs
+# Asterisk actually running (apply.sh issues live "module load"/"dialplan
+# reload" AMI-CLI commands), same precondition as the MixMonitor check
+# above. Never fatal to the install -- Listen still works via MixMonitor
+# if this fails or is skipped.
+echo "[7/10] Applying AudioSocket tap (low-latency Listen audio)..."
+if command -v asterisk &>/dev/null && systemctl is-active --quiet asterisk 2>/dev/null; then
+    if bash "$INSTALL_DIR/audiosocket-tap/apply.sh"; then
+        echo "      Applied."
+    else
+        echo "      WARNING: audiosocket-tap/apply.sh failed — Listen will use"
+        echo "      MixMonitor instead (higher latency, still fully functional)."
+        echo "      Re-run manually later: sudo bash $INSTALL_DIR/audiosocket-tap/apply.sh"
+    fi
+else
+    echo "      Asterisk not running — skipping. Apply later from Manager >"
+    echo "      Settings, or: sudo bash $INSTALL_DIR/audiosocket-tap/apply.sh"
+fi
+
 # ── Systemd service ───────────────────────────────────────
-echo "[7/9] Installing systemd service ($SERVICE_NAME)..."
+echo "[8/10] Installing systemd service ($SERVICE_NAME)..."
 
 # Remove any old service under the previous name to avoid duplicates
 if [ -f /etc/systemd/system/asl3-rpt-editor.service ]; then
@@ -223,7 +245,7 @@ fi
 # — do not broaden with wildcards. The updater rule only works if
 # $INSTALL_DIR is itself a git checkout of the HenWen repo — update.sh
 # no-ops with an error otherwise.
-echo "[8/9] Installing sudoers rule for restart/reload/update actions..."
+echo "[9/10] Installing sudoers rule for restart/reload/update actions..."
 SUDOERS_FILE=/etc/sudoers.d/henwen-systemctl
 SYSTEMCTL_BIN=$(command -v systemctl || echo /bin/systemctl)
 SYSTEMD_RUN_BIN=$(command -v systemd-run || echo /usr/bin/systemd-run)
@@ -273,7 +295,7 @@ elif command -v ufw &>/dev/null; then
 fi
 
 # ── Start service ─────────────────────────────────────────
-echo "[9/9] Enabling and starting $SERVICE_NAME..."
+echo "[10/10] Enabling and starting $SERVICE_NAME..."
 systemctl enable "$SERVICE_NAME"
 systemctl restart "$SERVICE_NAME"
 sleep 2

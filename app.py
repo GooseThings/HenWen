@@ -7701,6 +7701,119 @@ def api_tx_diagnostics():
     return jsonify({"checks": checks, "summary": summary, "raw_output": script_output})
 
 
+@app.route("/api/rx/diagnostics")
+def api_rx_diagnostics():
+    """One-click check of everything the Status Board's Listen feature needs,
+    for the Manager's RX Diagnostics page — the RX-side counterpart to
+    api_tx_diagnostics() above, same admin/superuser/owner gate and same
+    checks=[{label,status,detail}]/summary shape."""
+    if session.get('role') not in ('admin', 'superuser', 'owner'):
+        return jsonify({"error": "Admin access required"}), 403
+
+    checks = []
+
+    def add(label, ok, detail, warn=False):
+        checks.append({
+            "label": label,
+            "status": "warn" if warn else ("pass" if ok else "fail"),
+            "detail": detail,
+        })
+
+    if not shutil.which('ffmpeg'):
+        add("ffmpeg installed", False, "ffmpeg not found in PATH")
+    else:
+        try:
+            r = subprocess.run(['ffmpeg', '-encoders'], capture_output=True, text=True, timeout=5)
+            has_opus = 'libopus' in r.stdout
+            add("ffmpeg has libopus encoder", has_opus,
+                "libopus present" if has_opus else "ffmpeg build is missing libopus — "
+                "both RX audio paths need it")
+        except Exception as e:
+            add("ffmpeg has libopus encoder", False, f"ffmpeg probe failed: {e}")
+
+    try:
+        with open(MODULES_CONF_PATH) as f:
+            tap_applied = AUDIOSOCKET_TAP_MARKER in f.read()
+    except OSError as e:
+        tap_applied = False
+        add("AudioSocket tap applied", False, f"Couldn't read {MODULES_CONF_PATH}: {e}", warn=True)
+    else:
+        add("AudioSocket tap applied", tap_applied,
+            "Low-latency capture active for Listen" if tap_applied else
+            "Not applied — Listen falls back to MixMonitor (~2s more latency). "
+            "Apply from Manager > Settings.",
+            warn=not tap_applied)
+
+    def _check_mixmonitor(ami):
+        lines = ami.command('module show like app_mixmonitor')
+        loaded = any('app_mixmonitor' in l for l in lines)
+        if not loaded:
+            if ami.module_load('app_mixmonitor.so'):
+                log('INFO', '[AUDIO] Loaded app_mixmonitor.so on demand (RX diagnostics)')
+                loaded = True
+        return {'loaded': loaded}
+    try:
+        mm_loaded = ami_send_command(_check_mixmonitor).get('loaded')
+        add("MixMonitor module loaded (fallback path)", mm_loaded,
+            "app_mixmonitor.so loaded" if mm_loaded else "app_mixmonitor.so not loaded in Asterisk")
+    except Exception as e:
+        add("MixMonitor module loaded (fallback path)", False, f"Could not query AMI: {e}")
+
+    with _audio_ws_relay_proc_lock:
+        relay_alive = _audio_ws_relay_proc is not None and _audio_ws_relay_proc.poll() is None
+    add("Low-latency relay process running", relay_alive,
+        "audio_ws_relay.py is up" if relay_alive else
+        "audio_ws_relay.py is not running — the Low-Latency RX path will not work "
+        "until HenWen restarts it")
+
+    cfg = _get_rx_audio_config() or RX_AUDIO_CONFIG_DEFAULTS
+    proxy_applied = False
+    proxy_conf = None
+    for candidate in WS_AUDIO_APACHE_CONF_CANDIDATES:
+        try:
+            with open(candidate) as f:
+                if WS_AUDIO_MARKER in f.read():
+                    proxy_applied = True
+                    proxy_conf = candidate
+                    break
+        except OSError:
+            continue
+    if cfg['path'] == 'lowlatency':
+        add("Low-latency Apache proxy applied", proxy_applied,
+            f"Applied ({proxy_conf})" if proxy_applied else
+            "Not applied — remote browsers can't reach the low-latency path yet "
+            "(loopback-only until this is applied)",
+            warn=not proxy_applied)
+    else:
+        add("Low-latency Apache proxy applied", True,
+            "Applied (" + proxy_conf + ")" if proxy_applied else
+            "Not applied — only relevant if the Low-Latency RX path is selected")
+
+    content = read_conf_file(RPT_CONF_PATH)
+    nodes = get_node_numbers(content) if content else []
+    if not nodes:
+        add("Node channel resolution", False, "No [NNNN] stanza found in rpt.conf")
+    else:
+        for node in nodes:
+            channel = _find_node_channel(node)
+            add(f"Node {node} channel resolves", bool(channel),
+                channel if channel else f"No active Asterisk channel found for node {node} "
+                "(harmless if Asterisk hasn't started it yet)",
+                warn=not channel)
+
+    add("Current RX audio settings", True,
+        f"Path: {cfg['path']}, AGC: {'on' if cfg['agc_enabled'] else 'off'}")
+
+    summary = {
+        "pass": sum(1 for c in checks if c["status"] == "pass"),
+        "fail": sum(1 for c in checks if c["status"] == "fail"),
+        "warn": sum(1 for c in checks if c["status"] == "warn"),
+    }
+    log("INFO", f"[RX-DIAG] {session.get('username', '?')} ran RX diagnostics: "
+                f"{summary['pass']} pass, {summary['fail']} fail, {summary['warn']} warn")
+    return jsonify({"checks": checks, "summary": summary})
+
+
 # ---------------------------------------------------------------------------
 # Audio monitoring — one ffmpeg per node, broadcast to N simultaneous clients
 #
