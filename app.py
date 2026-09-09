@@ -29,6 +29,7 @@ FIXES in this version:
 import os
 import re
 import html
+import signal
 import subprocess
 import shutil
 import socket
@@ -333,6 +334,14 @@ AUDIOSOCKET_TAP_APPLY_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath
 # to append its snippet — reused here (read-only) so the Manager UI can show
 # applied/not-applied without needing root.
 AUDIOSOCKET_TAP_MARKER = "HenWen AudioSocket tap"
+WS_AUDIO_APPLY_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ws-audio", "apply.sh")
+# Same marker string ws-audio/apply.sh greps for -- see that script's own
+# comment for why it patches whichever of these two vhost files is present.
+WS_AUDIO_MARKER = "HenWen low-latency RX audio"
+WS_AUDIO_APACHE_CONF_CANDIDATES = (
+    "/etc/apache2/sites-enabled/henwen-ssl.conf",
+    "/etc/apache2/sites-enabled/henwen.conf",
+)
 
 
 def _systemctl(*args, timeout=30):
@@ -860,6 +869,37 @@ def get_db():
         # to any one club's URL since other installs use this too.
         conn.execute("ALTER TABLE stream_relay_config ADD COLUMN overlay_website TEXT NOT NULL DEFAULT ''")
     conn.commit()
+    # Singleton config for which RX audio pipeline serves the Listen feature
+    # -- 'legacy' (WebM/Opus via ffmpeg + dynaudnorm AGC, MSE playback -- the
+    # only path that has ever existed) or 'lowlatency' (raw Opus over a
+    # dedicated WebSocket relay, no AGC, WebCodecs+AudioWorklet playback --
+    # see audio_ws_relay.py). Owner-only, like recording_config/
+    # stream_relay_config above: this changes which capture/encode pipeline
+    # runs server-side for every listener, not a per-browser preference.
+    # `path` deliberately does NOT affect recording.py/stream_relay.py --
+    # both keep attaching to the existing WebM _AudioBroadcast exactly as
+    # before, regardless of this setting; only the Listen feature's own
+    # encoder choice is gated by it. `agc_enabled` is different: AGC is
+    # baked into that same shared WebM ffmpeg (_start_broadcast(), via
+    # _webm_af_filter()), so toggling it affects Listen (legacy mode),
+    # recording.py, AND stream_relay.py together -- there's only one WebM
+    # encoder per node, no way to split AGC out for just one consumer of
+    # it. Also read by the low-latency path's own ffmpeg
+    # (_opus_ffmpeg_cmd() in audio_ws_relay.py) -- one unified AGC setting
+    # covering both RX paths. Defaults to 0 (off) by explicit owner
+    # decision -- a deliberate behavior change from AGC having always been
+    # on (with no way to disable it) before this setting existed, for
+    # Listen-legacy/recording/stream-relay alike, not just low-latency.
+    # See the "Low-Latency Listen Path" and "Unified AGC Toggle" plans.
+    conn.execute("""CREATE TABLE IF NOT EXISTS rx_audio_config (
+        id          INTEGER PRIMARY KEY CHECK (id = 1),
+        path        TEXT    NOT NULL DEFAULT 'legacy',
+        agc_enabled INTEGER NOT NULL DEFAULT 0
+    )""")
+    _rx_audio_cfg_cols = {r[1] for r in conn.execute("PRAGMA table_info(rx_audio_config)").fetchall()}
+    if 'agc_enabled' not in _rx_audio_cfg_cols:
+        conn.execute("ALTER TABLE rx_audio_config ADD COLUMN agc_enabled INTEGER NOT NULL DEFAULT 0")
+    conn.commit()
     # Singleton config for the Meshtastic MQTT panel (meshtastic_mqtt.py) —
     # root topic / channel name / PSK, owner-only. Broker host/port/creds
     # are NOT here: they're hardcoded to the public mqtt.meshtastic.org
@@ -1210,7 +1250,17 @@ def check_auth():
                         'api_kiosk_settings_get', 'api_kiosk_logo_file',
                         'api_nets_list',
                         'forgot_password', 'reset_password_page', 'accept_invite',
-                        'login_2fa', 'api_login_2fa'}
+                        'login_2fa', 'api_login_2fa',
+                        # Internal, process-to-process only (audio_ws_relay.py ->
+                        # this process) — never reachable by a browser session,
+                        # gated instead by _check_internal_audio_request()'s
+                        # loopback+shared-secret check inside each route body.
+                        # Deliberately NOT api_internal_audio_authorize_ws:
+                        # that one's whole job is running check_auth()'s own
+                        # session logic against a forwarded browser cookie, so
+                        # it belongs in _USER_OR_ABOVE below, not here.
+                        'api_internal_audio_ensure_capture',
+                        'api_internal_audio_release_capture'}
     # The public *pages* (as opposed to the public JSON endpoints) that get
     # bounced to the first-run setup screen while no account exists yet.
     # Deliberately only these three: the login page fetches several of the
@@ -1239,7 +1289,13 @@ def check_auth():
                       # the admin+-only default below).
                       'api_change_password',
                       'api_mfa_status', 'api_mfa_setup', 'api_mfa_confirm',
-                      'api_mfa_disable', 'api_mfa_recovery_regenerate'}
+                      'api_mfa_disable', 'api_mfa_recovery_regenerate',
+                      # Called by audio_ws_relay.py, with the browser's own
+                      # Cookie header forwarded onto this request -- lets this
+                      # existing login-required gate answer "is this a valid
+                      # logged-in session" for the low-latency WS path the
+                      # same way it already does for api_audio_stream.
+                      'api_internal_audio_authorize_ws'}
 
     endpoint  = request.endpoint
     is_public = endpoint in _PUBLIC
@@ -7698,7 +7754,31 @@ def _webm_vint_len(first_byte):
 _audio_lock   = threading.Lock()
 _audio_active = {}   # node -> _AudioBroadcast
 
-_AUDIO_RELAY_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'audio_relay.py')
+
+def _force_teardown_all_broadcasts():
+    """Force-tears-down every currently active _AudioBroadcast (every
+    node's legacy WebM encode) -- called when the RX audio settings (path
+    or AGC) change, so the new setting takes effect immediately instead of
+    waiting for every listener/recording/the stream relay to disconnect on
+    their own. Deliberately doesn't special-case recording.py or
+    stream_relay.py: both already handle their broadcast disappearing out
+    from under them cleanly -- see their own 'if chunk is None' handling in
+    the recording-stream and stream-relay-loop generators (recording.py
+    finalizes the file via recorder.stop(), the stream relay logs
+    'reconnecting' and does exactly that) -- the same path a node actually
+    going offline mid-session already exercises today. Snapshots the dict
+    under the lock, then shuts down outside it: _AudioBroadcast.shutdown()
+    itself acquires _audio_lock to remove itself from _audio_active, so
+    holding it across the call would deadlock."""
+    with _audio_lock:
+        broadcasts = list(_audio_active.values())
+    for broadcast in broadcasts:
+        broadcast.shutdown()
+    return len(broadcasts)
+
+
+_AUDIO_RELAY_SCRIPT    = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'audio_relay.py')
+_AUDIO_WS_RELAY_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'audio_ws_relay.py')
 
 # In-browser recordings (recording.py) in progress right now, keyed by their
 # `recordings` table row id -> recording.Recorder. Separate from
@@ -8317,6 +8397,15 @@ def _start_broadcast(node):
         # we're actually running at DEBUG ourselves — otherwise the lines
         # would just be dropped by _relay_stderr_loop below anyway.
         _relay_env['AUDIO_RELAY_DEBUG'] = '1'
+    # Always set, harmlessly, regardless of rx_audio_config.path -- see
+    # audio_relay.py's module docstring's "WS-relay dual-write" section.
+    # audio_ws_relay.py's own logic (gated on rx_audio_config.path via the
+    # internal API) decides whether this node's dual-written PCM is ever
+    # actually encoded/used; a WebM broadcast dual-writing into a relay
+    # nothing is listening to costs nothing but a dropped frame counter.
+    _relay_env['AUDIO_WS_RELAY_HOST'] = AUDIO_WS_RELAY_HOST
+    _relay_env['AUDIO_WS_RELAY_PORT'] = str(AUDIO_WS_RELAY_PORT)
+    _relay_env['AUDIO_WS_NODE']       = str(node)
 
     fifo_in_path   = None
     tap_channel_id = None
@@ -8440,6 +8529,15 @@ def _start_broadcast(node):
     # on m/r; re-verified against the clipped-tone fixture below at these
     # values, 0 clipped samples). If clicking on peaks is still audible
     # after this, lower r further toward 0 before touching m or p.
+    #
+    # -af value itself comes from _webm_af_filter(), reading
+    # rx_audio_config.agc_enabled fresh at broadcast-start time (this
+    # function is only ever called at the start of a new broadcast, never
+    # mid-session) -- dynaudnorm is included only when AGC is enabled; the
+    # exact tuning below is what that toggle turns on/off, unchanged either
+    # way. See _webm_af_filter()'s own docstring for why this one setting
+    # also affects recording.py/stream_relay.py, not just Listen.
+    _agc_enabled = (_get_rx_audio_config() or RX_AUDIO_CONFIG_DEFAULTS)['agc_enabled']
     ffmpeg_cmd = [
         'ffmpeg', '-loglevel', 'warning',
         '-probesize', '32',
@@ -8447,8 +8545,7 @@ def _start_broadcast(node):
         '-fflags', '+nobuffer',
         '-f', 's16le', '-ar', '8000', '-ac', '1', '-channel_layout', 'mono',
         '-i', fifo_out_path,
-        '-af', 'dynaudnorm=f=50:g=5:p=0.95:m=4:r=0.2,'
-               'alimiter=limit=0.85:attack=5:release=50:level=false',
+        '-af', _webm_af_filter(_agc_enabled),
         '-ar', '48000',        # resample to Opus native rate before encoding
         '-c:a', 'libopus', '-b:a', '24k',
         '-vbr', 'off',         # CBR — keep a steady ~24 kbps byte flow even when the node
@@ -8562,6 +8659,475 @@ def _start_broadcast(node):
     return broadcast
 
 
+# ---------------------------------------------------------------------------
+# Low-latency RX audio (rx_audio_config.path == 'lowlatency') — capture-only
+# relay + the internal control-plane API audio_ws_relay.py drives.
+#
+# audio_ws_relay.py (separate module/process) owns the WebSocket server and
+# the per-node raw-Opus ffmpeg that actually encodes for this path — this
+# section only owns the *capture* half (AudioSocket tap / MixMonitor +
+# audio_relay.py's pacing loop, dual-writing raw PCM out over a plain TCP
+# socket to that process) and the tiny internal HTTP API that lets it drive
+# that lifecycle and authorize a browser's WS connection, without either
+# process needing to reach into the other's internals.
+#
+# Deliberately separate bookkeeping from _audio_active/_AudioBroadcast above:
+# a FIFO can only be drained by one reader, so this never reuses an existing
+# WebM broadcast's audio_relay.py even if one happens to already be running
+# for the same node (e.g. a recording in progress) — see _start_capture_only()
+# below and the "Low-Latency Listen Path" plan's Context section for why two
+# independent capture pipelines when both are genuinely needed is the
+# accepted tradeoff here, not incidental duplication. What this section does
+# guarantee: Listen itself never causes two *encoders* to run for the same
+# node at once, since 'legacy' mode never touches this section at all, and
+# 'lowlatency' mode never calls _start_broadcast() for Listen's own sake.
+# ---------------------------------------------------------------------------
+
+# Generated fresh every app.py startup, handed to audio_ws_relay.py only via
+# its spawn environment (never written to disk, never logged) — the shared
+# secret that lets its internal HTTP calls into this process prove they're
+# really audio_ws_relay.py and not an arbitrary request that happened to
+# reach the loopback interface. Loopback-binding alone isn't sufficient
+# defense in depth on a box where other local processes/containers might
+# share the loopback namespace.
+_INTERNAL_AUDIO_SECRET = secrets.token_hex(32)
+
+AUDIO_WS_RELAY_HOST = os.environ.get('AUDIO_WS_RELAY_HOST', '127.0.0.1')
+# The port audio_ws_relay.py listens on for audio_relay.py's raw-PCM
+# dual-write connections (distinct from the browser-facing WebSocket port
+# below — one is a trivial internal line-handshake-then-raw-frames
+# protocol between two processes this app owns end to end, the other is a
+# real RFC 6455 WebSocket Apache proxies to actual browsers).
+AUDIO_WS_RELAY_PORT = int(os.environ.get('AUDIO_WS_RELAY_PORT', '8099'))
+# The port audio_ws_relay.py listens on for browser WebSocket connections,
+# proxied by Apache at /ws-audio (see ws-audio/apply.sh).
+AUDIO_WS_PORT = int(os.environ.get('AUDIO_WS_PORT', '8098'))
+
+_capture_only_lock   = threading.Lock()
+_capture_only_active = {}   # node -> _CaptureOnlyRelay
+
+
+class _CaptureOnlyRelay:
+    """Owns just the capture+pacing stage (AudioSocket tap or MixMonitor +
+    audio_relay.py) for one node, with no ffmpeg/WebM encode attached — the
+    low-latency Listen path's capture pipeline. audio_relay.py's own
+    dual-write (see that module's docstring) is what actually gets this raw
+    PCM to audio_ws_relay.py for encoding; this class only owns the
+    process/AMI lifecycle, mirroring _AudioBroadcast's teardown logic for
+    the capture stage (it has no client-fanout/queue machinery of its own,
+    since there's nothing HTTP-streamed here — that's audio_ws_relay.py's
+    job, over its own socket).
+
+    `listener_count` is refcounted by _ensure_capture_only()/
+    _release_capture_only() below, driven by audio_ws_relay.py's own
+    per-node WS-client bookkeeping via the internal API — mirroring
+    _AudioBroadcast.add_client()/remove_client()'s "last one out tears it
+    down" shape, just without a Queue per listener since audio_ws_relay.py
+    fans encoded audio out to its browser clients itself.
+    """
+
+    def __init__(self, node, channel, relay_proc, tap_mode, tap_channel_id):
+        self.node           = node
+        self.channel        = channel
+        self.relay_proc     = relay_proc
+        self.tap_mode       = tap_mode
+        self.tap_channel_id = tap_channel_id
+        self.mixmonitor_id  = None
+        self.listener_count = 0
+        self._dead          = False
+        self._started_at    = time.monotonic()
+        self._stderr_thread = threading.Thread(
+            target=self._relay_stderr_loop, daemon=True,
+            name=f'ws-capture-stderr-{node}')
+        self._stderr_thread.start()
+
+    def _relay_stderr_loop(self):
+        """Mirrors _AudioBroadcast._relay_stderr_loop() — forward
+        audio_relay.py's stderr to the app log, under [AUDIO-WS] since an
+        instance of this class only ever exists for the low-latency path."""
+        try:
+            for raw_line in self.relay_proc.stderr:
+                line = raw_line.decode('utf-8', errors='replace').rstrip()
+                if not line:
+                    continue
+                if line.startswith('STATS '):
+                    log('DEBUG', f'[AUDIO-WS] relay[{self.node}]: {line[len("STATS "):]}')
+                else:
+                    log('WARN', f'[AUDIO-WS] relay[{self.node}]: {line}')
+        except Exception:
+            pass
+
+    def shutdown(self):
+        with _capture_only_lock:
+            if self._dead:
+                return
+            self._dead = True
+            if _capture_only_active.get(self.node) is self:
+                del _capture_only_active[self.node]
+        uptime = time.monotonic() - self._started_at
+        log('DEBUG', f'[AUDIO-WS] shutting down capture-only relay for node '
+                    f'{self.node}: uptime={uptime:.1f}s')
+
+        try:
+            self.relay_proc.terminate()
+            self.relay_proc.wait(timeout=2)
+        except Exception:
+            try:
+                self.relay_proc.kill()
+                self.relay_proc.wait(timeout=2)
+            except Exception:
+                pass
+
+        if self.tap_mode == 'audiosocket':
+            # See _AudioBroadcast.shutdown()'s identical branch — hanging up
+            # the ChanSpy leg by its known ChannelId tears down both halves
+            # of the Local-channel bridge.
+            if self.tap_channel_id:
+                def _hangup_tap(ami):
+                    ami._send_action({'Action': 'Hangup', 'Channel': self.tap_channel_id})
+                    ami._recv_until('\r\n\r\n', timeout=ami.timeout)
+                    return {'ok': True}
+                try:
+                    ami_send_command(_hangup_tap)
+                except Exception:
+                    pass
+        else:
+            def _stop_mm(ami):
+                params = {'Action': 'StopMixMonitor', 'Channel': self.channel}
+                if self.mixmonitor_id:
+                    params['MixMonitorID'] = self.mixmonitor_id
+                ami._send_action(params)
+                ami._recv_until('\r\n\r\n', timeout=ami.timeout)
+                return {'ok': True}
+            try:
+                ami_send_command(_stop_mm)
+            except Exception:
+                pass
+        log('INFO', f'[AUDIO-WS] capture-only relay for node {self.node} shut down '
+                    f'(tap_mode={self.tap_mode})')
+
+
+def _start_capture_only(node):
+    """Start just the capture+pacing stage for a node — no WebM ffmpeg, no
+    _AudioBroadcast, no output FIFO at all (audio_relay.py is spawned with
+    out_path='-'; see that module's docstring for why). Mirrors
+    _start_broadcast()'s own capture-establishment logic (channel lookup,
+    AudioSocket tap or MixMonitor fallback) since a FIFO can only be drained
+    by one reader — this can't reuse an already-running _AudioBroadcast's
+    relay_proc even if one happens to exist for the same node. Raises on
+    error, exactly like _start_broadcast()."""
+    _t0 = time.monotonic()
+    channel = _find_node_channel(node)
+    if not channel:
+        raise RuntimeError(
+            f'No active Asterisk channel found for node {node}. Is the node running?')
+
+    _gen = secrets.token_hex(4)
+
+    _relay_env = os.environ.copy()
+    if LOG_LEVEL == 'DEBUG':
+        _relay_env['AUDIO_RELAY_DEBUG'] = '1'
+    _relay_env['AUDIO_WS_RELAY_HOST'] = AUDIO_WS_RELAY_HOST
+    _relay_env['AUDIO_WS_RELAY_PORT'] = str(AUDIO_WS_RELAY_PORT)
+    _relay_env['AUDIO_WS_NODE']       = str(node)
+
+    tap_channel_id = None
+    # '-' out_path: see audio_relay.py's module docstring's "Output" section
+    # — no FIFO, this instance's only output is its WS-relay dual-write.
+    _audiosocket_result = _try_audiosocket_tap(node, channel, '-', _gen, _relay_env)
+    if _audiosocket_result is not None:
+        relay_proc, tap_channel_id = _audiosocket_result
+        tap_mode = 'audiosocket'
+        log('DEBUG', f'[AUDIO-WS] capture-only relay PID {relay_proc.pid} for node '
+                    f'{node} (AudioSocket mode)')
+    else:
+        fifo_in_path = f'/tmp/henwen_audio_{node}_{_gen}_wsin.sln'
+        if os.path.exists(fifo_in_path):
+            os.unlink(fifo_in_path)
+        os.mkfifo(fifo_in_path)
+        os.chmod(fifo_in_path, 0o666)
+        relay_proc = subprocess.Popen(
+            [sys.executable, _AUDIO_RELAY_SCRIPT, fifo_in_path, '-'],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            env=_relay_env,
+        )
+        tap_mode = 'mixmonitor'
+        log('DEBUG', f'[AUDIO-WS] capture-only relay PID {relay_proc.pid} for node '
+                    f'{node} (MixMonitor mode)')
+
+    capture = _CaptureOnlyRelay(node, channel, relay_proc, tap_mode, tap_channel_id)
+
+    if tap_mode == 'audiosocket':
+        log('INFO', f'[AUDIO-WS] AudioSocket tap started (capture-only) on {channel} '
+                    f'for node {node}, setup took {time.monotonic() - _t0:.3f}s total')
+        return capture
+
+    def _ensure_mm_module(ami):
+        lines = ami.command('module show like app_mixmonitor')
+        if not any('app_mixmonitor' in l for l in lines):
+            if ami.module_load('app_mixmonitor.so'):
+                log('INFO', '[AUDIO-WS] Loaded app_mixmonitor.so on demand')
+        return {'ok': True}
+    try:
+        ami_send_command(_ensure_mm_module)
+    except Exception as e:
+        log('WARN', f'[AUDIO-WS] module load check failed: {e}')
+
+    _mm_id_var = 'HENWEN_WS_MM_ID'
+
+    def _start_mm(ami):
+        ami._send_action({
+            'Action':  'MixMonitor',
+            'Channel': channel,
+            'File':    fifo_in_path,
+            'Options': f'i({_mm_id_var})',
+        })
+        raw = ami._recv_until('\r\n\r\n', timeout=ami.timeout)
+        pkt = ami._parse_packet(raw)
+        if pkt.get('Response') == 'Error':
+            raise RuntimeError(pkt.get('Message', 'MixMonitor failed'))
+        ami._send_action({'Action': 'GetVar', 'Channel': channel, 'Variable': _mm_id_var})
+        var_raw = ami._recv_until('\r\n\r\n', timeout=ami.timeout)
+        var_pkt = ami._parse_packet(var_raw)
+        pkt['_mixmonitor_id'] = var_pkt.get('Value') or None
+        return pkt
+
+    try:
+        start_pkt = ami_send_command(_start_mm)
+    except Exception as e:
+        capture.shutdown()
+        raise RuntimeError(f'MixMonitor failed: {e}')
+
+    capture.mixmonitor_id = start_pkt.get('_mixmonitor_id')
+    log('INFO', f'[AUDIO-WS] MixMonitor started (capture-only) on {channel} for node '
+                f'{node}, setup took {time.monotonic() - _t0:.3f}s total')
+    return capture
+
+
+def _ensure_capture_only(node):
+    """Attach one low-latency listener's worth of demand to node's
+    capture-only relay, starting it if this is the first. Returns nothing;
+    raises whatever _start_capture_only() raises if a fresh start fails."""
+    with _capture_only_lock:
+        capture = _capture_only_active.get(node)
+        if capture is not None and not capture._dead:
+            capture.listener_count += 1
+            log('DEBUG', f'[AUDIO-WS] capture-only relay for node {node} now has '
+                        f'{capture.listener_count} listener(s)')
+            return
+    # Start outside the lock -- _start_capture_only() does AMI/subprocess
+    # work that must never hold up other nodes' attach/detach calls.
+    capture = _start_capture_only(node)
+    with _capture_only_lock:
+        capture.listener_count = 1
+        _capture_only_active[node] = capture
+
+
+def _release_capture_only(node):
+    """Detach one low-latency listener's worth of demand; tears the
+    capture-only relay down once the count reaches zero."""
+    with _capture_only_lock:
+        capture = _capture_only_active.get(node)
+        if capture is None:
+            return
+        capture.listener_count -= 1
+        if capture.listener_count > 0:
+            log('DEBUG', f'[AUDIO-WS] capture-only relay for node {node} now has '
+                        f'{capture.listener_count} listener(s)')
+            return
+    capture.shutdown()
+
+
+def _check_internal_audio_request(req):
+    """Shared loopback+shared-secret gate for every /internal/audio/* route
+    below. These are process-to-process calls from audio_ws_relay.py only —
+    never something a real browser should be able to reach, even a logged-in
+    one, so this is deliberately a *different* mechanism from check_auth()'s
+    session-cookie gate, not a replacement for it (api_internal_audio_
+    authorize_ws below still goes through check_auth() normally, since its
+    whole job is asking check_auth()'s own logic "is this cookie a valid
+    logged-in session"). Returns an error (message, status) tuple, or None
+    if the request checks out."""
+    if req.remote_addr not in ('127.0.0.1', '::1'):
+        return ('forbidden', 403)
+    if not hmac.compare_digest(req.headers.get('X-Internal-Secret', ''), _INTERNAL_AUDIO_SECRET):
+        return ('forbidden', 403)
+    return None
+
+
+@app.route('/internal/audio/ensure-capture', methods=['POST'])
+@csrf.exempt   # server-to-server call from audio_ws_relay.py, no browser session/CSRF
+               # token involved -- authenticated instead by _check_internal_audio_request()'s
+               # loopback+shared-secret check. Confirmed live via an end-to-end browser
+               # test that this route 400'd on every real call without this: Flask-WTF's
+               # CSRFProtect rejects any state-changing (POST/PUT/PATCH/DELETE) request
+               # with no token before the route body ever runs, and the pytest suite's
+               # WTF_CSRF_ENABLED=False (conftest.py) made this invisible to unit tests.
+def api_internal_audio_ensure_capture():
+    err = _check_internal_audio_request(request)
+    if err:
+        return jsonify({'error': err[0]}), err[1]
+    cfg = _get_rx_audio_config() or RX_AUDIO_CONFIG_DEFAULTS
+    if cfg['path'] != 'lowlatency':
+        # Enforces the single-active-path rule at the point of entry, not
+        # just by convention: audio_ws_relay.py should never be asking for
+        # this in 'legacy' mode, but if it somehow does (a stale client, a
+        # race during a mode switch), refuse rather than silently spinning
+        # up a second capture pipeline for a mode that isn't selected.
+        return jsonify({'error': 'rx_audio_path is not lowlatency'}), 409
+    node = str((request.json or {}).get('node', '')).strip()
+    if not re.match(r'^\d{4,7}$', node):
+        return jsonify({'error': 'invalid node'}), 400
+    try:
+        _ensure_capture_only(node)
+    except Exception as e:
+        log('ERROR', f'[AUDIO-WS] ensure-capture failed for node {node}: {e}')
+        return jsonify({'error': str(e)}), 500
+    # Piggybacked here rather than a separate internal endpoint: this is
+    # already the one round-trip audio_ws_relay.py makes right before
+    # spawning its own per-node Opus encoder, the exact moment it needs to
+    # know the current AGC setting for. Read once at that moment, not
+    # live-reloaded mid-session -- same convention as `path` itself.
+    return jsonify({'ok': True, 'agc_enabled': bool(cfg['agc_enabled'])})
+
+
+@app.route('/internal/audio/release-capture', methods=['POST'])
+@csrf.exempt   # see api_internal_audio_ensure_capture()'s comment above
+def api_internal_audio_release_capture():
+    err = _check_internal_audio_request(request)
+    if err:
+        return jsonify({'error': err[0]}), err[1]
+    node = str((request.json or {}).get('node', '')).strip()
+    if not re.match(r'^\d{4,7}$', node):
+        return jsonify({'error': 'invalid node'}), 400
+    _release_capture_only(node)
+    return jsonify({'ok': True})
+
+
+@app.route('/internal/audio/authorize-ws')
+def api_internal_audio_authorize_ws():
+    """audio_ws_relay.py calls this once per incoming browser WS handshake,
+    forwarding the browser's own Cookie header as this request's Cookie
+    header — so Flask parses it exactly as it would for a real browser
+    request, and check_auth() (this endpoint is in _USER_OR_ABOVE) applies
+    its real, existing session/idle-timeout/password-epoch logic to decide
+    whether the cookie represents a currently-valid logged-in session. No
+    custom cookie-decoding here; this route's body only runs at all once
+    check_auth() has already let the request through."""
+    err = _check_internal_audio_request(request)
+    if err:
+        return jsonify({'error': err[0]}), err[1]
+    return jsonify({'ok': True, 'username': session.get('username', ''), 'role': session.get('role', '')})
+
+
+# ---------------------------------------------------------------------------
+# audio_ws_relay.py process supervision
+#
+# Unlike audio_relay.py (spawned fresh per broadcast by _start_broadcast()/
+# _start_capture_only()), this is a long-lived singleton for the whole
+# HenWen process's lifetime: Apache's static /ws-audio ProxyPass line (see
+# ws-audio/apply.sh) needs one stable local port to target the entire time
+# HenWen is up, not just while low-latency listeners happen to be attached.
+# Always started regardless of rx_audio_config.path -- the process itself
+# is cheap while idle (two blocked accept() loops, nothing else), and it's
+# the config value + Apache's proxy line + the frontend that actually gate
+# whether the feature is reachable, not whether this supervisor runs.
+# ---------------------------------------------------------------------------
+
+_AUDIO_WS_RELAY_RESTART_BACKOFF_SEC = 5
+
+# Tracks the *currently running* audio_ws_relay.py Popen so
+# _signal_audio_ws_relay_reload() (called when RX audio settings change) can
+# reach whichever instance is actually live right now -- the supervisor loop
+# below replaces this on every restart (crash or otherwise), so a stale
+# reference here would silently signal a process that's already gone.
+_audio_ws_relay_proc_lock = threading.Lock()
+_audio_ws_relay_proc = None
+
+
+def _audio_ws_relay_stderr_loop(proc):
+    """Forward audio_ws_relay.py's stderr to the app log. Every line it
+    prints is level-prefixed (see that module's _log()/_stat() docstring
+    comments) -- map the prefix to the matching real log level, same
+    'STATS' -> DEBUG mapping _relay_stderr_loop() already uses for
+    audio_relay.py's own heartbeat lines, so LOG_LEVEL=DEBUG surfaces both
+    audio processes' periodic stats uniformly. Anything not carrying a
+    recognized prefix (a raw Python traceback, say) is treated as WARN
+    rather than dropped."""
+    _LEVELS = ('INFO', 'WARN', 'DEBUG', 'ERROR')
+    try:
+        for raw_line in proc.stderr:
+            line = raw_line.decode('utf-8', errors='replace').rstrip()
+            if not line:
+                continue
+            prefix, sep, rest = line.partition(' ')
+            if prefix == 'STATS':
+                log('DEBUG', f'[AUDIO-WS] {rest}')
+            elif prefix in _LEVELS and sep:
+                log(prefix, f'[AUDIO-WS] {rest}')
+            else:
+                log('WARN', f'[AUDIO-WS] {line}')
+    except Exception:
+        pass
+
+
+def _spawn_audio_ws_relay():
+    global _audio_ws_relay_proc
+    env = os.environ.copy()
+    env['AUDIO_WS_APP_BASE_URL']    = f'http://127.0.0.1:{PORT}'
+    env['AUDIO_WS_INTERNAL_SECRET'] = _INTERNAL_AUDIO_SECRET
+    env['AUDIO_WS_RELAY_HOST']      = AUDIO_WS_RELAY_HOST
+    env['AUDIO_WS_RELAY_PORT']      = str(AUDIO_WS_RELAY_PORT)
+    env['AUDIO_WS_HOST']            = os.environ.get('AUDIO_WS_HOST', '127.0.0.1')
+    env['AUDIO_WS_PORT']            = str(AUDIO_WS_PORT)
+    proc = subprocess.Popen(
+        [sys.executable, _AUDIO_WS_RELAY_SCRIPT],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        env=env,
+    )
+    with _audio_ws_relay_proc_lock:
+        _audio_ws_relay_proc = proc
+    threading.Thread(target=_audio_ws_relay_stderr_loop, args=(proc,), daemon=True,
+                     name='audio-ws-relay-stderr').start()
+    return proc
+
+
+def _signal_audio_ws_relay_reload():
+    """Tells the currently-running audio_ws_relay.py to force-disconnect
+    every connected browser client right now (SIGHUP) -- the low-latency-
+    path half of forcing an immediate settings change, alongside
+    _force_teardown_all_broadcasts() below for the legacy/recording/
+    stream-relay half. Each dropped client's own connection thread over
+    there notices the closed socket and runs its existing normal cleanup
+    (see audio_ws_relay.py's _force_disconnect_all()) -- nothing new to
+    keep in sync on this side beyond delivering the signal."""
+    with _audio_ws_relay_proc_lock:
+        proc = _audio_ws_relay_proc
+    if proc is None:
+        return
+    try:
+        proc.send_signal(signal.SIGHUP)
+    except Exception as e:
+        log('WARN', f'[AUDIO] could not signal audio_ws_relay.py to disconnect clients: {e}')
+
+
+def _audio_ws_relay_supervisor_loop():
+    while True:
+        proc = _spawn_audio_ws_relay()
+        log('INFO', f'[AUDIO-WS] audio_ws_relay.py started (PID {proc.pid})')
+        rc = proc.wait()
+        log('WARN', f'[AUDIO-WS] audio_ws_relay.py exited (code {rc}) — '
+                    f'restarting in {_AUDIO_WS_RELAY_RESTART_BACKOFF_SEC}s')
+        time.sleep(_AUDIO_WS_RELAY_RESTART_BACKOFF_SEC)
+
+
+def start_audio_ws_relay():
+    threading.Thread(target=_audio_ws_relay_supervisor_loop, name='audio-ws-relay-supervisor',
+                     daemon=True).start()
+
+
 @app.route('/api/audio/stream/<node>')
 @limiter.limit("30 per minute")
 def api_audio_stream(node):
@@ -8654,9 +9220,14 @@ def api_audio_stop():
 
 @app.route('/api/audio/check/<node>')
 def api_audio_check(node):
-    """Diagnostic: verify prerequisites for audio streaming."""
+    """Diagnostic: verify prerequisites for audio streaming. Also reports
+    the active rx_audio_config.path so status.html's _startListen() knows,
+    before it starts anything, which client-side pipeline to use (the
+    server-side setting drives this, not per-browser capability detection
+    — see the "Low-Latency Listen Path" plan's Context section for why)."""
     if not re.match(r'^\d{4,7}$', node):
         return jsonify({'error': 'invalid node'}), 400
+    rx_audio_path = (_get_rx_audio_config() or RX_AUDIO_CONFIG_DEFAULTS)['path']
     issues = []
     if not shutil.which('ffmpeg'):
         issues.append('ffmpeg not found in PATH')
@@ -8667,37 +9238,44 @@ def api_audio_check(node):
                 issues.append('ffmpeg lacks libopus encoder')
         except Exception as e:
             issues.append(f'ffmpeg probe failed: {e}')
-    def _check_module(ami):
-        lines = ami.command('module show like app_mixmonitor')
-        loaded = any('app_mixmonitor' in l for l in lines)
-        if not loaded:
-            # Same on-demand load _start_broadcast() does right before
-            # MixMonitor — app_mixmonitor.so isn't in ASL3's default module
-            # list, so on a fresh Asterisk start (or after a module unload)
-            # it's simply not loaded yet. Load it here too instead of just
-            # reporting failure, otherwise this diagnostic permanently blocks
-            # the Listen button until someone loads it by hand, even though
-            # actually starting a broadcast would have loaded it anyway.
-            if ami.module_load('app_mixmonitor.so'):
-                log('INFO', '[AUDIO] Loaded app_mixmonitor.so on demand (check)')
-                loaded = True
-        return {'loaded': loaded}
-    try:
-        if not ami_send_command(_check_module).get('loaded'):
-            issues.append('app_mixmonitor.so not loaded in Asterisk')
-    except Exception as e:
-        issues.append(f'module check failed: {e}')
+    # MixMonitor is only relevant to the legacy WebM path -- lowlatency mode
+    # never calls _start_broadcast() for Listen's own sake (see
+    # _start_capture_only()), so a MixMonitor module check here would be a
+    # false-positive "issue" blocking a setup that doesn't need it at all.
+    if rx_audio_path != 'lowlatency':
+        def _check_module(ami):
+            lines = ami.command('module show like app_mixmonitor')
+            loaded = any('app_mixmonitor' in l for l in lines)
+            if not loaded:
+                # Same on-demand load _start_broadcast() does right before
+                # MixMonitor — app_mixmonitor.so isn't in ASL3's default
+                # module list, so on a fresh Asterisk start (or after a
+                # module unload) it's simply not loaded yet. Load it here
+                # too instead of just reporting failure, otherwise this
+                # diagnostic permanently blocks the Listen button until
+                # someone loads it by hand, even though actually starting a
+                # broadcast would have loaded it anyway.
+                if ami.module_load('app_mixmonitor.so'):
+                    log('INFO', '[AUDIO] Loaded app_mixmonitor.so on demand (check)')
+                    loaded = True
+            return {'loaded': loaded}
+        try:
+            if not ami_send_command(_check_module).get('loaded'):
+                issues.append('app_mixmonitor.so not loaded in Asterisk')
+        except Exception as e:
+            issues.append(f'module check failed: {e}')
     channel = _find_node_channel(node)
     if not channel:
         issues.append(f'No active Asterisk channel found for node {node}')
     with _audio_lock:
         active = node in _audio_active
     return jsonify({
-        'ok':      len(issues) == 0,
-        'issues':  issues,
-        'active':  active,
-        'channel': channel,
-        'node':    node,
+        'ok':            len(issues) == 0,
+        'issues':        issues,
+        'active':        active,
+        'channel':       channel,
+        'node':          node,
+        'rx_audio_path': rx_audio_path,
     })
 
 
@@ -9793,6 +10371,80 @@ def api_audiosocket_tap_apply():
     return jsonify({"success": True, "output": output,
                      "message": "AudioSocket tap applied. Listen will use it automatically "
                                 "next time it starts for any node — no restart needed."})
+
+
+# Optional Apache proxy for the low-latency RX audio path's WebSocket server
+# (audio_ws_relay.py, always running once HenWen starts) — see
+# ws-audio/README.md for what apply.sh does. Owner-only, same rationale as
+# the AudioSocket tap routes above: this edits an Apache vhost, not
+# something to expose below the top role.
+
+@app.route("/api/ws-audio/status")
+def api_ws_audio_status():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Owner access required"}), 403
+    applied  = False
+    conf_used = None
+    for candidate in WS_AUDIO_APACHE_CONF_CANDIDATES:
+        try:
+            with open(candidate) as f:
+                if WS_AUDIO_MARKER in f.read():
+                    applied = True
+                    conf_used = candidate
+                    break
+        except OSError:
+            continue
+    cfg = _get_rx_audio_config() or RX_AUDIO_CONFIG_DEFAULTS
+    return jsonify({
+        "applied":     applied,
+        "installed":   os.path.exists(WS_AUDIO_APPLY_SCRIPT_PATH),
+        "apache_conf": conf_used,
+        # Whether the Manager owner can actually select the low-latency
+        # path yet -- both the setting AND the Apache proxy have to be in
+        # place for a real remote browser to reach it.
+        "rx_audio_path":  cfg["path"],
+        "agc_enabled":    bool(cfg["agc_enabled"]),
+    })
+
+
+@app.route("/api/ws-audio/apply", methods=["POST"])
+def api_ws_audio_apply():
+    """Runs ws-audio/apply.sh via the same narrowly-scoped passwordless sudo
+    rule pattern as the AudioSocket tap route above. Doesn't restart HenWen
+    or Asterisk -- audio_ws_relay.py is already running regardless (app.py
+    spawns/supervises it unconditionally); this only patches Apache."""
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Owner access required"}), 403
+
+    if not os.path.exists(WS_AUDIO_APPLY_SCRIPT_PATH):
+        return jsonify({"error": f"apply.sh not found: {WS_AUDIO_APPLY_SCRIPT_PATH}"}), 404
+
+    cmd = [SUDO_PATH, "-n", WS_AUDIO_APPLY_SCRIPT_PATH]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "apply.sh timed out after 30s — check "
+                                  "journalctl / apache2ctl configtest by hand"}), 500
+    except Exception as e:
+        log("ERROR", f"[API] /api/ws-audio/apply exception: {e}")
+        return jsonify({"error": str(e)}), 500
+
+    output = (r.stdout or "") + (r.stderr or "")
+    if r.returncode != 0:
+        hint = ("Service account lacks sudo rights for apply.sh — re-run install.sh "
+                 "to install the henwen-systemctl sudoers rule."
+                 if "password" in output.lower() or "authoriz" in output.lower()
+                 else None)
+        log("ERROR", f"[API] ws-audio apply failed (exit {r.returncode}): {output.strip()}")
+        resp = {"error": output.strip() or f"apply.sh returned code {r.returncode}", "output": output}
+        if hint:
+            resp["hint"] = hint
+        return jsonify(resp), 500
+
+    log("INFO", f"[API] ws-audio Apache proxy applied by '{session.get('username')}'")
+    return jsonify({"success": True, "output": output,
+                     "message": "Apache proxy applied. Select \"Low-Latency\" below to "
+                                "actually start using it for Listen."})
 
 
 # ── App settings (SECRET_KEY) ─────────────────────────────────────────────────
@@ -11891,6 +12543,53 @@ def _get_stream_relay_config():
     return dict(row) if row else None
 
 
+RX_AUDIO_PATHS = ("legacy", "lowlatency")
+# agc_enabled defaults False -- an explicit owner decision to default AGC
+# off everywhere (Listen-legacy, recording, stream relay, and low-latency
+# alike), even though legacy's AGC was unconditionally on before this
+# setting existed. A real, deliberate behavior change on upgrade, not an
+# oversight.
+RX_AUDIO_CONFIG_DEFAULTS = {"path": "legacy", "agc_enabled": False}
+
+
+def _validate_rx_audio_path(value):
+    """Pure validator for the rx_audio_config.path setting -- kept free of
+    DB/Flask access so it's unit-testable in isolation (tests/test_rx_audio_config.py),
+    the same way _validate_new_password() is. Returns the normalized value or
+    raises ValueError with a message safe to surface directly to the caller."""
+    v = str(value).strip().lower()
+    if v not in RX_AUDIO_PATHS:
+        raise ValueError(f"path must be one of {RX_AUDIO_PATHS}")
+    return v
+
+
+def _webm_af_filter(agc_enabled):
+    """The -af filter chain for the legacy WebM broadcast ffmpeg
+    (_start_broadcast()) -- shared by Listen (legacy mode), recording.py,
+    and stream_relay.py, since all three attach to the same
+    _AudioBroadcast/ffmpeg instance for a given node. Pure/no I/O (no AMI,
+    no subprocess) so it's unit-testable in isolation, the same reasoning
+    as _validate_rx_audio_path() above and audio_relay.py's _fade_frame().
+
+    alimiter alone (level=false, a true-peak brick wall) is always present
+    for clip safety regardless of the AGC setting -- see _start_broadcast()'s
+    own extensive comment block for why level=false specifically matters and
+    how these parameter values were tuned. dynaudnorm (the actual "AGC" a
+    user is toggling) is prepended only when enabled; its f=50:g=5 lookahead
+    is the ~0.4s cost of turning this on, identical tuning reused verbatim
+    by the low-latency path's own _opus_ffmpeg_cmd() when AGC is enabled
+    there too -- one proven tuning, not two to maintain."""
+    af = 'alimiter=limit=0.85:attack=5:release=50:level=false'
+    if agc_enabled:
+        af = 'dynaudnorm=f=50:g=5:p=0.95:m=4:r=0.2,' + af
+    return af
+
+
+def _get_rx_audio_config():
+    row = get_db().execute("SELECT * FROM rx_audio_config WHERE id=1").fetchone()
+    return dict(row) if row else None
+
+
 @app.route("/api/recording/config")
 def api_recording_config_get():
     if session.get('role') != 'owner':
@@ -11963,6 +12662,55 @@ def api_recording_config_save():
     db.commit()
     log("INFO", f"[RECORDING] Config saved by {session.get('username', '')}")
     return jsonify({"ok": True})
+
+
+@app.route("/api/rx-audio/config")
+def api_rx_audio_config_get():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can view the RX audio path"}), 403
+    cfg = _get_rx_audio_config()
+    return jsonify(dict(cfg) if cfg else RX_AUDIO_CONFIG_DEFAULTS)
+
+
+@app.route("/api/rx-audio/config", methods=["POST", "PUT"])
+def api_rx_audio_config_save():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can change the RX audio path"}), 403
+    data = request.json or {}
+    try:
+        path = _validate_rx_audio_path(data.get("path", "legacy"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    # Defaults False, matching the column default -- see
+    # RX_AUDIO_CONFIG_DEFAULTS's own comment for the reasoning.
+    agc_enabled = bool(data.get("agc_enabled", False))
+
+    old_cfg = _get_rx_audio_config() or RX_AUDIO_CONFIG_DEFAULTS
+    changed = (old_cfg["path"] != path) or (bool(old_cfg["agc_enabled"]) != agc_enabled)
+
+    db = get_db()
+    db.execute("INSERT OR REPLACE INTO rx_audio_config (id, path, agc_enabled) VALUES (1, ?, ?)",
+               (path, int(agc_enabled)))
+    db.commit()
+    log("INFO", f"[AUDIO] RX audio path set to '{path}', AGC {'enabled' if agc_enabled else 'disabled'} "
+                f"by {session.get('username', '')}")
+
+    sessions_interrupted = 0
+    if changed:
+        # By explicit owner decision: a settings change takes effect
+        # immediately, forcibly interrupting any active Listen session,
+        # in-progress recording, or the stream relay's current connection
+        # for every node, rather than waiting for each to end naturally.
+        # Legacy/recording/stream-relay: in-process, torn down directly.
+        # Low-latency: a separate process (audio_ws_relay.py), signaled to
+        # do the equivalent to its own connected clients.
+        sessions_interrupted = _force_teardown_all_broadcasts()
+        _signal_audio_ws_relay_reload()
+        log("WARN", f"[AUDIO] RX audio settings changed -- force-disconnected "
+                    f"{sessions_interrupted} active legacy broadcast(s) and signaled "
+                    f"audio_ws_relay.py to drop its own clients")
+
+    return jsonify({"ok": True, "sessions_interrupted": sessions_interrupted})
 
 
 @app.route("/api/recording/permission")
@@ -13983,6 +14731,7 @@ if not os.environ.get("HENWEN_SKIP_STARTUP"):
     start_meshtastic_discord_relay_worker()
     start_stream_relay()
     start_irc_relay()
+    start_audio_ws_relay()
 
 if __name__ == "__main__":
     log("INFO", "Starting in direct-run mode (not via gunicorn)")
