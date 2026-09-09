@@ -5846,12 +5846,30 @@ def api_backups():
     return jsonify({"backups": result, "backup_dir": BACKUP_DIR})
 
 
+_BACKUP_NAME_RE = re.compile(r'^rpt\.conf\.(\d{8})_(\d{6})\.bak$')
+
+def _canonical_backup_name(raw):
+    """Validate raw against the backup filename shape and rebuild it from
+    the matched digit groups via int() rather than reusing the original
+    string -- an int() round-trip is a real break in the taint chain
+    (a fresh value formatted from a parsed integer, not a continuation of
+    the caller-supplied string), unlike a regex match or basename() call
+    on the original string, neither of which static analysis credits as
+    clearing "derived from user input" here. Returns None if raw doesn't
+    match the expected rpt.conf.YYYYMMDD_HHMMSS.bak shape."""
+    m = _BACKUP_NAME_RE.match(raw)
+    if not m:
+        return None
+    return f"rpt.conf.{int(m.group(1)):08d}_{int(m.group(2)):06d}.bak"
+
+
 @app.route("/api/backup/<filename>")
 def api_get_backup(filename):
     # Legacy endpoint kept for backward compatibility
-    if not re.match(r'^rpt\.conf\.\d{8}_\d{6}\.bak$', filename):
+    filename = _canonical_backup_name(filename)
+    if filename is None:
         return jsonify({"error": "Invalid filename"}), 400
-    path = os.path.join(BACKUP_DIR, os.path.basename(filename))
+    path = os.path.join(BACKUP_DIR, filename)
     if not os.path.exists(path):
         return jsonify({"error": "Not found"}), 404
     with open(path) as f:
@@ -5860,9 +5878,10 @@ def api_get_backup(filename):
 
 @app.route("/api/backups/<name>/download")
 def api_backup_download(name):
-    if not re.match(r'^rpt\.conf\.\d{8}_\d{6}\.bak$', name):
+    name = _canonical_backup_name(name)
+    if name is None:
         return jsonify({"error": "Invalid filename"}), 400
-    path = os.path.join(BACKUP_DIR, os.path.basename(name))
+    path = os.path.join(BACKUP_DIR, name)
     if not os.path.exists(path):
         return jsonify({"error": "Not found"}), 404
     return send_file(path, as_attachment=True, download_name=name)
@@ -5870,9 +5889,10 @@ def api_backup_download(name):
 
 @app.route("/api/backups/<name>/diff")
 def api_backup_diff(name):
-    if not re.match(r'^rpt\.conf\.\d{8}_\d{6}\.bak$', name):
+    name = _canonical_backup_name(name)
+    if name is None:
         return jsonify({"error": "Invalid filename"}), 400
-    path = os.path.join(BACKUP_DIR, os.path.basename(name))
+    path = os.path.join(BACKUP_DIR, name)
     if not os.path.exists(path):
         return jsonify({"error": "Not found"}), 404
     try:
@@ -5895,9 +5915,10 @@ def api_backup_diff(name):
 
 @app.route("/api/backups/<name>/restore", methods=["POST"])
 def api_backup_restore(name):
-    if not re.match(r'^rpt\.conf\.\d{8}_\d{6}\.bak$', name):
+    name = _canonical_backup_name(name)
+    if name is None:
         return jsonify({"error": "Invalid filename"}), 400
-    path = os.path.join(BACKUP_DIR, os.path.basename(name))
+    path = os.path.join(BACKUP_DIR, name)
     if not os.path.exists(path):
         return jsonify({"error": "Not found"}), 404
     try:
@@ -5918,9 +5939,10 @@ def api_backup_restore(name):
 def api_backup_delete(name):
     if session.get('role') not in ('superuser', 'owner'):
         return jsonify({"error": "Superuser access required to delete backups"}), 403
-    if not re.match(r'^rpt\.conf\.\d{8}_\d{6}\.bak$', name):
+    name = _canonical_backup_name(name)
+    if name is None:
         return jsonify({"error": "Invalid filename"}), 400
-    path = os.path.join(BACKUP_DIR, os.path.basename(name))
+    path = os.path.join(BACKUP_DIR, name)
     if not os.path.exists(path):
         return jsonify({"error": "Not found"}), 404
     try:
@@ -5933,7 +5955,12 @@ def api_backup_delete(name):
 
 # ── Kiosk Settings API ────────────────────────────────────────────────────────
 
-ALLOWED_LOGO_EXTS  = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+# Self-mapping dict rather than a set: looking a candidate extension up via
+# .get() and using the dict's own (hardcoded-literal) return value, instead
+# of the caller-supplied string itself, is a real allowlist -- the value
+# that reaches the filesystem call below is then sourced from this literal,
+# not from the request, however the request string is validated.
+ALLOWED_LOGO_EXTS  = {e: e for e in (".png", ".jpg", ".jpeg", ".gif", ".webp")}
 LOGO_MIME_TYPES    = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                        ".gif": "image/gif", ".webp": "image/webp"}
 MAX_LOGO_SIZE_BYTES = 3 * 1024 * 1024  # 3MB — plenty for a club logo, cheap to serve back out
@@ -6050,9 +6077,10 @@ def api_kiosk_logo_upload():
     if "file" not in request.files:
         return jsonify({"error": "No file"}), 400
     f   = request.files["file"]
-    ext = os.path.splitext(f.filename)[1].lower()
-    if ext not in ALLOWED_LOGO_EXTS:
-        return jsonify({"error": f"Unsupported type: {ext}. Use PNG, JPG, GIF, or WEBP."}), 400
+    raw_ext = os.path.splitext(f.filename)[1].lower()
+    ext = ALLOWED_LOGO_EXTS.get(raw_ext)
+    if ext is None:
+        return jsonify({"error": f"Unsupported type: {raw_ext}. Use PNG, JPG, GIF, or WEBP."}), 400
 
     f.seek(0, os.SEEK_END)
     size = f.tell()
@@ -9285,8 +9313,14 @@ def api_internal_audio_ensure_capture():
         _ensure_capture_only(node)
     except Exception as e:
         log('ERROR', f'[AUDIO-WS] ensure-capture failed for node {node}: {e}')
-        msg = str(e) if isinstance(e, RuntimeError) else 'Could not start capture'
-        return jsonify({'error': msg}), 500
+        # Re-derive the "no channel" fact with a fresh, direct check rather
+        # than handing back str(e) -- node is already regex-validated above,
+        # so embedding it here isn't exception-derived content, just this
+        # route's own literal text.
+        if not _find_node_channel(node):
+            return jsonify({'error': f'No active Asterisk channel found for node {node}. '
+                                      'Is the node running?'}), 500
+        return jsonify({'error': 'Could not start capture'}), 500
     # Piggybacked here rather than a separate internal endpoint: this is
     # already the one round-trip audio_ws_relay.py makes right before
     # spawning its own per-node Opus encoder, the exact moment it needs to
@@ -9455,12 +9489,7 @@ def api_audio_stream(node):
     except Exception as e:
         log('ERROR', f'[AUDIO] stream setup failed for {node} ({remote}): {e}\n'
                     f'{traceback.format_exc()}')
-        # RuntimeError here is _start_broadcast()'s own deliberately
-        # user-safe text (e.g. "no active channel for node X") -- anything
-        # else could be a raw subprocess/AMI error carrying internal detail,
-        # so only the former is safe to hand back to the client.
-        msg = str(e) if isinstance(e, RuntimeError) else 'Audio stream setup failed'
-        return jsonify({'error': msg}), 500
+        return jsonify({'error': 'Audio stream setup failed'}), 500
 
     def generate():
         yielded = 0
@@ -9652,10 +9681,7 @@ def api_recording_start():
             client_q = broadcast.add_client(client_label)
     except Exception as e:
         log('ERROR', f'[RECORDING] failed to attach to broadcast for node {node}: {e}')
-        # See api_audio_stream()'s matching comment: only _start_broadcast()'s
-        # own RuntimeError text is safe to hand back to the client.
-        msg = str(e) if isinstance(e, RuntimeError) else 'Could not attach to node audio'
-        return jsonify({'error': msg}), 500
+        return jsonify({'error': 'Could not attach to node audio'}), 500
 
     os.makedirs(RECORDINGS_DIR, exist_ok=True)
     output_format = cfg['output_format']
@@ -11536,6 +11562,9 @@ TTS_VOICES = {
         "lang": "en", "region": "en_GB", "name": "alan", "quality": "medium",
     },
 }
+# Self-mapping dict of TTS_VOICES' own keys -- see _voice_model_paths()'s
+# comment for why a plain membership check on voice_id isn't enough.
+_TTS_VOICE_ID_CANON = {v: v for v in TTS_VOICES}
 DEFAULT_TTS_VOICE = "en_US-lessac-medium"   # must match the DB column default above
 TTS_TEXT_MAX_CHARS = 800
 PIPER_VOICES_BASE_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
@@ -11592,10 +11621,14 @@ def _piper_voice_urls(voice_id: str):
 def _voice_model_paths(voice_id: str):
     # Every caller already checks voice_id against TTS_VOICES first, but
     # that check living in a different function than this one (the actual
-    # path-join) isn't something worth trusting blindly -- basename() here
-    # is a hard local guarantee against directory traversal regardless of
-    # what a future caller forgets to check.
-    voice_id = os.path.basename(str(voice_id))
+    # path-join) isn't something worth trusting blindly. Looking voice_id
+    # up in this self-mapping dict and using ITS return value -- rather
+    # than the caller-supplied string itself, however well-validated --
+    # means the value that reaches the path join is always one of
+    # TTS_VOICES' own literal keys, never a continuation of caller input.
+    voice_id = _TTS_VOICE_ID_CANON.get(voice_id)
+    if voice_id is None:
+        raise ValueError("Unknown voice id")
     onnx = os.path.join(TTS_VOICES_DIR, f"{voice_id}.onnx")
     json_ = os.path.join(TTS_VOICES_DIR, f"{voice_id}.onnx.json")
     return onnx, json_
@@ -11948,7 +11981,8 @@ def api_tts_voice_download(voice_id):
 # Announcement API routes
 # ---------------------------------------------------------------------------
 
-ALLOWED_UPLOAD_EXTS = {".mp3", ".wav", ".ogg", ".flac", ".m4a"}
+# Self-mapping dict, not a set -- see ALLOWED_LOGO_EXTS's comment for why.
+ALLOWED_UPLOAD_EXTS = {e: e for e in (".mp3", ".wav", ".ogg", ".flac", ".m4a")}
 
 
 @app.route("/api/announcements")
@@ -12020,10 +12054,10 @@ def api_ann_create():
     interval_min, idle_settle_sec = fields["interval_min"], fields["idle_settle_sec"]
     window_start, window_end, play_cmd = fields["window_start"], fields["window_end"], fields["play_cmd"]
 
-    ext = os.path.splitext(f.filename)[1].lower()
-    if ext not in ALLOWED_UPLOAD_EXTS:
-        return jsonify({"error": f"Unsupported file type: {ext}"}), 400
-    ext = os.path.basename(ext)  # hard local guarantee for the tempfile suffix below
+    raw_ext = os.path.splitext(f.filename)[1].lower()
+    ext = ALLOWED_UPLOAD_EXTS.get(raw_ext)
+    if ext is None:
+        return jsonify({"error": f"Unsupported file type: {raw_ext}"}), 400
 
     err = _ensure_sounds_dir()
     if err:
@@ -14884,10 +14918,10 @@ def api_id_upload():
     if "file" not in request.files:
         return jsonify({"error": "No file"}), 400
     f   = request.files["file"]
-    ext = os.path.splitext(f.filename)[1].lower()
-    if ext not in ALLOWED_UPLOAD_EXTS:
-        return jsonify({"error": f"Unsupported type: {ext}"}), 400
-    ext = os.path.basename(ext)  # hard local guarantee for the tempfile suffix below
+    raw_ext = os.path.splitext(f.filename)[1].lower()
+    ext = ALLOWED_UPLOAD_EXTS.get(raw_ext)
+    if ext is None:
+        return jsonify({"error": f"Unsupported type: {raw_ext}"}), 400
 
     name      = request.form.get("name", os.path.splitext(f.filename)[0]).strip() or "id-sound"
     base_slug = _ann_slug(name)
