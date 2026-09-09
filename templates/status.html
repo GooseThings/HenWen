@@ -475,13 +475,24 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   background: color-mix(in srgb, var(--btn-tint) 55%, var(--bg3));
   border-color: var(--btn-tint);
 }
-/* Sits directly under the buttons and only matters while Listen is running —
-   dimmed to 0.4 until then by _listenSetBtn(), same as when it lived in the
-   Connected Nodes header. No border/padding of its own here: in that old
-   home it was a full-width strip separating the header from the node list,
-   whereas here it's just the last row of this card's own stack. */
-#listen-vol-row { display: flex; align-items: center; gap: 8px; opacity: 0.4;
-  flex-shrink: 0; transition: opacity .15s; }
+/* Sits directly under the buttons and only matters while Listen is running.
+   No border/padding of its own here: in its old home (the Connected Nodes
+   header) it was a full-width strip separating the header from the node
+   list, whereas here it's just the last row of this card's own stack.
+   The idle-state dimming used to live here as opacity:0.4 on the whole
+   row — including the "Volume" label text — which Lighthouse's
+   color-contrast audit flagged on henwen.ironicsandwich.com (issue #103):
+   --text2 (#8b949e) on --bg2 (#0d1117) is a comfortable 6.15:1 at full
+   opacity, but 0.4 opacity blends it down to ~1.95:1, well under WCAG's
+   4.5:1 minimum for text. Getting back above 4.5:1 by raising the opacity
+   alone would mean ~0.85+, which barely reads as "dimmed" anymore — so
+   instead the dimming is scoped to just #listen-volume (the slider
+   control itself, see below), which is genuinely disabled while idle and
+   already gets the browser's native disabled cursor on top of it. The
+   label stays fully legible at every zoom/theme rather than only passing
+   contrast in some of them. */
+#listen-vol-row { display: flex; align-items: center; gap: 8px;
+  flex-shrink: 0; }
 /* Info-left / status-right grid, used on every width (see the mobile media
    query below for the phone-tuned size overrides layered on top of this same
    structure). Was originally mobile-only: the desktop card used a single
@@ -964,7 +975,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 #tx-meter-fill.hot  { background: var(--warn); }
 #tx-meter-fill.clip { background: var(--red); }
 #tx-gain { width: 110px; accent-color: var(--accent); flex-shrink: 0; }
-#listen-volume { width: 70px; accent-color: var(--accent); flex-shrink: 0; }
+#listen-volume { width: 70px; accent-color: var(--accent); flex-shrink: 0;
+  opacity: 0.4; transition: opacity .15s; }
 #listen-volume:disabled { cursor: not-allowed; }
 
 /* Monitor-only mode badge in node rows — TX is the default, so it's the only
@@ -6324,10 +6336,11 @@ function _listenSetBtn(html, color, disabled) {
   btn.style.color = active ? 'var(--text)' : (color || '');
   btn.disabled = !!disabled;
   btn.classList.toggle('btn-active', active);
-  var volRow = document.getElementById('listen-vol-row');
-  if (volRow) volRow.style.opacity = active ? '1' : '0.4';
+  /* Dimming is scoped to the slider control itself, not the whole row —
+     see the CSS comment on #listen-vol-row (issue #103): the "Volume"
+     label is meaningful text and stays fully legible at every opacity. */
   var vol = document.getElementById('listen-volume');
-  if (vol) vol.disabled = !active;
+  if (vol) { vol.disabled = !active; vol.style.opacity = active ? '1' : '0.4'; }
 }
 
 /* Listen volume attenuates only the <audio> element's own playback gain —
