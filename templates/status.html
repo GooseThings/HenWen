@@ -833,6 +833,23 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .map-ctl-subrow { margin-left: 22px; }
 .popup-node-link { color: var(--accent); font-weight: 600; text-decoration: none; }
 
+/* Legend button/popover — separate from .map-ctl (the hamburger options
+   menu) since this is reference info, not a set of togglable controls;
+   same position:fixed anchor-off-the-button-rect pattern as
+   .map-ctl-dropdown for the same reason (the card clips overflow). */
+.map-legend-btn { display: flex; align-items: center; background: var(--bg3);
+  border: 1px solid var(--border); color: var(--text2); border-radius: 5px;
+  padding: 4px 6px; cursor: pointer; margin-left: 8px; }
+.map-legend-btn:hover { color: var(--text); }
+.map-legend-btn .icon { width: 1rem; height: 1rem; }
+.map-legend-dropdown { position: fixed; display: flex; flex-direction: column; gap: 7px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+  min-width: 220px; max-width: 280px; box-shadow: 0 4px 16px rgba(0,0,0,.4); z-index: 2000; }
+.map-legend-title { font-size: 0.72rem; font-weight: 700; color: var(--text2);
+  text-transform: uppercase; letter-spacing: 0.03em; }
+.map-legend-row { display: flex; align-items: center; gap: 8px; font-size: 0.75rem; color: var(--text); }
+.map-legend-swatch { flex-shrink: 0; width: 20px; display: flex; align-items: center; justify-content: center; }
+
 /* ── Favorites sidebar: the whole right column by default. Chat still splits
    off its bottom third in the tree (see .chat-card and DASH_DEFAULT_TREE)
    but is hidden out of the box, so the default span here is the full 24
@@ -1226,6 +1243,11 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <path d="m21 21-4.34-4.34" />
     <circle cx="11" cy="11" r="8" />
   </symbol>
+  <symbol id="icon-info" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="10" />
+    <path d="M12 16v-4" />
+    <path d="M12 8h.01" />
+  </symbol>
   <symbol id="icon-menu" viewBox="0 0 24 24">
     <path d="M4 5h16" />
     <path d="M4 12h16" />
@@ -1554,6 +1576,21 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <span class="dash-header-grip" draggable="true" title="Drag to move"
               ondragstart="dashDragStart(event,'map')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
         <span class="card-title">Map</span>
+        <button type="button" class="map-legend-btn" id="map-legend-btn"
+                onclick="toggleMapLegend(event)" title="What am I looking at?" aria-haspopup="true" aria-expanded="false">
+          <svg class="icon"><use href="#icon-info"></use></svg>
+        </button>
+        <div class="map-legend-dropdown" id="map-legend-dropdown" style="display:none">
+          <div class="map-legend-title">Map legend</div>
+          <div class="map-legend-row"><span class="map-legend-swatch"><svg width="14" height="14" viewBox="0 0 32 32"><polygon points="16,2 20,12 31,12 22,19 25,30 16,23 7,30 10,19 1,12 12,12" fill="#ffd700" stroke="white" stroke-width="1.5"/></svg></span>This server's node</div>
+          <div class="map-legend-row"><span class="map-legend-swatch"><svg width="12" height="18" viewBox="0 0 20 30"><path d="M10 0C4.5 0 0 4.5 0 10c0 7.5 10 20 10 20S20 17.5 20 10C20 4.5 15.5 0 10 0z" fill="#e74c3c"/><circle cx="10" cy="10" r="4" fill="white"/></svg></span>Connected node</div>
+          <div class="map-legend-row"><span class="map-legend-swatch"><svg width="12" height="18" viewBox="0 0 20 30"><path d="M10 0C4.5 0 0 4.5 0 10c0 7.5 10 20 10 20S20 17.5 20 10C20 4.5 15.5 0 10 0z" fill="#3fb950"/><circle cx="10" cy="10" r="4" fill="white"/></svg></span>Keyed on this node</div>
+          <div class="map-legend-row"><span class="map-legend-swatch"><svg width="12" height="18" viewBox="0 0 20 30"><path d="M10 0C4.5 0 0 4.5 0 10c0 7.5 10 20 10 20S20 17.5 20 10C20 4.5 15.5 0 10 0z" fill="#58a6ff"/><circle cx="10" cy="10" r="4" fill="white"/></svg></span>Keyed elsewhere on the network (fades with age)</div>
+          <div class="map-legend-row"><span class="map-legend-swatch"><svg width="14" height="14" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8" fill="#a855f7" stroke="white" stroke-width="1.5"/></svg></span>Nearby APRS station <span style="color:var(--text2)">(if APRS is on)</span></div>
+          <div class="map-legend-row"><span class="map-legend-swatch"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffcc00" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="6" height="6" fill="#ffcc00" stroke="none"/><path d="M9 12H4M20 12h-5M4 8v8M20 8v8M9 9V4M9 20V15M15 9V4M15 20V15"/></svg></span>ISS position &amp; pass track <span style="color:var(--text2)">(if ISS is on)</span></div>
+          <div class="map-legend-row"><span class="map-legend-swatch"><svg width="16" height="16" viewBox="0 0 20 20"><rect x="2" y="2" width="16" height="16" rx="3" fill="var(--danger)" opacity="0.4" stroke="var(--danger)" stroke-width="1.5"/></svg></span>Active weather alert area <span style="color:var(--text2)">(red = warning, orange = watch/advisory)</span></div>
+          <div class="map-legend-row" style="color:var(--text2)">Toggle layers from the <svg class="icon" style="width:0.85em;height:0.85em;vertical-align:-0.1em"><use href="#icon-menu"></use></svg> menu next to this.</div>
+        </div>
         <div class="map-ctl">
           <button type="button" class="map-ctl-menu-btn" id="map-ctl-menu-btn"
                   onclick="toggleMapCtlMenu(event)" title="Map options" aria-haspopup="true" aria-expanded="false">
@@ -2280,6 +2317,7 @@ function closeMapCtlMenu() {
 function toggleMapCtlMenu(e) {
   if (e) e.stopPropagation();
   if (_mapCtlMenuOpen) { closeMapCtlMenu(); return; }
+  closeMapLegend();
   var dropdown = document.getElementById('map-ctl-dropdown');
   var btn = document.getElementById('map-ctl-menu-btn');
   if (!dropdown || !btn) return;
@@ -2293,6 +2331,51 @@ function toggleMapCtlMenu(e) {
   btn.setAttribute('aria-expanded', 'true');
   _mapCtlMenuOpen = true;
   document.addEventListener('click', _mapCtlOutsideClick);
+}
+
+/* ── Map legend popover ──
+   Answers issue #112 ("a new user would have no idea what the kiosk map is
+   showing") — a static reference popover for the pin/star/circle/icon
+   vocabulary defined across makeIcon()/makeStarIcon()/makeAprsIcon()/
+   makeIssIcon()/renderNwsAlertAreas() above, so a non-technical viewer
+   doesn't have to read the code to find out. Same open/outside-click/
+   position:fixed-anchored-off-the-button-rect pattern as the map options
+   menu (see toggleMapCtlMenu above) for the same reason — .map-card clips
+   overflow for its rounded corners/Leaflet div. Content is static rather
+   than reflecting which layers are actually toggled on: the whole point is
+   explaining the vocabulary before someone has necessarily turned anything
+   on, so entries for optional layers (APRS/ISS/Alerts) just say so inline. */
+var _mapLegendOpen = false;
+
+function _mapLegendOutsideClick(e) {
+  var wrap = document.getElementById('map-legend-dropdown');
+  var btn = document.getElementById('map-legend-btn');
+  if (wrap && !wrap.contains(e.target) && btn && !btn.contains(e.target)) closeMapLegend();
+}
+
+function closeMapLegend() {
+  var dropdown = document.getElementById('map-legend-dropdown');
+  var btn = document.getElementById('map-legend-btn');
+  if (dropdown) dropdown.style.display = 'none';
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+  _mapLegendOpen = false;
+  document.removeEventListener('click', _mapLegendOutsideClick);
+}
+
+function toggleMapLegend(e) {
+  if (e) e.stopPropagation();
+  if (_mapLegendOpen) { closeMapLegend(); return; }
+  closeMapCtlMenu();
+  var dropdown = document.getElementById('map-legend-dropdown');
+  var btn = document.getElementById('map-legend-btn');
+  if (!dropdown || !btn) return;
+  var r = btn.getBoundingClientRect();
+  dropdown.style.display = 'flex';
+  dropdown.style.top = (r.bottom + 6) + 'px';
+  dropdown.style.left = r.left + 'px';
+  btn.setAttribute('aria-expanded', 'true');
+  _mapLegendOpen = true;
+  document.addEventListener('click', _mapLegendOutsideClick);
 }
 
 /* Tile layer definitions: darkFilter=true means keep OSM invert CSS */
