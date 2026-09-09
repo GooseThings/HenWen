@@ -4720,6 +4720,18 @@ function sbToast(msg, ok) {
 
 async function sbConnect(localNode, remoteNode, btn, permanent, monitor) {
   var label = monitor ? 'Monitor' : 'Connect';
+  /* A map pin's popup is the one caller of this function whose button lives
+     inside content updateMap() refuses to touch while any popup is open
+     (see the popupopen/popupclose handlers in initMap()) -- that guard
+     exists so a background poll can't yank the popup out from under a user
+     reading it, but it means a Connect/Monitor click *inside* that same
+     popup never gets its disabled "..." state replaced by anything: nothing
+     else ever rebuilds that popup while it's still open. Left alone, the
+     button sits there disabled and unresponsive forever (issue #114) --
+     read the .leaflet-popup ancestor here (rather than always closing
+     whatever's open) so a Connect click from the Favorites sidebar doesn't
+     also snap shut an unrelated map popup the user still has open. */
+  var fromMapPopup = !!(btn && typeof btn.closest === 'function' && btn.closest('.leaflet-popup'));
   if (btn) { btn.disabled = true; btn.textContent = '…'; }
   try {
     var r = await apiFetch('/api/status/connect', {
@@ -4730,6 +4742,13 @@ async function sbConnect(localNode, remoteNode, btn, permanent, monitor) {
     var d = await r.json();
     if (r.ok && d.ok) {
       sbToast((monitor ? 'Monitoring' : 'Connecting to') + ' ' + remoteNode + '…', true);
+      /* Close it now rather than waiting for the user to dismiss it
+         themselves -- that's what lets updateMap()'s deferred re-render
+         (queued via _mapDirty) run immediately instead of staying stuck
+         behind this same popup, so the pin reflects the new state on the
+         very next board refresh instead of whenever the popup happens to
+         close on its own. */
+      if (fromMapPopup && typeof _map !== 'undefined' && _map) _map.closePopup();
       setTimeout(refreshBoard, 1500);
     } else if (r.status === 401) {
       if (btn) { btn.disabled = false; btn.textContent = label; }
