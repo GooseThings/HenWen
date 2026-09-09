@@ -6279,6 +6279,19 @@ var _listenRateTimer = null;   // rate-control interval
 var _listenStartTimer= null;   // startup watchdog — abort if no stream within N seconds
 var _LISTEN_START_MS = 12000;  // give up on a stalled connection after 12 s
 
+/* Low-latency (WebSocket) mode state — see _doStartListenWS(). Kept
+   separate from the MSE-mode vars above rather than reusing them, since
+   they're a genuinely different resource set (WebSocket + AudioContext +
+   AudioDecoder + AudioWorkletNode, not MediaSource + SourceBuffer). All
+   null/no-op when not in this mode, mirroring how _listenCtrl/_listenObjURL
+   already no-op harmlessly for the other two modes in _stopListen(). */
+var _listenWS           = null;   // WebSocket
+var _listenAudioCtx     = null;   // AudioContext
+var _listenDecoder      = null;   // WebCodecs AudioDecoder
+var _listenWorkletNode  = null;   // AudioWorkletNode running the jitter-buffer processor
+var _listenWSTelemetryTimer = null;
+var _listenVolumeChangeHandler = null;  // removed on stop, added fresh on start
+
 /* MSE live-edge tuning.
    Playback aims to sit _LISTEN_TARGET_S behind the live edge. When it drifts
    further back we speed up playback to catch up; Chrome/Firefox use
@@ -6432,7 +6445,7 @@ function _startListen() {
         sbToast('Audio unavailable: ' + (d.issues || []).join('; '), false);
         return;
       }
-      _doStartListen(audio, node);
+      _doStartListen(audio, node, d.rx_audio_path || 'legacy');
     })
     .catch(function(e) {
       if (_listenStartTimer) { clearTimeout(_listenStartTimer); _listenStartTimer = null; }
@@ -6441,22 +6454,225 @@ function _startListen() {
     });
 }
 
-function _doStartListen(audio, node) {
+function _doStartListen(audio, node, rxAudioPath) {
   _listenNode = node;
   if (_listenRenewTimer) { clearTimeout(_listenRenewTimer); _listenRenewTimer = null; }
   if (_listenCtrl) { _listenCtrl.abort(); _listenCtrl = null; }
   if (_listenObjURL) { URL.revokeObjectURL(_listenObjURL); _listenObjURL = null; }
 
-  /* Use MediaSource Extensions when available (Chrome/Firefox/Edge).
-     MSE lets us control the buffer directly and jump to the live edge,
-     eliminating the 5–30 s startup delay that the plain <audio src>
-     element builds up before it decides to start playback. */
-  if (typeof MediaSource !== 'undefined' &&
+  /* Which pipeline to use is a server-side setting (Manager > Audio's "RX
+     Audio Path", near TX Diagnostics), not per-browser capability
+     detection — see the "Low-Latency Listen Path" plan's Context section
+     for why: it changes which encoder runs server-side for every listener,
+     so the server tells every client which one is actually active rather
+     than each browser racing its own preference. _doStartListenWS() still
+     does its own capability check and falls through to the universal
+     plain-<audio> path if the browser can't support it (there's no MSE
+     fallback available server-side while lowlatency mode is selected — no
+     WebM ffmpeg is running for Listen in that mode at all). */
+  if (rxAudioPath === 'lowlatency' &&
+      typeof WebSocket !== 'undefined' && typeof AudioDecoder !== 'undefined' &&
+      typeof AudioContext !== 'undefined' && typeof AudioWorkletNode !== 'undefined') {
+    _doStartListenWS(audio, node);
+  } else if (typeof MediaSource !== 'undefined' &&
       MediaSource.isTypeSupported('audio/webm; codecs=opus')) {
+    /* Use MediaSource Extensions when available (Chrome/Firefox/Edge).
+       MSE lets us control the buffer directly and jump to the live edge,
+       eliminating the 5–30 s startup delay that the plain <audio src>
+       element builds up before it decides to start playback. */
     _doStartListenMSE(audio, node);
   } else {
     _doStartListenFallback(audio, node);
   }
+}
+
+/* Low-latency path: raw Opus over a plain WebSocket (/ws-audio/<node>,
+   proxied by Apache to audio_ws_relay.py — see ws-audio/README.md) decoded
+   via WebCodecs and played through an AudioWorklet, instead of WebM/MSE.
+   No container, no AGC lookahead — see the "Low-Latency Listen Path" plan
+   for the tradeoffs. Reuses _listenCtrl the same way _doStartListenMSE()
+   does: an AbortController whose .signal.aborted flag every async callback
+   below checks, set by _stopListen()'s call to _listenCtrl.abort(). Unlike
+   fetch(), a WebSocket/AudioContext/AudioDecoder don't honor AbortSignal
+   natively, so _stopListen() also explicitly closes each of them — the
+   signal check here just stops a callback from acting on a session that's
+   already being torn down (e.g. a decoded frame arriving the instant after
+   Stop was clicked). Any failure at any stage falls through to
+   _doStartListenFallback() — there is no MSE fallback available
+   server-side while lowlatency mode is selected, since no WebM ffmpeg is
+   running for Listen's sake in that mode at all (see _start_capture_only()
+   in app.py). */
+function _doStartListenWS(audio, node) {
+  var ctrl = new AbortController();
+  _listenCtrl = ctrl;
+
+  audio.muted = !!(window._tx && _tx.keyed);
+
+  function _now() {
+    return (window.performance && performance.now) ? performance.now() : Date.now();
+  }
+
+  function _fallback(reason) {
+    if (ctrl.signal.aborted) return;
+    console.warn('[AUDIO-WS] falling back to plain <audio>: ' + reason);
+    _stopListen();
+    _doStartListenFallback(audio, node);
+  }
+
+  var audioCtx;
+  try {
+    /* Explicit sampleRate: 48000 matches WebCodecs' Opus decoder output
+       (Opus always operates on a 48kHz reference timeline regardless of
+       the encoder's own input/bandwidth — see audio_ws_relay.py's
+       _opus_ffmpeg_cmd() comment) and avoids an extra implicit resample
+       between the AudioWorkletNode's output and the audio graph. */
+    audioCtx = new AudioContext({sampleRate: 48000});
+  } catch (e) {
+    _fallback('AudioContext construction failed: ' + e.message);
+    return;
+  }
+  _listenAudioCtx = audioCtx;
+  /* Some browsers still start a freshly-constructed AudioContext suspended
+     even inside a user-gesture call stack (the Listen button's own click
+     handler, in this case) -- resume defensively rather than assuming. */
+  if (audioCtx.state === 'suspended') { audioCtx.resume().catch(function(){}); }
+
+  var proto = (location.protocol === 'https:') ? 'wss:' : 'ws:';
+  var wsUrl = proto + '//' + location.host + '/ws-audio/' + node;
+
+  var _tm = { chunks: 0, bytes: 0, lastArr: 0, maxGapMs: 0 };
+
+  audioCtx.audioWorklet.addModule('/static/audio-worklet-lowlatency.js').then(function() {
+    if (ctrl.signal.aborted) return;
+
+    var workletNode = new AudioWorkletNode(audioCtx, 'henwen-lowlatency-playback');
+    _listenWorkletNode = workletNode;
+
+    /* Web Audio API output bypasses #node-audio entirely, so the existing
+       volume slider / TX-keyed auto-mute (both of which just set
+       audio.volume / audio.muted) need a bridge to actually affect
+       playback here — a GainNode kept in sync via 'volumechange', which
+       fires for script-driven .volume/.muted changes regardless of
+       whether the element has an active source of its own. */
+    var gainNode = audioCtx.createGain();
+    gainNode.gain.value = audio.muted ? 0 : audio.volume;
+    workletNode.connect(gainNode).connect(audioCtx.destination);
+    _listenVolumeChangeHandler = function() {
+      gainNode.gain.value = audio.muted ? 0 : audio.volume;
+    };
+    audio.addEventListener('volumechange', _listenVolumeChangeHandler);
+
+    var decoder;
+    try {
+      decoder = new AudioDecoder({
+        output: function(audioData) {
+          try {
+            var pcm = new Float32Array(audioData.numberOfFrames);
+            audioData.copyTo(pcm, {planeIndex: 0, format: 'f32-planar'});
+            workletNode.port.postMessage({type: 'pcm', pcm: pcm}, [pcm.buffer]);
+          } catch (e) {
+            console.error('[AUDIO-WS] AudioData copy failed:', e);
+          } finally {
+            audioData.close();
+          }
+        },
+        error: function(e) {
+          console.error('[AUDIO-WS] decoder error:', e);
+        },
+      });
+      decoder.configure({codec: 'opus', sampleRate: 48000, numberOfChannels: 1});
+    } catch (e) {
+      _fallback('AudioDecoder setup failed: ' + e.message);
+      return;
+    }
+    _listenDecoder = decoder;
+
+    var ws;
+    try {
+      ws = new WebSocket(wsUrl);
+    } catch (e) {
+      _fallback('WebSocket construction failed: ' + e.message);
+      return;
+    }
+    ws.binaryType = 'arraybuffer';
+    _listenWS = ws;
+
+    ws.onopen = function() {
+      if (ctrl.signal.aborted) return;
+      _listenActive = true;
+      if (_listenStartTimer) { clearTimeout(_listenStartTimer); _listenStartTimer = null; }
+      _listenSetBtn('<svg class="icon"><use href="#icon-pause"></use></svg> Mute', 'var(--green)', false);
+      sbToast('Monitoring node ' + node + ' — low-latency audio', true);
+      console.log('[AUDIO-WS] connected to node', node, new Date().toISOString());
+    };
+
+    ws.onmessage = function(event) {
+      if (ctrl.signal.aborted) return;
+      var nowA = _now();
+      if (_tm.lastArr) _tm.maxGapMs = Math.max(_tm.maxGapMs, nowA - _tm.lastArr);
+      _tm.lastArr = nowA;
+      _tm.chunks++;
+      _tm.bytes += event.data.byteLength;
+      try {
+        decoder.decode(new EncodedAudioChunk({
+          type: 'key',   /* every Opus packet decodes independently -- there's
+                             no inter-packet prediction the way video has
+                             keyframes, so this is correct for every packet,
+                             not just the first. */
+          timestamp: nowA * 1000,
+          data: event.data,
+        }));
+      } catch (e) {
+        console.error('[AUDIO-WS] decode failed:', e);
+      }
+    };
+
+    ws.onerror = function(e) {
+      console.warn('[AUDIO-WS] socket error for node', node, e);
+    };
+
+    ws.onclose = function(e) {
+      if (ctrl.signal.aborted) return;   /* our own teardown, not a real disconnect */
+      if (!_listenActive) {
+        /* Never actually opened -- capability existed client-side, but the
+           server rejected the connection (feature not applied, Apache
+           proxy missing, session not authorized) or the network blocked
+           it. Fall through immediately rather than leaving Listen stuck on
+           "... Connecting". */
+        _fallback('socket closed before opening (code ' + e.code + ')');
+        return;
+      }
+      console.warn('[AUDIO-WS] socket closed for node', node, e.code, e.reason);
+      _listenActive = false;
+      _listenSetBtn('<svg class="icon"><use href="#icon-headphones"></use></svg> Listen', '', false);
+      sbToast('Audio stream disconnected — click Listen to reconnect', false);
+    };
+
+    /* Telemetry: mirrors _doStartListenMSE()'s own 10s report shape (same
+       [AUDIO-CLIENT] log line family server-side) so both paths' health is
+       directly comparable in the server log — maxArrGap is the WS-frame
+       analog of that path's own chunk-arrival-gap metric, and
+       bufferedMs/underruns/overflows are the AudioWorklet jitter buffer's
+       own health, which the MSE path has no equivalent of. */
+    workletNode.port.onmessage = function(e) {
+      if (e.data.type !== 'stats') return;
+      var bufferedMs = e.data.bufferedSamples / audioCtx.sampleRate * 1000;
+      _audioClientLog(node, 'telemetry-ws',
+        'chunks=' + _tm.chunks +
+        ' kB=' + (_tm.bytes / 1024).toFixed(1) +
+        ' maxArrGap=' + _tm.maxGapMs.toFixed(0) + 'ms' +
+        ' bufferedMs=' + bufferedMs.toFixed(0) +
+        ' underruns=' + e.data.underruns +
+        ' overflows=' + e.data.overflows);
+      _tm.chunks = 0; _tm.bytes = 0; _tm.maxGapMs = 0;
+    };
+    _listenWSTelemetryTimer = setInterval(function() {
+      if (ctrl.signal.aborted) { clearInterval(_listenWSTelemetryTimer); return; }
+      workletNode.port.postMessage({type: 'stats-request'});
+    }, 10000);
+  }).catch(function(e) {
+    _fallback('audioWorklet.addModule failed: ' + e.message);
+  });
 }
 
 function _doStartListenMSE(audio, node) {
@@ -6845,8 +7061,27 @@ function _stopListen() {
   if (_listenStartTimer) { clearTimeout(_listenStartTimer);  _listenStartTimer = null; }
   if (_listenRenewTimer) { clearTimeout(_listenRenewTimer);  _listenRenewTimer = null; }
   if (_listenRateTimer)  { clearInterval(_listenRateTimer);  _listenRateTimer  = null; }
+  if (_listenWSTelemetryTimer) { clearInterval(_listenWSTelemetryTimer); _listenWSTelemetryTimer = null; }
   if (_listenCtrl) { _listenCtrl.abort(); _listenCtrl = null; }
   if (_listenObjURL) { URL.revokeObjectURL(_listenObjURL); _listenObjURL = null; }
+
+  /* Low-latency (WebSocket) mode teardown — see _doStartListenWS(). None of
+     these objects honor AbortSignal natively, unlike fetch(), so each is
+     closed explicitly rather than relying on _listenCtrl.abort() above to
+     do it. All no-op harmlessly when the MSE/fallback path was in use
+     instead (every var stays null in that case). */
+  var audio0 = document.getElementById('node-audio');
+  if (_listenVolumeChangeHandler) {
+    audio0.removeEventListener('volumechange', _listenVolumeChangeHandler);
+    _listenVolumeChangeHandler = null;
+  }
+  if (_listenWS) { try { _listenWS.close(); } catch (e) {} _listenWS = null; }
+  if (_listenDecoder) {
+    try { if (_listenDecoder.state !== 'closed') _listenDecoder.close(); } catch (e) {}
+    _listenDecoder = null;
+  }
+  if (_listenWorkletNode) { try { _listenWorkletNode.disconnect(); } catch (e) {} _listenWorkletNode = null; }
+  if (_listenAudioCtx) { try { _listenAudioCtx.close(); } catch (e) {} _listenAudioCtx = null; }
 
   var audio = document.getElementById('node-audio');
   audio.playbackRate = 1.0;

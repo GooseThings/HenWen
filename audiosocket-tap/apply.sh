@@ -53,13 +53,38 @@ echo "== Loading Asterisk modules (live, no restart)"
 # via "module show like" first (skip the load attempt entirely if already
 # Running) and, when a load attempt is actually made, verify success the
 # same way afterward rather than trusting stdout text.
+#
+# A single "module show like" immediately after "module load" is not
+# reliable -- reproduced live (3 separate real runs against a live
+# Asterisk 22/ASL3 instance): a module that *did* load successfully, and
+# was confirmed Running by a manual check moments later, was still
+# reported as not-yet-Running by the very next "module show like" call --
+# and on one run this happened even on the up-front residency check for a
+# module that had already been sitting Running for over a minute, so
+# this isn't purely a load-to-registration timing race, some fraction of
+# "asterisk -rx" invocations just come back short/stale. A single-shot
+# check therefore can't tell a genuine failure apart from a transient
+# miss. _module_running() retries a few times with a short pause before
+# trusting a negative result, at both call sites below.
+_module_running() {
+  local m="$1" tries=0
+  while [ "$tries" -lt 5 ]; do
+    if asterisk -rx "module show like $m" 2>&1 | grep -q "^$m .*Running"; then
+      return 0
+    fi
+    tries=$((tries + 1))
+    sleep 0.3
+  done
+  return 1
+}
+
 for m in res_audiosocket.so app_audiosocket.so app_chanspy.so; do
-  if asterisk -rx "module show like $m" 2>&1 | grep -q "^$m .*Running"; then
+  if _module_running "$m"; then
     echo "   $m: already loaded, skipping"
     continue
   fi
   out=$(asterisk -rx "module load $m" 2>&1) || true
-  if asterisk -rx "module show like $m" 2>&1 | grep -q "^$m .*Running"; then
+  if _module_running "$m"; then
     echo "   $m: loaded"
   else
     echo "   $m: $out"

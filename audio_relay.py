@@ -25,7 +25,35 @@ Input modes (first argv):
               (jitter buffer, pacing, declick fades) is identical between
               the two modes; only how bytes get into `buf` differs.
 
-Usage: audio_relay.py <in_spec> <out_fifo_path>
+Output (second argv):
+  <path>    legacy: a FIFO ffmpeg reads directly (the WebM/MSE Listen path,
+            recording, and the stream relay all ultimately read from one of
+            these, one per broadcast instance).
+  -         no FIFO at all -- used by app.py's _start_capture_only() for the
+            low-latency RX audio path (rx_audio_config.path == 'lowlatency'),
+            which has no ffmpeg reading a FIFO here at all; its own Opus
+            encode lives entirely inside audio_ws_relay.py, fed by this
+            process's WS-relay dual-write below, not a FIFO. Opening a FIFO
+            nobody reads would eventually block this loop's own os.write()
+            once the kernel pipe buffer fills (a few seconds' worth of
+            frames) -- '-' skips the FIFO path entirely rather than risk
+            that.
+
+WS-relay dual-write (optional, env-driven -- AUDIO_WS_RELAY_PORT/
+AUDIO_WS_NODE): every emitted frame is *also*, best-effort and
+non-blockingly, sent to a local TCP port owned by audio_ws_relay.py (the
+low-latency path's own process), tagged with this node's number via a small
+one-line handshake on connect. This is unconditional and independent of the
+FIFO output above -- a broadcast started for the WebM/MSE path dual-writes
+too, harmlessly, if audio_ws_relay.py happens to be listening; it's the
+receiving end's own logic (gated on rx_audio_config.path=='lowlatency' via
+app.py's internal API) that decides whether anything is actually done with
+it. See _WSRelayDualWriter below. A dropped/failed send here only ever
+costs the low-latency path one frame of audio -- it must never be allowed
+to slow down or block this process's real 20ms real-time loop, which every
+*other* consumer (WebM/MSE, recording, stream relay) also depends on.
+
+Usage: audio_relay.py <in_spec> <out_path_or_->
 """
 import os
 import sys
@@ -34,6 +62,93 @@ import signal
 import struct
 import array
 import socket
+
+
+class _WSRelayDualWriter:
+    """Best-effort, non-blocking sender of paced frames to audio_ws_relay.py's
+    PCM-ingestion port (see that module's docstring for the receiving side).
+    No-ops entirely if AUDIO_WS_RELAY_PORT isn't set in the environment --
+    the normal case for every install that hasn't enabled the low-latency
+    path. Never raises out of try_send(); the caller (main()'s hot loop)
+    treats this exactly like the FIFO write in spirit but can't afford to
+    let it be equally load-bearing -- a failed/blocked send here just means
+    this one frame doesn't reach the low-latency path, not a fatal error."""
+
+    RECONNECT_INTERVAL = 2.0  # seconds between reconnect attempts while down
+
+    def __init__(self):
+        host = os.environ.get('AUDIO_WS_RELAY_HOST', '127.0.0.1')
+        port = os.environ.get('AUDIO_WS_RELAY_PORT', '')
+        node = os.environ.get('AUDIO_WS_NODE', '')
+        self.enabled = bool(port) and bool(node)
+        self.addr = (host, int(port)) if self.enabled else None
+        self.node = node
+        self.sock = None
+        self.connected = False
+        self._last_attempt = 0.0
+        self.sent = 0
+        self.dropped = 0
+
+    def _try_connect(self):
+        now = time.monotonic()
+        if now - self._last_attempt < self.RECONNECT_INTERVAL:
+            return
+        self._last_attempt = now
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            s.setblocking(False)
+            # Non-blocking connect() to a loopback port either completes
+            # near-instantly (common case) or raises EINPROGRESS -- either
+            # way we don't wait/poll for it here (that would risk stalling
+            # the 20ms loop on the very rare slow case); a handshake send
+            # attempt right after either succeeds outright or raises
+            # BlockingIOError, which is treated as "still connecting, try
+            # again on a later frame" by the caller.
+            s.connect_ex(self.addr)
+            s.sendall(f'NODE {self.node}\n'.encode('ascii'))
+            self.sock = s
+            self.connected = True
+        except OSError:
+            try:
+                s.close()
+            except Exception:
+                pass
+            self.sock = None
+            self.connected = False
+
+    def try_send(self, frame_bytes):
+        if not self.enabled:
+            return
+        if self.sock is None:
+            self._try_connect()
+            if self.sock is None:
+                self.dropped += 1
+                return
+        try:
+            self.sock.send(frame_bytes)
+            self.sent += 1
+        except (BlockingIOError, OSError):
+            # Includes the handshake-still-in-flight case right after a
+            # fresh connect_ex() -- dropped, not fatal; the next frame (or
+            # the next reconnect attempt, if this closed the socket
+            # outright) tries again.
+            self.dropped += 1
+            try:
+                self.sock.close()
+            except Exception:
+                pass
+            self.sock = None
+            self.connected = False
+
+    def close(self):
+        if self.sock is not None:
+            try:
+                self.sock.close()
+            except Exception:
+                pass
+            self.sock = None
+            self.connected = False
 
 FRAME_BYTES    = 320    # 20 ms at 8 kHz mono s16le (160 samples x 2 bytes)
 FRAME_INTERVAL = 0.020
@@ -220,11 +335,15 @@ def main():
 
     # O_RDWR: lets us open immediately without waiting for the other side
     # (ffmpeg) to open its end first, and prevents the FIFO from ever
-    # seeing EOF.
-    out_fd = os.open(out_path, os.O_RDWR)
+    # seeing EOF. Skipped entirely in '-' mode (see the module docstring's
+    # "Output" section) -- no FIFO, no reader to wait on, nothing to open.
+    out_fd = None if out_path == '-' else os.open(out_path, os.O_RDWR)
+
+    ws_relay = _WSRelayDualWriter()
 
     if DEBUG:
-        _stat(f'input ready, out FIFO opened out_fd={out_fd}')
+        _stat(f'input ready, out={"(none, WS-relay only)" if out_fd is None else f"FIFO out_fd={out_fd}"}, '
+              f'ws_relay={"enabled" if ws_relay.enabled else "disabled"}')
 
     running = True
 
@@ -360,12 +479,20 @@ def main():
         prev_frame_is_real = frame_is_real
         last_sample = struct.unpack_from('<h', frame, FRAME_BYTES - 2)[0]
 
-        try:
-            os.write(out_fd, frame)
-        except OSError as e:
-            if DEBUG:
-                _stat(f'write() failed, exiting: {e!r}')
-            break
+        if out_fd is not None:
+            try:
+                os.write(out_fd, frame)
+            except OSError as e:
+                if DEBUG:
+                    _stat(f'write() failed, exiting: {e!r}')
+                break
+
+        # Best-effort, non-blocking -- see _WSRelayDualWriter's own docstring
+        # for why this can never be allowed to affect the loop's timing the
+        # way the FIFO write above legitimately can (a slow/blocked FIFO
+        # reader is a real problem for every other consumer; a slow/absent
+        # WS-relay listener is not this loop's problem to solve).
+        ws_relay.try_send(bytes(frame))
 
         if eof:
             break
@@ -376,15 +503,19 @@ def main():
             _stat(f'frames real={real_frames} silence={silence_frames} '
                   f'({pct_silence:.1f}% silence) overflows={overflows} '
                   f'resyncs={resyncs} fades={fades} buf={len(buf)}B '
-                  f'drift={(now - deadline):+.3f}s')
+                  f'drift={(now - deadline):+.3f}s '
+                  f'ws_connected={ws_relay.connected} ws_sent={ws_relay.sent} '
+                  f'ws_dropped={ws_relay.dropped}')
             stats_deadline = now + STATS_INTERVAL
 
     if DEBUG:
         _stat(f'exiting: real_frames={real_frames} silence_frames={silence_frames} '
-              f'overflows={overflows} resyncs={resyncs} fades={fades}')
+              f'overflows={overflows} resyncs={resyncs} fades={fades} '
+              f'ws_sent={ws_relay.sent} ws_dropped={ws_relay.dropped}')
 
     if reader is not None:
         reader.close()
+    ws_relay.close()
     for fd in (in_fd, out_fd):
         if fd is None:
             continue

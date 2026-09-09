@@ -680,6 +680,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     <button class="nav-item" onclick="showPage('conn-history')">Conn. History</button>
     <button class="nav-item" onclick="showPage('ami-diag')">AMI Diagnostics</button>
     <button class="nav-item" onclick="showPage('tx-diag')">TX Diagnostics</button>
+    <button class="nav-item" onclick="showPage('rx-diag')">RX Diagnostics</button>
     <button class="nav-item" id="nav-ast-console" onclick="showPage('ast-console')">Asterisk Console</button>
 
     <div class="nav-section">rpt.conf Editor</div>
@@ -1871,6 +1872,116 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
         </p>
       </div>
     </div>
+
+  </section>
+
+  <!-- RX Diagnostics -->
+  <section class="page" id="page-rx-diag">
+    <div class="page-title">RX Diagnostics</div>
+    <div class="page-sub">Checks everything the Status Board's Listen (receive) feature needs, end to end.</div>
+
+    <div class="card">
+      <div class="card-header">
+        <h2>Run Checks</h2>
+        <div class="btn-row">
+          <button class="btn btn-primary" id="rx-diag-btn" onclick="runRxDiagnostics()">Run Diagnostics</button>
+        </div>
+      </div>
+      <div class="card-body">
+        <p style="margin-bottom:10px;color:var(--text2);font-size:0.9rem">
+          Covers RX capture (AudioSocket tap vs. MixMonitor fallback), ffmpeg/libopus, the
+          Low-Latency path's relay process and Apache proxy, and whether each configured
+          node's Asterisk channel currently resolves. Nothing is changed on the system.
+        </p>
+        <div id="rx-diag-out"><span class="muted">Click Run Diagnostics to check RX readiness.</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><h2>Low-Latency Path Requirements</h2></div>
+      <div class="card-body">
+        <p class="muted" style="margin-bottom:8px">
+          Everything the Low-Latency RX Audio Path (below) needs to actually work for a
+          browser that isn't on this box's own localhost:
+        </p>
+        <ul style="margin:0 0 10px 20px;padding:0;color:var(--text2);font-size:0.9rem;line-height:1.7">
+          <li><span class="mono">ffmpeg</span> with a <span class="mono">libopus</span> encoder</li>
+          <li>The low-latency relay process (<span class="mono">audio_ws_relay.py</span>) running — HenWen starts this on its own</li>
+          <li>Apache installed and fronting HenWen, with the <span class="mono">/ws-audio</span> WebSocket proxy applied (<span class="mono">ws-audio/apply.sh</span>) — required because gunicorn's own worker threads can't do WebSocket upgrades, so this is the only way a browser on another machine can reach the relay at all</li>
+          <li>"Low-Latency" actually selected below, not just Apache being ready</li>
+          <li>A browser with <span class="mono">WebSocket</span>, <span class="mono">AudioDecoder</span> (WebCodecs), <span class="mono">AudioContext</span>, and <span class="mono">AudioWorkletNode</span> support — checked client-side only; unsupported browsers fall back to the plain, higher-latency <span class="mono">&lt;audio&gt;</span> tag automatically</li>
+        </ul>
+        <p class="muted" style="margin:0;font-size:0.85rem">
+          "Run Checks" above verifies everything server-side, plus a single rollup row
+          summarizing whether the path is actually ready to use right now.
+        </p>
+      </div>
+    </div>
+
+    <div class="card" id="audiosocket-tap-settings-card" style="display:none">
+      <div class="card-header"><h2>AudioSocket Tap (Listen audio)</h2></div>
+      <div class="card-body">
+        <p class="muted" style="margin-bottom:12px">
+          Optional, opt-in low-latency capture path for the Status Board's Listen feature.
+          Without this, Listen uses AMI <span class="mono">MixMonitor</span>, which adds
+          roughly 2 seconds of latency from Asterisk's own buffered file writes. Applying this
+          swaps in a live TCP tap (<span class="mono">AudioSocket</span>) instead — additive
+          and safe to re-run; Listen automatically falls back to MixMonitor if anything about
+          the tap ever fails. See <span class="mono">audiosocket-tap/README.md</span> for
+          details.
+        </p>
+        <p id="audiosocket-tap-status" style="margin-bottom:12px;color:var(--text2)">Checking&hellip;</p>
+        <div class="btn-row">
+          <button class="btn btn-sm btn-primary" onclick="applyAudioSocketTap()">Apply AudioSocket Tap</button>
+        </div>
+        <pre id="audiosocket-tap-output" class="codeblock" style="display:none;margin-top:12px;white-space:pre-wrap;max-height:260px;overflow-y:auto"></pre>
+      </div>
+    </div>
+
+    <div class="card" id="rx-audio-path-card" style="display:none">
+      <div class="card-header"><h2>RX Audio Path (Listen audio)</h2></div>
+      <div class="card-body">
+        <p class="muted" style="margin-bottom:12px">
+          Which pipeline the Status Board's Listen feature uses. <b>Legacy</b> is the default:
+          WebM/Opus played back through MediaSource Extensions — a steady-state latency floor
+          of roughly 1.3-1.4s. <b>Low-Latency</b> streams raw Opus over a dedicated WebSocket to
+          WebCodecs/AudioWorklet instead — no container — trading some jitter tolerance for
+          substantially lower latency. This is a node-wide setting, not a per-browser
+          preference: it changes which pipeline runs server-side for every listener.
+          <span class="mono">recording.py</span> and the stream relay are unaffected by
+          <i>this</i> setting either way — both keep using the Legacy WebM pipeline on their
+          own, regardless of what Listen is doing. See <span class="mono">ws-audio/README.md</span>
+          for details.
+        </p>
+
+        <p id="rx-audio-ws-status" style="margin-bottom:12px;color:var(--text2)">Checking&hellip;</p>
+        <div class="btn-row" style="margin-bottom:16px">
+          <button class="btn btn-sm btn-primary" onclick="applyWsAudioProxy()">Apply Apache Proxy</button>
+        </div>
+        <pre id="rx-audio-ws-output" class="codeblock" style="display:none;margin-bottom:16px;white-space:pre-wrap;max-height:260px;overflow-y:auto"></pre>
+
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px">
+          <label class="toggle-label" style="margin:0">RX Audio Path</label>
+          <select id="rx-audio-path-select" class="val-input" style="width:auto;min-width:220px">
+            <option value="legacy">Legacy (WebM/MSE, default)</option>
+            <option value="lowlatency">Low-Latency (WebSocket)</option>
+          </select>
+        </div>
+
+        <div class="toggle-row" style="margin-bottom:14px">
+          <div class="toggle-info">
+            <div class="toggle-key">AGC</div>
+            <div class="toggle-desc">Normalizes audio levels. Adds ~0.4s of latency either way.</div>
+          </div>
+          <label class="switch"><input type="checkbox" id="rx-audio-agc-enabled"><span class="slider"></span></label>
+        </div>
+
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <button class="btn btn-sm btn-primary" onclick="saveRxAudioPath()">Save</button>
+          <span id="rx-audio-path-status" style="font-size:0.85rem"></span>
+        </div>
+      </div>
+    </div>
   </section>
 
   <!-- Asterisk Console -->
@@ -2787,25 +2898,6 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
       </div>
     </div>
 
-    <div class="card" id="audiosocket-tap-settings-card" style="display:none">
-      <div class="card-header"><h2>AudioSocket Tap (Listen audio)</h2></div>
-      <div class="card-body">
-        <p class="muted" style="margin-bottom:12px">
-          Optional, opt-in low-latency capture path for the Status Board's Listen feature.
-          Without this, Listen uses AMI <span class="mono">MixMonitor</span>, which adds
-          roughly 2 seconds of latency from Asterisk's own buffered file writes. Applying this
-          swaps in a live TCP tap (<span class="mono">AudioSocket</span>) instead — additive
-          and safe to re-run; Listen automatically falls back to MixMonitor if anything about
-          the tap ever fails. See <span class="mono">audiosocket-tap/README.md</span> for
-          details.
-        </p>
-        <p id="audiosocket-tap-status" style="margin-bottom:12px;color:var(--text2)">Checking&hellip;</p>
-        <div class="btn-row">
-          <button class="btn btn-sm btn-primary" onclick="applyAudioSocketTap()">Apply AudioSocket Tap</button>
-        </div>
-        <pre id="audiosocket-tap-output" class="codeblock" style="display:none;margin-top:12px;white-space:pre-wrap;max-height:260px;overflow-y:auto"></pre>
-      </div>
-    </div>
 
     <div class="card">
       <div class="card-header"><h2>About HenWen</h2></div>
@@ -3232,8 +3324,8 @@ function showPage(id) {
   else if (id === 'kiosk-settings')   ksLoad();
   else if (id === 'ami-diag')         loadSysInfo();
   else if (id === 'ast-console')  astFetchLog();
-  else if (id === 'settings')       { loadSecretKeyStatus(); loadPortsStatus(); syncThemePicker(); mfaLoadStatus();
-                                       if (window._henwenRole === 'owner') loadAudioSocketTapStatus(); }
+  else if (id === 'settings')       { loadSecretKeyStatus(); loadPortsStatus(); syncThemePicker(); mfaLoadStatus(); }
+  else if (id === 'rx-diag')         { if (window._henwenRole === 'owner') { loadAudioSocketTapStatus(); loadRxAudioPathStatus(); } }
   else if (id === 'user-mgmt')      { loadUsers(); pwResetLoad(); invitesLoad(); }
   else if (id === 'recordings')         recordingsLoad();
   else if (id === 'recording-settings') recLoad();
@@ -5356,6 +5448,49 @@ async function runTxDiagnostics() {
   else log('TX diagnostics: all ' + s.pass + ' checks passed.', 'OK');
 }
 
+/* ── RX Diagnostics ───────────────────────────────────────────────────────── */
+async function runRxDiagnostics() {
+  var btn = document.getElementById('rx-diag-btn');
+  var el  = document.getElementById('rx-diag-out');
+  btn.disabled = true;
+  el.innerHTML = '<span class="muted"><span class="spinner"></span> Running checks...</span>';
+  log('Running RX diagnostics...', 'INFO');
+
+  var r = await api('/api/rx/diagnostics');
+  btn.disabled = false;
+
+  if (!r.ok) {
+    el.innerHTML = '<div class="alert alert-danger">' + esc(r.data.error || 'Diagnostics failed') + '</div>';
+    log('RX diagnostics failed: ' + (r.data.error || 'unknown'), 'ERROR');
+    return;
+  }
+
+  var d = r.data;
+  var s = d.summary || {pass: 0, fail: 0, warn: 0};
+  var badgeClass = {pass: 'badge-ok', fail: 'badge-err', warn: 'badge-warn'};
+  var badgeLabel = {pass: 'PASS', fail: 'FAIL', warn: 'WARN'};
+
+  var html = '<div style="margin-bottom:12px">'
+    + '<span class="badge badge-ok" style="margin-right:6px">' + s.pass + ' pass</span>'
+    + (s.fail ? '<span class="badge badge-err" style="margin-right:6px">' + s.fail + ' fail</span>' : '')
+    + (s.warn ? '<span class="badge badge-warn">' + s.warn + ' warn</span>' : '')
+    + '</div>';
+  html += '<table class="tbl"><tbody>';
+  (d.checks || []).forEach(function(c) {
+    html += '<tr><td>' + esc(c.label) + '</td><td style="text-align:right"><span class="badge '
+      + (badgeClass[c.status] || 'badge-unk') + '">' + (badgeLabel[c.status] || c.status) + '</span></td></tr>';
+    if (c.detail && c.detail !== c.label) {
+      html += '<tr><td colspan="2" class="muted" style="font-size:0.82rem;padding-top:0">' + esc(c.detail) + '</td></tr>';
+    }
+  });
+  html += '</tbody></table>';
+  el.innerHTML = html;
+
+  if (s.fail) log('RX diagnostics: ' + s.pass + ' pass, ' + s.fail + ' fail, ' + s.warn + ' warn.', 'ERROR');
+  else if (s.warn) log('RX diagnostics: ' + s.pass + ' pass, ' + s.warn + ' warn.', 'WARN');
+  else log('RX diagnostics: all ' + s.pass + ' checks passed.', 'OK');
+}
+
 async function loadSysInfo() {
   var el = document.getElementById('sysinfo-out');
   var r  = await api('/api/sysinfo');
@@ -6462,6 +6597,11 @@ async function applyRoleNav() {
      explicit role==='owner' check on /api/audiosocket-tap/apply. */
   var audiosocketTapCard = document.getElementById('audiosocket-tap-settings-card');
   if (audiosocketTapCard) audiosocketTapCard.style.display = isOwnerRole ? '' : 'none';
+  /* RX Audio Path (low-latency Listen) is owner-only too — matches the
+     backend's explicit role==='owner' check on /api/rx-audio/config and
+     /api/ws-audio/apply. */
+  var rxAudioPathCard = document.getElementById('rx-audio-path-card');
+  if (rxAudioPathCard) rxAudioPathCard.style.display = isOwnerRole ? '' : 'none';
   /* Only superuser/owner sees the higher-risk COP quick actions (node-wide link
      outage, disabling the transmit time-limit safety mechanism) — matching
      the same allowlist enforced server-side in /api/dtmf/cop. */
@@ -6604,6 +6744,98 @@ async function applyAudioSocketTap() {
     log('AudioSocket tap apply failed: ' + err, 'ERROR');
   }
   loadAudioSocketTapStatus();
+}
+
+/* ── RX Audio Path (low-latency Listen) ──────────────────────────────────── */
+/* Last-loaded values, so saveRxAudioPath() only warns about the (now
+   immediate/destructive -- see that function) teardown when something
+   actually changed, not on every click of Save. */
+var _rxAudioLoadedPath = 'legacy';
+var _rxAudioLoadedAgc  = false;
+
+async function loadRxAudioPathStatus() {
+  var wsEl  = document.getElementById('rx-audio-ws-status');
+  var sel   = document.getElementById('rx-audio-path-select');
+  var agcCb = document.getElementById('rx-audio-agc-enabled');
+  if (!wsEl || !sel) return;
+  wsEl.textContent = 'Checking…';
+
+  var r = await api('/api/ws-audio/status');
+  if (!r.ok) {
+    wsEl.textContent = (r.data && r.data.error) || 'Could not check status.';
+    return;
+  }
+  if (!r.data.installed) {
+    wsEl.innerHTML = '<span style="color:var(--warn,#e0a030)">ws-audio/apply.sh not found on this install '
+                    + '— pull the latest HenWen code first.</span>';
+  } else {
+    wsEl.innerHTML = r.data.applied
+      ? '<span style="color:var(--green,#3fb950)">Apache proxy applied</span> ('
+        + esc(r.data.apache_conf || '') + ') — the low-latency path is reachable from outside this box.'
+      : 'Apache proxy not applied yet — the low-latency path only works for browsers on this '
+        + 'box\'s loopback until you apply it.';
+  }
+  sel.value = r.data.rx_audio_path || 'legacy';
+  if (agcCb) agcCb.checked = r.data.agc_enabled !== false;
+  _rxAudioLoadedPath = sel.value;
+  _rxAudioLoadedAgc  = agcCb ? agcCb.checked : false;
+}
+
+async function applyWsAudioProxy() {
+  if (!confirm('Apply the low-latency RX audio Apache proxy now?\n\nThis edits your Apache '
+             + 'vhost (henwen-ssl.conf or henwen.conf, whichever is present) to add a '
+             + '/ws-audio WebSocket proxy line, and reloads Apache. It does not restart '
+             + 'HenWen or Asterisk, and does not by itself change which RX audio path Listen '
+             + 'uses — that\'s the separate selector below. Safe to re-run.')) return;
+  var statusEl = document.getElementById('rx-audio-ws-status');
+  var outEl = document.getElementById('rx-audio-ws-output');
+  if (statusEl) statusEl.textContent = 'Applying…';
+  var r = await api('/api/ws-audio/apply', {method: 'POST'});
+  if (outEl && ((r.data && r.data.output) || '').trim()) {
+    outEl.textContent = r.data.output;
+    outEl.style.display = '';
+  }
+  if (r.ok) {
+    log('Low-latency RX audio Apache proxy applied', 'OK');
+  } else {
+    var err = (r.data && (r.data.error || r.data.hint)) || 'Failed to apply the Apache proxy.';
+    alert(err);
+    log('ws-audio apply failed: ' + err, 'ERROR');
+  }
+  loadRxAudioPathStatus();
+}
+
+async function saveRxAudioPath() {
+  var sel   = document.getElementById('rx-audio-path-select');
+  var agcCb = document.getElementById('rx-audio-agc-enabled');
+  var st    = document.getElementById('rx-audio-path-status');
+  var agcEnabled = agcCb ? agcCb.checked : true;
+
+  var changed = (sel.value !== _rxAudioLoadedPath) || (agcEnabled !== _rxAudioLoadedAgc);
+  if (changed && !confirm('This takes effect immediately: any active Listen session, '
+      + 'in-progress recording, or the stream relay\'s current connection will be '
+      + 'disconnected right now for every node, not just when they end on their own. '
+      + 'Continue?')) return;
+
+  var r = await api('/api/rx-audio/config', {
+    method:  'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body:    JSON.stringify({path: sel.value, agc_enabled: agcEnabled}),
+  });
+  if (r.ok) {
+    var n = (r.data && r.data.sessions_interrupted) || 0;
+    st.textContent = n > 0 ? ('Saved — interrupted ' + n + ' active session(s).') : 'Saved.';
+    st.style.color = 'var(--success)';
+    log('RX audio path set to ' + sel.value + ', AGC ' + (agcEnabled ? 'enabled' : 'disabled')
+        + (n > 0 ? ' (' + n + ' session(s) interrupted)' : ''), 'OK');
+    _rxAudioLoadedPath = sel.value;
+    _rxAudioLoadedAgc  = agcEnabled;
+  } else {
+    st.textContent = (r.data && r.data.error) || 'Error';
+    st.style.color = 'var(--danger)';
+    log('Failed to save RX audio settings: ' + ((r.data && r.data.error) || 'unknown'), 'ERROR');
+  }
+  setTimeout(function(){ st.textContent = ''; }, 4000);
 }
 
 async function checkNodeDB() {
