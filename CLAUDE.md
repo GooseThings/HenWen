@@ -41,6 +41,14 @@ cd /opt/HenWen
 sudo bash install.sh   # copies files to /opt/HenWen, installs venv, enables service
 ```
 
+**Uninstall:**
+```bash
+sudo bash uninstall.sh                # asks whether to delete data/credentials
+sudo bash uninstall.sh --purge        # delete them, no prompt
+sudo bash uninstall.sh --keep-data    # keep them, no prompt
+```
+`install.sh` deliberately preserves `/etc/asterisk/henwen.db` so an in-place reinstall doesn't wipe the operator's accounts and config. The consequence nobody expected was that uninstall-then-reinstall silently restored working admin logins from before (issue #80) — the DB holds every password hash, TOTP secret and recovery code, plus the saved Broadcastify/YouTube/Discord/IRC/Meshtastic/ntfy/Pushover credentials. So `uninstall.sh` now asks before deleting that (and the TX SIP secret, recordings, TTS voices, uploaded sounds), defaulting to **keep** since deletion is irreversible, and a non-interactive run without `--purge` always keeps. It removes the `henwen-systemctl` sudoers rule unconditionally, though — a standing passwordless-root grant pointing at paths under a now-deleted `/opt/HenWen` is not something to leave behind. `rpt.conf`, its backups, and any Apache vhost/certificate from `setup-https.sh` are deliberately never touched.
+
 There is no linter configuration. Unit tests exist under `tests/` — see **Testing** below.
 
 ## Testing
@@ -64,7 +72,7 @@ python3 -m venv venv   # or reuse /opt/HenWen/venv if this checkout *is* the liv
 
 ### Single-file backend
 
-`app.py` (~7800 lines) contains everything: Flask routes, AMI client, rpt.conf parser, SQLite schema, and all background threads. There is no module split.
+`app.py` (~13,900 lines) contains everything: Flask routes, AMI client, rpt.conf parser, SQLite schema, and all background threads. There is no module split.
 
 ### Background threads (started at module load, bottom of app.py)
 
@@ -76,6 +84,7 @@ Daemon threads launch when gunicorn imports the module:
 - `start_connector_scheduler()` — manages Smart Connector link/unlink on schedule
 - `start_id_monitor()` — monitors node activity to trigger FCC ID audio playback
 - `start_nws_alert_poller()` — polls api.weather.gov for active severe weather alerts (~120s interval, exponential backoff) and manages the lifecycle of auto-created NWS announcement rows; never triggers playback itself, that's still `start_announcer()`'s job
+- `start_echolink_directory_poller()` — scrapes echolink.org's public logins snapshot every 5 min into an in-process cache of currently-online EchoLink stations. See "EchoLink directory" below.
 - `start_release_poller()` — checks GitHub for the latest published HenWen release once a day into an in-process cache (`get_latest_release()`); `/api/update-check` reads that cache instead of hitting GitHub live, and the Manager dashboard surfaces it as a dismissible bar to superusers only (checked once per login/page-load, via `checkForUpdate()` in `henwen-manager.html`)
 - `start_aprs_poller()` — optional; maintains one persistent APRS-IS connection (via the `aprslib` pip package) filtered to `APRS_MAX_RADIUS_MI` around the node's own geocoded location, caching station positions in-process (`_aprs_cache`); no-ops with a log line until an admin saves a login callsign in Manager > Kiosk Settings, or if `aprslib` isn't installed. See "APRS-IS map layer" below.
 - `start_iss_poller()` — fetches the ISS's TLE from SatNOGS DB every `ISS_TLE_POLL_SEC` (6h) into `_iss_tle_cache`, exposed via public `GET /api/iss/tle`; all position/pass propagation happens client-side. See "ISS tracking (map layer)" below.
@@ -108,7 +117,7 @@ The Manager UI's per-connector Delete button (and the same pattern on NWS Alerts
 
 ### Database
 
-SQLite at `/etc/asterisk/henwen.db`. Schema is defined inline in `get_db()` (called per request). Migrations happen via `ALTER TABLE` checks at startup — no migration framework. Tables: `users`, `favorites`, `settings`, `announcements`, `connectors`, `id_configs`, `permanent_links`, `alert_config`, `nws_alert_config`, `recording_config`, `stream_relay_config`, `meshtastic_config`, `meshtastic_messages`, `meshtastic_node_names`, `discord_relay_config`, `recordings`, and a connection history log table.
+SQLite at `/etc/asterisk/henwen.db`. Schema is defined inline in `get_db()` (called per request). Migrations happen via `ALTER TABLE` checks at startup — no migration framework. Tables: `users`, `favorites`, `settings`, `announcements`, `connectors`, `id_configs`, `permanent_links`, `alert_config`, `nws_alert_config`, `recording_config`, `stream_relay_config`, `meshtastic_config`, `meshtastic_messages`, `meshtastic_node_names`, `discord_relay_config`, `meshtastic_discord_relay_config`, `irc_relay_config`, `recordings`, `chat_messages`, `net_schedules`, `invites`, `password_reset_requests`, `node_lockouts`, `kiosk_temp_conns`, and `connection_history`.
 
 `announcements.source_type` distinguishes `'upload'` (user-uploaded audio file), `'tts'` (typed text, synthesized once at save time), and `'nws_alert'` (auto-created/retired by the NWS poller) — the scheduler (`_run_due_announcements()`) treats all three identically except for two NWS-only nullable columns: `max_defer_sec` (forces playback past a busy channel after being due too long; NULL preserves indefinite defer for every other row) and `nws_expires`/`external_id` (NWS lifecycle bookkeeping, unused by upload/tts rows).
 
@@ -139,6 +148,32 @@ Two independent features, each its own standalone module (`recording.py`, `strea
 **Persistent stream relay** (`stream_relay.py`, poller + routes in `app.py`) — an owner-only, always-on relay of one node's live audio to Broadcastify (Icecast source client) and/or YouTube Live (plain RTMP push, no OAuth/Data API), entirely independent of any recording session or browser tab: `start_stream_relay()`'s `_stream_relay_loop()` re-reads `stream_relay_config` at the top of every reconnect cycle exactly like `start_aprs_poller()` does, so a saved config change or a disable toggle takes effect on the next natural reconnect without a HenWen restart, and no-ops until the owner has enabled at least one target. A `Relay` decodes the node's WebM/Opus once and fans the raw PCM out unmodified — no silence-trim or TTS splice, since a live stream should track real time — to independent `RelayTarget` processes, one per enabled destination, so one target's ffmpeg dying or reconnecting never touches the other or the decode stage. YouTube's RTMP push always includes a static dummy video track (`color=size=320x240`) alongside the real audio, since audio-only RTMP acceptance by YouTube's ingest wasn't something available to verify against a real account. `GET /api/stream-relay/status` (owner-only) exposes live per-target connected/disconnected state, polled by the Manager "Stream Relay" page while it's open.
 
 Both modules' config lives in their own singleton table (`recording_config`, `stream_relay_config`) — deliberately not shared, even though both are owner-only settings — and both were verified end-to-end against real local infrastructure standing in for what they ultimately talk to: `recording.py`'s pipeline against real ffmpeg with synthetic and (for the TTS splice) the box's actual cached Piper voice model; `stream_relay.py`'s Broadcastify path against a real local Icecast instance (Broadcastify's ingest is Icecast-compatible) and its YouTube path against an ffmpeg-as-RTMP-server loopback. Real Broadcastify/YouTube accounts remain a manual verification step.
+
+### Browser transmit (TX)
+
+The kiosk's TX button keys the node's real transmitter from a browser microphone, and deliberately routes **no audio through this process at all**. The browser registers straight to Asterisk's own PJSIP stack over WSS (Apache reverse-proxies `TX_WS_PATH`, default `/asterisk-ws`, to Asterisk's loopback-only builtin HTTP server) and calls the phone-portal extension `2<node>`, landing in `Rpt(<node>,P)` — app_rpt's phone-control mode, where **PTT is DTMF `*99` and unkey is `#`**. Audio is G.711 µ-law end to end: WebRTC mandates it and app_rpt speaks it natively, so there's no transcoding stage and no Opus module to install. HenWen's entire runtime role is handing a logged-in session the SIP credentials.
+
+`GET /api/tx/config` reads that credential from `TX_SECRET_PATH` (`/etc/asterisk/henwen-tx.secret`), and **a missing or empty secret file is the feature's off switch** — the route answers `{"enabled": false}`/404 and the kiosk hides the TX button entirely, so an install that never ran the Asterisk-side setup simply doesn't show the feature. `?probe=1` answers availability *only* — no secret in the body, no log line — so the frontend can decide button visibility without minting a live credential on every page load; the real response is `Cache-Control: no-store` since it carries a working SIP password. It's gated by `_USER_OR_ABOVE` (any logged-in role, including plain `user`/kiosk): keying RF under the club callsign sounds like it wants admin+, but account creation is *already* admin-gated, so any account that exists has been vetted to transmit and login itself is the real gate. (`GET /api/tx/diagnostics` is stricter — it's in no `check_auth()` set, so it falls through to the admin+ default. Its own docstring claims it's gated "same as `/api/tx/config`", which is wrong in that one respect.)
+
+The config response also carries `tot_sec`, app_rpt's Time-Out Timer resolved through node/template inheritance by `parse_stanza_settings()` so it's the value actually in effect, not just whatever the node's own stanza says. `totime=` is in **milliseconds** despite the name inviting the seconds guess, and an absent/commented/unparseable value falls back to app_rpt's own documented 180s default rather than 0 — `totime=0` would read as "no timeout", a real and different setting.
+
+The Asterisk side is **not** set up by `install.sh`. `tx-spike/apply.sh` installs the PJSIP endpoint and dialplan; `tx-spike/setup-https.sh` provisions the Apache + Let's Encrypt vhost the WSS connection requires, since a browser won't grant microphone access off localhost without a secure context (any third-party HTTPS fronting works instead — Tailscale Serve, Cloudflare Tunnel, a reverse proxy elsewhere — the scripts only care that the vhost exists and proxies Flask's port plus the websocket path). `tx-spike/rollback.sh` undoes it. `GET /api/tx/diagnostics` backs a Manager TX Diagnostics page and checks both layers: fast in-process checks (secret file present, `pjsip show endpoint henwen-tx` over AMI, a local node configured, whether *this* request itself arrived over HTTPS) covering "was `apply.sh` ever run at all", then `tx-spike/check-ports.sh` (read-only, changes nothing) covering the network/NAT layer neither setup script can verify from inside the box.
+
+The frontend vendors JsSIP 3.13.8 locally (`static/vendor/jssip-3.13.8.min.js`) and lazy-loads it on first arm rather than on page load. ICE gathering is bounded (`TX_ICE_MAX_WAIT_MS` 4s / `TX_ICE_NO_CAND_MS` 8s) so arming can't hang waiting out a blocked STUN server — JsSIP has no timeout of its own there and would otherwise sit on the INVITE for ~40s. Despite the directory name, `tx-spike/` is shipped product code that the app imports paths from at runtime, not a scratch experiment — it kept its original spike name after the feature graduated. See `tx-spike/README.md`.
+
+### EchoLink directory
+
+`start_echolink_directory_poller()` scrapes `https://www.echolink.org/logins.jsp` every 5 minutes (`ECHOLINK_POLL_INTERVAL`) — a public, unauthenticated snapshot of every currently-logged-in EchoLink station (repeaters, links, conferences, individual users), which is the only source available since EchoLink publishes no API. Regex-scraped with no HTML parser dependency, the same posture as the ASL keyed-nodes scrape. Each successful poll full-replaces `_echolink_cache` and rebuilds `_echolink_by_node` (the same rows, indexed for O(1) `lookup_node()` hits); failures back off exponentially and leave the last good cache in place.
+
+AllStarLink reserves node numbers **3000000–3999999** as pseudo-nodes for EchoLink peers, encoded as `'3'` followed by the EchoLink station's own ID zero-padded to 6 digits (`_ECHOLINK_PSEUDO_NODE_RE` / `_echolink_station_id()`). Those pseudo-nodes appear in neither allmondb nor astdb, so this cache is the *only* way `lookup_node()` can put a callsign and location on a connected EchoLink peer instead of a bare number.
+
+`GET /api/echolink/search` (2-char minimum query) searches that cache by callsign substring or node number, and is gated to `_USER_OR_ABOVE` rather than being public like the rest of the board's map data — connecting to an EchoLink station bridges RF under the club callsign exactly like any other connect action. It's surfaced in the kiosk's tabbed Node Search modal alongside `api_asl_search`, so AllStar and EchoLink are searched from one place.
+
+### Net schedules
+
+A lightweight recurring-net calendar, surfaced on the kiosk as a header calendar button (`openNetModal()`) plus a reminder bar rendered next to the weather ticker — separate frames, so a net reminder and a weather alert don't fight over one bar. Rows live in `net_schedules` and are plain CRUD over `/api/nets` (`GET` list, `POST` create, `PATCH`, `DELETE`); there is **no background thread** here, unlike Announcements or Smart Connector — nothing is ever played or dialed, the frontend just renders what's due, so a net schedule is display-only.
+
+`GET /api/nets` is public (the kiosk calendar is visible without login, matching the rest of the board); the three mutating routes are `_USER_OR_ABOVE`. `_validate_net_fields()` handles both routes' input and enforces the recurrence split: `recurrence='weekly'` requires `weekday` 0–6 (0 = Monday) and nulls `net_date`, anything else requires a `YYYY-MM-DD` `net_date` and nulls `weekday` — exactly one of the two is ever set, so a row can't claim to be both. It also supports `PATCH` semantics via its `existing=` parameter, validating a partial update against the stored row rather than requiring the client to resend every field. `end_time` was added after the table shipped and is migrated in by the usual `PRAGMA table_info` + `ALTER TABLE` check in `get_db()`.
 
 ### Text-to-speech (TTS) Announcements
 
@@ -179,9 +214,11 @@ were reached and later overturned; the sequence is left visible on purpose.
 
 ### Templates
 
-- `templates/status.html` — kiosk/status board (`/` and `/status` routes); self-contained SPA with embedded JS (~1800 lines). Contains the live audio player, network map, weather bar, and global activity feed. Accessible without login.
+- `templates/status.html` — kiosk/status board (`/` and `/status` routes); self-contained SPA with embedded JS (~7600 lines). Contains the live audio player, map, weather bar, global activity feed, browser-TX PTT bar, chat and Meshtastic panels. Accessible without login.
 - `templates/henwen-manager.html` — all manager pages (settings, connectors, user management, announcements, node ID, etc.) loaded as a SPA shell via `/henwen-manager`.
-- `templates/login.html` — login and first-run account creation.
+- `templates/login.html` — login and first-run account creation. `setup_mode` (from `is_auth_configured()`) is what swaps it between "Sign In" and "Create Account".
+- `templates/status-accessible.html` — a plain, screen-reader-oriented alternative to the kiosk board (`/accessible`), no map/canvas/live-audio machinery.
+- `templates/password-reset.html` / `templates/invite-accept.html` — the two token-consuming standalone pages for the self-service reset and admin-invite flows (see "Auth and security").
 
 ### Configuration
 
@@ -212,6 +249,7 @@ Sessions are plain signed cookies — there is no server-side session store. To 
 - `https://stats.allstarlink.org/api/stats/{node}` — node keyed/connected counts, one request per favorite node (5s paced apart within a cycle), polled every 180s (`FAVORITES_POLL_INTERVAL`)
 - `https://stats.allstarlink.org/stats/keyed` — scraped (regex, no HTML parser dependency) for the global activity feed on the kiosk map; every node currently keyed network-wide, polled every 5 min (`GLOBAL_ACTIVITY_INTERVAL`)
 - `https://allmondb.allstarlink.org/allmondb.php` — node callsign/location database
+- `https://www.echolink.org/logins.jsp` — scraped (regex, no HTML parser dependency) every 5 min for the directory of currently-online EchoLink stations; no API key, and no API exists — see "EchoLink directory" above
 - `astdb.txt` — local copy of ASL node DB written by `asl3-update-nodelist` package
 - `https://api.weather.gov` — NWS active alerts (`/alerts/active`) and zone lookup (`/points/{lat},{lon}`), no API key, requires a descriptive `User-Agent`
 - `https://huggingface.co/rhasspy/piper-voices` — Piper TTS voice model downloads (`.onnx`/`.onnx.json`), on demand
@@ -220,6 +258,7 @@ Sessions are plain signed cookies — there is no server-side session store. To 
 - `rotate.aprs2.net:14580` (APRS-IS) — nearby APRS station positions for the kiosk map's optional "APRS" layer, via the `aprslib` pip package; receive-only, requires a callsign saved in Manager > Kiosk Settings (feature is off otherwise) — see "APRS-IS map layer" above
 - `https://db.satnogs.org/api/tle/` — ISS TLE (two-line element set) for the kiosk map's optional "ISS" layer, no API key; polled server-side every ~6h — see "ISS tracking (map layer)" below. Celestrak (the more commonly cited TLE source) was tried first but is unreachable from this server at the TCP level; SatNOGS DB was the working alternative.
 - `https://cdn.jsdelivr.net/npm/satellite.js@5/dist/satellite.min.js` — SGP4 propagator library, loaded client-side for the ISS layer's position/pass-prediction math (see below); not a backend dependency
+- JsSIP 3.13.8 — the browser-TX SIP/WebRTC stack, **vendored into `static/vendor/` rather than loaded from a CDN** (unlike satellite.js above): TX must keep working on a node with no outbound internet, and it handles a live SIP credential. Lazy-loaded on first arm — see "Browser transmit (TX)" above
 - Broadcastify's Icecast-compatible ingest and YouTube Live's RTMP ingest — optional targets for the persistent stream relay (`stream_relay.py`), pushed to via ffmpeg (`icecast://`/`rtmp://` output), off by default and only active once the owner saves credentials/a stream key in Manager > Stream Relay — see "Audio recording and stream relay" above
 - `mqtt.meshtastic.org:1883` — the public Meshtastic MQTT broker, for the kiosk's optional Meshtastic panel, via the `paho-mqtt` pip package (fixed host/port/credentials, not owner-configurable); root topic/channel/PSK are — see "Meshtastic MQTT panel" below
 - A Discord Incoming Webhook URL — optional one-way mirror of the kiosk Chat panel, via stdlib `urllib.request` (no pip dependency); off by default and only active once the owner saves a webhook URL in Manager > Discord Relay — see "Discord chat relay" above

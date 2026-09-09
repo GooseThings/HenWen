@@ -120,13 +120,49 @@ else
 fi
 
 # ── Install Apache + certbot ───────────────────────────────
-echo "[2/7] Installing Apache and certbot..."
-# apt-get update first -- a stale package list here 404s the same way it did
-# for install.sh's python3-venv install (see install.sh's own comment on
-# this), and this step is unattended (--non-interactive certbot below), so
-# there's no later error message pointing back at a fix.
-apt-get update
-apt-get install -y apache2 certbot python3-certbot-apache
+echo "[2/7] Checking for Apache and certbot..."
+# Ask before touching the system, mirroring install.sh's own dependency
+# prompt (see its NEED_PKGS block). Answering "yes" to *set up HTTPS* is
+# not the same as consenting to apt-get pulling in three packages, and
+# this script shouldn't treat it as such -- reported as issue #75.
+#
+# Only the genuinely-missing packages are named and installed, so a re-run
+# on a box that already has them prompts for nothing and changes nothing.
+# dpkg-query's Status field is the check rather than `dpkg -s`, which also
+# succeeds for a removed-but-not-purged package still holding config files.
+HTTPS_PKGS=(apache2 certbot python3-certbot-apache)
+NEED_HTTPS_PKGS=()
+for pkg in "${HTTPS_PKGS[@]}"; do
+    dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q '^install ok installed$' \
+        || NEED_HTTPS_PKGS+=("$pkg")
+done
+
+if [ ${#NEED_HTTPS_PKGS[@]} -gt 0 ]; then
+    echo "      HTTPS setup needs these package(s): ${NEED_HTTPS_PKGS[*]}"
+    DO_HTTPS_INSTALL=1
+    if [ -t 0 ]; then
+        read -p "      Install via apt-get now? [Y/n]: " REPLY
+        [[ "$REPLY" =~ ^[Nn] ]] && DO_HTTPS_INSTALL=0
+    fi
+    if [ "$DO_HTTPS_INSTALL" -ne 1 ]; then
+        echo "      Skipped — HTTPS is not set up, and the browser TX button will"
+        echo "      stay hidden until it is. Everything else works over plain HTTP."
+        echo "      To do it yourself later:"
+        echo "        sudo apt-get update && sudo apt-get install -y ${NEED_HTTPS_PKGS[*]}"
+        echo "        sudo bash $0 $HOSTNAME_ARG $EMAIL_ARG"
+        exit 1
+    fi
+    # apt-get update first -- a stale package list here 404s the same way it did
+    # for install.sh's python3-venv install (see install.sh's own comment on
+    # this), and this step is unattended (--non-interactive certbot below), so
+    # there's no later error message pointing back at a fix.
+    echo "      Running apt-get update..."
+    apt-get update
+    echo "      Installing: ${NEED_HTTPS_PKGS[*]}"
+    apt-get install -y "${NEED_HTTPS_PKGS[@]}"
+else
+    echo "      Already installed: ${HTTPS_PKGS[*]}"
+fi
 a2enmod ssl proxy proxy_http proxy_wstunnel headers rewrite >/dev/null
 
 if [ "$HTTPS_PORT" != "443" ]; then
@@ -134,6 +170,73 @@ if [ "$HTTPS_PORT" != "443" ]; then
     grep -qxF "Listen ${HTTPS_PORT}" /etc/apache2/ports.conf 2>/dev/null || \
         echo "Listen ${HTTPS_PORT}" >> /etc/apache2/ports.conf
 fi
+
+# ── Preserve whatever else this box already serves ─────────
+# A catch-all `ProxyPass / -> Flask` on a *named* vhost hijacks every URL on
+# that hostname, including apps that were working long before HenWen was
+# installed. Allmon3 and AllScan live under the default DocumentRoot on a
+# great many AllStar nodes, and issue #77 reported exactly that: /allmon3/
+# and /allscan/ began returning 404 (Flask has no such route) the moment
+# this vhost claimed the hostname, while the same paths still worked by raw
+# IP -- because an IP doesn't match ServerName, so it fell through to the
+# default vhost, which was still serving them perfectly well.
+#
+# So before claiming the hostname, look at what the default site already
+# serves and exclude each of those paths with `ProxyPass /<dir> !`. Apache
+# honours an exclusion only when it appears *before* the catch-all, hence
+# the insertion point below. Excluded paths are then served straight from
+# DocumentRoot exactly as they were.
+HENWEN_RESERVED=(accept-invite accessible api asl3-ez-manager forgot-password
+                 henwen-manager login logout reset-password status static)
+EXCL_MARKER="# HenWen: preserve paths this box already served (issue #77)"
+
+DOCROOT=$(awk '/^[[:space:]]*DocumentRoot[[:space:]]+/ {print $2; exit}' \
+          /etc/apache2/sites-enabled/*.conf 2>/dev/null)
+[ -n "$DOCROOT" ] || DOCROOT=/var/www/html
+DOCROOT="${DOCROOT%/}"
+
+PRESERVED=()
+SHADOWED=()
+if [ -d "$DOCROOT" ]; then
+    for _d in "$DOCROOT"/*/; do
+        [ -d "$_d" ] || continue
+        _name=$(basename "$_d")
+        # Anything needing quoting would produce a malformed directive; a
+        # directory named like that isn't a served app worth guessing about.
+        case "$_name" in *[!A-Za-z0-9._-]*) continue ;; esac
+        # Never shadow HenWen's own routes -- the operator explicitly pointed
+        # this hostname at HenWen, so on a collision HenWen has to win. Say so
+        # rather than silently picking a side.
+        if printf '%s\n' "${HENWEN_RESERVED[@]}" | grep -qxF "$_name"; then
+            SHADOWED+=("$_name")
+            continue
+        fi
+        PRESERVED+=("$_name")
+    done
+fi
+
+# Insert the DocumentRoot + exclusions immediately above the catch-all
+# ProxyPass in a vhost file. Idempotent (marker check), and a no-op when
+# there's nothing to preserve, so re-running the script never stacks
+# duplicates.
+inject_exclusions() {
+    local conf="$1" line tmp injected=0 n
+    [ -f "$conf" ] || return 0
+    [ "${#PRESERVED[@]}" -gt 0 ] || return 0
+    grep -qF "$EXCL_MARKER" "$conf" && return 0
+    tmp=$(mktemp)
+    while IFS= read -r line; do
+        if [ "$injected" -eq 0 ] && \
+           [[ "$line" =~ ^[[:space:]]*ProxyPass[[:space:]]+/[[:space:]]+http://127\.0\.0\.1: ]]; then
+            printf '    DocumentRoot %s\n' "$DOCROOT"
+            printf '    %s\n' "$EXCL_MARKER"
+            for n in "${PRESERVED[@]}"; do printf '    ProxyPass /%s !\n' "$n"; done
+            injected=1
+        fi
+        printf '%s\n' "$line"
+    done < "$conf" > "$tmp"
+    mv "$tmp" "$conf"
+}
 
 # ── Base HTTP vhost (port 80) ──────────────────────────────
 echo "[3/7] Writing Apache vhost for $HOSTNAME_ARG..."
@@ -145,6 +248,18 @@ cat > "$HTTP_AVAIL" <<VHOST
     ProxyPassReverse / http://127.0.0.1:${FLASK_PORT}/
 </VirtualHost>
 VHOST
+inject_exclusions "$HTTP_AVAIL"
+
+if [ "${#PRESERVED[@]}" -gt 0 ]; then
+    echo "      Preserving paths already served from ${DOCROOT}: ${PRESERVED[*]}"
+    echo "      (these keep working on $HOSTNAME_ARG instead of being proxied to HenWen)"
+fi
+if [ "${#SHADOWED[@]}" -gt 0 ]; then
+    echo "      WARNING: ${DOCROOT} also contains: ${SHADOWED[*]}"
+    echo "      Those names collide with HenWen's own URLs, so HenWen wins on"
+    echo "      $HOSTNAME_ARG and they stay reachable only by IP. Rename them if"
+    echo "      you need both on this hostname."
+fi
 a2ensite "${CONF_NAME}.conf" >/dev/null
 apache2ctl configtest
 systemctl reload apache2
@@ -202,6 +317,13 @@ if [ -f "$SSL_AVAIL" ] && ! grep -qE '^\s*ProxyPass\s+/ http://127\.0\.0\.1:'"${
         sed -i "/<\/VirtualHost>/i\\    ProxyPreserveHost On\\n    ProxyPass        / http://127.0.0.1:${FLASK_PORT}/ retry=0 timeout=120\\n    ProxyPassReverse / http://127.0.0.1:${FLASK_PORT}/" "$SSL_AVAIL"
     fi
 fi
+
+# Same preservation for the SSL vhost. certbot builds it by copying the :80
+# vhost, so the exclusions are usually carried over already -- inject_exclusions
+# is a no-op then (marker check). This covers the case where certbot rewrites
+# or reorders enough that they don't survive the copy, and costs nothing when
+# they did.
+inject_exclusions "$SSL_AVAIL"
 
 apache2ctl configtest
 systemctl reload apache2

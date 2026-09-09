@@ -1446,6 +1446,45 @@ def _no_cache_auth_pages(resp):
     return resp
 
 
+@app.after_request
+def _security_headers(resp):
+    """
+    Baseline security headers applied to every response, regardless of
+    whether this install ever ran tx-spike/setup-https.sh's optional
+    Apache vhost — doing it here in Flask means every install gets these,
+    not just the subset that's HTTPS-fronted.
+
+    X-Frame-Options and Cross-Origin-Opener-Policy apply unconditionally:
+    neither depends on the connection being HTTPS, and this app has no
+    legitimate reason to be framed by another origin or to expose
+    window.opener to one (every outbound link this app opens in a new
+    tab already uses rel="noopener").
+
+    Strict-Transport-Security is only added when this specific request
+    actually arrived over HTTPS (request.is_secure — already corrected
+    for the Apache TLS proxy case by _LocalProxyFix above, same as
+    _SchemeAwareSessionInterface relies on). Asserting HSTS for an
+    install that's never served this app over TLS at all would be
+    actively wrong, and browsers ignore the header on a plain HTTP
+    response anyway. max-age is a conservative 180 days, with neither
+    includeSubDomains (a self-hosted box may share its domain with
+    unrelated subdomains) nor preload (a much bigger, harder-to-reverse
+    commitment than a self-hosted appliance app should make on an
+    owner's behalf).
+
+    A full Content-Security-Policy is deliberately NOT set here: this
+    app's templates use inline <script>/<style> throughout, so enabling
+    CSP in enforcement mode needs its own pass to inventory nonce/hash
+    requirements first rather than being bundled into this general
+    header-hardening pass.
+    """
+    resp.headers.setdefault('X-Frame-Options', 'SAMEORIGIN')
+    resp.headers.setdefault('Cross-Origin-Opener-Policy', 'same-origin')
+    if request.is_secure:
+        resp.headers.setdefault('Strict-Transport-Security', 'max-age=15552000')
+    return resp
+
+
 # ── Auth hardening helpers ───────────────────────────────────────────────────
 # Shared by /login, /api/login, /login/2fa, /api/login/2fa, and every
 # "set a new password" route below.
@@ -2374,8 +2413,17 @@ class AMIClient:
         e.g. "2,2324RU,666380TK" — node 2324 in mode R(monitor), Unkeyed;
         node 666380 in mode T(transceive), Keyed.
 
-        Connected nodes come from 'rpt lstats <node>' which gives one line
-        per connected node containing the remote node number.
+        Connected nodes come from 'rpt lstats <node>', one line per connected
+        peer.
+
+        A peer id is NOT always a node number. A Web Transceiver client shows
+        up under its callsign in both sources — 'rpt lstats' as
+        "NT0Y  73.145.245.30  0  IN  00:20:32:549  ESTABLISHED", and
+        RPT_ALINKS as "1,NT0YTU" — so neither parser may assume digits (issue
+        #74). Peer ids therefore flow through as opaque strings. lookup_node()
+        already tolerates that: a callsign misses allmondb/astdb and gets a
+        negative cache entry, so it costs one dict slot rather than a fetch per
+        board refresh.
         """
         status = {"keyed": False, "connected": [], "links": {}, "raw": [], "lstats": [],
                   "link_connect_seconds": {}, "link_direction": {}, "link_connect_state": {}}
@@ -2391,7 +2439,27 @@ class AMIClient:
             m = re.search(r'\bRPT_ALINKS\s*=\s*\d+,(.+)$', line)
             if m:
                 for entry in m.group(1).split(","):
-                    em = re.match(r'^(\d{4,7})([A-Za-z]*)$', entry.strip())
+                    entry = entry.strip()
+                    # "<peer><mode><K|U>" — peer is normally a node number, but
+                    # a Web Transceiver client appears under its *callsign*
+                    # instead (confirmed live: RPT_ALINKS=1,NT0YTU, i.e. NT0Y in
+                    # mode T, Unkeyed). Splitting on character class the way the
+                    # numeric-only parse below does cannot work for a callsign,
+                    # since letters and digits mix freely in one. The trailing
+                    # mode+keyed pair is always exactly two characters, so take
+                    # those off the end and treat whatever precedes them as the
+                    # peer id, whatever shape it has. See issue #74.
+                    em = re.match(r'^(.+?)([A-Za-z])([KU])$', entry)
+                    if em:
+                        status["links"][em.group(1)] = {
+                            "keyed": em.group(3) == "K",
+                            "mode":  em.group(2),
+                        }
+                        continue
+                    # Anything not ending in a mode+K/U pair falls back to the
+                    # original numeric parse, so every shape that already worked
+                    # is handled identically to before.
+                    em = re.match(r'^(\d{4,7})([A-Za-z]*)$', entry)
                     if em:
                         link_node, flags = em.group(1), em.group(2)
                         status["links"][link_node] = {
@@ -2409,7 +2477,22 @@ class AMIClient:
         log("DEBUG", f"[AMI] rpt lstats {node} -> {lstats}")
         for line in lstats:
             parts = line.split()
-            if len(parts) >= 5 and re.match(r'^\d{4,7}$', parts[0]):
+            # A data row is recognised by its DIRECTION column (IN/OUT), not by
+            # the peer column looking like a node number. A Web Transceiver
+            # client connects under a callsign — confirmed live, `rpt lstats`
+            # reporting "NT0Y  73.145.245.30  0  IN  00:20:32:549  ESTABLISHED"
+            # — so testing parts[0] against ^\d{4,7}$ dropped the whole row
+            # silently and the client never appeared in Connected Nodes
+            # (issue #74). DIRECTION also rejects the two non-data rows that a
+            # looser peer-shaped pattern would let through: the header puts
+            # "DIRECTION" at index 3 (because "CONNECT TIME" is two words), and
+            # the "----" separator has dashes there.
+            is_row = len(parts) >= 5 and parts[3].upper() in ("IN", "OUT")
+            # Keep the original numeric test as a fallback so an app_rpt build
+            # with a different column order behaves exactly as it did before.
+            if not is_row:
+                is_row = len(parts) >= 5 and re.match(r'^\d{4,7}$', parts[0]) is not None
+            if is_row:
                 cn = parts[0]
                 if cn != str(node) and cn not in status["connected"]:
                     status["connected"].append(cn)

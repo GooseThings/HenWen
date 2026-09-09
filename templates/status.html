@@ -5,8 +5,23 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <title>HenWen Kiosk</title>
+<meta name="description" content="HenWen live status board — AllStarLink node status, connections, map, and repeater activity.">
 <link id="dyn-favicon" rel="icon" type="image/x-icon" href="/static/favicon.ico">
 <script>(function(){var t=localStorage.getItem('henwen-theme')||localStorage.getItem('asl3ez-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- Warms up the connection to both CDN origins as early as possible in
+     <head> parsing — DNS/TCP/TLS handshake overlaps with the rest of the
+     page instead of only starting once the parser reaches each resource's
+     own tag below. Doesn't change load/execution order or timing of the
+     resources themselves (unlike defer/async, which risks breaking the
+     inline <script> at the bottom of body that uses L./satellite. as soon
+     as it runs), just shortens the connection-setup portion of the
+     render-blocking critical path Lighthouse's render-blocking-insight
+     flagged for leaflet.min.css/leaflet.min.js. crossorigin is required
+     for the browser to actually reuse the preconnected connection for a
+     CORS-fetched resource like these (font/style/script requests from a
+     third-party origin are anonymous-mode CORS requests by default here). -->
+<link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
 <style>
 html[data-theme="midnight"] {
@@ -146,6 +161,17 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   display: flex; flex-direction: column;
   height: 100vh; padding: 16px 20px 12px; gap: 10px;
 }
+/* Wraps the weather/net bars, NWS alert bar, and .content-area in a <main>
+   landmark (accessibility only — .header/.footer are already <header>/
+   <footer>, but nothing marked the primary content region, so screen
+   readers/keyboard users had no way to jump past the header). Mirrors
+   .board's own display:flex/flex-direction:column/gap so this extra
+   nesting level is layout-invisible: .board-main takes the flex:1 +
+   min-height:0 that .content-area's own rules already relied on to fill
+   the remaining viewport height, and the 10px gap here replaces the one
+   .board's own `gap` used to provide between these three elements when
+   they were its direct children. */
+.board-main { display: flex; flex-direction: column; flex: 1; min-height: 0; gap: 10px; }
 
 /* ── Header ── */
 .header {
@@ -342,8 +368,19 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
    DASH_NON_GREEDY/dashSubtreeGreedy()), so Node still only claims what its
    content needs rather than stretching to the bottom of the window. The
    span below is only what's painted until the first board refresh — it must
-   stay in step with DASH_DEFAULT_TREE's node/map ratio (6/24), same
+   stay in step with DASH_DEFAULT_TREE's node/map ratio (10/24), same
    invariant as every other default here.
+   That ratio was tuned to the actual measured height of a typical
+   populated card (header + identity block + controls + volume row),
+   not picked arbitrarily -- a static guess far from what
+   dashFitNodeCard() computes on the first real refresh is itself a
+   layout-shift source (issue #101: a 6/24 guess against real content
+   came out closer to 10/24, a jump big enough to register as the
+   single largest contributor to a 0.774 Lighthouse CLS score). This
+   still won't be exact for every install (callsign/location length,
+   which buttons a viewer's role shows, etc. all vary), but it should
+   land close enough that the one guaranteed first-refresh reflow is
+   barely visible instead of a full card resizing under the viewer.
 
    The card itself carries no padding of its own — .card-header uses its
    ordinary shared style (padding/border-bottom) exactly like every other
@@ -355,7 +392,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
    card's). All of the actual "pad the content, absorb the auto-fit
    leftover" work happens one level down, in .node-body, below. ── */
 .node-card {
-  grid-column: 1 / span 4; grid-row: 1 / span 6;
+  grid-column: 1 / span 4; grid-row: 1 / span 10;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
@@ -415,29 +452,47 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
    app's many color themes (see :root above) is active rather than baking
    in one palette's hex values.
    .btn-active is toggled by _txSetBtn()/_listenSetBtn()/_recordSetBtn()
-   exactly when each one's inline text color is set to its own active-state
-   color (TX armed/Listen active = their own tint; Rec active is already
-   red) — see those functions. Text/icon color while active still comes
-   from that same inline style, not from this rule, so the two always
-   agree. */
+   exactly when each one's inline text color is set — TX armed/Listen active
+   pass their own tint as that sentinel value, see those functions. Text/icon
+   color while active is forced to --text rather than the raw tint though:
+   text-colored-as-background-tint against a background that's itself a
+   mix of that same tint reliably fails WCAG contrast (verified 2.2–2.3:1 in
+   the default theme, i.e. Lighthouse's aria-command-name/color-contrast
+   findings on issue #86) — --text is chosen per-theme specifically to
+   contrast against that theme's own backgrounds, so pairing it with a
+   tint-mixed background reliably does much better (4.96–6.2:1 here). The
+   idle-state 14%→8% mix below is the same fix applied to the untinted
+   text2-on-idle-background pairing (TX's own idle state measured 4.47:1,
+   just under the 4.5:1 minimum). */
 #tx-btn     { --btn-tint: var(--warn); }
 #listen-btn { --btn-tint: var(--green); }
 #record-btn { --btn-tint: var(--danger); }
 .node-controls .btn-icon {
-  background: color-mix(in srgb, var(--btn-tint) 14%, var(--bg3));
+  background: color-mix(in srgb, var(--btn-tint) 8%, var(--bg3));
   border-color: color-mix(in srgb, var(--btn-tint) 38%, var(--border));
 }
 .node-controls .btn-icon.btn-active {
   background: color-mix(in srgb, var(--btn-tint) 55%, var(--bg3));
   border-color: var(--btn-tint);
 }
-/* Sits directly under the buttons and only matters while Listen is running —
-   dimmed to 0.4 until then by _listenSetBtn(), same as when it lived in the
-   Connected Nodes header. No border/padding of its own here: in that old
-   home it was a full-width strip separating the header from the node list,
-   whereas here it's just the last row of this card's own stack. */
-#listen-vol-row { display: flex; align-items: center; gap: 8px; opacity: 0.4;
-  flex-shrink: 0; transition: opacity .15s; }
+/* Sits directly under the buttons and only matters while Listen is running.
+   No border/padding of its own here: in its old home (the Connected Nodes
+   header) it was a full-width strip separating the header from the node
+   list, whereas here it's just the last row of this card's own stack.
+   The idle-state dimming used to live here as opacity:0.4 on the whole
+   row — including the "Volume" label text — which Lighthouse's
+   color-contrast audit flagged on henwen.ironicsandwich.com (issue #103):
+   --text2 (#8b949e) on --bg2 (#0d1117) is a comfortable 6.15:1 at full
+   opacity, but 0.4 opacity blends it down to ~1.95:1, well under WCAG's
+   4.5:1 minimum for text. Getting back above 4.5:1 by raising the opacity
+   alone would mean ~0.85+, which barely reads as "dimmed" anymore — so
+   instead the dimming is scoped to just #listen-volume (the slider
+   control itself, see below), which is genuinely disabled while idle and
+   already gets the browser's native disabled cursor on top of it. The
+   label stays fully legible at every zoom/theme rather than only passing
+   contrast in some of them. */
+#listen-vol-row { display: flex; align-items: center; gap: 8px;
+  flex-shrink: 0; }
 /* Info-left / status-right grid, used on every width (see the mobile media
    query below for the phone-tuned size overrides layered on top of this same
    structure). Was originally mobile-only: the desktop card used a single
@@ -725,7 +780,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .mesh-text { font-size: 0.78rem; color: var(--text); word-wrap: break-word; margin-top: 1px; }
 
 /* ── Map ── */
-.map-card { grid-column: 1 / span 4; grid-row: 7 / span 18; min-height: 0;
+.map-card { grid-column: 1 / span 4; grid-row: 11 / span 14; min-height: 0;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; }
 #map { flex: 1; background: #0d1117; }
@@ -802,10 +857,20 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .fav-call:hover { text-decoration: underline; }
 .fav-loc  { font-size: 0.67rem; color: var(--text2); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
-.fav-actions { display: flex; flex-direction: column; gap: 3px; align-items: stretch; width: fit-content; }
+/* gap bumped 3px -> 6px alongside .sb-btn's taller padding below (issue #102):
+   Lighthouse's target-size audit checks clickable space between neighbors as
+   well as each target's own size, and the stacked Connect/Monitor pair here
+   was failing both. */
+.fav-actions { display: flex; flex-direction: column; gap: 6px; align-items: stretch; width: fit-content; }
+/* min-width/min-height/padding push the actual click target to ~24x24px
+   (was ~11x10px, failing Lighthouse's target-size audit both on its own
+   size and its clearance from the callsign link/Disconnect button next to
+   it) while display:inline-flex centering keeps the small "X" glyph itself
+   visually unchanged — the box grows around it, not the text. */
 .fav-del-btn { background: none; border: none; color: var(--text2); cursor: pointer;
-  font-size: 0.65rem; padding: 0 0 0 2px; margin-left: auto; opacity: 0.45;
-  line-height: 1; flex-shrink: 0; }
+  font-size: 0.65rem; margin-left: auto; opacity: 0.45; line-height: 1; flex-shrink: 0;
+  padding: 6px; min-width: 24px; min-height: 24px; box-sizing: border-box;
+  display: inline-flex; align-items: center; justify-content: center; }
 .fav-del-btn:hover { color: #f85149; opacity: 1; }
 .fav-sort-controls { margin-left: auto; display: flex; gap: 4px; align-items: center; }
 .fav-sort-select { font-size: 0.66rem; padding: 2px 4px; border-radius: 4px; border: 1px solid var(--border);
@@ -844,10 +909,16 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .chat-composer input:focus { outline: none; border-color: var(--accent); }
 
 
-/* ── Status-board action buttons ── */
+/* ── Status-board action buttons ──
+   Vertical padding bumped 3px -> 6px (issue #102): at 0.68rem/3px this
+   rendered at ~20px tall, under Lighthouse's 24px target-size minimum,
+   everywhere this class is used (favorites list, Connected Nodes, node
+   search results). Horizontal padding is untouched — width was never
+   the flagged dimension, and most of these buttons already sit well past
+   24px wide from their own label text alone. */
 .sb-btn {
   font-size: 0.68rem; font-weight: 600; letter-spacing: .03em;
-  padding: 3px 8px; border-radius: 4px; border: 1px solid; cursor: pointer;
+  padding: 6px 8px; border-radius: 4px; border: 1px solid; cursor: pointer;
   white-space: nowrap; transition: all .15s; flex-shrink: 0;
 }
 .sb-btn.connect    { background: rgba(63,185,80,.08);  border-color: rgba(63,185,80,.3);  color: var(--green); }
@@ -904,7 +975,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 #tx-meter-fill.hot  { background: var(--warn); }
 #tx-meter-fill.clip { background: var(--red); }
 #tx-gain { width: 110px; accent-color: var(--accent); flex-shrink: 0; }
-#listen-volume { width: 70px; accent-color: var(--accent); flex-shrink: 0; }
+#listen-volume { width: 70px; accent-color: var(--accent); flex-shrink: 0;
+  opacity: 0.4; transition: opacity .15s; }
 #listen-volume:disabled { cursor: not-allowed; }
 
 /* Monitor-only mode badge in node rows — TX is the default, so it's the only
@@ -1287,7 +1359,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   <!-- Header -->
   <header class="header">
     <div class="header-brand">
-      <img class="header-logo" src="/static/logo-512.png" alt="HenWen">
+      <img class="header-logo" src="/static/logo-128.png" alt="HenWen">
       <strong>HenWen</strong> <span>KIOSK</span><span class="header-brand-mobile-suffix"> Mobile</span>
     </div>
     <img class="header-club-logo" id="club-logo-img" alt="" style="display:none">
@@ -1331,6 +1403,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
       <button type="button" class="btn-icon" id="header-menu-btn" onclick="toggleHeaderMenu(event)" title="Menu" aria-haspopup="true" aria-expanded="false" style="display:none"><svg class="icon"><use href="#icon-menu"></use></svg></button>
     </div>
   </header>
+
+  <main class="board-main">
 
   <!-- Weather bar + net-schedule reminder bar: separate frames so a
        due/soon net only colors its own box, not the weather ticker too. -->
@@ -1596,6 +1670,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 
   </div>
 
+  </main>
+
   <!-- Footer -->
   <footer class="footer">
     <span id="f-active-users-wrap" style="position:relative;display:flex;align-items:center;gap:8px">
@@ -1818,6 +1894,14 @@ var _ECHOLINK_NODE_RE = /^3\d{6}$/;
 function nodeLink(node, cssClass) {
   if (_ECHOLINK_NODE_RE.test(String(node))) {
     return '<span class="' + cssClass + '">' + esc(node) + '</span><span class="el-badge" title="EchoLink node">EL</span>';
+  }
+  /* Not every connected peer is a node number. A Web Transceiver client shows
+     up under its callsign (issue #74), and stats.allstarlink.org indexes nodes
+     only — so pointing one at /stats/NT0Y is a guaranteed dead link. QRZ is
+     both valid and more useful for a callsign, and callsignLink() already
+     handles the SSID/modifier stripping that needs. */
+  if (CALLSIGN_RE.test(String(node).toUpperCase())) {
+    return callsignLink(node, cssClass);
   }
   return '<a class="' + cssClass + '" href="https://stats.allstarlink.org/stats/' +
     encodeURIComponent(node) + '" target="_blank" rel="noopener">' + esc(node) + '</a>';
@@ -2399,13 +2483,45 @@ function starSize() {
   return [s, s];
 }
 
+/* WCAG 2.2/Lighthouse's target-size minimum is 24x24 CSS px. Several of the
+   map glyphs below are deliberately smaller than that at typical zoom so the
+   map doesn't turn into a wall of oversized dots (see pinSize()/
+   aprsIconSize()'s own halved-then-halved-again history) — Lighthouse
+   flagged exactly this on henwen.ironicsandwich.com (issue #102): a
+   pinSize() teardrop at z<=6 renders ~10.8x16.2px.
+   Rather than growing the visible glyph, wrap it in a flex-centered box
+   padded up to at least 24x24 — only the *clickable* divIcon element grows;
+   the SVG inside keeps its original pixel size and visual weight on the
+   map. Padding is symmetric, so each axis's anchor just needs to shift by
+   half of whatever got added to that axis to keep pointing at the exact
+   same map coordinate as before (this is exact, not approximate: the
+   glyph's own top/left edge moves by padY/padX, so any anchor coordinate
+   measured from that edge — a center at s/2 or a pin tip at the full
+   height — moves by the same padY/padX). */
+var MAP_MIN_TARGET_PX = 24;
+function padMarkerIcon(svg, w, h) {
+  var boxW = Math.max(w, MAP_MIN_TARGET_PX), boxH = Math.max(h, MAP_MIN_TARGET_PX);
+  return {
+    html: '<div style="width:' + boxW + 'px;height:' + boxH + 'px;display:flex;' +
+          'align-items:center;justify-content:center">' + svg + '</div>',
+    size: [boxW, boxH],
+    padX: (boxW - w) / 2,
+    padY: (boxH - h) / 2
+  };
+}
+
 function makeIcon(color, opacity) {
   var s  = pinSize();
   var op = (opacity == null) ? 0.9 : opacity;
   var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + s[0] + '" height="' + s[1] +
     '" viewBox="0 0 20 30"><path d="M10 0C4.5 0 0 4.5 0 10c0 7.5 10 20 10 20S20 17.5 20 10C20 4.5 15.5 0 10 0z"' +
     ' fill="' + color + '" opacity="' + op + '"/><circle cx="10" cy="10" r="4" fill="white" opacity="' + op + '"/></svg>';
-  return L.divIcon({ html:svg, iconSize:s, iconAnchor:[s[0]/2,s[1]], popupAnchor:[0,-s[1]], className:'' });
+  var p = padMarkerIcon(svg, s[0], s[1]);
+  /* Anchor is the pin's tip (bottom-center of the original glyph), so the y
+     coordinate shifts by the full padY (top padding pushes the whole glyph
+     down), not padY/2. */
+  var anchorY = s[1] + p.padY;
+  return L.divIcon({ html:p.html, iconSize:p.size, iconAnchor:[p.size[0]/2, anchorY], popupAnchor:[0,-anchorY], className:'' });
 }
 
 /* Global (blue) activity pins start bright and mute toward a dim blue-gray
@@ -2444,7 +2560,10 @@ function makeStarIcon(color) {
   var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + s[0] + '" height="' + s[1] +
     '" viewBox="0 0 32 32"><polygon points="16,2 20,12 31,12 22,19 25,30 16,23 7,30 10,19 1,12 12,12"' +
     ' fill="' + color + '" stroke="white" stroke-width="1.5" opacity="0.95"/></svg>';
-  return L.divIcon({ html:svg, iconSize:s, iconAnchor:[s[0]/2,s[1]/2], popupAnchor:[0,-s[1]/2], className:'' });
+  var p = padMarkerIcon(svg, s[0], s[1]);
+  /* Center-anchored, so the anchor is just the padded box's own center —
+     centering a symmetric pad never moves it. */
+  return L.divIcon({ html:p.html, iconSize:p.size, iconAnchor:[p.size[0]/2,p.size[1]/2], popupAnchor:[0,-p.size[1]/2], className:'' });
 }
 
 /* Plain filled circle — deliberately not the node teardrop pin or the
@@ -2457,7 +2576,8 @@ function makeAprsIcon(color, opacity) {
   var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + d + '" height="' + d +
     '" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8" fill="' + (color || '#a855f7') +
     '" stroke="white" stroke-width="1.5" opacity="' + op + '"/></svg>';
-  return L.divIcon({ html:svg, iconSize:[d,d], iconAnchor:[d/2,d/2], popupAnchor:[0,-d/2], className:'' });
+  var p = padMarkerIcon(svg, d, d);
+  return L.divIcon({ html:p.html, iconSize:p.size, iconAnchor:[p.size[0]/2,p.size[1]/2], popupAnchor:[0,-p.size[1]/2], className:'' });
 }
 
 /* ── APRS-IS map layer (optional, toggled from the map controls) ──
@@ -2583,7 +2703,7 @@ function renderAprsMarkers(stations) {
   clearAprsMarkers();
   stations.forEach(function(s) {
     var style = aprsPinStyle(s.age_sec || 0);
-    var m = L.marker([s.lat, s.lon], {icon: makeAprsIcon(style.color, style.opacity)})
+    var m = L.marker([s.lat, s.lon], {icon: makeAprsIcon(style.color, style.opacity), title: s.callsign || 'APRS station'})
       .bindPopup('<b>' + aprsFiLink(s.callsign, 'popup-node-link') + '</b><br>' +
                  (s.comment ? esc(s.comment) + '<br>' : '') +
                  '<small>' + s.distance_mi + ' mi &mdash; heard ' + _histDuration(s.age_sec) + ' ago</small>');
@@ -2704,7 +2824,8 @@ function makeIssIcon() {
     '<rect x="9" y="9" width="6" height="6" fill="' + ISS_PASS_COLOR + '" stroke="none"/>' +
     '<path d="M9 12H4M20 12h-5M4 8v8M20 8v8M9 9V4M9 20V15M15 9V4M15 20V15"/>' +
     '</svg>';
-  return L.divIcon({ html: svg, iconSize: [d, d], iconAnchor: [d / 2, d / 2], popupAnchor: [0, -d / 2], className: '' });
+  var p = padMarkerIcon(svg, d, d);
+  return L.divIcon({ html: p.html, iconSize: p.size, iconAnchor: [p.size[0] / 2, p.size[1] / 2], popupAnchor: [0, -p.size[1] / 2], className: '' });
 }
 
 function _issNormLon(lon) {
@@ -2979,7 +3100,7 @@ function issUpdatePosition() {
 
   if (!_issMarkers.length) {
     MAP_WORLD_OFFSETS.forEach(function() {
-      _issMarkers.push(L.marker([lat, lon], { icon: makeIssIcon(), zIndexOffset: 500 }).addTo(_map));
+      _issMarkers.push(L.marker([lat, lon], { icon: makeIssIcon(), zIndexOffset: 500, title: 'ISS (ZARYA)' }).addTo(_map));
     });
   }
   _issMarkers.forEach(function(m, i) {
@@ -3071,7 +3192,7 @@ function updateMap() {
     if (n.lat == null || n.lon == null) return;
     allPinned.push(n);
     MAP_WORLD_OFFSETS.forEach(function(off) {
-      var m = L.marker([n.lat, n.lon + off], {icon:makeStarIcon('#ffd700'), zIndexOffset:1000})
+      var m = L.marker([n.lat, n.lon + off], {icon:makeStarIcon('#ffd700'), zIndexOffset:1000, title:(n.callsign || n.node) + ' (this server)'})
         .bindPopup('<b><svg class="icon"><use href="#icon-star"></use></svg> ' + (n.callsign ? callsignLink(n.callsign, 'popup-node-link') : esc(n.node)) + '</b><br>' +
                    esc(n.location||'') + '<br><small>Node ' + nodeLink(n.node, 'popup-node-link') + ' &mdash; this server</small>');
       m.addTo(_map); _markers.push(m);
@@ -3083,7 +3204,7 @@ function updateMap() {
     if (c.lat == null || c.lon == null) return;
     allPinned.push(c);
     MAP_WORLD_OFFSETS.forEach(function(off) {
-      var m = L.marker([c.lat, c.lon + off], {icon:makeIcon('#e74c3c'), zIndexOffset:500})
+      var m = L.marker([c.lat, c.lon + off], {icon:makeIcon('#e74c3c'), zIndexOffset:500, title:(c.callsign || c.node) + ' (connected)'})
         .bindPopup('<b>' + (c.callsign ? callsignLink(c.callsign, 'popup-node-link') : esc(c.node)) + '</b><br>' +
                    esc(c.location||'') + '<br><small>Node ' + nodeLink(c.node, 'popup-node-link') + ' &mdash; connected</small>');
       m.addTo(_map); _markers.push(m);
@@ -3115,7 +3236,7 @@ function updateMap() {
         '</div>'
       : '';
     MAP_WORLD_OFFSETS.forEach(function(off) {
-      var m = L.marker([p.lat, p.lon + off], {icon:makeIcon(color, opacity)})
+      var m = L.marker([p.lat, p.lon + off], {icon:makeIcon(color, opacity), title:(p.callsign || p.node) + (p.type==='local' ? ' (keyed)' : ' (online)')})
         .bindPopup('<b>' + (p.callsign ? callsignLink(p.callsign, 'popup-node-link') : esc(p.node)) + '</b><br>' +
                    esc(p.location||'') + '<br><small>Node ' + nodeLink(p.node, 'popup-node-link') +
                    (p.type==='local' ? ' &mdash; keyed' : ' &mdash; online') + '</small>' +
@@ -3807,7 +3928,7 @@ function _drawFavicon(state) {
        drawing nothing before the image is ready. */
     var img = new Image();
     img.onload = function() { _faviconLogo = img; _drawFavicon(_faviconState); };
-    img.src = '/static/logo-512.png';
+    img.src = '/static/logo-128.png';
     return;
   }
   if (!_faviconCanvas) { _faviconCanvas = document.createElement('canvas'); _faviconCanvas.width = 64; _faviconCanvas.height = 64; }
@@ -3914,7 +4035,7 @@ async function refreshBoard() {
         (n.location ? '<div class="node-location">' + esc(n.location) + '</div>' : '') +
         '<div class="keyed-wrap">' +
           '<div class="keyed-dot ' + (healthy ? 'healthy' : 'down') + '">' +
-            '<img class="keyed-dot-logo" src="/static/logo-512.png" alt="">' +
+            '<img class="keyed-dot-logo" src="/static/logo-128.png" alt="">' +
           '</div>' +
           '<div class="keyed-label ' + (healthy ? 'healthy' : 'down') + '">' + (healthy ? 'ONLINE' : 'OFFLINE') + '</div>' +
         '</div>' +
@@ -5332,8 +5453,13 @@ function _txSetBtn(html, color) {
   var btn = document.getElementById('tx-btn');
   if (btn) {
     btn.innerHTML = html;
-    btn.style.color = color || '';
-    btn.classList.toggle('btn-active', color === 'var(--warn)');
+    /* color is also the active-state sentinel (see .node-controls .btn-icon
+       comment above) — the *displayed* text color while active is forced to
+       --text rather than the raw tint for contrast, but the sentinel check
+       itself still compares against the tint value passed in. */
+    var active = (color === 'var(--warn)');
+    btn.style.color = active ? 'var(--text)' : (color || '');
+    btn.classList.toggle('btn-active', active);
   }
 }
 
@@ -6215,14 +6341,19 @@ function _listenSetBtn(html, color, disabled) {
   var btn = document.getElementById('listen-btn');
   if (!btn) return;
   btn.innerHTML = html;
-  btn.style.color = color || '';
-  btn.disabled = !!disabled;
+  /* color is also the active-state sentinel (see .node-controls .btn-icon
+     comment above) — the *displayed* text color while active is forced to
+     --text rather than the raw tint for contrast, but the sentinel check
+     itself still compares against the tint value passed in. */
   var active = (color === 'var(--green)');
+  btn.style.color = active ? 'var(--text)' : (color || '');
+  btn.disabled = !!disabled;
   btn.classList.toggle('btn-active', active);
-  var volRow = document.getElementById('listen-vol-row');
-  if (volRow) volRow.style.opacity = active ? '1' : '0.4';
+  /* Dimming is scoped to the slider control itself, not the whole row —
+     see the CSS comment on #listen-vol-row (issue #103): the "Volume"
+     label is meaningful text and stays fully legible at every opacity. */
   var vol = document.getElementById('listen-volume');
-  if (vol) vol.disabled = !active;
+  if (vol) { vol.disabled = !active; vol.style.opacity = active ? '1' : '0.4'; }
 }
 
 /* Listen volume attenuates only the <audio> element's own playback gain —
@@ -7056,7 +7187,7 @@ var DASH_DEFAULT_TREE = {
      board refresh (and rewrites it on resize). Keep it in step with
      .node-card/.map-card's stylesheet row spans, which are what's painted
      until that first measurement lands. */
-  a: {type: 'split', dir: 'row', ratio: 6 / 24,
+  a: {type: 'split', dir: 'row', ratio: 10 / 24,
     a: {type: 'leaf', id: 'node'},
     b: {type: 'leaf', id: 'map'}
   },
