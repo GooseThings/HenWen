@@ -2821,7 +2821,7 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
       </div>
     </div>
 
-    <div class="card">
+    <div class="card" id="secret-key-settings-card">
       <div class="card-header"><h2>Flask Secret Key</h2></div>
       <div class="card-body">
         <p class="muted" style="margin-bottom:14px">
@@ -3389,8 +3389,13 @@ async function refreshDashboard() {
 
   document.getElementById('dash-ts').textContent = 'Updated: ' + new Date().toLocaleTimeString();
 
+  // Only superuser/owner can act on this (rotating SECRET_KEY is gated the
+  // same way now — see applyRoleNav()'s secretKeyCard), so admins don't get
+  // a warning pointing at a Settings card they can't see, same reasoning as
+  // checkForUpdate()'s own role check.
   var secretWarnEl = document.getElementById('dash-secret-warn');
-  secretWarnEl.innerHTML = d.secret_key_is_default
+  var isSuperForWarn = (window._henwenRole === 'superuser' || window._henwenRole === 'owner');
+  secretWarnEl.innerHTML = (d.secret_key_is_default && isSuperForWarn)
     ? '<div class="alert alert-warn">Still using the default SECRET_KEY. '
       + '<a href="javascript:void(0)" onclick="showPage(\'settings\')" style="color:inherit;text-decoration:underline">Change it in Settings</a>.</div>'
     : '';
@@ -6572,6 +6577,11 @@ async function applyRoleNav() {
      without shell access to fix it back. */
   var portsCard = document.getElementById('ports-settings-card');
   if (portsCard) portsCard.style.display = isSuper ? '' : 'none';
+  /* Only superuser/owner can rotate SECRET_KEY (matches the backend gate
+     on /api/settings/secret_key) — same unit-file-write-plus-restart
+     mechanism as ports above, and it force-logs-out every session. */
+  var secretKeyCard = document.getElementById('secret-key-settings-card');
+  if (secretKeyCard) secretKeyCard.style.display = isSuper ? '' : 'none';
   /* Recording Settings and Stream Relay are owner-only — matches the
      backend's explicit role==='owner' check on both config routes. */
   var isOwnerRole = (role === 'owner');
