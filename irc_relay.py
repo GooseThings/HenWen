@@ -188,6 +188,7 @@ class IRCClient:
         raw = socket.create_connection((self.host, self.port), timeout=self.timeout)
         if self.use_tls:
             ctx = ssl.create_default_context()
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
             self._sock = ctx.wrap_socket(raw, server_hostname=self.host)
         else:
             self._sock = raw
