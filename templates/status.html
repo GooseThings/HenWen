@@ -368,8 +368,19 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
    DASH_NON_GREEDY/dashSubtreeGreedy()), so Node still only claims what its
    content needs rather than stretching to the bottom of the window. The
    span below is only what's painted until the first board refresh — it must
-   stay in step with DASH_DEFAULT_TREE's node/map ratio (6/24), same
+   stay in step with DASH_DEFAULT_TREE's node/map ratio (10/24), same
    invariant as every other default here.
+   That ratio was tuned to the actual measured height of a typical
+   populated card (header + identity block + controls + volume row),
+   not picked arbitrarily -- a static guess far from what
+   dashFitNodeCard() computes on the first real refresh is itself a
+   layout-shift source (issue #101: a 6/24 guess against real content
+   came out closer to 10/24, a jump big enough to register as the
+   single largest contributor to a 0.774 Lighthouse CLS score). This
+   still won't be exact for every install (callsign/location length,
+   which buttons a viewer's role shows, etc. all vary), but it should
+   land close enough that the one guaranteed first-refresh reflow is
+   barely visible instead of a full card resizing under the viewer.
 
    The card itself carries no padding of its own — .card-header uses its
    ordinary shared style (padding/border-bottom) exactly like every other
@@ -381,7 +392,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
    card's). All of the actual "pad the content, absorb the auto-fit
    leftover" work happens one level down, in .node-body, below. ── */
 .node-card {
-  grid-column: 1 / span 4; grid-row: 1 / span 6;
+  grid-column: 1 / span 4; grid-row: 1 / span 10;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
@@ -758,7 +769,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .mesh-text { font-size: 0.78rem; color: var(--text); word-wrap: break-word; margin-top: 1px; }
 
 /* ── Map ── */
-.map-card { grid-column: 1 / span 4; grid-row: 7 / span 18; min-height: 0;
+.map-card { grid-column: 1 / span 4; grid-row: 11 / span 14; min-height: 0;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; }
 #map { flex: 1; background: #0d1117; }
@@ -6881,7 +6892,7 @@ var DASH_DEFAULT_TREE = {
      board refresh (and rewrites it on resize). Keep it in step with
      .node-card/.map-card's stylesheet row spans, which are what's painted
      until that first measurement lands. */
-  a: {type: 'split', dir: 'row', ratio: 6 / 24,
+  a: {type: 'split', dir: 'row', ratio: 10 / 24,
     a: {type: 'leaf', id: 'node'},
     b: {type: 'leaf', id: 'map'}
   },
