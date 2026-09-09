@@ -2071,7 +2071,7 @@ def parse_manager_conf():
         result["secret"] = env_secret
         return result
     elif env_user and env_secret and env_secret.lower() in PLACEHOLDERS:
-        log("WARN", f"[AMI-CREDS] AMI_SECRET is a placeholder ('{env_secret}') — "
+        log("WARN", "[AMI-CREDS] AMI_SECRET is a placeholder value — "
                     "falling through to read manager.conf directly")
     else:
         log("INFO", f"[AMI-CREDS] AMI_USER/AMI_SECRET not set — reading {MANAGER_CONF} directly")
@@ -5851,7 +5851,7 @@ def api_get_backup(filename):
     # Legacy endpoint kept for backward compatibility
     if not re.match(r'^rpt\.conf\.\d{8}_\d{6}\.bak$', filename):
         return jsonify({"error": "Invalid filename"}), 400
-    path = os.path.join(BACKUP_DIR, filename)
+    path = os.path.join(BACKUP_DIR, os.path.basename(filename))
     if not os.path.exists(path):
         return jsonify({"error": "Not found"}), 404
     with open(path) as f:
@@ -5862,7 +5862,7 @@ def api_get_backup(filename):
 def api_backup_download(name):
     if not re.match(r'^rpt\.conf\.\d{8}_\d{6}\.bak$', name):
         return jsonify({"error": "Invalid filename"}), 400
-    path = os.path.join(BACKUP_DIR, name)
+    path = os.path.join(BACKUP_DIR, os.path.basename(name))
     if not os.path.exists(path):
         return jsonify({"error": "Not found"}), 404
     return send_file(path, as_attachment=True, download_name=name)
@@ -5872,7 +5872,7 @@ def api_backup_download(name):
 def api_backup_diff(name):
     if not re.match(r'^rpt\.conf\.\d{8}_\d{6}\.bak$', name):
         return jsonify({"error": "Invalid filename"}), 400
-    path = os.path.join(BACKUP_DIR, name)
+    path = os.path.join(BACKUP_DIR, os.path.basename(name))
     if not os.path.exists(path):
         return jsonify({"error": "Not found"}), 404
     try:
@@ -5897,7 +5897,7 @@ def api_backup_diff(name):
 def api_backup_restore(name):
     if not re.match(r'^rpt\.conf\.\d{8}_\d{6}\.bak$', name):
         return jsonify({"error": "Invalid filename"}), 400
-    path = os.path.join(BACKUP_DIR, name)
+    path = os.path.join(BACKUP_DIR, os.path.basename(name))
     if not os.path.exists(path):
         return jsonify({"error": "Not found"}), 404
     try:
@@ -5920,7 +5920,7 @@ def api_backup_delete(name):
         return jsonify({"error": "Superuser access required to delete backups"}), 403
     if not re.match(r'^rpt\.conf\.\d{8}_\d{6}\.bak$', name):
         return jsonify({"error": "Invalid filename"}), 400
-    path = os.path.join(BACKUP_DIR, name)
+    path = os.path.join(BACKUP_DIR, os.path.basename(name))
     if not os.path.exists(path):
         return jsonify({"error": "Not found"}), 404
     try:
@@ -6067,7 +6067,7 @@ def api_kiosk_logo_upload():
         return err
     _clear_kiosk_logo_files()
     filename = f"kiosk-logo{ext}"
-    f.save(os.path.join(KIOSK_LOGO_DIR, filename))
+    f.save(os.path.join(KIOSK_LOGO_DIR, os.path.basename(filename)))
 
     version = int(get_setting('kiosk_logo_version', '0') or 0) + 1
     set_setting('kiosk_logo_filename', filename)
@@ -6621,7 +6621,7 @@ def api_favorites():
         return resp
     except Exception as e:
         log("ERROR", f"[API] /api/favorites: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal error"}), 500
 
 
 @app.route("/api/favorites/status")
@@ -6643,7 +6643,7 @@ def api_favorites_status():
         })
     except Exception as e:
         log("ERROR", f"[API] /api/favorites/status: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal error"}), 500
 
 
 @app.route("/api/favorites/add", methods=["POST"])
@@ -6673,7 +6673,8 @@ def api_fav_add():
         log("INFO", f"[API] Favorite added: user_id={user_id} node={node} label={label!r}")
         return jsonify({"success": True, "node": node, "label": label})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        log("ERROR", f"[API] /api/favorites/add: {e}")
+        return jsonify({"error": "Internal error"}), 500
 
 
 @app.route("/api/favorites/delete", methods=["POST"])
@@ -6690,7 +6691,8 @@ def api_fav_delete():
         log("INFO", f"[API] Favorite deleted: user_id={user_id} node={node}")
         return jsonify({"success": True})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        log("ERROR", f"[API] /api/favorites/delete: {e}")
+        return jsonify({"error": "Internal error"}), 500
 
 
 @app.route("/api/favorites/label", methods=["POST"])
@@ -6708,7 +6710,8 @@ def api_fav_label():
         db.commit()
         return jsonify({"success": True})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        log("ERROR", f"[API] /api/favorites/label: {e}")
+        return jsonify({"error": "Internal error"}), 500
 
 
 @app.route("/api/favorites/reorder", methods=["POST"])
@@ -7550,7 +7553,7 @@ def api_status_connect():
         return jsonify({"ok": True, "output": result})
     except Exception as e:
         log("ERROR", f"[API] /api/status/connect error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Connect failed"}), 500
 
 
 @app.route("/api/status/disconnect", methods=["POST"])
@@ -7607,7 +7610,7 @@ def api_status_disconnect():
         return jsonify({"ok": True, "output": result})
     except Exception as e:
         log("ERROR", f"[API] /api/status/disconnect error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Disconnect failed"}), 500
 
 
 @app.route("/api/status/squash-idle", methods=["POST"])
@@ -8651,8 +8654,16 @@ def _start_broadcast(node):
     _try_audiosocket_tap()), spawn the audio_relay.py pacing process
     (raw PCM in -> paced FIFO out), then point ffmpeg directly at the
     paced FIFO -> WebM/Opus -> HTTP clients. Raises on error.
+
+    Every caller already regex-validates node before calling this, but
+    that guard living several frames away from where node gets baked into
+    FIFO paths and an ffmpeg argv isn't something static analysis (or a
+    future caller) can be trusted to see -- round-tripping through int()
+    here is a hard, local guarantee that node is nothing but digits by the
+    time it reaches any filesystem or subprocess call below.
     """
     _t0 = time.monotonic()
+    node = str(int(node))
     channel = _find_node_channel(node)
     if not channel:
         raise RuntimeError(
@@ -9106,6 +9117,7 @@ def _start_capture_only(node):
     relay_proc even if one happens to exist for the same node. Raises on
     error, exactly like _start_broadcast()."""
     _t0 = time.monotonic()
+    node = str(int(node))   # see _start_broadcast()'s same guard for why
     channel = _find_node_channel(node)
     if not channel:
         raise RuntimeError(
@@ -9273,7 +9285,8 @@ def api_internal_audio_ensure_capture():
         _ensure_capture_only(node)
     except Exception as e:
         log('ERROR', f'[AUDIO-WS] ensure-capture failed for node {node}: {e}')
-        return jsonify({'error': str(e)}), 500
+        msg = str(e) if isinstance(e, RuntimeError) else 'Could not start capture'
+        return jsonify({'error': msg}), 500
     # Piggybacked here rather than a separate internal endpoint: this is
     # already the one round-trip audio_ws_relay.py makes right before
     # spawning its own per-node Opus encoder, the exact moment it needs to
@@ -9442,7 +9455,12 @@ def api_audio_stream(node):
     except Exception as e:
         log('ERROR', f'[AUDIO] stream setup failed for {node} ({remote}): {e}\n'
                     f'{traceback.format_exc()}')
-        return jsonify({'error': str(e)}), 500
+        # RuntimeError here is _start_broadcast()'s own deliberately
+        # user-safe text (e.g. "no active channel for node X") -- anything
+        # else could be a raw subprocess/AMI error carrying internal detail,
+        # so only the former is safe to hand back to the client.
+        msg = str(e) if isinstance(e, RuntimeError) else 'Audio stream setup failed'
+        return jsonify({'error': msg}), 500
 
     def generate():
         yielded = 0
@@ -9634,7 +9652,10 @@ def api_recording_start():
             client_q = broadcast.add_client(client_label)
     except Exception as e:
         log('ERROR', f'[RECORDING] failed to attach to broadcast for node {node}: {e}')
-        return jsonify({'error': str(e)}), 500
+        # See api_audio_stream()'s matching comment: only _start_broadcast()'s
+        # own RuntimeError text is safe to hand back to the client.
+        msg = str(e) if isinstance(e, RuntimeError) else 'Could not attach to node audio'
+        return jsonify({'error': msg}), 500
 
     os.makedirs(RECORDINGS_DIR, exist_ok=True)
     output_format = cfg['output_format']
@@ -9704,7 +9725,7 @@ def api_recording_start():
         db.execute("UPDATE recordings SET status='error', stop_reason=? WHERE id=?", (str(e), recording_id))
         db.commit()
         log('ERROR', f'[RECORDING] #{recording_id} failed to start pipeline: {e}')
-        return jsonify({'error': f'Could not start recording: {e}'}), 500
+        return jsonify({'error': 'Could not start recording'}), 500
 
     with _recordings_lock:
         _active_recordings[recording_id] = recorder
@@ -11569,6 +11590,12 @@ def _piper_voice_urls(voice_id: str):
 
 
 def _voice_model_paths(voice_id: str):
+    # Every caller already checks voice_id against TTS_VOICES first, but
+    # that check living in a different function than this one (the actual
+    # path-join) isn't something worth trusting blindly -- basename() here
+    # is a hard local guarantee against directory traversal regardless of
+    # what a future caller forgets to check.
+    voice_id = os.path.basename(str(voice_id))
     onnx = os.path.join(TTS_VOICES_DIR, f"{voice_id}.onnx")
     json_ = os.path.join(TTS_VOICES_DIR, f"{voice_id}.onnx.json")
     return onnx, json_
@@ -11736,7 +11763,11 @@ def _convert_to_ulaw(src: str, dest: str) -> None:
 
 
 def _ann_sound_path(slug: str) -> str:
-    return os.path.join(SOUNDS_DIR, f"{slug}.ulaw")
+    # slug is already _ann_slug()'d to [a-zA-Z0-9_-] by every caller, but
+    # this is the actual path-join point -- basename() makes that a hard
+    # local guarantee rather than something every future caller must
+    # remember to have done first.
+    return os.path.join(SOUNDS_DIR, f"{os.path.basename(slug)}.ulaw")
 
 
 def _ensure_sounds_dir():
@@ -11992,6 +12023,7 @@ def api_ann_create():
     ext = os.path.splitext(f.filename)[1].lower()
     if ext not in ALLOWED_UPLOAD_EXTS:
         return jsonify({"error": f"Unsupported file type: {ext}"}), 400
+    ext = os.path.basename(ext)  # hard local guarantee for the tempfile suffix below
 
     err = _ensure_sounds_dir()
     if err:
@@ -14855,6 +14887,7 @@ def api_id_upload():
     ext = os.path.splitext(f.filename)[1].lower()
     if ext not in ALLOWED_UPLOAD_EXTS:
         return jsonify({"error": f"Unsupported type: {ext}"}), 400
+    ext = os.path.basename(ext)  # hard local guarantee for the tempfile suffix below
 
     name      = request.form.get("name", os.path.splitext(f.filename)[0]).strip() or "id-sound"
     base_slug = _ann_slug(name)
