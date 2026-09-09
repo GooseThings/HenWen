@@ -5439,10 +5439,9 @@ async function removeFavorite(node) {
    Credentials come from /api/tx/config (admin/superuser only); the button
    is hidden unless that endpoint says the feature is configured AND the
    page is a secure context (mic capture requires HTTPS). */
-var _tx = { ua: null, session: null, keyed: false, armed: false, idleTimer: null,
+var _tx = { ua: null, session: null, keyed: false, armed: false,
             node: '', statsTimer: null,
             audioCtx: null, gainNode: null, analyser: null, rawStream: null, meterTimer: null };
-var _TX_IDLE_HANGUP_MS = 5 * 60 * 1000;  // auto-disarm after 5 min without keying
 
 /* Mic gain: the browser's autoGainControl drove a headset mic to hard
    clipping (media-source audioLevel pinned at 1.000, "much too loud" on a
@@ -6224,7 +6223,6 @@ async function armTx() {
         document.getElementById('tx-ptt').disabled = false;
         /* Listen is the monitor path — make sure it's running */
         if (!_listenActive) _startListen();
-        _txTouchIdle();
         _txDiag('armed', 'call confirmed');
         _txStatsSample('armed');
       });
@@ -6270,7 +6268,6 @@ function _txReleaseMic() {
    readable. Listen is left exactly as the user has it (just unmuted). */
 function _txTeardown() {
   _txUnkey();
-  clearTimeout(_tx.idleTimer);
   clearTimeout(_tx.statsTimer);
   var pttEl = document.getElementById('tx-ptt');
   if (pttEl) pttEl.disabled = true;
@@ -6284,16 +6281,6 @@ function disarmTx() {
   _tx.armed = false;
   _txTeardown();
   document.getElementById('tx-bar').style.display = 'none';
-}
-
-function _txTouchIdle() {
-  clearTimeout(_tx.idleTimer);
-  _tx.idleTimer = setTimeout(function() {
-    if (_tx.session) {
-      sbToast('TX disarmed after 5 minutes idle', false);
-      disarmTx();
-    }
-  }, _TX_IDLE_HANGUP_MS);
 }
 
 /* Mute Listen only while keyed — the radio-style RX mute. Restored on
@@ -6312,7 +6299,6 @@ function _txKey() {
   b.classList.add('tx');
   _txStatus('TRANSMITTING', 'var(--red)');
   _txMuteListen(true);
-  _txTouchIdle();
   try { _tx.session.sendDTMF('*99', { duration: 100, interToneGap: 70 }); }
   catch (e) {
     _tx.keyed = false; b.classList.remove('tx'); _txMuteListen(false);
@@ -6332,7 +6318,6 @@ function _txUnkey() {
   _txMuteListen(false);
   if (_tx.session && _tx.session.isEstablished()) {
     _txStatus('');
-    _txTouchIdle();
     try { _tx.session.sendDTMF('#', { duration: 100, interToneGap: 70 }); } catch (e) {}
   }
 }
