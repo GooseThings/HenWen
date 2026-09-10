@@ -906,6 +906,17 @@ def get_db():
     _rx_audio_cfg_cols = {r[1] for r in conn.execute("PRAGMA table_info(rx_audio_config)").fetchall()}
     if 'agc_enabled' not in _rx_audio_cfg_cols:
         conn.execute("ALTER TABLE rx_audio_config ADD COLUMN agc_enabled INTEGER NOT NULL DEFAULT 0")
+    # RX_AUDIO_DEFAULT_PATH is set by install.sh only when it successfully
+    # provisioned the Apache /ws-audio proxy for a fresh install (see
+    # "Low-latency RX audio" in CLAUDE.md) -- unset/invalid for every
+    # existing install and every test run, in which case this is a no-op
+    # and rx_audio_config stays exactly as it is today (no row, callers fall
+    # back to RX_AUDIO_CONFIG_DEFAULTS). Only ever seeds the row once (guard
+    # is "no row yet"), so a later explicit Manager > Audio save always wins.
+    _rx_audio_default_path = os.environ.get("RX_AUDIO_DEFAULT_PATH", "").strip().lower()
+    if _rx_audio_default_path in RX_AUDIO_PATHS:
+        if not conn.execute("SELECT 1 FROM rx_audio_config WHERE id=1").fetchone():
+            conn.execute("INSERT INTO rx_audio_config (id, path) VALUES (1, ?)", (_rx_audio_default_path,))
     conn.commit()
     # Singleton config for the Meshtastic MQTT panel (meshtastic_mqtt.py) —
     # root topic / channel name / PSK, owner-only. Broker host/port/creds
@@ -8861,13 +8872,15 @@ def _try_audiosocket_tap(node, channel, fifo_out_path, gen, relay_env):
     effect on the channel's own Rpt() execution, with clean teardown via
     Hangup-by-ChannelId leaving no stray channels behind.
 
-    Purely additive/opt-in: on ANY failure -- most commonly the feature
-    simply not installed yet (audiosocket-tap/apply.sh never run, the
-    common case for every existing install today), but also a handshake
+    Purely additive: on ANY failure -- most commonly the feature not
+    installed yet (audiosocket-tap/apply.sh never run or failed -- install.sh
+    applies it automatically on every fresh install, but only when Asterisk
+    is already installed and running at install time), but also a handshake
     timeout or a rejected Originate -- this returns None so the caller
     falls straight through to the existing MixMonitor path unchanged.
     Never raises; every failure is logged at DEBUG rather than WARN, since
-    "not available" is the expected steady state until an owner opts in.
+    "not available" is a real, non-error steady state for any install where
+    the automatic apply didn't run or hasn't happened yet.
     Returns (relay_proc, tap_channel_id) on success.
     """
     try:
@@ -10933,12 +10946,15 @@ def api_update_launch():
 
 # ── AudioSocket tap (low-latency Listen audio) ───────────────────────────────
 #
-# Optional opt-in swap of the Status Board's Listen capture path from AMI
-# MixMonitor (buffered, ~2s latency — see "Audio streaming" in CLAUDE.md) to
-# a live AudioSocket tap. See audiosocket-tap/README.md for what apply.sh
-# actually does. Owner-only, matching every other shell/deploy-level action
-# on this page (Force Update, ports, secret key) — misconfiguring Asterisk
-# modules/dialplan isn't something to expose below the top role.
+# Swaps the Status Board's Listen capture path from AMI MixMonitor (buffered,
+# ~2s latency — see "Audio streaming" in CLAUDE.md) to a live AudioSocket
+# tap. install.sh applies this automatically on every fresh install (when
+# Asterisk is already running at install time); these routes exist for
+# installs where that didn't happen yet, or to re-apply after a rollback.
+# See audiosocket-tap/README.md for what apply.sh actually does. Owner-only,
+# matching every other shell/deploy-level action on this page (Force Update,
+# ports, secret key) — misconfiguring Asterisk modules/dialplan isn't
+# something to expose below the top role.
 
 @app.route("/api/audiosocket-tap/status")
 def api_audiosocket_tap_status():
@@ -10993,11 +11009,15 @@ def api_audiosocket_tap_apply():
                                 "next time it starts for any node — no restart needed."})
 
 
-# Optional Apache proxy for the low-latency RX audio path's WebSocket server
-# (audio_ws_relay.py, always running once HenWen starts) — see
-# ws-audio/README.md for what apply.sh does. Owner-only, same rationale as
-# the AudioSocket tap routes above: this edits an Apache vhost, not
-# something to expose below the top role.
+# Apache proxy for the low-latency RX audio path's WebSocket server
+# (audio_ws_relay.py, always running once HenWen starts). install.sh applies
+# this automatically on every fresh install (provisioning a minimal Apache
+# vhost first if none exists yet, or reusing one from browser TX's HTTPS
+# setup) and seeds rx_audio_config.path to 'lowlatency' when it succeeds —
+# these routes exist for installs that predate that, or where the automatic
+# step failed/was declined. See ws-audio/README.md for what apply.sh does.
+# Owner-only, same rationale as the AudioSocket tap routes above: this edits
+# an Apache vhost, not something to expose below the top role.
 
 @app.route("/api/ws-audio/status")
 def api_ws_audio_status():
