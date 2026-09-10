@@ -667,18 +667,23 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 /* A connected node is two deliberate lines: identity (dot, number, callsign,
    location — location stays glued to the right of the callsign, truncating
    with an ellipsis via .nr-loc rather than wrapping to its own line, so it
-   never jumps around) then the stats strip (connect time, keyups, mode/idle
-   badges and their admin buttons). Always two lines rather than
-   wrap-only-when-needed on purpose: the idle timer and keyup counts re-render
-   every couple of seconds with varying widths, and fit-dependent wrapping
-   would make rows jitter between one and two lines as those tick over.
+   never jumps around) then the stats strip (connect time, keyups, mode
+   badge). Always two lines rather than wrap-only-when-needed on purpose: the
+   keyup count re-renders every couple of seconds with a varying width, and
+   fit-dependent wrapping would make rows jitter between one and two lines as
+   those tick over.
 
    The right side (.nr-side) mirrors that two-line shape on its own axis: the
-   chime toggle and disconnect X sit on one line, the keyed-activity timeline
-   directly under them on the next — rather than the X spanning the row's
-   full height beside a timeline floating off to the side, so the timeline
-   reads as "this button's own activity strip" instead of an unrelated
-   third column. */
+   idle-timeout badge (countdown/No-Timeout/Permanent/untracked, whichever
+   applies) sits right in front of the disconnect X on one line, the keyed-
+   activity timeline (with the chime toggle right after it) directly under on
+   the next — rather than the X spanning the row's full height beside a
+   timeline floating off to the side, so the timeline reads as this row's own
+   activity strip instead of an unrelated third column, and the chime toggle
+   reads as acting on that same strip rather than as another button paired
+   with disconnect. The idle badge lives here rather than in the stats strip
+   so it sits next to the button (Reset/No-Timeout-restore) it directly
+   controls, instead of across the row from it. */
 .node-row { display: flex; align-items: center; gap: 10px; min-width: 0;
   padding: 8px 18px;
   border-bottom: 1px solid var(--border); transition: background .15s; }
@@ -719,25 +724,32 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   display: flex; align-items: center; gap: 10px; row-gap: 3px; flex-wrap: wrap; }
 .nr-meta span { white-space: nowrap; }
 .nr-meta strong { color: var(--text); }
-/* The right-hand column: chime toggle + disconnect X on top, the keyed-
-   activity timeline underneath — see the .node-row comment above for why.
-   min-width:0 lets it shrink below its content size (needed for
-   .nr-timeline's max-width:100% below to actually bite on a narrow
-   dashboard-resized column instead of overflowing the row). */
+/* The right-hand column: idle badge + disconnect X on top, the keyed-activity
+   timeline (plus the chime toggle right after it) underneath — see the
+   .node-row comment above for why. min-width:0 lets it shrink below its
+   content size (needed for .nr-timeline's max-width:100% below to actually
+   bite on a narrow dashboard-resized column instead of overflowing the row). */
 .nr-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px;
   flex: 0 1 auto; min-width: 0; }
-.nr-side-top { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+/* wrap+justify-end (not nowrap): the idle badge can carry a Reset button or
+   a countdown that's wider than the disconnect X alone, so on a narrow
+   dashboard-resized column this drops the badge above the X instead of
+   overflowing the row horizontally. */
+.nr-side-top { display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+  flex-wrap: wrap; justify-content: flex-end; }
 .nr-side-top .sb-btn.disconnect { flex: 0 0 auto; }
+.nr-side-bottom { display: flex; align-items: center; gap: 6px; min-width: 0; }
 
 /* Keyed-activity timeline: a strip of per-bucket bars, newest on the right.
-   Sized with width/max-width rather than flex-basis now that it's stacked
-   under the buttons in .nr-side (a column) instead of sitting beside
-   .nr-main as a row sibling — flex-basis governs the *main* axis of its
-   parent, which is vertical (height) in a column container, so a
-   flex-basis here would size the strip's height, not its width. 240px keeps
-   every bar a small, constant, predictable pixel width regardless of screen
-   size; max-width:100% (with .nr-side's own min-width:0 above) still lets a
-   custom-resized narrow dashboard column compress it rather than overflow
+   Sized with width/max-width rather than flex-basis now that it sits inside
+   .nr-side-bottom, itself stacked under the disconnect button in .nr-side (a
+   column), instead of sitting beside .nr-main as a row sibling — flex-basis
+   governs the *main* axis of its parent, which is vertical (height) in a
+   column container, so a flex-basis here would size the strip's height, not
+   its width. 240px keeps every bar a small, constant, predictable pixel
+   width regardless of screen size; max-width:100% (with .nr-side's own
+   min-width:0 above) still lets a custom-resized narrow dashboard column
+   compress it rather than overflow
    the row. Bars spike full-height red when that bucket saw any keyup,
    otherwise sit at a low gray baseline (seen but quiet) or render invisible
    (no data yet for that slice — e.g. right after the connection appeared or
@@ -4472,7 +4484,7 @@ async function refreshBoard() {
             : '<span title="Not tracked for idle timeout — connected outside the kiosk"><svg class="icon"><use href="#icon-clock"></use></svg></span>';
           idleBadge = '<span class="idle-badge off">' + trackBtn + '</span>';
         }
-        var badges = modeBadge + idleBadge;
+        var badges = modeBadge;
         var dotClass = !isConn ? ' connecting' : (c.keyed ? ' keyed' : ' connected');
         var isAdminRole = window._kioskRole === 'admin' || window._kioskRole === 'superuser' || window._kioskRole === 'owner';
         var dcBtn = (c.connector_managed && !isAdminRole)
@@ -4498,8 +4510,11 @@ async function refreshBoard() {
             (!isConn ? '<div class="nr-meta" style="color:var(--warn)">Connecting…</div>' : '') +
           '</div>' +
           '<div class="nr-side">' +
-            '<div class="nr-side-top">' + renderChimeToggle(c.local_node, c.node) + dcBtn + '</div>' +
-            renderKeyedTimeline(c.local_node, c.node) +
+            '<div class="nr-side-top">' + idleBadge + dcBtn + '</div>' +
+            '<div class="nr-side-bottom">' +
+              renderKeyedTimeline(c.local_node, c.node) +
+              renderChimeToggle(c.local_node, c.node) +
+            '</div>' +
           '</div>' +
         '</div>';
       }).join('');
