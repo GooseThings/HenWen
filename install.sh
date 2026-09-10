@@ -397,18 +397,20 @@ fi
 # ── Sudoers rule for privileged systemctl actions ─────────
 # The service runs unprivileged as User=asterisk (see HenWen.service), but
 # the Dashboard's "Restart Asterisk" button, secret-key rotation, port
-# rotation, the "Launch Updater" button, and the Settings page's "Apply"
-# buttons for the AudioSocket tap and low-latency RX audio proxy need to run
-# `systemctl restart asterisk`, `systemctl restart HenWen`, `systemctl daemon-reload`,
-# rotate_secret_key.sh / update_service_ports.sh (the only code allowed to
-# edit the root-owned unit file's SECRET_KEY/PORT/AMI_PORT lines — see
-# app.py's api_set_secret_key / api_set_ports), (via systemd-run, so it
-# survives outside HenWen.service's own cgroup) update.sh,
-# audiosocket-tap/apply.sh (edits /etc/asterisk/modules.conf and
-# custom/extensions.conf, loads Asterisk modules live — see
-# audiosocket-tap/README.md), and ws-audio/apply.sh (edits the Apache vhost
-# to add the low-latency RX audio path's WebSocket proxy — see
-# ws-audio/README.md). Without this rule those actions fail with
+# rotation, the "Launch Updater" button, and the Settings/Diagnostics pages'
+# "Apply" buttons for the AudioSocket tap, low-latency RX audio proxy, and
+# browser TX setup need to run `systemctl restart asterisk`, `systemctl
+# restart HenWen`, `systemctl daemon-reload`, rotate_secret_key.sh /
+# update_service_ports.sh (the only code allowed to edit the root-owned unit
+# file's SECRET_KEY/PORT/AMI_PORT lines — see app.py's api_set_secret_key /
+# api_set_ports), (via systemd-run, so it survives outside HenWen.service's
+# own cgroup) update.sh, audiosocket-tap/apply.sh (edits
+# /etc/asterisk/modules.conf and custom/extensions.conf, loads Asterisk
+# modules live — see audiosocket-tap/README.md), ws-audio/apply.sh (edits
+# the Apache vhost to add the low-latency RX audio path's WebSocket proxy —
+# see ws-audio/README.md), and tx-spike/apply.sh (edits Asterisk's PJSIP
+# config and the same Apache vhost to add browser TX's WSS proxy — see
+# tx-spike/README.md). Without this rule those actions fail with
 # "Interactive authentication required" since there's no session for
 # polkit to prompt. Scope is intentionally limited to these exact commands
 # — do not broaden with wildcards. The updater rule only works if
@@ -431,6 +433,7 @@ asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/update_service_ports.sh
 asterisk ALL=(root) NOPASSWD: ${SYSTEMD_RUN_BIN} --unit=henwen-updater --collect ${INSTALL_DIR}/update.sh
 asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/audiosocket-tap/apply.sh
 asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/ws-audio/apply.sh
+asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/tx-spike/apply.sh
 EOF
 # visudo ships as part of the sudo package, so "no visudo" means sudo simply
 # isn't installed on this box — a legitimate choice, not an error. Say so

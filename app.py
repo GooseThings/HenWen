@@ -338,7 +338,14 @@ WS_AUDIO_APPLY_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file
 # Same marker string ws-audio/apply.sh greps for -- see that script's own
 # comment for why it patches whichever of these two vhost files is present.
 WS_AUDIO_MARKER = "HenWen low-latency RX audio"
-WS_AUDIO_APACHE_CONF_CANDIDATES = (
+# The two names a HenWen Apache vhost can be under -- henwen-ssl.conf from
+# setup-https.sh's full Let's-Encrypt flow, or henwen.conf from its
+# --http-only mode (install.sh's own default, and what an operator fronting
+# HTTPS with their own reverse proxy/tunnel is left with). Shared by
+# api_rx_diagnostics()/api_ws_audio_status() (ws-audio's own proxy check)
+# and api_tx_diagnostics()/api_tx_apply_status() (tx-spike's), mirroring
+# tx-spike/apply.sh's identical candidate-loop.
+HENWEN_APACHE_VHOST_CANDIDATES = (
     "/etc/apache2/sites-enabled/henwen-ssl.conf",
     "/etc/apache2/sites-enabled/henwen.conf",
 )
@@ -8039,6 +8046,24 @@ def api_status_reset_idle():
 TX_SECRET_PATH = os.environ.get("TX_SECRET_PATH", "/etc/asterisk/henwen-tx.secret")
 TX_SIP_USER    = os.environ.get("TX_SIP_USER", "henwen-tx")
 TX_WS_PATH     = os.environ.get("TX_WS_PATH", "/asterisk-ws")
+TX_APPLY_SCRIPT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "tx-spike", "apply.sh"
+)
+
+
+def _find_henwen_apache_vhost():
+    """Which of HENWEN_APACHE_VHOST_CANDIDATES (if any) is actually fronting
+    HenWen's own Flask port right now -- i.e. apply.sh's own candidate-loop,
+    reimplemented read-only so the Manager UI/diagnostics can tell an
+    operator whether apply.sh is even ready to run, before they try it."""
+    for candidate in HENWEN_APACHE_VHOST_CANDIDATES:
+        try:
+            with open(candidate) as f:
+                if re.search(r'ProxyPass\s+/ http://127\.0\.0\.1:\d+/', f.read()):
+                    return candidate
+        except OSError:
+            continue
+    return None
 
 
 @app.route("/api/tx/config")
@@ -8131,6 +8156,20 @@ def api_tx_diagnostics():
             "detail": detail,
         })
 
+    # The true prerequisite gate: apply.sh itself refuses to run at all
+    # without one of these vhosts present (see its own candidate-loop
+    # comment) -- surfaced here first so an operator sees "provision Apache
+    # first" instead of every check below it failing for the same root
+    # cause. Confirmed live: install.sh's own default (--http-only,
+    # henwen.conf) satisfies this just as well as the full Let's-Encrypt
+    # flow's henwen-ssl.conf -- neither name needs to be created by hand.
+    vhost_found = _find_henwen_apache_vhost()
+    add("Apache vhost ready for apply.sh", vhost_found is not None,
+        f"Found: {vhost_found}" if vhost_found else
+        "No HenWen Apache vhost found (checked henwen-ssl.conf and henwen.conf) — "
+        "run setup-https.sh first (--http-only is enough if you front HTTPS "
+        "yourself with an external reverse proxy/tunnel)")
+
     try:
         with open(TX_SECRET_PATH) as f:
             secret_configured = bool(f.read().strip())
@@ -8189,6 +8228,71 @@ def api_tx_diagnostics():
     log("INFO", f"[TX-DIAG] {session.get('username', '?')} ran TX diagnostics: "
                 f"{summary['pass']} pass, {summary['fail']} fail, {summary['warn']} warn")
     return jsonify({"checks": checks, "summary": summary, "raw_output": script_output})
+
+
+# One-click TX setup, mirroring api_ws_audio_status()/api_ws_audio_apply()
+# (and the AudioSocket tap routes those two themselves mirror) exactly —
+# same owner-only gate, same narrowly-scoped passwordless-sudo pattern.
+# Closes the one gap those two already-shipped features didn't have: before
+# this, tx-spike/apply.sh was the only one of the three apply.sh scripts an
+# operator had to SSH in and run by hand.
+
+@app.route("/api/tx/apply-status")
+def api_tx_apply_status():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Owner access required"}), 403
+    try:
+        with open(TX_SECRET_PATH) as f:
+            applied = bool(f.read().strip())
+    except OSError:
+        applied = False
+    vhost_found = _find_henwen_apache_vhost()
+    return jsonify({
+        "applied":     applied,
+        "installed":   os.path.exists(TX_APPLY_SCRIPT_PATH),
+        "vhost_found": vhost_found,
+    })
+
+
+@app.route("/api/tx/apply", methods=["POST"])
+def api_tx_apply():
+    """Runs tx-spike/apply.sh via the same narrowly-scoped passwordless sudo
+    rule pattern as the ws-audio/AudioSocket tap apply routes. Live-loads
+    Asterisk PJSIP modules and generates/keeps a real SIP credential -- see
+    apply.sh's own comments for exactly what it touches. Doesn't restart
+    HenWen or Asterisk."""
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Owner access required"}), 403
+
+    if not os.path.exists(TX_APPLY_SCRIPT_PATH):
+        return jsonify({"error": f"apply.sh not found: {TX_APPLY_SCRIPT_PATH}"}), 404
+
+    cmd = [SUDO_PATH, "-n", TX_APPLY_SCRIPT_PATH]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "apply.sh timed out after 30s — check "
+                                  "journalctl / apache2ctl configtest by hand"}), 500
+    except Exception as e:
+        log("ERROR", f"[API] /api/tx/apply exception: {e}")
+        return jsonify({"error": str(e)}), 500
+
+    output = (r.stdout or "") + (r.stderr or "")
+    if r.returncode != 0:
+        hint = ("Service account lacks sudo rights for apply.sh — re-run install.sh "
+                 "to install the henwen-systemctl sudoers rule."
+                 if "password" in output.lower() or "authoriz" in output.lower()
+                 else None)
+        log("ERROR", f"[API] tx apply failed (exit {r.returncode}): {output.strip()}")
+        resp = {"error": output.strip() or f"apply.sh returned code {r.returncode}", "output": output}
+        if hint:
+            resp["hint"] = hint
+        return jsonify(resp), 500
+
+    log("INFO", f"[API] Browser TX applied by '{session.get('username')}'")
+    return jsonify({"success": True, "output": output,
+                     "message": "Browser TX applied. The TX button should now appear on the "
+                                "kiosk for logged-in users."})
 
 
 @app.route("/api/rx/diagnostics")
@@ -8260,7 +8364,7 @@ def api_rx_diagnostics():
     cfg = _get_rx_audio_config() or RX_AUDIO_CONFIG_DEFAULTS
     proxy_applied = False
     proxy_conf = None
-    for candidate in WS_AUDIO_APACHE_CONF_CANDIDATES:
+    for candidate in HENWEN_APACHE_VHOST_CANDIDATES:
         try:
             with open(candidate) as f:
                 if WS_AUDIO_MARKER in f.read():
@@ -11087,7 +11191,7 @@ def api_ws_audio_status():
         return jsonify({"error": "Owner access required"}), 403
     applied  = False
     conf_used = None
-    for candidate in WS_AUDIO_APACHE_CONF_CANDIDATES:
+    for candidate in HENWEN_APACHE_VHOST_CANDIDATES:
         try:
             with open(candidate) as f:
                 if WS_AUDIO_MARKER in f.read():

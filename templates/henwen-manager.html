@@ -1907,20 +1907,32 @@ sudo asterisk -rx "module reload manager"</pre>
       </div>
     </div>
 
-    <div class="card">
-      <div class="card-header"><h2>Setup Guide</h2></div>
+    <div class="card" id="tx-apply-card" style="display:none">
+      <div class="card-header"><h2>Browser TX Setup</h2></div>
       <div class="card-body">
-        <p style="margin-bottom:10px">TX needs HTTPS (skip if this box already has it) and the Asterisk-side PJSIP/WebRTC config, in that order:</p>
-        <pre class="codeblock">sudo bash /opt/HenWen/tx-spike/setup-https.sh &lt;hostname&gt; &lt;email&gt;
-sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
         <p style="margin-bottom:10px;color:var(--text2);font-size:0.9rem">
-          <span class="mono">setup-https.sh</span> requires a public hostname already pointed at this box
-          and port 80 forwarded (plus your chosen HTTPS port — <span class="mono">--port N</span> if not
-          443; <span class="mono">--dns-manual</span> if your ISP blocks port 80 too). No public hostname
-          to point here? A third-party service that can front HTTPS for you (Tailscale Serve/Funnel,
-          Cloudflare Tunnel, etc.) works too — see <span class="mono">tx-spike/README.md</span> for what
-          it needs to proxy. Both scripts are safe to re-run.
+          Wires up Asterisk's PJSIP/WebRTC stack and the Apache WSS proxy for browser TX.
+          Safe to re-run, and won't restart Asterisk or HenWen.
         </p>
+        <p id="tx-apply-status" style="margin-bottom:12px;color:var(--text2)">Checking&hellip;</p>
+        <div class="btn-row" id="tx-apply-btn-row" style="display:none">
+          <button class="btn btn-sm btn-primary" id="tx-apply-btn" onclick="applyTxSetup()">Apply Browser TX Setup</button>
+        </div>
+        <div id="tx-apply-prereq" style="display:none">
+          <p style="margin-bottom:10px">No Apache vhost found yet — provision one first:</p>
+          <pre class="codeblock">sudo bash /opt/HenWen/tx-spike/setup-https.sh &lt;hostname&gt; &lt;email&gt;   # full HTTPS via Let's Encrypt
+sudo bash /opt/HenWen/tx-spike/setup-https.sh --http-only              # fronting HTTPS yourself</pre>
+          <p style="margin-bottom:10px;color:var(--text2);font-size:0.9rem">
+            <span class="mono">setup-https.sh</span> requires a public hostname already pointed at this box
+            and port 80 forwarded (plus your chosen HTTPS port — <span class="mono">--port N</span> if not
+            443; <span class="mono">--dns-manual</span> if your ISP blocks port 80 too). No public hostname
+            to point here? A third-party service that can front HTTPS for you (Tailscale Serve/Funnel,
+            Cloudflare Tunnel, etc.) works too, with <span class="mono">--http-only</span> — see
+            <span class="mono">tx-spike/README.md</span> for what it needs to proxy. Once either has run,
+            reload this page and Apply becomes available above.
+          </p>
+        </div>
+        <pre id="tx-apply-output" class="codeblock" style="display:none;margin-top:12px;white-space:pre-wrap;max-height:260px;overflow-y:auto"></pre>
       </div>
     </div>
 
@@ -3467,6 +3479,7 @@ function showPage(id) {
   else if (id === 'ami-diag')         loadSysInfo();
   else if (id === 'ast-console')  astFetchLog();
   else if (id === 'settings')       { loadSecretKeyStatus(); loadPortsStatus(); syncThemePicker(); mfaLoadStatus(); }
+  else if (id === 'tx-diag')         { if (window._henwenRole === 'owner') { loadTxApplyStatus(); } }
   else if (id === 'rx-diag')         { if (window._henwenRole === 'owner') { loadAudioSocketTapStatus(); loadRxAudioPathStatus(); } }
   else if (id === 'user-mgmt')      { loadUsers(); pwResetLoad(); invitesLoad(); }
   else if (id === 'recordings')         recordingsLoad();
@@ -6837,6 +6850,10 @@ async function applyRoleNav() {
      explicit role==='owner' check on /api/audiosocket-tap/apply. */
   var audiosocketTapCard = document.getElementById('audiosocket-tap-settings-card');
   if (audiosocketTapCard) audiosocketTapCard.style.display = isOwnerRole ? '' : 'none';
+  /* Browser TX apply.sh needs root too — owner-only, matches the backend's
+     explicit role==='owner' check on /api/tx/apply-status and /api/tx/apply. */
+  var txApplyCard = document.getElementById('tx-apply-card');
+  if (txApplyCard) txApplyCard.style.display = isOwnerRole ? '' : 'none';
   /* RX Audio Path (low-latency Listen) is owner-only too — matches the
      backend's explicit role==='owner' check on /api/rx-audio/config and
      /api/ws-audio/apply. */
@@ -6989,6 +7006,66 @@ async function applyAudioSocketTap() {
     log('AudioSocket tap apply failed: ' + err, 'ERROR');
   }
   loadAudioSocketTapStatus();
+}
+
+/* ── Browser TX Setup (tx-spike/apply.sh) ────────────────────────────────── */
+async function loadTxApplyStatus() {
+  var statusEl = document.getElementById('tx-apply-status');
+  var btnRow   = document.getElementById('tx-apply-btn-row');
+  var prereq   = document.getElementById('tx-apply-prereq');
+  if (!statusEl) return;
+  statusEl.textContent = 'Checking…';
+  var r = await api('/api/tx/apply-status');
+  if (!r.ok) {
+    statusEl.textContent = (r.data && r.data.error) || 'Could not check status.';
+    if (btnRow) btnRow.style.display = 'none';
+    if (prereq) prereq.style.display = 'none';
+    return;
+  }
+  if (!r.data.installed) {
+    statusEl.innerHTML = '<span style="color:var(--warn,#e0a030)">Not available on this install. '
+                        + 'Pull the latest HenWen code first.</span>';
+    if (btnRow) btnRow.style.display = 'none';
+    if (prereq) prereq.style.display = 'none';
+    return;
+  }
+  if (!r.data.vhost_found) {
+    statusEl.textContent = 'No Apache vhost found yet — Apply needs one first (see below).';
+    if (btnRow) btnRow.style.display = 'none';
+    if (prereq) prereq.style.display = '';
+    return;
+  }
+  if (prereq) prereq.style.display = 'none';
+  statusEl.innerHTML = (r.data.applied
+    ? '<span style="color:var(--green,#3fb950)">Applied.</span> '
+    : 'Vhost found — ')
+    + 'Using <span class="mono">' + r.data.vhost_found + '</span>';
+  var btn = document.getElementById('tx-apply-btn');
+  if (btn) btn.textContent = r.data.applied ? 'Re-apply Browser TX Setup' : 'Apply Browser TX Setup';
+  if (btnRow) btnRow.style.display = '';
+}
+
+async function applyTxSetup() {
+  if (!confirm('Apply browser TX setup now?\n\n'
+             + 'This live-loads Asterisk\'s PJSIP/WebRTC modules and generates (or reuses) a '
+             + 'real SIP credential for the TX button. Safe to re-run, and won\'t restart '
+             + 'Asterisk or HenWen.')) return;
+  var statusEl = document.getElementById('tx-apply-status');
+  var outEl = document.getElementById('tx-apply-output');
+  if (statusEl) statusEl.textContent = 'Applying…';
+  var r = await api('/api/tx/apply', {method: 'POST'});
+  if (outEl && ((r.data && r.data.output) || '').trim()) {
+    outEl.textContent = r.data.output;
+    outEl.style.display = '';
+  }
+  if (r.ok) {
+    log('Browser TX applied', 'OK');
+  } else {
+    var err = (r.data && (r.data.error || r.data.hint)) || 'Failed to apply browser TX setup.';
+    alert(err);
+    log('Browser TX apply failed: ' + err, 'ERROR');
+  }
+  loadTxApplyStatus();
 }
 
 /* ── RX Audio Path (low-latency Listen) ──────────────────────────────────── */

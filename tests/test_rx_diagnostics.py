@@ -232,7 +232,7 @@ class TestLowLatencyReadyRollup:
 
         conf = tmp_path / "henwen.conf"
         conf.write_text("; " + app.WS_AUDIO_MARKER + "\n")
-        monkeypatch.setattr(app, "WS_AUDIO_APACHE_CONF_CANDIDATES", (str(conf),))
+        monkeypatch.setattr(app, "HENWEN_APACHE_VHOST_CANDIDATES", (str(conf),))
 
     def _get(self, client):
         # X-Forwarded-Proto: https stands in for the request having actually
@@ -271,7 +271,7 @@ class TestLowLatencyReadyRollup:
         create_user("owner1", role="owner")
         _login(client, "owner1")
         self._make_ready(monkeypatch, tmp_path)
-        monkeypatch.setattr(app, "WS_AUDIO_APACHE_CONF_CANDIDATES", (str(tmp_path / "nope.conf"),))
+        monkeypatch.setattr(app, "HENWEN_APACHE_VHOST_CANDIDATES", (str(tmp_path / "nope.conf"),))
         body = self._get(client)
         c = _find(body["checks"], "Low-latency path ready to use")
         assert c["status"] == "warn"
