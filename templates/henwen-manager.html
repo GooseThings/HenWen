@@ -851,6 +851,46 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
       </div>
     </div>
 
+    <div class="card" id="kiosk-banner-card">
+      <div class="card-header"><h2>Kiosk Banner</h2></div>
+      <div class="card-body">
+        <p class="muted" style="font-size:0.82rem;margin-top:0">
+          Post a message on the public Status Board (issue #138) for a set amount of time
+          &mdash; e.g. "Node will be down from 1AM to 2AM for maintenance." Visible to every
+          kiosk viewer, even with the chat panel hidden.
+        </p>
+        <div id="kiosk-banner-status" style="margin-bottom:12px"></div>
+        <div id="kiosk-banner-form-wrap">
+          <div class="form-row">
+            <div class="form-group" style="flex:1;min-width:260px">
+              <label class="form-label">Message</label>
+              <textarea id="kb-message" class="val-input" rows="2" maxlength="300"
+                        style="width:100%;resize:vertical"
+                        placeholder="Node will be down from 1AM to 2AM for updates and maintenance."></textarea>
+            </div>
+          </div>
+          <div class="form-row" style="align-items:flex-end">
+            <div class="form-group">
+              <label class="form-label">Duration</label>
+              <select id="kb-duration" class="val-input">
+                <option value="15">15 minutes</option>
+                <option value="30" selected>30 minutes</option>
+                <option value="60">1 hour</option>
+                <option value="120">2 hours</option>
+                <option value="240">4 hours</option>
+                <option value="480">8 hours</option>
+                <option value="1440">24 hours</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <button class="btn btn-primary" onclick="kioskBannerSet()">Show Banner</button>
+            </div>
+          </div>
+          <div id="kiosk-banner-msg" style="font-size:0.82rem;margin-top:4px"></div>
+        </div>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-header"><h2>Connect / Disconnect</h2></div>
       <div class="card-body">
@@ -3170,6 +3210,7 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
             <tr><td>User Management (create Owners)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
             <tr><td>Raw Editor (direct rpt.conf edit)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
             <tr><td>Node Lockout (lock out all other roles)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
+            <tr><td>Kiosk Banner (post a board-wide notice)</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
             <tr><td>Exempt from another owner's lockout</td><td style="text-align:center">&#10003;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td><td style="text-align:center">&#8212;</td></tr>
           </tbody>
         </table>
@@ -3443,7 +3484,7 @@ function showPage(id) {
   currentPage = id;
 
   if      (id === 'dashboard')    { refreshDashboard(); startDiagPolling(); }
-  else if (id === 'node-control') { loadFavorites(); startNcPolling(); startFavStatusPolling(); renderNodeLockoutCard(); }
+  else if (id === 'node-control') { loadFavorites(); startNcPolling(); startFavStatusPolling(); renderNodeLockoutCard(); renderKioskBannerCard(); }
   else if (id === 'raw-editor')   rawLoad();
   else if (id === 'backups')        loadBackups();
   else if (id === 'conn-history')   chLoad(0);
@@ -5022,6 +5063,67 @@ async function toggleNodeLockout(node, locked, btn) {
     return;
   }
   renderNodeLockoutCard();
+}
+
+/* ── Kiosk Banner (issue #138) ─────────────────────────────────────────────
+   Read side reuses /api/status/board (public, already the source of truth
+   for the kiosk itself) rather than a dedicated GET route, same as
+   renderNodeLockoutCard() above -- every role can see whether a banner is
+   currently showing, but only Owner gets the controls to set/clear one
+   (enforced again server-side on POST/DELETE /api/kiosk/banner). */
+async function renderKioskBannerCard() {
+  var statusEl = document.getElementById('kiosk-banner-status');
+  var formWrap = document.getElementById('kiosk-banner-form-wrap');
+  if (!statusEl || !formWrap) return;
+  var isOwner = window._henwenRole === 'owner';
+  formWrap.style.display = isOwner ? '' : 'none';
+
+  var r = await api('/api/status/board');
+  if (!r.ok) { statusEl.innerHTML = '<span class="muted">Error loading banner status.</span>'; return; }
+  var banner = r.data.banner;
+  if (banner && banner.message) {
+    var remaining = Math.max(0, banner.expires_at - (Date.now()/1000));
+    statusEl.innerHTML =
+      '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;' +
+      'padding:8px 10px;border:1px solid var(--accent);border-radius:6px">' +
+        '<div><strong>Showing now:</strong> ' + esc(banner.message) +
+          '<div class="muted" style="font-size:0.78rem">' +
+            (banner.created_by ? 'Set by ' + esc(banner.created_by) + ' &mdash; ' : '') +
+            _fmtDuration(remaining) + ' left</div></div>' +
+        (isOwner ? '<button class="btn btn-sm btn-danger" onclick="kioskBannerClear()">Clear Now</button>' : '') +
+      '</div>';
+  } else {
+    statusEl.innerHTML = '<span class="muted">No banner currently showing.</span>';
+  }
+}
+
+async function kioskBannerSet() {
+  var msgEl = document.getElementById('kb-message');
+  var message = msgEl.value.trim();
+  var statusMsg = document.getElementById('kiosk-banner-msg');
+  if (!message) { statusMsg.textContent = 'Enter a message.'; statusMsg.style.color = 'var(--danger)'; return; }
+  var duration = parseInt(document.getElementById('kb-duration').value, 10);
+  var r = await api('/api/kiosk/banner', {
+    method:  'POST',
+    headers: {'Content-Type': 'application/json'},
+    body:    JSON.stringify({message: message, duration_min: duration}),
+  });
+  if (!r.ok) {
+    statusMsg.textContent = r.data.error || 'Error setting banner';
+    statusMsg.style.color = 'var(--danger)';
+    return;
+  }
+  statusMsg.textContent = 'Banner posted.';
+  statusMsg.style.color = 'var(--green)';
+  msgEl.value = '';
+  setTimeout(function(){ statusMsg.textContent = ''; }, 3000);
+  renderKioskBannerCard();
+}
+
+async function kioskBannerClear() {
+  var r = await api('/api/kiosk/banner', { method: 'DELETE' });
+  if (!r.ok) { alert('Error: ' + (r.data.error || r.status)); return; }
+  renderKioskBannerCard();
 }
 
 /* ── Node Control — live status polling ──────────────────────────────────── */
@@ -6776,6 +6878,10 @@ async function applyRoleNav() {
      controls themselves only render for Owner — enforced again server-side
      in /api/nodes/<node>/lockout. */
   renderNodeLockoutCard();
+  /* Kiosk Banner card (Node Control page): same "status visible to all,
+     controls Owner-only" split as Node Lockout just above — enforced again
+     server-side on POST/DELETE /api/kiosk/banner. */
+  renderKioskBannerCard();
 }
 
 window.addEventListener('DOMContentLoaded', async function() {

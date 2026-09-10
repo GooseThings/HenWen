@@ -990,6 +990,23 @@ def get_db():
         locked_at  TEXT NOT NULL DEFAULT (datetime('now'))
     )""")
     conn.commit()
+    # Singleton, Owner-triggered banner shown board-wide on the public Status
+    # Board (issue #138) -- same "system-wide, visible to every anonymous
+    # kiosk viewer" shape as node_lockouts above, so it gets the same
+    # owner-only gate. expires_at is a unix timestamp (REAL), matching
+    # invites.expires_at's convention, rather than a TEXT datetime() string
+    # like locked_at above -- it's compared against time.time() on every
+    # board refresh (see _get_active_kiosk_banner()), and a float compare is
+    # simpler and cheaper than parsing a stored datetime string each time.
+    # message='' or expires_at IS NULL both mean "no active banner".
+    conn.execute("""CREATE TABLE IF NOT EXISTS kiosk_banner (
+        id          INTEGER PRIMARY KEY CHECK (id = 1),
+        message     TEXT NOT NULL DEFAULT '',
+        expires_at  REAL,
+        created_by  TEXT NOT NULL DEFAULT '',
+        created_at  REAL
+    )""")
+    conn.commit()
     # One row per in-browser recording session (recording.py). No equivalent
     # table exists for the stream relay — that's a continuous service, not a
     # set of discrete sessions; see stream_relay_config above.
@@ -1218,6 +1235,27 @@ def get_locked_nodes():
 
 def is_any_node_locked():
     return get_db().execute("SELECT 1 FROM node_lockouts LIMIT 1").fetchone() is not None
+
+
+# ---------------------------------------------------------------------------
+# Kiosk banner (Owner-only, issue #138)
+# ---------------------------------------------------------------------------
+def _get_active_kiosk_banner():
+    """{'message':..., 'expires_at':..., 'created_by':...} if a banner is
+    currently live (message non-empty and not yet past its expires_at), else
+    None. A past-expiry row is left in place rather than deleted here --
+    _get_active_kiosk_banner() is called on every /api/status/board request
+    (up to once per kiosk viewer per 2s), so this stays a read-only check;
+    the row is only ever overwritten by the next api_kiosk_banner_set() call
+    or wiped by api_kiosk_banner_clear()."""
+    row = get_db().execute(
+        "SELECT message, expires_at, created_by FROM kiosk_banner WHERE id=1").fetchone()
+    if not row or not row["message"] or not row["expires_at"]:
+        return None
+    if time.time() >= row["expires_at"]:
+        return None
+    return {"message": row["message"], "expires_at": row["expires_at"],
+            "created_by": row["created_by"]}
 
 
 # ---------------------------------------------------------------------------
@@ -7440,6 +7478,7 @@ def api_status_board():
         "connector_warning": _connector_upcoming_disconnect_all(),
         "active_announcements": active_announcements,
         "scheduled_connectors": scheduled_connectors,
+        "banner":            _get_active_kiosk_banner(),
     })
     resp.headers["Cache-Control"] = "no-store"
     return resp
@@ -7474,6 +7513,62 @@ def api_node_lockout(node):
     db.commit()
     log("INFO", f"[LOCKOUT] Node {node} {'locked' if locked else 'unlocked'} by {session.get('username', '')}")
     return jsonify({"ok": True, "node": node, "locked": locked})
+
+
+_KIOSK_BANNER_MAX_MESSAGE_LEN = 300
+_KIOSK_BANNER_MAX_DURATION_MIN = 10080  # 7 days
+
+
+@app.route("/api/kiosk/banner", methods=["POST"])
+def api_kiosk_banner_set():
+    """Owner-only. Sets (or replaces) the board-wide kiosk banner for a
+    fixed duration -- see issue #138. Every kiosk viewer, logged in or not,
+    sees this, so it gets the same owner-only gate as node lockout above."""
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can set the kiosk banner"}), 403
+    data    = request.json or {}
+    message = str(data.get("message", "")).strip()
+    if not message:
+        return jsonify({"error": "Banner message is required"}), 400
+    if len(message) > _KIOSK_BANNER_MAX_MESSAGE_LEN:
+        return jsonify({"error": f"Banner message must be {_KIOSK_BANNER_MAX_MESSAGE_LEN} characters or fewer"}), 400
+    try:
+        duration_min = int(data.get("duration_min", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "duration_min must be a number"}), 400
+    if not (1 <= duration_min <= _KIOSK_BANNER_MAX_DURATION_MIN):
+        return jsonify({"error": f"duration_min must be between 1 and {_KIOSK_BANNER_MAX_DURATION_MIN}"}), 400
+
+    now        = time.time()
+    expires_at = now + duration_min * 60
+    username   = session.get('username', '')
+    db = get_db()
+    db.execute(
+        """INSERT INTO kiosk_banner (id, message, expires_at, created_by, created_at)
+           VALUES (1, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET message=excluded.message,
+               expires_at=excluded.expires_at, created_by=excluded.created_by,
+               created_at=excluded.created_at""",
+        (message, expires_at, username, now)
+    )
+    db.commit()
+    log("INFO", f"[BANNER] Kiosk banner set by {username} for {duration_min}min: {message!r}")
+    return jsonify({"ok": True, "banner": {"message": message, "expires_at": expires_at, "created_by": username}})
+
+
+@app.route("/api/kiosk/banner", methods=["DELETE"])
+def api_kiosk_banner_clear():
+    """Owner-only. Clears an active kiosk banner early. Row is blanked, not
+    deleted -- kiosk_banner is a singleton table (id=1 always exists once
+    api_kiosk_banner_set() has run once; a no-op UPDATE is harmless if it
+    hasn't)."""
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can clear the kiosk banner"}), 403
+    db = get_db()
+    db.execute("UPDATE kiosk_banner SET message='', expires_at=NULL WHERE id=1")
+    db.commit()
+    log("INFO", f"[BANNER] Kiosk banner cleared by {session.get('username', '')}")
+    return jsonify({"ok": True})
 
 
 @app.route("/api/status/active_users")
