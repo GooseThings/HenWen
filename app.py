@@ -11011,13 +11011,16 @@ def api_audiosocket_tap_apply():
 
 # Apache proxy for the low-latency RX audio path's WebSocket server
 # (audio_ws_relay.py, always running once HenWen starts). install.sh applies
-# this automatically on every fresh install (provisioning a minimal Apache
+# this automatically on every fresh install, provisioning a minimal Apache
 # vhost first if none exists yet, or reusing one from browser TX's HTTPS
-# setup) and seeds rx_audio_config.path to 'lowlatency' when it succeeds —
-# these routes exist for installs that predate that, or where the automatic
-# step failed/was declined. See ws-audio/README.md for what apply.sh does.
-# Owner-only, same rationale as the AudioSocket tap routes above: this edits
-# an Apache vhost, not something to expose below the top role.
+# setup. It only seeds rx_audio_config.path to 'lowlatency' when HTTPS was
+# also set up, since the browser side needs a secure context (WebCodecs)
+# and would otherwise silently keep using the legacy pipeline regardless of
+# this setting. These routes exist for installs that predate that automatic
+# step, or where it failed or was declined. See ws-audio/README.md for what
+# apply.sh does. Owner-only, same rationale as the AudioSocket tap routes
+# above: this edits an Apache vhost, not something to expose below the top
+# role.
 
 @app.route("/api/ws-audio/status")
 def api_ws_audio_status():

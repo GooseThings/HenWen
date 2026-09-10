@@ -208,15 +208,33 @@ fi
 # doing double duty). Answering no (or a non-interactive install, which can't
 # ask either question) moves on to the actual HTTPS question: yes runs the
 # full HTTPS flow (Apache comes along for free), no still gets a minimal
-# plain-HTTP vhost via setup-https.sh --http-only so low-latency RX works by
-# default either way. Self-falling-back and non-fatal throughout, exactly
-# like the AudioSocket tap step above -- Listen keeps working over the legacy
-# WebM path (and TX just stays hidden) regardless of what happens here.
+# plain-HTTP vhost via setup-https.sh --http-only so browser TX and the
+# capture-side AudioSocket tap improvement stay reachable either way. Self-
+# falling-back and non-fatal throughout, exactly like the AudioSocket tap
+# step above -- Listen keeps working over the legacy WebM path (and TX just
+# stays hidden) regardless of what happens here.
+#
+# HTTPS_SUCCEEDED (distinct from HAVE_APACHE_VHOST) tracks specifically
+# whether the FULL HTTPS flow succeeded, not just plain HTTP -- this matters
+# below for whether rx_audio_config.path gets defaulted to lowlatency at all.
+# The low-latency path's browser side uses WebCodecs (AudioDecoder), which
+# is a secure-context-only API: on a plain-HTTP vhost it's simply undefined
+# for every real remote visitor, so _doStartListen() always falls through to
+# the legacy MSE pipeline regardless of the saved rx_audio_config.path value
+# -- defaulting to lowlatency there would just be a misleading label with no
+# behavioral difference from legacy. Found live: a fresh plain-HTTP install's
+# Listen button failed for a remote browser and needed this traced end to end
+# before the actual constraint surfaced.
 echo "[8/11] Setting up Apache for low-latency RX audio..."
 WS_AUDIO_DEFAULT_OK=0
 HAVE_APACHE_VHOST=0
-if [ -f /etc/apache2/sites-enabled/henwen-ssl.conf ] || [ -f /etc/apache2/sites-enabled/henwen.conf ]; then
-    echo "      Apache vhost already present — leaving it as-is."
+HTTPS_SUCCEEDED=0
+if [ -f /etc/apache2/sites-enabled/henwen-ssl.conf ]; then
+    echo "      Apache vhost already present (HTTPS) — leaving it as-is."
+    HAVE_APACHE_VHOST=1
+    HTTPS_SUCCEEDED=1
+elif [ -f /etc/apache2/sites-enabled/henwen.conf ]; then
+    echo "      Apache vhost already present (plain HTTP) — leaving it as-is."
     HAVE_APACHE_VHOST=1
 elif [ -t 0 ]; then
     echo ""
@@ -238,18 +256,19 @@ elif [ -t 0 ]; then
         if [[ "$SETUP_HTTPS" =~ ^[Yy] ]]; then
             if bash "$INSTALL_DIR/tx-spike/setup-https.sh"; then
                 HAVE_APACHE_VHOST=1
+                HTTPS_SUCCEEDED=1
             else
                 echo "      HTTPS setup failed — you can re-run it later:"
                 echo "        sudo bash $INSTALL_DIR/tx-spike/setup-https.sh"
             fi
         else
-            echo "      Skipped HTTPS. Run 'sudo bash $INSTALL_DIR/tx-spike/setup-https.sh' later if you want browser TX."
+            echo "      Skipped HTTPS. Run 'sudo bash $INSTALL_DIR/tx-spike/setup-https.sh' later if you want browser TX and default low-latency RX audio."
             if bash "$INSTALL_DIR/tx-spike/setup-https.sh" --http-only; then
                 HAVE_APACHE_VHOST=1
             else
-                echo "      WARNING: plain-HTTP Apache setup failed — low-latency RX audio"
-                echo "      won't be reachable by default. Apply later from Manager > Audio,"
-                echo "      or: sudo bash $INSTALL_DIR/tx-spike/setup-https.sh --http-only"
+                echo "      WARNING: plain-HTTP Apache setup failed — TX and low-latency RX"
+                echo "      audio won't be reachable by default. Apply later from Manager >"
+                echo "      Audio, or: sudo bash $INSTALL_DIR/tx-spike/setup-https.sh --http-only"
             fi
         fi
     fi
@@ -257,7 +276,7 @@ else
     if bash "$INSTALL_DIR/tx-spike/setup-https.sh" --http-only; then
         HAVE_APACHE_VHOST=1
     else
-        echo "      WARNING: plain-HTTP Apache setup failed — low-latency RX audio"
+        echo "      WARNING: plain-HTTP Apache setup failed — TX and low-latency RX audio"
         echo "      won't be reachable by default. Apply later from Manager > Audio,"
         echo "      or: sudo bash $INSTALL_DIR/tx-spike/setup-https.sh --http-only"
     fi
@@ -265,8 +284,22 @@ fi
 
 if [ "$HAVE_APACHE_VHOST" = "1" ]; then
     if bash "$INSTALL_DIR/ws-audio/apply.sh"; then
-        echo "      Low-latency RX audio proxy applied."
-        WS_AUDIO_DEFAULT_OK=1
+        echo "      /ws-audio Apache proxy applied."
+        # Wired up regardless (harmless, and ready for whenever HTTPS gets
+        # added later), but only actually switch Listen's default to
+        # lowlatency when HTTPS succeeded -- see the comment above this
+        # whole step for why plain HTTP can't use the low-latency path at
+        # all (WebCodecs/AudioDecoder needs a secure context), so defaulting
+        # to it there would just mislabel what's actually still the legacy
+        # pipeline under the hood.
+        if [ "$HTTPS_SUCCEEDED" = "1" ]; then
+            WS_AUDIO_DEFAULT_OK=1
+        else
+            echo "      Not defaulting RX Audio Path to Low-Latency -- it needs HTTPS to"
+            echo "      actually work in a browser (WebCodecs requires a secure context)."
+            echo "      Listen still works fine over the legacy path. Set up HTTPS later"
+            echo "      (sudo bash $INSTALL_DIR/tx-spike/setup-https.sh) to make Low-Latency usable."
+        fi
     else
         echo "      WARNING: ws-audio/apply.sh failed — Listen will use the legacy"
         echo "      WebM path. Re-run manually later: sudo bash $INSTALL_DIR/ws-audio/apply.sh"
@@ -325,9 +358,12 @@ sed -i "s|^Environment=\"\?SECRET_KEY=.*|Environment=\"SECRET_KEY=${NEW_SECRET_K
 # Only ever seeds rx_audio_config.path once, the first time the table is
 # created (see get_db() in app.py) -- an owner's later Manager > Audio save
 # always wins regardless of this env var. Added only when step [8/11] above
-# actually got the Apache /ws-audio proxy wired up; otherwise the checked-in
-# HenWen.service template (no RX_AUDIO_DEFAULT_PATH line at all) is left as-is
-# and the DB falls back to today's 'legacy' default, same as ever.
+# got the Apache /ws-audio proxy wired up AND HTTPS succeeded -- WebCodecs
+# needs a secure context, so defaulting to lowlatency without HTTPS would be
+# a no-op label with no real behavior change from legacy. Otherwise the
+# checked-in HenWen.service template (no RX_AUDIO_DEFAULT_PATH line at all)
+# is left as-is and the DB falls back to today's 'legacy' default, same as
+# ever.
 if [ "$WS_AUDIO_DEFAULT_OK" = "1" ]; then
     sed -i '/^\[Install\]/i Environment="RX_AUDIO_DEFAULT_PATH=lowlatency"' "$SERVICE_FILE_DEST"
     echo "      RX_AUDIO_DEFAULT_PATH=lowlatency added to $SERVICE_FILE_DEST"
