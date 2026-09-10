@@ -1979,13 +1979,14 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
         </div>
         <pre id="rx-audio-ws-output" class="codeblock" style="display:none;margin-bottom:16px;white-space:pre-wrap;max-height:260px;overflow-y:auto"></pre>
 
-        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px">
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px">
           <label class="toggle-label" style="margin:0">RX Audio Path</label>
-          <select id="rx-audio-path-select" class="val-input" style="width:auto;min-width:220px">
+          <select id="rx-audio-path-select" class="val-input" style="width:auto;min-width:220px" onchange="updateRxAudioSecureWarning()">
             <option value="legacy">Legacy</option>
             <option value="lowlatency">Low-Latency (default)</option>
           </select>
         </div>
+        <p id="rx-audio-secure-warn" style="display:none;margin:0 0 14px;color:var(--warn,#e0a030);font-size:0.85rem"></p>
 
         <div class="toggle-row" style="margin-bottom:14px">
           <div class="toggle-info">
@@ -7023,6 +7024,28 @@ async function loadRxAudioPathStatus() {
   if (agcCb) agcCb.checked = r.data.agc_enabled !== false;
   _rxAudioLoadedPath = sel.value;
   _rxAudioLoadedAgc  = agcCb ? agcCb.checked : false;
+  updateRxAudioSecureWarning();
+}
+
+/* window.isSecureContext reflects THIS page's own connection, the closest
+   available signal for whether visitor browsers can use the low-latency
+   path at all (WebCodecs/AudioDecoder needs a secure context, so it's
+   simply undefined otherwise). Not a perfect proxy for what every kiosk
+   visitor sees (an admin could be on a different URL than the kiosk), but
+   this page is served from the same origin as the kiosk in the normal
+   case, so it's a reliable, zero-round-trip check. */
+function updateRxAudioSecureWarning() {
+  var el  = document.getElementById('rx-audio-secure-warn');
+  var sel = document.getElementById('rx-audio-path-select');
+  if (!el || !sel) return;
+  if (sel.value === 'lowlatency' && !window.isSecureContext) {
+    el.textContent = 'This page is not loaded over HTTPS. Even with Low-Latency selected, '
+                    + 'visitor browsers will silently keep using the standard method instead. '
+                    + 'Set up HTTPS to actually enable Low-Latency.';
+    el.style.display = '';
+  } else {
+    el.style.display = 'none';
+  }
 }
 
 async function applyWsAudioProxy() {
