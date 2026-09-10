@@ -90,7 +90,25 @@ fi
 
 echo "== pjsip.conf + secret"
 if grep -q "$MARKER" /etc/asterisk/pjsip.conf; then
-  echo "   already patched, skipping (existing secret kept)"
+  echo "   already patched, skipping"
+  # A prior run can be interrupted between patching pjsip.conf and writing
+  # the secret file (the two used to be assumed atomic together) -- confirmed
+  # live: pjsip.conf had a real password already patched in while
+  # /etc/asterisk/henwen-tx.secret was missing, which left TX_SECRET_PATH's
+  # "missing file = feature off" switch stuck off even though PJSIP itself
+  # was fully configured and working. Recover the already-configured
+  # password straight from pjsip.conf rather than generating a new one --
+  # a fresh secret here wouldn't match the endpoint's actual auth.
+  if [ ! -s /etc/asterisk/henwen-tx.secret ]; then
+    echo "   secret file missing/empty -- recovering existing password from pjsip.conf"
+    TXSECRET=$(sed -n '/^\[henwen-tx-auth\]$/,/^$/p' /etc/asterisk/pjsip.conf | sed -n 's/^password=//p' | head -1)
+    [ -n "$TXSECRET" ] || { echo "   FAILED: could not find password= under [henwen-tx-auth] in pjsip.conf"; exit 1; }
+    printf '%s\n' "$TXSECRET" > /etc/asterisk/henwen-tx.secret
+    chown asterisk:asterisk /etc/asterisk/henwen-tx.secret
+    chmod 600 /etc/asterisk/henwen-tx.secret
+  else
+    echo "   existing secret kept"
+  fi
 else
   TXSECRET=$(openssl rand -hex 16)
   sed -e "s/__TXSECRET__/$TXSECRET/" -e "s/__NODENUM__/$NODENUM/g" "$SPIKE_DIR/pjsip.snippet" >> /etc/asterisk/pjsip.conf
