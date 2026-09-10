@@ -8426,15 +8426,43 @@ def _node_rxchannel(node):
 
 def _find_node_channel(node):
     """
-    Return the Asterisk channel name for a local node by scanning
-    'core show channels'. Matches a channel name containing '/<node>'
-    (radio/USB-style local channels), a Location/Application column
-    identifying the node (e.g. a trunked IAX2 channel running Rpt(<node>),
-    where the node number never appears in the channel name itself), or —
-    when neither of those find anything — a channel name literally starting
-    with the node's configured rxchannel value (see _node_rxchannel()).
-    Returns None if not found.
+    Return the Asterisk channel name for a local node to capture audio
+    from. Tries app_rpt's own authoritative "rpt show channels <node>" CLI
+    command first (its rxchannel line), falling back to a heuristic scan of
+    'core show channels' only if that's unavailable or doesn't resolve.
+    Returns None if neither finds anything.
+
+    The two strategies are not interchangeable on a node with active
+    links. Every linked peer gets its own separate Asterisk channel (that
+    peer's own inbound connection into this node's Rpt() application) —
+    app_rpt has no conventional Bridge object, so it composites audio
+    across all of them (the node's own rxchannel plus every linked peer's
+    channel) via its own internal mixing instead. The heuristic scan below
+    matches ANY channel whose Location field encodes the target node
+    number, which every linked peer's own channel does too, since each one
+    lands in a dialplan extension named after the LOCAL node it dialed
+    into, not the peer's own identity. Confirmed live on a hub node with 17
+    simultaneous links: the heuristic scan matched one specific linked
+    peer's own inbound IAX2 channel instead of the node's actual rxchannel
+    -- a channel that only carries real audio while that ONE peer happens
+    to be transmitting, silent the rest of the time (often well past
+    AudioSocket's fixed 2000ms no-activity timeout), breaking Listen
+    entirely whenever the wrong peer's channel got picked. rpt show
+    channels reports the node's real rxchannel directly from app_rpt
+    itself, sidestepping the ambiguity altogether.
     """
+    def _rpt_show(ami):
+        return {'lines': ami.command(f'rpt show channels {node}')}
+    try:
+        for line in ami_send_command(_rpt_show).get('lines', []):
+            if line.strip().startswith('rxchannel'):
+                chan = line.split(':', 1)[1].strip() if ':' in line else ''
+                if chan:
+                    return chan
+                break
+    except Exception as e:
+        log('DEBUG', f'[AUDIO] rpt show channels failed for node {node}: {e}')
+
     def _cmd(ami):
         return {'lines': ami.command('core show channels')}
     try:
