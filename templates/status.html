@@ -4078,8 +4078,14 @@ function chimeToggleLabel(on) {
 function renderChimeToggle(localNode, node) {
   var key = _keyedHistoryKey(localNode, node);
   var on  = !!_chimeEnabledNodes[key];
-  return '<button class="chime-toggle-btn' + (on ? ' on' : '') + '" onclick="toggleNodeChime(\'' +
-      esc(localNode) + '\',\'' + esc(node) + '\',this)" title="' + esc(chimeToggleLabel(on)) + '">' +
+  /* JSON.stringify + esc(), not a single-quoted-attr + esc()-only literal —
+     node numbers are server-validated as ^\d{4,7}$ so this can't actually be
+     hit today, but this is the same onclick(id + string arg) shape the
+     connector/NWS/announcement delete buttons got bitten by once a value
+     wasn't guaranteed digits-only (see the rpt.conf/Smart Connector section
+     of CLAUDE.md); cheap to just build it safely from the start here. */
+  return '<button class="chime-toggle-btn' + (on ? ' on' : '') + '" onclick="toggleNodeChime(' +
+      esc(JSON.stringify(localNode)) + ',' + esc(JSON.stringify(node)) + ',this)" title="' + esc(chimeToggleLabel(on)) + '">' +
       '<svg class="icon"><use href="#icon-' + (on ? 'bell' : 'bell-off') + '"></use></svg></button>';
 }
 
