@@ -6,7 +6,7 @@
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <title>HenWen | AllStarLink 3 Node Manager</title>
 <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
-<script>(function(){var t=localStorage.getItem('henwen-theme')||localStorage.getItem('asl3ez-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<script>(function(){var t=localStorage.getItem('henwen-theme')||localStorage.getItem('asl3ez-theme');if(t)document.documentElement.setAttribute('data-theme',t);if(t==='custom'){try{var c=JSON.parse(localStorage.getItem('henwen-custom-colors')||'{}'),r=document.documentElement.style,k;for(k in c){if(c[k])r.setProperty('--'+k,c[k]);}}catch(e){}}})();</script>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -537,6 +537,11 @@ input:checked + .slider::before  { transform: translateX(16px); background: var(
 .ts-dots { display: flex; gap: 4px; }
 .ts-dots span { display: inline-block; width: 11px; height: 11px; border-radius: 50%; }
 .ts-name { padding: 5px 9px 7px; font-size: 0.78rem; font-weight: 500; }
+.custom-theme-editor { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+.custom-theme-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px 16px; }
+.cc-field { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 0.85rem; }
+.cc-field input[type=color] { width: 40px; height: 28px; padding: 0; border: 1px solid var(--border); border-radius: 4px; background: none; cursor: pointer; }
+.custom-theme-actions { margin-top: 14px; }
 .dtmf-key { width:100%; height:48px; font-size:1.1rem; font-weight:600; padding:0; justify-content:center; }
 .dtmf-key:active { background: var(--accent); color: #000; }
 .log-panel div { margin-bottom: 1px; word-break: break-all; }
@@ -2746,6 +2751,34 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
             </div>
             <div class="ts-name" style="background:#140808;color:#e8d8d8">Vampire</div>
           </div>
+          <div class="theme-swatch" id="ts-custom" onclick="selectCustomTheme()">
+            <div class="ts-preview" style="background:linear-gradient(135deg,#58a6ff,#3fb950,#f85149,#d29922)">
+              <div class="ts-dots">
+                <span style="background:rgba(255,255,255,0.9)"></span>
+                <span style="background:rgba(255,255,255,0.9)"></span>
+                <span style="background:rgba(255,255,255,0.9)"></span>
+                <span style="background:rgba(255,255,255,0.9)"></span>
+              </div>
+            </div>
+            <div class="ts-name" style="background:#161b22;color:#e6edf3">Custom&hellip;</div>
+          </div>
+        </div>
+        <div class="custom-theme-editor" id="custom-theme-editor" hidden>
+          <div class="custom-theme-grid">
+            <label class="cc-field">Background <input type="color" id="cc-bg" oninput="onCustomColorInput()"></label>
+            <label class="cc-field">Panel <input type="color" id="cc-bg2" oninput="onCustomColorInput()"></label>
+            <label class="cc-field">Panel Alt <input type="color" id="cc-bg3" oninput="onCustomColorInput()"></label>
+            <label class="cc-field">Border <input type="color" id="cc-border" oninput="onCustomColorInput()"></label>
+            <label class="cc-field">Accent <input type="color" id="cc-accent" oninput="onCustomColorInput()"></label>
+            <label class="cc-field">Success <input type="color" id="cc-green" oninput="onCustomColorInput()"></label>
+            <label class="cc-field">Warning <input type="color" id="cc-warn" oninput="onCustomColorInput()"></label>
+            <label class="cc-field">Danger <input type="color" id="cc-danger" oninput="onCustomColorInput()"></label>
+            <label class="cc-field">Text <input type="color" id="cc-text" oninput="onCustomColorInput()"></label>
+            <label class="cc-field">Muted Text <input type="color" id="cc-text2" oninput="onCustomColorInput()"></label>
+          </div>
+          <div class="custom-theme-actions">
+            <button type="button" class="btn btn-sm" onclick="resetCustomTheme()">Reset to Dark defaults</button>
+          </div>
         </div>
       </div>
     </div>
@@ -3171,15 +3204,31 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
 
 /* ── Theme ──────────────────────────────────────────────────────────────── */
 var THEME_NAMES = ['dark','midnight','light','terminal','amber','nord','mario','dracula','monokai','cyberpunk','solarized','cotton-candy','gruvbox','tokyo-night','catppuccin','onedark','rosepine','synthwave','forest','ayu','ocean','vampire'];
+// The full set of CSS custom properties every preset skin above defines —
+// same list the "Custom" editor exposes one color picker per key for.
+var CUSTOM_COLOR_KEYS = ['bg','bg2','bg3','border','accent','green','warn','danger','text','text2'];
+
+function clearCustomColorOverrides() {
+  // A custom theme works by setting these as *inline* style properties on
+  // <html>, which beats any selector (including a preset's own
+  // html[data-theme="x"] rule) regardless of source order. Switching to a
+  // preset has to explicitly remove them, or they'd keep winning forever.
+  CUSTOM_COLOR_KEYS.forEach(function(k) { document.documentElement.style.removeProperty('--' + k); });
+}
 
 function applyTheme(name) {
   if (THEME_NAMES.indexOf(name) === -1) name = 'dark';
+  clearCustomColorOverrides();
   document.documentElement.setAttribute('data-theme', name);
   localStorage.setItem('henwen-theme', name);
   THEME_NAMES.forEach(function(t) {
     var el = document.getElementById('ts-' + t);
     if (el) el.classList.toggle('active', t === name);
   });
+  var cs = document.getElementById('ts-custom');
+  if (cs) cs.classList.remove('active');
+  var editor = document.getElementById('custom-theme-editor');
+  if (editor) editor.hidden = true;
 }
 
 // Mark the active swatch whenever the settings page is shown.
@@ -3190,6 +3239,83 @@ function syncThemePicker() {
     var el = document.getElementById('ts-' + t);
     if (el) el.classList.toggle('active', t === current);
   });
+  var cs = document.getElementById('ts-custom');
+  var editor = document.getElementById('custom-theme-editor');
+  if (current === 'custom') {
+    if (cs) cs.classList.add('active');
+    if (editor) editor.hidden = false;
+    var colors = loadCustomColors();
+    CUSTOM_COLOR_KEYS.forEach(function(k) {
+      var inp = document.getElementById('cc-' + k);
+      if (inp && colors[k]) inp.value = colors[k];
+    });
+  } else {
+    if (cs) cs.classList.remove('active');
+    if (editor) editor.hidden = true;
+  }
+}
+
+// Saved custom colors, or (first time) whatever's currently resolved on
+// <html> — so opening the editor from any preset seeds it with that
+// preset's own colors as a starting point instead of blank/black fields.
+function loadCustomColors() {
+  try {
+    var saved = JSON.parse(localStorage.getItem('henwen-custom-colors') || 'null');
+    if (saved) return saved;
+  } catch (e) {}
+  var cs = getComputedStyle(document.documentElement);
+  var seed = {};
+  CUSTOM_COLOR_KEYS.forEach(function(k) { seed[k] = (cs.getPropertyValue('--' + k) || '').trim() || '#000000'; });
+  return seed;
+}
+
+function applyCustomTheme(colors) {
+  document.documentElement.setAttribute('data-theme', 'custom');
+  CUSTOM_COLOR_KEYS.forEach(function(k) {
+    if (colors[k]) document.documentElement.style.setProperty('--' + k, colors[k]);
+  });
+  localStorage.setItem('henwen-theme', 'custom');
+  localStorage.setItem('henwen-custom-colors', JSON.stringify(colors));
+  THEME_NAMES.forEach(function(t) {
+    var el = document.getElementById('ts-' + t);
+    if (el) el.classList.remove('active');
+  });
+  var cs = document.getElementById('ts-custom');
+  if (cs) cs.classList.add('active');
+}
+
+function selectCustomTheme() {
+  var colors = loadCustomColors();
+  CUSTOM_COLOR_KEYS.forEach(function(k) {
+    var inp = document.getElementById('cc-' + k);
+    if (inp) inp.value = colors[k];
+  });
+  applyCustomTheme(colors);
+  var editor = document.getElementById('custom-theme-editor');
+  if (editor) editor.hidden = false;
+}
+
+// Live preview + auto-save on every picker change, same "click applies
+// immediately" pattern as the preset swatches — no separate Save button.
+function onCustomColorInput() {
+  var colors = {};
+  CUSTOM_COLOR_KEYS.forEach(function(k) {
+    var inp = document.getElementById('cc-' + k);
+    colors[k] = inp ? inp.value : null;
+  });
+  applyCustomTheme(colors);
+}
+
+function resetCustomTheme() {
+  // The stock Dark theme's own :root values — a sane, legible starting
+  // point for a fresh custom theme rather than leaving pickers at black.
+  var defaults = { bg: '#070a0f', bg2: '#0d1117', bg3: '#161b24', border: '#21283a', accent: '#58a6ff',
+                    green: '#3fb950', warn: '#d29922', danger: '#f85149', text: '#e6edf3', text2: '#8b949e' };
+  CUSTOM_COLOR_KEYS.forEach(function(k) {
+    var inp = document.getElementById('cc-' + k);
+    if (inp) inp.value = defaults[k];
+  });
+  applyCustomTheme(defaults);
 }
 
 /* ── State ─────────────────────────────────────────────────────────────── */
