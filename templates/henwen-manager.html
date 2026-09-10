@@ -920,9 +920,11 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
         </div>
       </div>
       <table class="tbl">
-        <thead><tr><th></th><th>Node</th><th>Label</th><th>Callsign</th><th>Location</th><th>Keyed</th><th>Connected</th><th>Actions</th></tr></thead>
+        <thead><tr><th></th><th>Node</th><th>Label</th><th>Callsign</th><th>Location</th><th>Keyed</th><th>Connected</th>
+          <th title="Percent of polled samples (last 6h) this node was keyed, and how many times it keyed up in that window — see FAVSTATS_PCT_WINDOW_SEC">Rx% / LCnt</th>
+          <th>Actions</th></tr></thead>
         <tbody id="fav-tbody">
-          <tr><td colspan="8" class="muted" style="padding:14px">Loading...</td></tr>
+          <tr><td colspan="9" class="muted" style="padding:14px">Loading...</td></tr>
         </tbody>
       </table>
     </div>
@@ -5195,10 +5197,10 @@ function _mgrFavoritesForDisplay() {
 
 async function loadFavorites() {
   var tbody = document.getElementById('fav-tbody');
-  tbody.innerHTML = '<tr><td colspan="8" class="muted" style="padding:14px">Loading...</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="9" class="muted" style="padding:14px">Loading...</td></tr>';
   var r = await api('/api/favorites');
   if (!r.ok) {
-    tbody.innerHTML = '<tr><td colspan="8" class="muted" style="padding:14px">' + esc(r.data.error || 'Failed') + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="muted" style="padding:14px">' + esc(r.data.error || 'Failed') + '</td></tr>';
     return;
   }
   _mgrFavorites = r.data.favorites || [];
@@ -5212,7 +5214,7 @@ function renderMgrFavorites() {
   var tbody = document.getElementById('fav-tbody');
   if (!tbody) return;
   if (!_mgrFavorites.length) {
-    tbody.innerHTML = '<tr><td colspan="8" class="muted" style="padding:14px">No favorites yet. Use Add Node above.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="muted" style="padding:14px">No favorites yet. Use Add Node above.</td></tr>';
     return;
   }
   var isCustomSort = _mgrFavSort.field === 'custom';
@@ -5230,6 +5232,7 @@ function renderMgrFavorites() {
       + '<td>' + esc(f.location || '') + '</td>'
       + '<td id="fav-keyed-' + esc(f.node) + '"><span class="muted">...</span></td>'
       + '<td id="fav-conn-' + esc(f.node) + '" class="mono"><span class="muted">...</span></td>'
+      + '<td id="fav-pct-' + esc(f.node) + '" class="mono"><span class="muted">...</span></td>'
       + '<td><div class="btn-row">'
       + '<button class="btn btn-sm btn-primary" onclick="favConnect(\'' + esc(f.node) + '\')">Connect</button>'
       + '<button class="btn btn-sm" onclick="favFill(\'' + esc(f.node) + '\')">Fill</button>'
@@ -5303,6 +5306,7 @@ async function updateFavoritesStatus() {
     var s = favs[node];
     var keyedCell = document.getElementById('fav-keyed-' + node);
     var connCell  = document.getElementById('fav-conn-' + node);
+    var pctCell   = document.getElementById('fav-pct-' + node);
     if (keyedCell) {
       if (s.error) {
         keyedCell.innerHTML = '<span class="muted" title="' + esc(s.error) + '">N/A</span>';
@@ -5314,6 +5318,14 @@ async function updateFavoritesStatus() {
     }
     if (connCell) {
       connCell.textContent = s.error ? '—' : s.connected_count;
+    }
+    if (pctCell) {
+      // keyed_pct/keyups are null until at least one clean (non-error) poll
+      // sample has landed for this node — see get_cached_favstats() in
+      // app.py — so render a muted placeholder rather than "0%" until then.
+      pctCell.innerHTML = (s.keyed_pct === null || s.keyed_pct === undefined)
+        ? '<span class="muted">—</span>'
+        : (s.keyed_pct + '% / ' + s.keyups);
     }
   });
 }

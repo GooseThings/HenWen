@@ -938,8 +938,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .fav-num  { font-size: 0.9rem; font-weight: 700; font-family: var(--mono); color: var(--accent); text-decoration: none; }
 .fav-call { font-size: 0.75rem; font-weight: 600; color: var(--text); text-decoration: none; }
 .fav-call:hover { text-decoration: underline; }
-.fav-loc  { font-size: 0.67rem; color: var(--text2); overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap; }
+.fav-loc  { font-size: 0.67rem; color: var(--text2); display: flex; align-items: baseline;
+  gap: 6px; min-width: 0; }
+.fav-loc-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.fav-pct  { flex-shrink: 0; color: var(--text2); opacity: 0.85; }
 /* gap bumped 3px -> 6px alongside .sb-btn's taller padding below (issue #102):
    Lighthouse's target-size audit checks clickable space between neighbors as
    well as each target's own size, and the stacked Connect/Monitor pair here
@@ -5391,6 +5393,13 @@ async function checkKioskSession() {
 
 /* ── Favorites sidebar ── */
 var _favorites = [];
+/* {node: {keyed_pct, keyups, ...}} from /api/favorites/status — the same
+   rolling-sample Rx%/LCnt duty-cycle cache the Manager Favorites table
+   reads (see updateFavoritesStatus() in henwen-manager.html and
+   get_cached_favstats() in app.py, issue #113). Populated only once
+   logged in (the route 401s to an empty object otherwise), same gate as
+   /api/favorites itself. */
+var _favStatus = {};
 
 /* Sort preference is view-only and per-browser (localStorage), separate from
    the server-side custom order: "custom" displays favorites.sort_order as-is
@@ -5470,6 +5479,21 @@ async function loadFavorites() {
     if (!r.ok) return;
     var d = await r.json();
     _favorites = d.favorites || [];
+    renderFavorites();
+  } catch(e) {}
+}
+
+/* Rx%/LCnt cells update in place on their own timer, same "cheap re-read of
+   an already-throttled server-side cache" reasoning as
+   updateFavoritesStatus() in henwen-manager.html — the external stats API
+   poll itself stays on its own multi-minute cadence regardless of how often
+   this is called. */
+async function loadFavStatus() {
+  try {
+    var r = await apiFetch('/api/favorites/status', {cache: 'no-store'});
+    if (!r.ok) return;
+    var d = await r.json();
+    _favStatus = d.favorites || {};
     renderFavorites();
   } catch(e) {}
 }
@@ -5562,6 +5586,11 @@ function renderFavorites() {
        instead of being stuck on a stored placeholder. */
     var name    = f.label || f.callsign || ('Node ' + f.node);
     var loc     = f.location || '';
+    var st      = _favStatus[f.node];
+    var pctText = (st && st.keyed_pct !== null && st.keyed_pct !== undefined)
+      ? ('Rx ' + st.keyed_pct + '%') : '';
+    var pctTitle = pctText ? (' title="Percent of polled samples keyed, last 6h (' +
+      st.keyups + ' keyups)"') : '';
     var handle  = isCustomSort ? '<span class="fav-drag-handle" title="Drag to reorder"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>' : '';
     var dragAttrs = isCustomSort ?
       ' draggable="true" ondragstart="favRowDragStart(event,\'' + esc(f.node) + '\')"' +
@@ -5602,7 +5631,10 @@ function renderFavorites() {
           (f.callsign ? callsignLink(f.callsign, 'fav-call', name) : (name ? '<span class="fav-call">' + esc(name) + '</span>' : '')) +
           '<button class="fav-del-btn" onclick="removeFavorite(\'' + esc(f.node) + '\')" title="Remove from Favorites">✕</button>' +
         '</div>' +
-        (loc ? '<div class="fav-loc">' + esc(loc) + '</div>' : '') +
+        ((loc || pctText) ? '<div class="fav-loc">' +
+          (loc ? '<span class="fav-loc-text">' + esc(loc) + '</span>' : '') +
+          (pctText ? '<span class="fav-pct"' + pctTitle + '>' + esc(pctText) + '</span>' : '') +
+          '</div>' : '') +
       '</div>' +
       '<div class="fav-actions">' + actions + '</div>' +
     '</div>';
@@ -8361,6 +8393,7 @@ refreshActivity();
 loadMeshtasticMessages();
 initFavSort();
 loadFavorites();
+loadFavStatus();
 checkKioskSession();
 fetchNets();
 
@@ -8377,6 +8410,10 @@ setInterval(refreshWeather,  600000);  /* weather every 10min */
 setInterval(refreshNwsAlerts, 60000);  /* NWS alert ticker every 60s — well under the
                                           poller's own 120s cadence, just catches up
                                           promptly after a config change */
+setInterval(loadFavStatus,  10000);    /* Favorites Rx%/LCnt cells every 10s — reads
+                                          only the already-throttled server-side favstats
+                                          cache (see FAVORITES_POLL_INTERVAL in app.py),
+                                          so this cadence adds no external load */
 setInterval(fetchNets,       60000);   /* net schedule list every 60s — the weather-bar
                                           badge/highlight itself re-derives every second
                                           from tickSecond(), this just catches edits made

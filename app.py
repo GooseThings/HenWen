@@ -2930,6 +2930,22 @@ _favstats_cache    = {}   # {node: {"keyed": bool, "connected_count": int, "erro
 _favstats_cache_ts = {}   # {node: float unix timestamp}
 _favstats_lock     = threading.Lock()
 
+# Rolling keyed-sample history behind the Favorites "Rx%"/"LCnt" columns
+# (issue #113, modeled on AllScan's own Rx%/LCnt columns for its
+# connected-node list). Each successful favstats poll appends one
+# (ts, keyed) sample per node — a failed cycle (network error, 429) is
+# skipped entirely rather than recorded as "not keyed", since a
+# stats.allstarlink.org outage must not silently drag every favorite's
+# duty cycle toward 0%. Rx% is samples-keyed / samples-total over the
+# window; LCnt is the count of False->True transitions across that same
+# sample sequence — the polled-snapshot analog of _link_stats' "keyups",
+# which counts real transitions from the continuous 1s AMI poll instead.
+# Bounded by wall-clock age, not sample count, since FAVORITES_POLL_INTERVAL
+# can change at runtime via env var and a count-based cap would silently
+# shrink/grow the effective time window along with it.
+_favstats_history       = {}   # {node: deque[(ts, keyed_bool)]}
+FAVSTATS_PCT_WINDOW_SEC = float(os.environ.get("FAVSTATS_PCT_WINDOW_SEC", "21600"))  # 6h
+
 
 def _fetch_node_stats(node: str) -> dict:
     """
@@ -2973,6 +2989,9 @@ def _favstats_poll_loop():
         try:
             db    = get_db()
             nodes = [r["node"] for r in db.execute("SELECT DISTINCT node FROM favorites").fetchall()]
+            with _favstats_lock:
+                for gone in set(_favstats_history) - set(nodes):
+                    del _favstats_history[gone]
             for node in nodes:
                 try:
                     result = _fetch_node_stats(node)
@@ -2983,9 +3002,16 @@ def _favstats_poll_loop():
                         any_429 = True
                     log("WARN", f"[FAVSTATS-POLL] {node}: {e}")
                     result = {"keyed": False, "connected_count": 0, "error": err_str}
+                now = time.time()
                 with _favstats_lock:
                     _favstats_cache[node]    = result
-                    _favstats_cache_ts[node] = time.time()
+                    _favstats_cache_ts[node] = now
+                    if result["error"] is None:
+                        hist   = _favstats_history.setdefault(node, deque())
+                        cutoff = now - FAVSTATS_PCT_WINDOW_SEC
+                        hist.append((now, result["keyed"]))
+                        while hist and hist[0][0] < cutoff:
+                            hist.popleft()
                 # Pacing gap between nodes within a cycle, on top of the
                 # interval between whole cycles. Confirmed live that a tight
                 # burst (originally 0.3s apart) across just 6 nodes was
@@ -4525,10 +4551,21 @@ def get_cached_favstats(node: str) -> dict:
     with _favstats_lock:
         entry = _favstats_cache.get(node)
         ts    = _favstats_cache_ts.get(node, 0)
+        hist  = list(_favstats_history.get(node, ()))
     age = time.time() - ts
+    # keyed_pct/keyups are None until at least one clean (non-error) sample
+    # has landed, rather than 0 — 0% and "no data yet" must render
+    # differently in the UI (see fav-pct-<node> in henwen-manager.html).
+    keyed_pct = None
+    keyups    = None
+    if hist:
+        keyed_pct = round(100 * sum(1 for _, k in hist if k) / len(hist))
+        keyups    = sum(1 for i in range(1, len(hist)) if hist[i][1] and not hist[i - 1][1])
     if entry is None:
-        return {"node": node, "keyed": False, "connected_count": 0, "stale": True, "age": None}
-    return {**entry, "node": node, "stale": age > FAVORITES_POLL_INTERVAL * 3, "age": round(age, 2)}
+        return {"node": node, "keyed": False, "connected_count": 0, "stale": True, "age": None,
+                "keyed_pct": keyed_pct, "keyups": keyups}
+    return {**entry, "node": node, "stale": age > FAVORITES_POLL_INTERVAL * 3, "age": round(age, 2),
+            "keyed_pct": keyed_pct, "keyups": keyups}
 
 
 def ami_send_command(subcmd_fn) -> dict:
