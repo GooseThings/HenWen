@@ -515,3 +515,50 @@ class TestForceDisconnectAll:
     def test_no_op_with_no_connected_clients(self):
         wsrelay._get_or_create_node("628280")  # node exists, but no clients
         assert wsrelay._force_disconnect_all() == 0
+
+
+class TestPcmOwnership:
+    """_claim_pcm_owner()/_release_pcm_owner() -- only one audio_relay.py
+    connection may feed a given node's low-latency ffmpeg at a time. Plain
+    object() sentinels stand in for connection sockets: only identity
+    matters to this logic, never actual socket I/O."""
+
+    def setup_method(self):
+        wsrelay._pcm_owners.clear()
+
+    def teardown_method(self):
+        wsrelay._pcm_owners.clear()
+
+    def test_first_connection_claims_the_node(self):
+        conn = object()
+        assert wsrelay._claim_pcm_owner("628280", conn) is True
+
+    def test_same_connection_reclaiming_still_succeeds(self):
+        conn = object()
+        wsrelay._claim_pcm_owner("628280", conn)
+        assert wsrelay._claim_pcm_owner("628280", conn) is True
+
+    def test_second_connection_for_same_node_is_rejected(self):
+        first, second = object(), object()
+        assert wsrelay._claim_pcm_owner("628280", first) is True
+        assert wsrelay._claim_pcm_owner("628280", second) is False
+
+    def test_different_nodes_do_not_conflict(self):
+        a, b = object(), object()
+        assert wsrelay._claim_pcm_owner("628280", a) is True
+        assert wsrelay._claim_pcm_owner("546054", b) is True
+
+    def test_release_lets_a_new_connection_claim_the_node(self):
+        first, second = object(), object()
+        wsrelay._claim_pcm_owner("628280", first)
+        wsrelay._release_pcm_owner("628280", first)
+        assert wsrelay._claim_pcm_owner("628280", second) is True
+
+    def test_release_by_non_owner_is_a_no_op(self):
+        owner, impostor = object(), object()
+        wsrelay._claim_pcm_owner("628280", owner)
+        wsrelay._release_pcm_owner("628280", impostor)
+        # The real owner's claim must survive an unrelated release() call --
+        # otherwise a stale/rejected connection's own cleanup could evict the
+        # legitimate owner out from under it.
+        assert wsrelay._pcm_owners.get("628280") is owner
