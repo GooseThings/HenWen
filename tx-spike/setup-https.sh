@@ -253,8 +253,16 @@ HENWEN_RESERVED=(accept-invite accessible api asl3-ez-manager forgot-password
                  henwen-manager login logout reset-password status static)
 EXCL_MARKER="# HenWen: preserve paths this box already served (issue #77)"
 
+# With zero enabled sites (a genuinely empty Apache, e.g. right after
+# removing every vhost by hand) this glob doesn't match anything and bash
+# passes the literal, non-existent "*.conf" pattern straight to awk, which
+# exits non-zero -- 2>/dev/null hides the message but not the exit status,
+# and under set -e that silently killed the whole script here with no
+# visible error at all. Confirmed live. `|| true` is the actual fix; the
+# existing fallback on the next line already covers the resulting empty
+# DOCROOT correctly, so no other logic needs to change.
 DOCROOT=$(awk '/^[[:space:]]*DocumentRoot[[:space:]]+/ {print $2; exit}' \
-          /etc/apache2/sites-enabled/*.conf 2>/dev/null)
+          /etc/apache2/sites-enabled/*.conf 2>/dev/null || true)
 [ -n "$DOCROOT" ] || DOCROOT=/var/www/html
 DOCROOT="${DOCROOT%/}"
 
