@@ -95,6 +95,14 @@ label { display: block; font-weight: 600; margin-bottom: 0.3rem; }
 }
 .banner ul { margin: 0.4rem 0 0 1.3rem; }
 
+/* Owner-triggered kiosk banner (issue #138) — same box shape as .banner
+   above but --accent-bordered rather than --danger-bordered, since this is
+   an operational notice the Owner posted, not a weather warning. */
+.kiosk-banner {
+  margin-top: 1rem; padding: 0.9rem 1.1rem; border: 3px solid var(--accent);
+  border-radius: 8px; background: var(--bg2); color: var(--fg); font-weight: 600;
+}
+
 .live-status {
   margin-top: 1rem; padding: 0.7rem 1rem; border: 2px solid var(--border);
   border-radius: 8px; background: var(--bg2); color: var(--fg2); font-size: 0.95rem;
@@ -154,6 +162,8 @@ footer { margin-top: 2.5rem; padding-top: 1rem; border-top: 2px solid var(--bord
 </header>
 
 <div id="alert-banner" class="banner" role="alert" hidden></div>
+
+<div id="kiosk-banner" class="kiosk-banner" role="status" aria-live="polite" hidden></div>
 
 <div id="live-status" class="live-status" role="status" aria-live="polite">Loading node status&hellip;</div>
 
@@ -391,6 +401,19 @@ async function refreshBoard() {
   var data = await r.json();
   var nodes = data.nodes || [];
   window._lastBoardNodes = nodes;
+
+  var kioskBanner = document.getElementById('kiosk-banner');
+  var bannerText = (data.banner && data.banner.message) || '';
+  if (bannerText) {
+    /* Only touch the DOM (and so only re-announce via aria-live) when the
+       text actually changes, matching refreshNwsAlerts()'s own
+       _lastNwsKey guard below. */
+    if (kioskBanner.textContent !== bannerText) kioskBanner.textContent = bannerText;
+    kioskBanner.hidden = false;
+  } else {
+    kioskBanner.hidden = true;
+    kioskBanner.textContent = '';
+  }
 
   var area = document.getElementById('node-status-area');
   /* refreshBoard() replaces this area's innerHTML every 4s (duration/keyed

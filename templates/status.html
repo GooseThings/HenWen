@@ -344,6 +344,22 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .nws-alert-item.nws-sev-advisory strong { color: var(--warn); }
 @keyframes nws-scroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
 
+/* ── Kiosk banner: Owner-triggered notice (issue #138), shown for a fixed
+   duration the Owner picks in Manager > Node Control. Deliberately its own
+   bar rather than folded into the weather ticker or NWS bar -- this is a
+   one-off message the Owner is actively pointing at, not a recurring feed
+   item, and needs to read as distinct from both. Static text (no scroll
+   track like .nws-alert-bar), since a single short notice has no need to
+   loop, and wraps instead of clipping so a longer message stays readable. */
+.kiosk-banner-bar {
+  background: rgba(90,140,255,.12); border: 1px solid var(--accent); border-radius: 7px;
+  padding: 7px 14px; display: flex; align-items: flex-start; gap: 10px;
+  font-size: 0.9rem; min-height: 32px;
+}
+.kiosk-banner-icon { color: var(--accent); flex-shrink: 0; margin-top: 0.1em; }
+.kiosk-banner-text { flex: 1; min-width: 0; color: var(--text); font-weight: 500;
+  overflow-wrap: anywhere; }
+
 /* ── Content area: Node/Map | Connected Nodes | Favorites ──
    A 12-col x 24-row grid built from `fr` tracks, not fixed px, so it always
    fills exactly the space .content-area has (same "fits the viewport, never
@@ -1319,6 +1335,11 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <path d="M12 16v-4" />
     <path d="M12 8h.01" />
   </symbol>
+  <symbol id="icon-megaphone" viewBox="0 0 24 24">
+    <path d="M11 6a13 13 0 0 0 8.4-2.8A1 1 0 0 1 21 4v12a1 1 0 0 1-1.6.8A13 13 0 0 0 11 14H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z" />
+    <path d="M6 14a12 12 0 0 0 2.4 7.2 2 2 0 0 0 3.2-2.4A8 8 0 0 1 10 14" />
+    <path d="M8 6v8" />
+  </symbol>
   <symbol id="icon-menu" viewBox="0 0 24 24">
     <path d="M4 5h16" />
     <path d="M4 12h16" />
@@ -1562,6 +1583,14 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
     <div class="nws-alert-track-wrap" id="nws-alert-track-wrap">
       <div class="nws-alert-track" id="nws-alert-track"></div>
     </div>
+  </div>
+
+  <!-- Owner-triggered kiosk banner (issue #138) — updated from the same
+       /api/status/board refresh cycle as everything above, so it appears
+       within one refreshBoard() tick of the Owner setting it. -->
+  <div class="kiosk-banner-bar" id="kiosk-banner-bar" style="display:none">
+    <span class="kiosk-banner-icon"><svg class="icon"><use href="#icon-megaphone"></use></svg></span>
+    <div class="kiosk-banner-text" id="kiosk-banner-text"></div>
   </div>
 
   <!-- Content -->
@@ -4496,6 +4525,20 @@ async function refreshBoard() {
         warnBar.style.display = 'flex';
       } else {
         warnBar.style.display = 'none';
+      }
+    }
+
+    /* Owner-triggered kiosk banner (issue #138) — data.banner is null once
+       the server-side expires_at check in _get_active_kiosk_banner() lapses,
+       so this bar disappears on its own within one refreshBoard() tick of
+       expiring, with no separate countdown/timer needed client-side. */
+    var kioskBannerBar = document.getElementById('kiosk-banner-bar');
+    if (kioskBannerBar) {
+      if (data.banner && data.banner.message) {
+        document.getElementById('kiosk-banner-text').textContent = data.banner.message;
+        kioskBannerBar.style.display = 'flex';
+      } else {
+        kioskBannerBar.style.display = 'none';
       }
     }
     recordKeyedHistory(allLinked);
