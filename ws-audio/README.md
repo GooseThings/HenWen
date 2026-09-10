@@ -3,10 +3,10 @@
 Alternative to the legacy WebM/MSE Listen pipeline. The
 default path mixes into a WebM container, batches into ~200ms clusters, and
 streams over chunked HTTP with an AGC (`dynaudnorm`) filter that adds ~0.4s
-of lookahead by itself — a steady-state RX latency floor of roughly
+of lookahead by itself, for a steady-state RX latency floor of roughly
 1.3-1.4s, measured end to end. This path instead streams raw Opus packets
 over a plain WebSocket to `WebCodecs`/`AudioWorklet` in the browser, no
-container, no AGC lookahead — trading the default path's loudness
+container and no AGC lookahead, trading the default path's loudness
 consistency and jitter tolerance for substantially lower latency.
 
 Three things have to all be true for the low-latency path to actually serve
@@ -18,9 +18,16 @@ a listener:
    undefined for any real visitor, so `status.html`'s own capability check
    always falls through to the legacy MSE pipeline no matter what
    `rx_audio_config.path` says. This is a real, unavoidable browser
-   restriction, not something this project can route around. See
-   `tx-spike/setup-https.sh` for the same HTTPS setup browser TX already
-   needs, since it satisfies this requirement too.
+   restriction, not something this project can route around. There are two
+   ways to satisfy it, the same two browser TX already has: `tx-spike/
+   setup-https.sh` (HenWen's own Apache plus Let's Encrypt setup), or any
+   third-party HTTPS fronting instead, such as Tailscale Serve, Cloudflare
+   Tunnel, or a reverse proxy elsewhere. A third-party option has to forward
+   the WebSocket path (`/ws-audio`) to this box in addition to plain HTTP
+   traffic, not just terminate TLS, or this feature stays unreachable even
+   once the page itself is secure. Verified live: a third-party reverse
+   proxy terminating HTTPS and forwarding both paths works exactly like
+   `tx-spike/setup-https.sh` + `apply.sh` does.
 2. **`rx_audio_config.path` is set to `lowlatency`.** This is a Manager-level,
    owner-only setting (Manager > Audio, near TX Diagnostics), not a
    per-browser preference. It changes which capture/encode pipeline runs
@@ -28,13 +35,15 @@ a listener:
    `stream_relay.py` are unaffected by this setting either way. Both keep
    using the default WebM `_AudioBroadcast` pipeline exactly as before,
    regardless of what Listen is doing.
-3. **This script has been applied.** `audio_ws_relay.py` (the process that
-   actually does the low-latency encoding and serves the WebSocket) is
-   always running once HenWen starts, at near-zero idle cost, whether or
-   not this script has ever been run. What this script adds is the
-   *network path to it*: an Apache `ProxyPass` so a browser outside this
-   box can actually reach its WebSocket listener. This mirrors exactly how
-   `tx-spike/apply.sh` proxies `/asterisk-ws` for browser TX.
+3. **The WebSocket path is reachable from outside this box.** `audio_ws_relay.py`
+   (the process that actually does the low-latency encoding and serves the
+   WebSocket) is always running once HenWen starts, at near-zero idle cost,
+   regardless of how (or whether) this requirement is met. If Apache is
+   fronting HenWen, this script is how to satisfy it: it adds an Apache
+   `ProxyPass` for `/ws-audio`, mirroring exactly how `tx-spike/apply.sh`
+   proxies `/asterisk-ws` for browser TX. If a third-party reverse proxy is
+   fronting HenWen instead (see requirement 1), configure it to forward
+   `/ws-audio` directly and this script is not needed at all.
 
 ## What it does
 
@@ -77,7 +86,7 @@ sudo bash ws-audio/apply.sh
 ```
 
 Idempotent and marker-guarded (safe to re-run), backs up the vhost file
-first, and does **not** restart HenWen or Asterisk — `audio_ws_relay.py` is
+first, and does **not** restart HenWen or Asterisk. `audio_ws_relay.py` is
 already running regardless; this just makes it reachable.
 
 If `rx_audio_config.path` wasn't already seeded to `lowlatency`, switch the
@@ -93,12 +102,12 @@ sudo bash ws-audio/rollback.sh
 ```
 
 Restores the backed-up vhost file (most recent run by default, or pass a
-backup dir). Doesn't stop `audio_ws_relay.py` — app.py keeps
+backup dir). Doesn't stop `audio_ws_relay.py`. app.py keeps
 spawning/supervising that process regardless, since it costs nothing idle.
 If `rx_audio_config.path` was set to `lowlatency`, switch it back to
-`legacy` in Manager separately — this script only removes the network path,
+`legacy` in Manager separately. This script only removes the network path,
 not the setting.
 
 ## Files
 
-- `apply.sh` / `rollback.sh` — see above.
+- `apply.sh` / `rollback.sh`. See above.

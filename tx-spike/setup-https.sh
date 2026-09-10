@@ -1,18 +1,24 @@
 #!/bin/bash
-# HenWen HTTPS setup — provisions Apache + a Let's Encrypt certificate.
+# HenWen HTTPS setup. Provisions Apache plus a Let's Encrypt certificate.
 #
-# This is what makes the browser a "secure context", which the TX button
-# requires (getUserMedia/WebRTC are blocked on plain http:// except on
-# localhost) and gives Asterisk's SIP-over-WebSocket signaling somewhere
-# to terminate TLS. Optional: the kiosk and every other HenWen feature
-# work fine over plain HTTP — only run this if you want browser TX and
-# have a public hostname pointed at this box. If you're behind CGNAT or
-# can't forward a port at all, a third-party reverse-proxy/VPN service
-# that can front HTTPS for you (e.g. Tailscale Serve/Funnel, Cloudflare
-# Tunnel) is an option — HenWen doesn't script or manage that setup
-# itself, but any of them work as long as they proxy plain HTTP to this
-# box's Flask port and a WebSocket-capable proxy to Asterisk's :8088 for
-# /asterisk-ws (see the README's Browser TX section).
+# This is what makes the browser a "secure context", which two features
+# need it for: the TX button (getUserMedia/WebRTC are blocked on plain
+# http:// except on localhost), which also needs somewhere for Asterisk's
+# SIP-over-WebSocket signaling to terminate TLS, and the low-latency RX
+# audio path (WebCodecs/AudioDecoder is a secure-context-only browser API;
+# see ws-audio/README.md). Everything else in HenWen, including the kiosk
+# and the legacy Listen path, works fine over plain HTTP. install.sh
+# already runs a plain-HTTP-only version of this automatically on every
+# fresh install, so this script is only needed if you want TX or
+# low-latency RX audio, and have a public hostname pointed at this box.
+# If you're behind CGNAT or can't forward a port at all, a third-party
+# reverse-proxy/VPN service that can front HTTPS for you (e.g. Tailscale
+# Serve/Funnel, Cloudflare Tunnel) is an option instead. HenWen doesn't
+# script or manage that setup itself, but any of them work as long as they
+# proxy plain HTTP to this box's Flask port, plus a WebSocket-capable proxy
+# to Asterisk's :8088 for /asterisk-ws if you want TX, and/or to this box's
+# own :8098 for /ws-audio if you want low-latency RX audio (see the
+# README's Browser TX section and ws-audio/README.md respectively).
 #
 # Usage: sudo bash setup-https.sh [--port N] [--dns-manual] [hostname] [email]
 #        sudo bash setup-https.sh --http-only
