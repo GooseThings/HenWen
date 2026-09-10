@@ -1975,7 +1975,7 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
         </p>
         <p id="audiosocket-tap-status" style="margin-bottom:12px;color:var(--text2)">Checking&hellip;</p>
         <div class="btn-row">
-          <button class="btn btn-sm btn-primary" onclick="applyAudioSocketTap()">Apply AudioSocket Tap</button>
+          <button class="btn btn-sm btn-primary" id="audiosocket-tap-apply-btn" onclick="applyAudioSocketTap()">Apply AudioSocket Tap</button>
         </div>
         <pre id="audiosocket-tap-output" class="codeblock" style="display:none;margin-top:12px;white-space:pre-wrap;max-height:260px;overflow-y:auto"></pre>
       </div>
@@ -1994,7 +1994,7 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
 
         <p id="rx-audio-ws-status" style="margin-bottom:12px;color:var(--text2)">Checking&hellip;</p>
         <div class="btn-row" style="margin-bottom:16px">
-          <button class="btn btn-sm btn-primary" onclick="applyWsAudioProxy()">Apply Apache Proxy</button>
+          <button class="btn btn-sm btn-primary" id="rx-audio-ws-apply-btn" onclick="applyWsAudioProxy()">Apply Apache Proxy</button>
         </div>
         <pre id="rx-audio-ws-output" class="codeblock" style="display:none;margin-bottom:16px;white-space:pre-wrap;max-height:260px;overflow-y:auto"></pre>
 
@@ -6983,6 +6983,8 @@ async function loadAudioSocketTapStatus() {
   el.innerHTML = r.data.applied
     ? '<span style="color:var(--green,#3fb950)">Applied.</span> Listen starts with less delay on this node.'
     : 'Not applied. Listen is using the standard method, which is slightly slower.';
+  var btn = document.getElementById('audiosocket-tap-apply-btn');
+  if (btn) btn.textContent = r.data.applied ? 'Re-apply AudioSocket Tap' : 'Apply AudioSocket Tap';
 }
 
 async function applyAudioSocketTap() {
@@ -7034,6 +7036,8 @@ async function loadRxAudioPathStatus() {
       ? '<span style="color:var(--green,#3fb950)">Applied.</span> Low-Latency mode is reachable from other devices.'
       : 'Not applied yet. Low-Latency mode only works on this box itself until you apply this.';
   }
+  var wsBtn = document.getElementById('rx-audio-ws-apply-btn');
+  if (wsBtn) wsBtn.textContent = r.data.applied ? 'Re-apply Apache Proxy' : 'Apply Apache Proxy';
   sel.value = r.data.rx_audio_path || 'legacy';
   if (agcCb) agcCb.checked = r.data.agc_enabled !== false;
   _rxAudioLoadedPath = sel.value;
