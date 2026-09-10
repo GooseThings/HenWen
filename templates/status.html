@@ -5043,8 +5043,31 @@ function sbToast(msg, ok) {
   _sbToastTimer = setTimeout(function() { t.className = ''; }, 3500);
 }
 
-async function sbConnect(localNode, remoteNode, btn, permanent, monitor) {
+async function sbConnect(localNode, remoteNode, btn, permanent, monitor, skipConfirm) {
   var label = monitor ? 'Monitor' : 'Connect';
+  /* issue #140: warn before bridging two networks together. Every Connect/
+     Monitor button on the board (node card, Node Search, Favorites, map
+     popups, net-schedule Join) funnels through this one function, so this
+     is the single place to catch it rather than repeating the check at
+     each caller. Only fires when localNode already has some *other* node
+     connected -- connecting the first node, or re-clicking Connect on a
+     node that's already linked, is not a bridging risk. skipConfirm is set
+     on the openKioskLogin() retry below so a login round-trip doesn't ask
+     the same question twice. */
+  if (!skipConfirm) {
+    var already = [];
+    (window._lastBoardNodes || []).forEach(function(n) {
+      if (String(n.node) !== String(localNode)) return;
+      (n.connected || []).forEach(function(c) {
+        if (String(c.node) !== String(remoteNode)) already.push(c.node);
+      });
+    });
+    if (already.length && !confirm(
+        'Node ' + localNode + ' is already connected to ' + already.join(', ') + '. ' +
+        (monitor ? 'Monitoring' : 'Connecting') + ' ' + remoteNode + ' too will bridge audio between all of them. Continue?')) {
+      return;
+    }
+  }
   /* A map pin's popup is the one caller of this function whose button lives
      inside content updateMap() refuses to touch while any popup is open
      (see the popupopen/popupclose handlers in initMap()) -- that guard
@@ -5077,7 +5100,7 @@ async function sbConnect(localNode, remoteNode, btn, permanent, monitor) {
       setTimeout(refreshBoard, 1500);
     } else if (r.status === 401) {
       if (btn) { btn.disabled = false; btn.textContent = label; }
-      openKioskLogin(sbConnect, [localNode, remoteNode, null, permanent, monitor]);
+      openKioskLogin(sbConnect, [localNode, remoteNode, null, permanent, monitor, true]);
     } else {
       sbToast(label + ' failed: ' + (d.error || r.status), false);
       if (btn) { btn.disabled = false; btn.textContent = label; }
