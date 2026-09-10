@@ -510,6 +510,9 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
    contrast in some of them. */
 #listen-vol-row { display: flex; align-items: center; gap: 8px;
   flex-shrink: 0; }
+#chime-row { display: flex; align-items: center; gap: 6px;
+  flex-shrink: 0; font-size: 0.78rem; color: var(--text2); }
+#chime-row label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
 /* Info-left / status-right grid, used on every width (see the mobile media
    query below for the phone-tuned size overrides layered on top of this same
    structure). Was originally mobile-only: the desktop card used a single
@@ -1533,6 +1536,11 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <div id="listen-vol-row">
           <span style="font-size:0.78rem;color:var(--text2);flex-shrink:0;display:flex;align-items:center;gap:4px" title="Listen volume"><svg class="icon"><use href="#icon-volume-2"></use></svg> Volume</span>
           <input type="range" id="listen-volume" min="0" max="100" value="100" disabled title="Listen volume — separate from your device's system volume" style="flex:1">
+        </div>
+        <div id="chime-row">
+          <label title="Play a short chime in this browser when a connected node keys up for a while and Listen isn't running — lets you know you're missing live audio without needing Listen on all the time. Per-browser: only chimes here, not on any other logged-in device.">
+            <input type="checkbox" id="activity-chime-chk" onchange="toggleActivityChime(this.checked)"> Activity Chime
+          </label>
         </div>
       </div>
     </div>
@@ -4009,6 +4017,96 @@ function renderKeyedTimeline(localNode, node) {
   return '<div class="nr-timeline" title="Keyed activity, last 5 minutes (~5s per bar)">' + bars + '</div>';
 }
 
+/* ── Activity chime (issue #132) ──
+   A per-browser opt-in nudge: if a connected peer stays continuously keyed
+   for ACTIVITY_CHIME_THRESHOLD_SEC while Listen isn't running, play a short
+   chime so the viewer knows they're missing live audio without needing
+   Listen on constantly. Deliberately client-side/localStorage rather than a
+   Manager/server setting — the owner asked for this to chime only for
+   "the one who selected the notification chime", not for every logged-in
+   viewer or kiosk display sharing this same board. */
+var ACTIVITY_CHIME_THRESHOLD_SEC = 15;    /* continuous key-up duration that earns a chime */
+var ACTIVITY_CHIME_COOLDOWN_MS   = 10000; /* floor between chimes so several peers crossing the threshold together don't stack */
+var _chimeEnabled    = false;   /* loaded from localStorage below */
+var _chimeKeyedSince = {};      /* "local|remote" -> ms timestamp this peer's current continuous key-up began */
+var _chimeFired      = {};      /* "local|remote" -> true once this continuous key-up already earned its one chime */
+var _chimeLastPlayed = 0;
+var _chimeAudioCtx   = null;
+
+function toggleActivityChime(on) {
+  _chimeEnabled = on;
+  localStorage.setItem('henwen-activity-chime', on ? '1' : '0');
+  /* Created inside the checkbox's own click handler so it's inside a real
+     user gesture — browsers' autoplay policy would otherwise silently block
+     an AudioContext first created later from a timer tick (checkActivityChime
+     runs off refreshBoard's 2s poll, not a click). */
+  if (on && !_chimeAudioCtx) {
+    try { _chimeAudioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+  }
+}
+
+(function() {
+  var chk = document.getElementById('activity-chime-chk');
+  var on  = localStorage.getItem('henwen-activity-chime') === '1';
+  if (chk) chk.checked = on;
+  _chimeEnabled = on;
+  /* Not constructing _chimeAudioCtx here even if already on: page load isn't
+     a user gesture either, so most browsers would just leave it suspended.
+     _playActivityChime() creates/resumes it lazily on first actual use. */
+})();
+
+function _playActivityChime() {
+  try {
+    if (!_chimeAudioCtx) _chimeAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (_chimeAudioCtx.state === 'suspended') _chimeAudioCtx.resume();
+    var ctx = _chimeAudioCtx;
+    var now = ctx.currentTime;
+    /* Two short sine notes rather than one — reads as a distinct "notification"
+       chime rather than a plain beep, with no audio asset to ship/load. */
+    [[880, 0], [660, 0.15]].forEach(function(pair) {
+      var osc  = ctx.createOscillator();
+      var gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = pair[0];
+      var t0 = now + pair[1];
+      gain.gain.setValueAtTime(0, t0);
+      gain.gain.linearRampToValueAtTime(0.2, t0 + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.3);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(t0);
+      osc.stop(t0 + 0.32);
+    });
+  } catch (e) { /* autoplay-blocked or unsupported — skip silently, this is a nudge, not core functionality */ }
+}
+
+/* Called from refreshBoard() with the same allLinked list recordKeyedHistory()
+   just saw. Tracks each peer's current continuous key-up (reset the instant
+   it unkeys) and fires one chime the first time it crosses the threshold —
+   never a repeat chime for the same still-ongoing transmission — but only
+   while Listen isn't already running, since the point is catching activity
+   the viewer would otherwise miss entirely. */
+function checkActivityChime(allLinked) {
+  if (!_chimeEnabled) return;
+  var liveKeys = {};
+  allLinked.forEach(function(c) {
+    var key = _keyedHistoryKey(c.local_node, c.node);
+    liveKeys[key] = true;
+    var isConn = (c.connect_state || 'ESTABLISHED') === 'ESTABLISHED';
+    if (!(isConn && c.keyed)) { delete _chimeKeyedSince[key]; delete _chimeFired[key]; return; }
+    if (!_chimeKeyedSince[key]) _chimeKeyedSince[key] = Date.now();
+    if (_chimeFired[key]) return;
+    if (Date.now() - _chimeKeyedSince[key] < ACTIVITY_CHIME_THRESHOLD_SEC * 1000) return;
+    _chimeFired[key] = true;
+    if (_listenActive) return;
+    if (Date.now() - _chimeLastPlayed < ACTIVITY_CHIME_COOLDOWN_MS) return;
+    _chimeLastPlayed = Date.now();
+    _playActivityChime();
+  });
+  Object.keys(_chimeKeyedSince).forEach(function(key) {
+    if (!liveKeys[key]) { delete _chimeKeyedSince[key]; delete _chimeFired[key]; }
+  });
+}
+
 /* ── Dynamic favicon ──
    Badges the browser-tab icon with the same gray/green/red the Connected
    Nodes dots use (.nr-dot / .nr-dot.connected / .nr-dot.keyed), so a kiosk
@@ -4224,6 +4322,7 @@ async function refreshBoard() {
     }
     recordKeyedHistory(allLinked);
     updateFaviconState(allLinked);
+    checkActivityChime(allLinked);
     if (!allLinked.length) {
       nl.innerHTML = '<div class="empty-msg">No nodes linked</div>';
     } else {
