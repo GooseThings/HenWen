@@ -39,6 +39,21 @@ if [ ! -f "$APACHE_CONF" ]; then
   exit 1
 fi
 
+# a2ensite's sites-enabled entry is a symlink into sites-available -- but
+# `sed -i` below doesn't edit through a symlink, it replaces whatever's at
+# that path with a fresh file it creates (a well-known GNU sed gotcha).
+# Left alone, that both breaks the sites-available/sites-enabled split and
+# can leave the result unreadable by the `asterisk` user running gunicorn,
+# since sed's own temp file doesn't reliably keep the original's
+# permissions -- app.py's own TX diagnostics read-back then silently
+# reports the proxy as not applied even though Apache itself (reading
+# config as root at startup) is proxying it correctly. Resolve to the real
+# underlying file first so the symlink, if any, is never touched.
+if [ -L "$APACHE_CONF" ]; then
+  APACHE_CONF="$(readlink -f "$APACHE_CONF")"
+  echo "== sites-enabled symlink resolves to $APACHE_CONF"
+fi
+
 # Local node number: same convention app.py's get_node_numbers() uses
 # (first top-level [NNNN] stanza in rpt.conf, 4-7 digits) so the TX feature
 # always keys the same node HenWen itself treats as primary. Pass it
@@ -139,6 +154,10 @@ else
   sed -i 's|^    ProxyPass        / http://127.0.0.1:5000/ retry=0 timeout=120$|    # '"$MARKER"': SIP-over-WebSocket signaling to the loopback-only\n    # Asterisk builtin HTTP server; Apache terminates WSS with the same cert.\n    ProxyPass /asterisk-ws ws://127.0.0.1:8088/ws retry=0\n\n    ProxyPass        / http://127.0.0.1:5000/ retry=0 timeout=120|' "$APACHE_CONF"
   grep -q "asterisk-ws" "$APACHE_CONF" || { echo "   FAILED to insert proxy line"; exit 1; }
 fi
+# Belt-and-suspenders regardless of which branch above ran (also heals a
+# box that already hit the stale-permissions bug from a previous version
+# of this script): Apache vhosts should always be world-readable.
+chmod 644 "$APACHE_CONF"
 apache2ctl configtest 2>&1 | grep -q "Syntax OK" || { echo "   Apache configtest FAILED — restoring backup"; cp "$BACKUP_DIR/henwen-ssl.conf" "$APACHE_CONF"; exit 1; }
 # `reload` requires an already-active service. Config just passed
 # configtest, so if apache2 isn't running, start it fresh instead of

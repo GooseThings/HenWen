@@ -59,6 +59,23 @@ if [ -z "$APACHE_CONF" ]; then
 fi
 echo "== Using Apache vhost: $APACHE_CONF"
 
+# a2ensite/a2dissite's sites-enabled entries are symlinks into
+# sites-available -- but `sed -i` doesn't edit through a symlink, it
+# replaces whatever's at that path with a fresh file it creates (a
+# well-known GNU sed gotcha). Left alone, that both breaks the
+# sites-available/sites-enabled split (sites-available goes stale, further
+# a2dissite/a2ensite runs get confused) and can leave the result
+# unreadable by the `asterisk` user running gunicorn, since sed's own temp
+# file doesn't reliably keep the original's permissions -- app.py's own
+# read-back check for $MARKER then silently reports "not applied" via its
+# generic `except OSError: continue`, even though Apache itself (reading
+# config as root at startup) is proxying it correctly. Resolve to the real
+# underlying file first so the symlink, if any, is never touched.
+if [ -L "$APACHE_CONF" ]; then
+  APACHE_CONF="$(readlink -f "$APACHE_CONF")"
+  echo "   (sites-enabled symlink resolves to $APACHE_CONF)"
+fi
+
 echo "== Backing up to $BACKUP_DIR"
 mkdir -p "$BACKUP_DIR"
 cp "$APACHE_CONF" "$BACKUP_DIR/"
@@ -82,6 +99,10 @@ else
     exit 1
   }
 fi
+# Belt-and-suspenders regardless of which branch above ran (also heals a
+# box that already hit the stale-permissions bug from a previous version
+# of this script): Apache vhosts should always be world-readable.
+chmod 644 "$APACHE_CONF"
 
 echo "== proxy_wstunnel module"
 if apache2ctl -M 2>/dev/null | grep -q proxy_wstunnel_module; then

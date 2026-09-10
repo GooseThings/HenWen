@@ -293,6 +293,11 @@ inject_exclusions() {
         printf '%s\n' "$line"
     done < "$conf" > "$tmp"
     mv "$tmp" "$conf"
+    # mktemp's default 600 would otherwise silently downgrade the vhost's
+    # permissions here -- Apache vhosts need to stay world-readable so the
+    # `asterisk` user (gunicorn) can read them back too, e.g. for the RX/TX
+    # diagnostics pages' own applied-or-not checks.
+    chmod 644 "$conf"
 }
 
 # ── Base HTTP vhost (port 80) ──────────────────────────────
@@ -312,6 +317,7 @@ ${SERVERNAME_LINE}
     ProxyPassReverse / http://127.0.0.1:${FLASK_PORT}/
 </VirtualHost>
 VHOST
+chmod 644 "$HTTP_AVAIL"
 inject_exclusions "$HTTP_AVAIL"
 
 if [ "${#PRESERVED[@]}" -gt 0 ]; then
@@ -384,6 +390,9 @@ else
     echo "      ($LE_SSL_AVAIL). Check 'certbot certificates' and 'apache2ctl -S'"
     echo "      and rename its vhost to $SSL_AVAIL by hand before running apply.sh."
 fi
+# Same world-readable requirement as the plain-HTTP vhost above -- belt and
+# suspenders regardless of what certbot's own plugin left it as.
+[ -f "$SSL_AVAIL" ] && chmod 644 "$SSL_AVAIL"
 
 if [ -f "$SSL_AVAIL" ] && [ "$HTTPS_PORT" != "443" ]; then
     sed -i "s|<VirtualHost \*:443>|<VirtualHost *:${HTTPS_PORT}>|" "$SSL_AVAIL"
