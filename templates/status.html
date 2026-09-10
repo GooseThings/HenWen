@@ -518,6 +518,14 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   display: flex; align-items: center; }
 .chime-toggle-btn:hover { opacity: 1; }
 .chime-toggle-btn.on { color: var(--green); opacity: 1; }
+/* Manual per-node chime snooze — sits right next to .chime-toggle-btn (see
+   toggleChimePause()). Dim like the bell when idle; brighter (warn-colored,
+   full opacity) while a snooze is actively counting down. */
+.chime-pause-btn { background: none; border: none; color: var(--text2);
+  opacity: .5; cursor: pointer; padding: 2px; flex-shrink: 0;
+  display: flex; align-items: center; }
+.chime-pause-btn:hover { opacity: 1; }
+.chime-pause-btn.active { color: var(--warn); opacity: 1; }
 /* Info-left / status-right grid, used on every width (see the mobile media
    query below for the phone-tuned size overrides layered on top of this same
    structure). Was originally mobile-only: the desktop card used a single
@@ -4096,15 +4104,23 @@ function renderKeyedTimeline(localNode, node) {
    feature) essentially never fired until someone happened to hold the PTT
    that long in one go. A "session" now starts at the first key-up and keeps
    accumulating across gaps shorter than ACTIVITY_CHIME_GAP_SEC — only a
-   gap longer than that resets tracking, treating the conversation as over. */
-var ACTIVITY_CHIME_THRESHOLD_SEC = 5;     /* cumulative session activity that earns a chime */
+   gap longer than that resets tracking, treating the conversation as over.
+
+   The chime repeats every ACTIVITY_CHIME_THRESHOLD_SEC of cumulative
+   session activity for as long as the session stays alive — it does not
+   fire once and then go quiet for the rest of a long conversation. There is
+   deliberately no automatic floor/cooldown between chimes anymore (an
+   earlier cut had one, and it just meant a long QSO stopped notifying after
+   its first minute); the only way to go quiet is the per-node snooze button
+   below, which the listener starts on purpose. */
+var ACTIVITY_CHIME_THRESHOLD_SEC = 5;     /* cumulative session activity between repeat chimes */
 var ACTIVITY_CHIME_GAP_SEC       = 10;    /* silence longer than this ends the session instead of just pausing it */
-var ACTIVITY_CHIME_COOLDOWN_MS   = 10000; /* floor between chimes so several nodes crossing the threshold together don't stack */
+var ACTIVITY_CHIME_COOLDOWN_SEC  = 300;   /* default manual snooze duration (5 min) started via the pause button */
 var _chimeEnabledNodes = {};    /* "local|remote" -> true — loaded from localStorage below */
 var _chimeSessionStart = {};    /* "local|remote" -> ms timestamp this session's first key-up */
 var _chimeLastKeyed    = {};    /* "local|remote" -> ms timestamp of the most recent keyed sample seen */
-var _chimeFired        = {};    /* "local|remote" -> true once the current session already earned its one chime */
-var _chimeLastPlayed   = 0;
+var _chimeNextFireAt   = {};    /* "local|remote" -> ms timestamp this session's next repeat chime is due */
+var _chimePausedUntil  = {};    /* "local|remote" -> ms timestamp a manual snooze (pause button) runs until */
 var _chimeAudioCtx     = null;
 
 (function() {
@@ -4164,6 +4180,49 @@ function toggleNodeChime(localNode, remoteNode, btn) {
   }
 }
 
+/* Formats a millisecond duration as e.g. "4m 12s" / "45s" for the pause
+   button's title — kept short since it's a tooltip, not a status readout. */
+function _formatChimeCooldown(ms) {
+  var totalSec = Math.max(0, Math.round(ms / 1000));
+  var m = Math.floor(totalSec / 60), s = totalSec % 60;
+  return m > 0 ? (m + 'm' + (s ? ' ' + s + 's' : '')) : (s + 's');
+}
+
+function chimePauseLabel(active, remainingMs) {
+  return active
+      ? 'Activity chime snoozed for this node — ' + _formatChimeCooldown(remainingMs) + ' left, click to resume now'
+      : 'Snooze the activity chime for this node for ' + _formatChimeCooldown(ACTIVITY_CHIME_COOLDOWN_SEC * 1000);
+}
+
+/* Manual snooze button, rendered right next to the bell toggle. Deliberately
+   plain in-memory state (not localStorage) — a snooze is a short-lived "I
+   heard it, quiet down for a while" action, not a saved preference like the
+   bell's own on/off state. */
+function renderChimePauseBtn(localNode, node) {
+  var key    = _keyedHistoryKey(localNode, node);
+  var until  = _chimePausedUntil[key] || 0;
+  var active = until > Date.now();
+  return '<button class="chime-pause-btn' + (active ? ' active' : '') + '" onclick="toggleChimePause(' +
+      esc(JSON.stringify(localNode)) + ',' + esc(JSON.stringify(node)) + ',this)" title="' +
+      esc(chimePauseLabel(active, until - Date.now())) + '">' +
+      '<svg class="icon"><use href="#icon-pause"></use></svg></button>';
+}
+
+function toggleChimePause(localNode, remoteNode, btn) {
+  var key    = _keyedHistoryKey(localNode, remoteNode);
+  var active = (_chimePausedUntil[key] || 0) > Date.now();
+  if (active) {
+    delete _chimePausedUntil[key];
+  } else {
+    _chimePausedUntil[key] = Date.now() + ACTIVITY_CHIME_COOLDOWN_SEC * 1000;
+  }
+  var nowActive = !active;
+  if (btn) {
+    btn.classList.toggle('active', nowActive);
+    btn.title = chimePauseLabel(nowActive, ACTIVITY_CHIME_COOLDOWN_SEC * 1000);
+  }
+}
+
 function _playActivityChime() {
   try {
     if (!_chimeAudioCtx) _chimeAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -4203,24 +4262,26 @@ function checkActivityChime(allLinked) {
         /* First key-up ever seen for this connection, or the previous
            session already timed out — start a fresh one. */
         _chimeSessionStart[key] = now;
-        _chimeFired[key] = false;
+        _chimeNextFireAt[key] = now + ACTIVITY_CHIME_THRESHOLD_SEC * 1000;
       }
       _chimeLastKeyed[key] = now;
-      if (!_chimeFired[key] && (now - _chimeSessionStart[key]) >= ACTIVITY_CHIME_THRESHOLD_SEC * 1000) {
-        _chimeFired[key] = true;
-        if (_chimeEnabledNodes[key] && !_listenActive &&
-            now - _chimeLastPlayed >= ACTIVITY_CHIME_COOLDOWN_MS) {
-          _chimeLastPlayed = now;
+      if (now >= (_chimeNextFireAt[key] || Infinity)) {
+        /* Due for a repeat chime — reschedule the next one regardless of
+           whether this one actually plays (disabled/snoozed/Listen-active
+           all just mean "skip this one", not "stop repeating"). */
+        _chimeNextFireAt[key] = now + ACTIVITY_CHIME_THRESHOLD_SEC * 1000;
+        var snoozedUntil = _chimePausedUntil[key] || 0;
+        if (_chimeEnabledNodes[key] && !_listenActive && now >= snoozedUntil) {
           _playActivityChime();
         }
       }
     } else if (_chimeLastKeyed[key] && (now - _chimeLastKeyed[key]) > ACTIVITY_CHIME_GAP_SEC * 1000) {
       /* Quiet long enough to call the conversation over. */
-      delete _chimeSessionStart[key]; delete _chimeLastKeyed[key]; delete _chimeFired[key];
+      delete _chimeSessionStart[key]; delete _chimeLastKeyed[key]; delete _chimeNextFireAt[key];
     }
   });
   Object.keys(_chimeSessionStart).forEach(function(key) {
-    if (!liveKeys[key]) { delete _chimeSessionStart[key]; delete _chimeLastKeyed[key]; delete _chimeFired[key]; }
+    if (!liveKeys[key]) { delete _chimeSessionStart[key]; delete _chimeLastKeyed[key]; delete _chimeNextFireAt[key]; }
   });
 }
 
@@ -4535,6 +4596,7 @@ async function refreshBoard() {
             '<div class="nr-side-bottom">' +
               renderKeyedTimeline(c.local_node, c.node) +
               renderChimeToggle(c.local_node, c.node) +
+              renderChimePauseBtn(c.local_node, c.node) +
             '</div>' +
           '</div>' +
         '</div>';
