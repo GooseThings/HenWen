@@ -510,9 +510,14 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
    contrast in some of them. */
 #listen-vol-row { display: flex; align-items: center; gap: 8px;
   flex-shrink: 0; }
-#chime-row { display: flex; align-items: center; gap: 6px;
-  flex-shrink: 0; font-size: 0.78rem; color: var(--text2); }
-#chime-row label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+/* Per-connected-node activity-chime toggle (issue #132) — sits in the
+   Connected Nodes row next to the keyed-activity timeline, not the Node
+   card, so it can be set per node rather than as one board-wide switch. */
+.chime-toggle-btn { background: none; border: none; color: var(--text2);
+  opacity: .5; cursor: pointer; padding: 2px; flex-shrink: 0;
+  display: flex; align-items: center; }
+.chime-toggle-btn:hover { opacity: 1; }
+.chime-toggle-btn.on { color: var(--green); opacity: 1; }
 /* Info-left / status-right grid, used on every width (see the mobile media
    query below for the phone-tuned size overrides layered on top of this same
    structure). Was originally mobile-only: the desktop card used a single
@@ -660,13 +665,25 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   color: var(--text2); font-size: 0.95rem; min-height: 48px; }
 
 /* A connected node is two deliberate lines: identity (dot, number, callsign,
-   location) then the stats strip (connect time, keyups, mode/idle badges and
-   their admin buttons), with the disconnect X centered on the right spanning
-   both. Nothing truncates — either line wraps further if it still doesn't
-   fit. Always two lines rather than wrap-only-when-needed on purpose: the
-   idle timer and keyup counts re-render every couple of seconds with varying
-   widths, and fit-dependent wrapping would make rows jitter between one and
-   two lines as those tick over. */
+   location — location stays glued to the right of the callsign, truncating
+   with an ellipsis via .nr-loc rather than wrapping to its own line, so it
+   never jumps around) then the stats strip (connect time, keyups, mode
+   badge). Always two lines rather than wrap-only-when-needed on purpose: the
+   keyup count re-renders every couple of seconds with a varying width, and
+   fit-dependent wrapping would make rows jitter between one and two lines as
+   those tick over.
+
+   The right side (.nr-side) mirrors that two-line shape on its own axis: the
+   idle-timeout badge (countdown/No-Timeout/Permanent/untracked, whichever
+   applies) sits right in front of the disconnect X on one line, the keyed-
+   activity timeline (with the chime toggle right after it) directly under on
+   the next — rather than the X spanning the row's full height beside a
+   timeline floating off to the side, so the timeline reads as this row's own
+   activity strip instead of an unrelated third column, and the chime toggle
+   reads as acting on that same strip rather than as another button paired
+   with disconnect. The idle badge lives here rather than in the stats strip
+   so it sits next to the button (Reset/No-Timeout-restore) it directly
+   controls, instead of across the row from it. */
 .node-row { display: flex; align-items: center; gap: 10px; min-width: 0;
   padding: 8px 18px;
   border-bottom: 1px solid var(--border); transition: background .15s; }
@@ -677,55 +694,84 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
    element, so .fav-conn-dot's always-green-while-connected look (Favorites
    has no keyed concept to distinguish) and this dot's red-while-keyed look
    agree on the connected-but-idle color instead of this one alone falling
-   through to gray. */
-.nr-dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; background: #2a2a2a; border: 1px solid #333; }
+   through to gray.
+
+   A rectangle, not a circle: .nr-dot-wrap uses align-self:stretch (rather
+   than .node-row's own align-items:center, which everything else in the row
+   still uses) to stretch to the row's full rendered height — top of the
+   identity line down to the bottom of the stats line — and then centers
+   .nr-dot at 75% of that height inside it, reading as a status stripe for
+   the whole row rather than a small dot sitting beside it, without quite
+   touching the row's own top/bottom edges. The percentage height only
+   resolves correctly because .nr-dot-wrap (its containing block) has a
+   definite height from that stretch — a bare percentage height on .nr-dot
+   itself, without the wrapper, wouldn't resolve against anything. Width
+   stays ~9px, close to the old dot's diameter. */
+.nr-dot-wrap { flex: 0 0 auto; align-self: stretch; width: 9px;
+  display: flex; align-items: center; }
+.nr-dot { width: 100%; height: 75%; border-radius: 2px; background: #2a2a2a; border: 1px solid #333; }
 .nr-dot.connected { background: var(--green); border-color: var(--green);
   box-shadow: 0 0 5px rgba(63,185,80,.6); }
 .nr-dot.keyed { background: var(--danger); border-color: var(--danger);
   box-shadow: 0 0 5px rgba(224,68,68,.7); }
 .nr-dot.connecting { background: #d9a520; border-color: #d9a520;
   box-shadow: 0 0 5px rgba(217,165,32,.6); }
-.nr-main { flex: 0 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.nr-line { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; min-width: 0; }
+/* flex:1 1 auto (not 0 1 auto): grows to fill whatever space .nr-side (fixed/
+   content-sized) isn't using, which is what pins .nr-side flush against the
+   row's right edge with no margin-left:auto trick needed on anything inside
+   it — the old approach, back when the disconnect button sat directly in
+   .node-row's own flex flow. */
+.nr-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+/* nowrap, not wrap: .nr-loc is the only shrinkable item on this line (num/call
+   are flex:0 0 auto), so forcing it to stay put and truncate via its own
+   overflow:ellipsis is what keeps location glued to the right of the
+   callsign instead of dropping to a line of its own under width pressure. */
+.nr-line { display: flex; align-items: baseline; gap: 10px; flex-wrap: nowrap; min-width: 0; }
 .nr-num  { flex: 0 0 auto;
   font-size: 1.05rem; font-weight: 700; font-family: var(--mono); color: var(--accent); text-decoration: none; }
 .nr-call { flex: 0 0 auto;
   font-size: 0.95rem; font-weight: 600; color: var(--text); letter-spacing: .03em; text-decoration: none; }
 .nr-call:hover { text-decoration: underline; }
-.nr-loc  { flex: 0 1 auto; min-width: 0; font-size: 0.82rem; color: var(--text2); }
+.nr-loc  { flex: 0 1 auto; min-width: 0; font-size: 0.82rem; color: var(--text2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .nr-meta { min-width: 0; font-size: 0.72rem; color: var(--text2);
   display: flex; align-items: center; gap: 10px; row-gap: 3px; flex-wrap: wrap; }
 .nr-meta span { white-space: nowrap; }
 .nr-meta strong { color: var(--text); }
-/* margin-left:auto, not just flex:0 0 auto: this used to sit flush against
-   the row's right edge for free, because .nr-timeline's old flex:1 1 0
-   consumed every pixel of leftover row space right up to it. Now that the
-   timeline caps out at a fixed width (see its own comment below) instead of
-   growing to fill the row, nothing claims that leftover space any more —
-   without an explicit auto margin here the button would just sit wherever
-   the timeline's fixed width happens to end, drifting left on wide rows. */
-.node-row > .sb-btn.disconnect { flex: 0 0 auto; margin-left: auto; }
+/* The right-hand column: idle badge + disconnect X on top, the keyed-activity
+   timeline (plus the chime toggle right after it) underneath — see the
+   .node-row comment above for why. min-width:0 lets it shrink below its
+   content size (needed for .nr-timeline's max-width:100% below to actually
+   bite on a narrow dashboard-resized column instead of overflowing the row). */
+.nr-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px;
+  flex: 0 1 auto; min-width: 0; }
+/* wrap+justify-end (not nowrap): the idle badge can carry a Reset button or
+   a countdown that's wider than the disconnect X alone, so on a narrow
+   dashboard-resized column this drops the badge above the X instead of
+   overflowing the row horizontally. */
+.nr-side-top { display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+  flex-wrap: wrap; justify-content: flex-end; }
+.nr-side-top .sb-btn.disconnect { flex: 0 0 auto; }
+.nr-side-bottom { display: flex; align-items: center; gap: 6px; min-width: 0; }
 
 /* Keyed-activity timeline: a strip of per-bucket bars, newest on the right.
-   flex-grow:0 on the strip and a fixed flex-basis (not width — see below)
-   keeps every bar a constant, predictable pixel width regardless of screen
-   size or how wide the Connected Nodes panel happens to be resized, instead
-   of the old flex:1 1 0 which stretched all 60 bars to fill whatever space
-   nr-main wasn't using — fine on a phone, but on a wide desktop kiosk each
-   bar could balloon to 10+px, well past what a single 5s sample needs to
-   read clearly. flex-shrink stays 1 (not 0) and min-width stays 60px so a
-   custom-resized narrow column can still compress the strip rather than
-   overflow the row — basis, not a hard width, so that shrink still applies.
-   Bars spike full-height red when that bucket saw any keyup, otherwise sit
-   at a low gray baseline (seen but quiet) or render invisible (no data yet
-   for that slice — e.g. right after the connection appeared or right after
-   page load, before history has had time to fill the window).
+   Sized with width/max-width rather than flex-basis now that it sits inside
+   .nr-side-bottom, itself stacked under the disconnect button in .nr-side (a
+   column), instead of sitting beside .nr-main as a row sibling — flex-basis
+   governs the *main* axis of its parent, which is vertical (height) in a
+   column container, so a flex-basis here would size the strip's height, not
+   its width. 240px keeps every bar a small, constant, predictable pixel
+   width regardless of screen size; max-width:100% (with .nr-side's own
+   min-width:0 above) still lets a custom-resized narrow dashboard column
+   compress it rather than overflow
+   the row. Bars spike full-height red when that bucket saw any keyup,
+   otherwise sit at a low gray baseline (seen but quiet) or render invisible
+   (no data yet for that slice — e.g. right after the connection appeared or
+   right after page load, before history has had time to fill the window).
 
-   Framed (border + subtle fill) now that it no longer stretches to the
-   row's edge on its own — at a fixed width it would otherwise float
-   unanchored in whatever leftover space sits between nr-main and the
-   (now right-pinned) disconnect button, with nothing marking where the
-   strip actually starts/ends.
+   Framed (border + subtle fill) so the strip reads as its own element under
+   the buttons rather than a bare row of bars with nothing marking where it
+   starts/ends.
 
    No gap between bars: at a static ~240px for 60 of them, each bar is only
    ~3-4px wide, and the same 1px inter-bar gap that was barely visible when
@@ -734,7 +780,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
    rather than bars. Sitting flush removes that, and a real "no history
    yet" .empty bar (genuinely transparent, unlike its solid on/off
    neighbors) still reads as a gap exactly where one belongs. */
-.nr-timeline { flex: 0 1 240px; min-width: 60px; display: flex; align-items: flex-end;
+.nr-timeline { width: 240px; max-width: 100%; min-width: 60px; display: flex; align-items: flex-end;
   height: 24px; padding: 3px 4px; border: 1px solid var(--border); border-radius: 6px;
   background: var(--bg3); }
 .nr-tl-bar { flex: 1 1 0; min-width: 1px; height: 15%; background: #3a3a3a; }
@@ -978,9 +1024,14 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .perm-label { font-size: 0.72rem; color: var(--text2); display: inline-flex; align-items: center;
   gap: 4px; user-select: none; cursor: pointer; white-space: nowrap; width: fit-content; }
 .perm-label input[type=checkbox] { cursor: pointer; accent-color: var(--accent); width: auto; flex-shrink: 0; }
-/* idle-countdown badge in node rows */
-.idle-badge { font-size: 0.68rem; padding: 1px 6px; border-radius: 3px; font-weight: 600;
-  background: rgba(88,166,255,.1); color: var(--accent); white-space: nowrap; }
+/* idle-countdown badge in node rows — padding/border match .sb-btn's box
+   model (6px vertical padding + 1px border, both border-box) so this and the
+   Reset button below sit exactly as tall as the disconnect X next to them in
+   .nr-side-top; the border is transparent since the badge has no visible
+   outline of its own, but border-box still counts it toward total height. */
+.idle-badge { font-size: 0.68rem; padding: 6px 8px; border-radius: 3px; font-weight: 600;
+  border: 1px solid transparent; background: rgba(88,166,255,.1); color: var(--accent);
+  white-space: nowrap; display: inline-flex; align-items: center; }
 .idle-badge.warn { background: rgba(255,179,0,.15); color: var(--warn); }
 /* No-timeout state: same badge, faded, instead of disappearing entirely */
 .idle-badge.off { opacity: 0.45; }
@@ -991,7 +1042,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .idle-squash-btn { background: none; border: none; color: inherit; cursor: pointer;
   font-size: 0.75rem; padding: 0 0 0 5px; line-height: 1; opacity: 0.6; }
 .idle-squash-btn:hover { opacity: 1; }
-.idle-reset-btn { font-size: 0.68rem; padding: 1px 6px; border-radius: 3px; font-weight: 600;
+.idle-reset-btn { font-size: 0.68rem; padding: 6px 8px; border-radius: 3px; font-weight: 600;
   background: rgba(63,185,80,.08); border: 1px solid rgba(63,185,80,.3); color: var(--green);
   cursor: pointer; white-space: nowrap; }
 .idle-reset-btn:hover { background: rgba(63,185,80,.22); }
@@ -1175,19 +1226,20 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   .keyed-dot { width: 34px; height: 34px; }
   .keyed-label { font-size: 0.62rem; }
 
-  /* .node-row already wraps instead of truncating (see base styles) — just
-     tighten sizes/gaps so more fits per line before wrapping kicks in. */
+  /* .node-row's stats line already wraps instead of truncating (see base
+     styles) — just tighten sizes/gaps so more fits per line before wrapping
+     kicks in. */
   .node-row { gap: 6px; padding: 10px 12px; }
   .nr-num   { font-size: 1.05rem; }
   .nr-call  { font-size: 0.95rem; }
   .nr-line  { gap: 6px; }
-  .node-row > .sb-btn.disconnect { padding-left: 6px; padding-right: 6px; }
-  /* No room for a 60-bar strip beside nr-main on a phone-width single column.
-     nr-main reverts to flex:1 1 auto here since nr-timeline isn't present to
-     absorb the row's leftover width — without this the disconnect button no
-     longer sits flush right. */
+  .nr-side-top .sb-btn.disconnect { padding-left: 6px; padding-right: 6px; }
+  /* No room for a 60-bar strip on a phone-width single column — .nr-side
+     just holds the chime toggle + disconnect button on their own with
+     nothing underneath. .nr-main is already flex:1 1 auto by default (see
+     base styles), so it still fills the leftover width without needing an
+     override here. */
   .nr-timeline { display: none; }
-  .nr-main { flex: 1 1 auto; }
 
   /* Activity rows: let the optional Fav/Monitor button pair drop to their
      own line under the entry instead of squeezing beside it. With a single
@@ -1351,6 +1403,16 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   <symbol id="icon-pause" viewBox="0 0 24 24">
     <rect x="14" y="3" width="5" height="18" rx="1" />
     <rect x="5" y="3" width="5" height="18" rx="1" />
+  </symbol>
+  <symbol id="icon-bell" viewBox="0 0 24 24">
+    <path d="M10.268 21a2 2 0 0 0 3.464 0" />
+    <path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326" />
+  </symbol>
+  <symbol id="icon-bell-off" viewBox="0 0 24 24">
+    <path d="M8.7 3A6 6 0 0 1 18 8a21.3 21.3 0 0 0 .6 5" />
+    <path d="M17 17H4a1 1 0 0 1-.74-1.673C4.59 13.956 6 12.499 6 8a6 6 0 0 1 .258-1.742" />
+    <path d="m2 2 20 20" />
+    <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
   </symbol>
   <symbol id="icon-cloud-sun" viewBox="0 0 24 24">
     <path d="M12 2v2" />
@@ -1536,11 +1598,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         <div id="listen-vol-row">
           <span style="font-size:0.78rem;color:var(--text2);flex-shrink:0;display:flex;align-items:center;gap:4px" title="Listen volume"><svg class="icon"><use href="#icon-volume-2"></use></svg> Volume</span>
           <input type="range" id="listen-volume" min="0" max="100" value="100" disabled title="Listen volume — separate from your device's system volume" style="flex:1">
-        </div>
-        <div id="chime-row">
-          <label title="Play a short chime in this browser when a connected node keys up for a while and Listen isn't running — lets you know you're missing live audio without needing Listen on all the time. Per-browser: only chimes here, not on any other logged-in device.">
-            <input type="checkbox" id="activity-chime-chk" onchange="toggleActivityChime(this.checked)"> Activity Chime
-          </label>
         </div>
       </div>
     </div>
@@ -4018,42 +4075,92 @@ function renderKeyedTimeline(localNode, node) {
 }
 
 /* ── Activity chime (issue #132) ──
-   A per-browser opt-in nudge: if a connected peer stays continuously keyed
-   for ACTIVITY_CHIME_THRESHOLD_SEC while Listen isn't running, play a short
-   chime so the viewer knows they're missing live audio without needing
-   Listen on constantly. Deliberately client-side/localStorage rather than a
-   Manager/server setting — the owner asked for this to chime only for
+   A per-connected-node opt-in nudge: while enabled for a given node, an
+   ongoing "conversation" on it that runs at least ACTIVITY_CHIME_THRESHOLD_SEC
+   plays a short chime if Listen isn't running, so the viewer knows they're
+   missing live audio without needing Listen on constantly. Per-node rather
+   than one board-wide switch (moved off the Node card per follow-up
+   feedback on #132) — a viewer who only cares about one particular
+   connected node's traffic shouldn't have to hear every other node too.
+   Deliberately client-side/localStorage rather than a Manager/server
+   setting, per the issue's own follow-up comment: it should chime only for
    "the one who selected the notification chime", not for every logged-in
-   viewer or kiosk display sharing this same board. */
-var ACTIVITY_CHIME_THRESHOLD_SEC = 15;    /* continuous key-up duration that earns a chime */
-var ACTIVITY_CHIME_COOLDOWN_MS   = 10000; /* floor between chimes so several peers crossing the threshold together don't stack */
-var _chimeEnabled    = false;   /* loaded from localStorage below */
-var _chimeKeyedSince = {};      /* "local|remote" -> ms timestamp this peer's current continuous key-up began */
-var _chimeFired      = {};      /* "local|remote" -> true once this continuous key-up already earned its one chime */
-var _chimeLastPlayed = 0;
-var _chimeAudioCtx   = null;
+   viewer or kiosk display sharing this same board.
 
-function toggleActivityChime(on) {
-  _chimeEnabled = on;
-  localStorage.setItem('henwen-activity-chime', on ? '1' : '0');
-  /* Created inside the checkbox's own click handler so it's inside a real
-     user gesture — browsers' autoplay policy would otherwise silently block
-     an AudioContext first created later from a timer tick (checkActivityChime
-     runs off refreshBoard's 2s poll, not a click). */
-  if (on && !_chimeAudioCtx) {
-    try { _chimeAudioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
-  }
-}
+   "Activity" is cumulative over a conversation, not one unbroken key-up:
+   real over-the-air traffic is almost always a string of short
+   transmissions with brief gaps between them, so requiring
+   ACTIVITY_CHIME_THRESHOLD_SEC of continuous keying (the first cut of this
+   feature) essentially never fired until someone happened to hold the PTT
+   that long in one go. A "session" now starts at the first key-up and keeps
+   accumulating across gaps shorter than ACTIVITY_CHIME_GAP_SEC — only a
+   gap longer than that resets tracking, treating the conversation as over. */
+var ACTIVITY_CHIME_THRESHOLD_SEC = 5;     /* cumulative session activity that earns a chime */
+var ACTIVITY_CHIME_GAP_SEC       = 10;    /* silence longer than this ends the session instead of just pausing it */
+var ACTIVITY_CHIME_COOLDOWN_MS   = 10000; /* floor between chimes so several nodes crossing the threshold together don't stack */
+var _chimeEnabledNodes = {};    /* "local|remote" -> true — loaded from localStorage below */
+var _chimeSessionStart = {};    /* "local|remote" -> ms timestamp this session's first key-up */
+var _chimeLastKeyed    = {};    /* "local|remote" -> ms timestamp of the most recent keyed sample seen */
+var _chimeFired        = {};    /* "local|remote" -> true once the current session already earned its one chime */
+var _chimeLastPlayed   = 0;
+var _chimeAudioCtx     = null;
 
 (function() {
-  var chk = document.getElementById('activity-chime-chk');
-  var on  = localStorage.getItem('henwen-activity-chime') === '1';
-  if (chk) chk.checked = on;
-  _chimeEnabled = on;
-  /* Not constructing _chimeAudioCtx here even if already on: page load isn't
-     a user gesture either, so most browsers would just leave it suspended.
-     _playActivityChime() creates/resumes it lazily on first actual use. */
+  try {
+    var saved = JSON.parse(localStorage.getItem('henwen-activity-chime-nodes') || '[]');
+    saved.forEach(function(key) { _chimeEnabledNodes[key] = true; });
+  } catch (e) {}
 })();
+
+function _saveChimeEnabledNodes() {
+  try { localStorage.setItem('henwen-activity-chime-nodes', JSON.stringify(Object.keys(_chimeEnabledNodes))); }
+  catch (e) {}
+}
+
+function chimeToggleLabel(on) {
+  return on ? 'Activity chime enabled for this node — click to disable'
+            : "Play a chime in this browser when this node has ongoing activity and Listen isn't running — click to enable";
+}
+
+function renderChimeToggle(localNode, node) {
+  var key = _keyedHistoryKey(localNode, node);
+  var on  = !!_chimeEnabledNodes[key];
+  /* JSON.stringify + esc(), not a single-quoted-attr + esc()-only literal —
+     node numbers are server-validated as ^\d{4,7}$ so this can't actually be
+     hit today, but this is the same onclick(id + string arg) shape the
+     connector/NWS/announcement delete buttons got bitten by once a value
+     wasn't guaranteed digits-only (see the rpt.conf/Smart Connector section
+     of CLAUDE.md); cheap to just build it safely from the start here. */
+  return '<button class="chime-toggle-btn' + (on ? ' on' : '') + '" onclick="toggleNodeChime(' +
+      esc(JSON.stringify(localNode)) + ',' + esc(JSON.stringify(node)) + ',this)" title="' + esc(chimeToggleLabel(on)) + '">' +
+      '<svg class="icon"><use href="#icon-' + (on ? 'bell' : 'bell-off') + '"></use></svg></button>';
+}
+
+function toggleNodeChime(localNode, remoteNode, btn) {
+  var key = _keyedHistoryKey(localNode, remoteNode);
+  var on  = !_chimeEnabledNodes[key];
+  if (on) {
+    _chimeEnabledNodes[key] = true;
+    /* Created inside this click handler so it's inside a real user gesture —
+       browsers' autoplay policy would otherwise silently block an
+       AudioContext first created later from checkActivityChime, which runs
+       off refreshBoard()'s 2s poll timer, not a click. */
+    if (!_chimeAudioCtx) {
+      try { _chimeAudioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+    }
+  } else {
+    delete _chimeEnabledNodes[key];
+  }
+  _saveChimeEnabledNodes();
+  /* Update this button immediately rather than waiting up to 2s for the next
+     refreshBoard() re-render to pick up the new localStorage state. */
+  if (btn) {
+    btn.classList.toggle('on', on);
+    btn.title = chimeToggleLabel(on);
+    var use = btn.querySelector('use');
+    if (use) use.setAttribute('href', '#icon-' + (on ? 'bell' : 'bell-off'));
+  }
+}
 
 function _playActivityChime() {
   try {
@@ -4080,30 +4187,38 @@ function _playActivityChime() {
 }
 
 /* Called from refreshBoard() with the same allLinked list recordKeyedHistory()
-   just saw. Tracks each peer's current continuous key-up (reset the instant
-   it unkeys) and fires one chime the first time it crosses the threshold —
-   never a repeat chime for the same still-ongoing transmission — but only
-   while Listen isn't already running, since the point is catching activity
-   the viewer would otherwise miss entirely. */
+   just saw. See the block comment above for why this tracks cumulative
+   session time (with a gap tolerance) rather than one continuous key-up. */
 function checkActivityChime(allLinked) {
-  if (!_chimeEnabled) return;
+  var now = Date.now();
   var liveKeys = {};
   allLinked.forEach(function(c) {
     var key = _keyedHistoryKey(c.local_node, c.node);
     liveKeys[key] = true;
     var isConn = (c.connect_state || 'ESTABLISHED') === 'ESTABLISHED';
-    if (!(isConn && c.keyed)) { delete _chimeKeyedSince[key]; delete _chimeFired[key]; return; }
-    if (!_chimeKeyedSince[key]) _chimeKeyedSince[key] = Date.now();
-    if (_chimeFired[key]) return;
-    if (Date.now() - _chimeKeyedSince[key] < ACTIVITY_CHIME_THRESHOLD_SEC * 1000) return;
-    _chimeFired[key] = true;
-    if (_listenActive) return;
-    if (Date.now() - _chimeLastPlayed < ACTIVITY_CHIME_COOLDOWN_MS) return;
-    _chimeLastPlayed = Date.now();
-    _playActivityChime();
+    if (isConn && c.keyed) {
+      if (!_chimeSessionStart[key] || (now - (_chimeLastKeyed[key] || 0)) > ACTIVITY_CHIME_GAP_SEC * 1000) {
+        /* First key-up ever seen for this connection, or the previous
+           session already timed out — start a fresh one. */
+        _chimeSessionStart[key] = now;
+        _chimeFired[key] = false;
+      }
+      _chimeLastKeyed[key] = now;
+      if (!_chimeFired[key] && (now - _chimeSessionStart[key]) >= ACTIVITY_CHIME_THRESHOLD_SEC * 1000) {
+        _chimeFired[key] = true;
+        if (_chimeEnabledNodes[key] && !_listenActive &&
+            now - _chimeLastPlayed >= ACTIVITY_CHIME_COOLDOWN_MS) {
+          _chimeLastPlayed = now;
+          _playActivityChime();
+        }
+      }
+    } else if (_chimeLastKeyed[key] && (now - _chimeLastKeyed[key]) > ACTIVITY_CHIME_GAP_SEC * 1000) {
+      /* Quiet long enough to call the conversation over. */
+      delete _chimeSessionStart[key]; delete _chimeLastKeyed[key]; delete _chimeFired[key];
+    }
   });
-  Object.keys(_chimeKeyedSince).forEach(function(key) {
-    if (!liveKeys[key]) { delete _chimeKeyedSince[key]; delete _chimeFired[key]; }
+  Object.keys(_chimeSessionStart).forEach(function(key) {
+    if (!liveKeys[key]) { delete _chimeSessionStart[key]; delete _chimeLastKeyed[key]; delete _chimeFired[key]; }
   });
 }
 
@@ -4388,7 +4503,7 @@ async function refreshBoard() {
             : '<span title="Not tracked for idle timeout — connected outside the kiosk"><svg class="icon"><use href="#icon-clock"></use></svg></span>';
           idleBadge = '<span class="idle-badge off">' + trackBtn + '</span>';
         }
-        var badges = modeBadge + idleBadge;
+        var badges = modeBadge;
         var dotClass = !isConn ? ' connecting' : (c.keyed ? ' keyed' : ' connected');
         var isAdminRole = window._kioskRole === 'admin' || window._kioskRole === 'superuser' || window._kioskRole === 'owner';
         var dcBtn = (c.connector_managed && !isAdminRole)
@@ -4402,7 +4517,7 @@ async function refreshBoard() {
           : '<button class="sb-btn disconnect" title="Disconnect" data-label="X" onclick="sbDisconnect(\'' +
               esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)">X</button>';
         return '<div class="node-row">' +
-          '<div class="nr-dot' + dotClass + '"></div>' +
+          '<div class="nr-dot-wrap"><div class="nr-dot' + dotClass + '"></div></div>' +
           '<div class="nr-main">' +
             '<div class="nr-line">' +
               nodeLink(c.node, 'nr-num') +
@@ -4413,8 +4528,13 @@ async function refreshBoard() {
             (badges ? '<div class="nr-meta nr-badges">' + badges + '</div>' : '') +
             (!isConn ? '<div class="nr-meta" style="color:var(--warn)">Connecting…</div>' : '') +
           '</div>' +
-          renderKeyedTimeline(c.local_node, c.node) +
-          dcBtn +
+          '<div class="nr-side">' +
+            '<div class="nr-side-top">' + idleBadge + dcBtn + '</div>' +
+            '<div class="nr-side-bottom">' +
+              renderKeyedTimeline(c.local_node, c.node) +
+              renderChimeToggle(c.local_node, c.node) +
+            '</div>' +
+          '</div>' +
         '</div>';
       }).join('');
     }
