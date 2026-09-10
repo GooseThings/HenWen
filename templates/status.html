@@ -4095,8 +4095,8 @@ function renderKeyedTimeline(localNode, node) {
    that long in one go. A "session" now starts at the first key-up and keeps
    accumulating across gaps shorter than ACTIVITY_CHIME_GAP_SEC — only a
    gap longer than that resets tracking, treating the conversation as over. */
-var ACTIVITY_CHIME_THRESHOLD_SEC = 15;    /* cumulative session activity that earns a chime */
-var ACTIVITY_CHIME_GAP_SEC       = 12;    /* silence longer than this ends the session instead of just pausing it */
+var ACTIVITY_CHIME_THRESHOLD_SEC = 5;     /* cumulative session activity that earns a chime */
+var ACTIVITY_CHIME_GAP_SEC       = 10;    /* silence longer than this ends the session instead of just pausing it */
 var ACTIVITY_CHIME_COOLDOWN_MS   = 10000; /* floor between chimes so several nodes crossing the threshold together don't stack */
 var _chimeEnabledNodes = {};    /* "local|remote" -> true — loaded from localStorage below */
 var _chimeSessionStart = {};    /* "local|remote" -> ms timestamp this session's first key-up */
