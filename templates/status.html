@@ -4269,6 +4269,25 @@ async function refreshBoard() {
           idleBadge = '<span class="idle-badge off">' + clockBtn + '</span>';
         } else if (c.permanent === true) {
           idleBadge = '<span class="idle-badge">Permanent</span>';
+        } else if (c.permanent == null && isConn) {
+          /* Untracked connection: established outside the kiosk's own connect
+             flow (an external node dialing into this one, or one made
+             directly via the Asterisk CLI before HenWen started tracking it)
+             — _kiosk_temp_conns never got an entry for it, so none of the
+             idle-elapsed/no-timeout/permanent branches above match and there
+             would otherwise be no idle-timeout control here at all (issue
+             #121). Same clock icon/button as the "No Timeout" case above,
+             but sbRestoreIdle's endpoint now starts tracking a previously-
+             untracked connection instead of 404ing, so clicking it here
+             begins enforcing the idle timeout from now rather than
+             "restoring" a state that never existed. */
+          var isAdmin3 = window._kioskRole === 'admin' || window._kioskRole === 'superuser' || window._kioskRole === 'owner';
+          var trackBtn = isAdmin3
+            ? '<button class="idle-restore-btn" onclick="sbRestoreIdle(\'' +
+                esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)" ' +
+                'title="Not tracked for idle timeout (connected outside the kiosk) — click to start enforcing the idle timeout on this connection"><svg class="icon"><use href="#icon-clock"></use></svg></button>'
+            : '<span title="Not tracked for idle timeout — connected outside the kiosk"><svg class="icon"><use href="#icon-clock"></use></svg></span>';
+          idleBadge = '<span class="idle-badge off">' + trackBtn + '</span>';
         }
         var badges = modeBadge + idleBadge;
         var dotClass = !isConn ? ' connecting' : (c.keyed ? ' keyed' : ' connected');

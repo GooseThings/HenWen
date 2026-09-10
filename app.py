@@ -7683,7 +7683,21 @@ def api_status_squash_idle():
 def api_status_restore_idle():
     """Undo /api/status/squash-idle — re-enable the idle-timeout auto-disconnect
     for a connection that was exempted from it. Resets the idle clock to now,
-    since time spent exempted was never counted as elapsed idle time."""
+    since time spent exempted was never counted as elapsed idle time.
+
+    Also doubles as "start tracking" for a connection _kiosk_temp_conns never
+    had an entry for at all — an external node that dialed into this one, or
+    a link made directly via the Asterisk CLI before HenWen was tracking it.
+    Those show up on the Status Board with no idle-timeout badge/control of
+    any kind, not even a squashed one, since none of the permanent/no_timeout/
+    tracked-elapsed branches match a row that's simply absent (issue #121).
+    Reusing this endpoint rather than adding a separate one: the end state a
+    user wants by clicking the clock icon is identical either way — the idle
+    clock starts counting from now. `monitor` is optional and only cosmetic
+    (round-tripped to kiosk_temp_conns/the DB for display elsewhere); a fresh
+    entry defaults it False, same as squash-idle's own fresh-entry branch,
+    since the caller has no way to know the link's actual R/T mode from here.
+    """
     if session.get('role') not in ('admin', 'superuser', 'owner'):
         return jsonify({"error": "Admin access required"}), 403
     data        = request.json or {}
@@ -7695,14 +7709,18 @@ def api_status_restore_idle():
         return jsonify({"error": "Invalid remote_node"}), 400
     key = (local_node, remote_node)
     with _kiosk_temp_lock:
-        if key not in _kiosk_temp_conns or _kiosk_temp_conns[key].get('permanent'):
-            return jsonify({"error": "Not a tracked temporary connection"}), 404
-        _kiosk_temp_conns[key]['no_timeout']  = False
-        _kiosk_temp_conns[key]['last_active'] = time.time()
+        if key in _kiosk_temp_conns and _kiosk_temp_conns[key].get('permanent'):
+            return jsonify({"error": "Not a trackable connection"}), 404
+        if key not in _kiosk_temp_conns:
+            _kiosk_temp_conns[key] = {'permanent': False, 'monitor': False,
+                                       'no_timeout': False, 'last_active': time.time()}
+        else:
+            _kiosk_temp_conns[key]['no_timeout']  = False
+            _kiosk_temp_conns[key]['last_active'] = time.time()
         info = dict(_kiosk_temp_conns[key])
     _db_temp_conn_save(local_node, remote_node, info.get('monitor', False),
                        False, info['last_active'])
-    log("INFO", f"[API] /api/status/restore-idle {local_node} -> {remote_node}: idle timeout re-enabled")
+    log("INFO", f"[API] /api/status/restore-idle {local_node} -> {remote_node}: idle timeout enabled")
     return jsonify({"ok": True})
 
 
