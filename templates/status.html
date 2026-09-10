@@ -694,8 +694,15 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
    element, so .fav-conn-dot's always-green-while-connected look (Favorites
    has no keyed concept to distinguish) and this dot's red-while-keyed look
    agree on the connected-but-idle color instead of this one alone falling
-   through to gray. */
-.nr-dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; background: #2a2a2a; border: 1px solid #333; }
+   through to gray.
+
+   A rectangle, not a circle: align-self:stretch (rather than .node-row's own
+   align-items:center, which everything else in the row still uses) makes
+   this one child stretch to the row's full rendered height — top of the
+   identity line down to the bottom of the stats line — reading as a status
+   stripe for the whole row rather than a small dot sitting beside it. Width
+   stays ~9px, close to the old dot's diameter. */
+.nr-dot { flex: 0 0 auto; align-self: stretch; width: 9px; border-radius: 2px; background: #2a2a2a; border: 1px solid #333; }
 .nr-dot.connected { background: var(--green); border-color: var(--green);
   box-shadow: 0 0 5px rgba(63,185,80,.6); }
 .nr-dot.keyed { background: var(--danger); border-color: var(--danger);
