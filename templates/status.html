@@ -1010,9 +1010,14 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .perm-label { font-size: 0.72rem; color: var(--text2); display: inline-flex; align-items: center;
   gap: 4px; user-select: none; cursor: pointer; white-space: nowrap; width: fit-content; }
 .perm-label input[type=checkbox] { cursor: pointer; accent-color: var(--accent); width: auto; flex-shrink: 0; }
-/* idle-countdown badge in node rows */
-.idle-badge { font-size: 0.68rem; padding: 1px 6px; border-radius: 3px; font-weight: 600;
-  background: rgba(88,166,255,.1); color: var(--accent); white-space: nowrap; }
+/* idle-countdown badge in node rows — padding/border match .sb-btn's box
+   model (6px vertical padding + 1px border, both border-box) so this and the
+   Reset button below sit exactly as tall as the disconnect X next to them in
+   .nr-side-top; the border is transparent since the badge has no visible
+   outline of its own, but border-box still counts it toward total height. */
+.idle-badge { font-size: 0.68rem; padding: 6px 8px; border-radius: 3px; font-weight: 600;
+  border: 1px solid transparent; background: rgba(88,166,255,.1); color: var(--accent);
+  white-space: nowrap; display: inline-flex; align-items: center; }
 .idle-badge.warn { background: rgba(255,179,0,.15); color: var(--warn); }
 /* No-timeout state: same badge, faded, instead of disappearing entirely */
 .idle-badge.off { opacity: 0.45; }
@@ -1023,7 +1028,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .idle-squash-btn { background: none; border: none; color: inherit; cursor: pointer;
   font-size: 0.75rem; padding: 0 0 0 5px; line-height: 1; opacity: 0.6; }
 .idle-squash-btn:hover { opacity: 1; }
-.idle-reset-btn { font-size: 0.68rem; padding: 1px 6px; border-radius: 3px; font-weight: 600;
+.idle-reset-btn { font-size: 0.68rem; padding: 6px 8px; border-radius: 3px; font-weight: 600;
   background: rgba(63,185,80,.08); border: 1px solid rgba(63,185,80,.3); color: var(--green);
   cursor: pointer; white-space: nowrap; }
 .idle-reset-btn:hover { background: rgba(63,185,80,.22); }
