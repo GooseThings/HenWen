@@ -333,7 +333,24 @@ echo "  AMI Secret: $SECRET"
 echo "  AMI Port:   ${PORT:-5038}"
 echo ""
 echo "  To verify in the web UI:"
-echo "    http://$(hostname -I | awk '{print $1}'):5000"
+# This script is also run standalone, long after install.sh, so it can't
+# rely on any shell variable install.sh may have computed -- re-detect the
+# right URL the same way install.sh's own final banner does: prefer HTTPS
+# (setup-https.sh's marker files) over a plain HenWen Apache vhost over the
+# direct :5000 port, since :5000 bypasses Apache and with it the
+# low-latency RX audio path's /ws-audio proxy.
+IP=$(hostname -I | awk '{print $1}')
+if [ -f /etc/asterisk/henwen-https-hostname ]; then
+    WEBUI_HOSTNAME=$(cat /etc/asterisk/henwen-https-hostname 2>/dev/null || true)
+    WEBUI_HTTPS_PORT=$(cat /etc/asterisk/henwen-https-port 2>/dev/null || true)
+    WEBUI_PORT_SUFFIX=""
+    [ -n "$WEBUI_HTTPS_PORT" ] && [ "$WEBUI_HTTPS_PORT" != "443" ] && WEBUI_PORT_SUFFIX=":${WEBUI_HTTPS_PORT}"
+    echo "    https://${WEBUI_HOSTNAME}${WEBUI_PORT_SUFFIX}"
+elif [ -f /etc/apache2/sites-enabled/henwen.conf ] || [ -f /etc/apache2/sites-enabled/henwen-ssl.conf ]; then
+    echo "    http://${IP}/"
+else
+    echo "    http://${IP}:5000"
+fi
 echo "    -> AMI Diagnostics -> Run Test"
 echo ""
 echo "  To check logs:"

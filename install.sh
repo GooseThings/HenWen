@@ -195,13 +195,23 @@ fi
 # ws-audio/apply.sh's /ws-audio proxy line needs somewhere to live (see
 # CLAUDE.md's "Audio streaming"/"Background threads" sections). Merged with
 # the (still fully opt-in) "set up HTTPS for browser TX" question so there's
-# exactly one Apache-provisioning pass and one consent prompt: answering yes
-# runs the full HTTPS flow (Apache comes along for free), answering no, or a
-# non-interactive install, still gets a minimal plain-HTTP vhost via
-# setup-https.sh --http-only so low-latency RX works by default either way.
-# Self-falling-back and non-fatal throughout, exactly like the AudioSocket
-# tap step above -- Listen keeps working over the legacy WebM path (and TX
-# just stays hidden) regardless of what happens here.
+# one Apache-provisioning pass covering both features rather than two.
+#
+# An interactive run asks two questions, in order: first, whether HenWen is
+# already sitting behind the operator's OWN reverse proxy on this box (nginx,
+# Caddy, another Apache instance) -- answering yes skips Apache entirely, no
+# apache2 install, no vhost, nothing (this used to be folded into the HTTPS
+# question's own "skip this if..." wording, which was wrong: declining HTTPS
+# there still ran setup-https.sh --http-only underneath, which would fight
+# with a real existing reverse proxy exactly like the old wording warned
+# against -- the two are now genuinely separate questions, not one question
+# doing double duty). Answering no (or a non-interactive install, which can't
+# ask either question) moves on to the actual HTTPS question: yes runs the
+# full HTTPS flow (Apache comes along for free), no still gets a minimal
+# plain-HTTP vhost via setup-https.sh --http-only so low-latency RX works by
+# default either way. Self-falling-back and non-fatal throughout, exactly
+# like the AudioSocket tap step above -- Listen keeps working over the legacy
+# WebM path (and TX just stays hidden) regardless of what happens here.
 echo "[8/11] Setting up Apache for low-latency RX audio..."
 WS_AUDIO_DEFAULT_OK=0
 HAVE_APACHE_VHOST=0
@@ -210,26 +220,37 @@ if [ -f /etc/apache2/sites-enabled/henwen-ssl.conf ] || [ -f /etc/apache2/sites-
     HAVE_APACHE_VHOST=1
 elif [ -t 0 ]; then
     echo ""
-    echo "  Note: skip this if HenWen will run behind an existing reverse proxy"
-    echo "  (e.g. nginx, Caddy, or another Apache instance) that already terminates"
-    echo "  HTTPS for you -- this step provisions its own standalone Apache +"
-    echo "  Let's Encrypt HTTPS listener, which isn't what you want in that case."
-    read -p "  Set up HTTPS now for the browser TX button? Requires a public hostname pointed at this box. [y/N]: " SETUP_HTTPS
-    if [[ "$SETUP_HTTPS" =~ ^[Yy] ]]; then
-        if bash "$INSTALL_DIR/tx-spike/setup-https.sh"; then
-            HAVE_APACHE_VHOST=1
-        else
-            echo "      HTTPS setup failed — you can re-run it later:"
-            echo "        sudo bash $INSTALL_DIR/tx-spike/setup-https.sh"
-        fi
+    echo "  By default this installs its own Apache on this box (if not already"
+    echo "  present) to front HenWen, which is what lets the low-latency RX audio"
+    echo "  path's WebSocket proxy work out of the box, and optionally sets up"
+    echo "  HTTPS on it for the browser TX button too."
+    read -p "  Is HenWen already running behind YOUR OWN reverse proxy on this box (nginx, Caddy, another Apache instance)? [y/N]: " EXISTING_PROXY
+    if [[ "$EXISTING_PROXY" =~ ^[Yy] ]]; then
+        echo "      Skipping Apache setup entirely so this doesn't fight with your"
+        echo "      existing reverse proxy (e.g. a port-80 bind conflict). Low-latency"
+        echo "      RX audio and browser TX both still work -- point your own reverse"
+        echo "      proxy at this box's Flask port ($PORT) and, for either feature, add"
+        echo "      its own WebSocket proxy rule for /ws-audio (and /asterisk-ws for TX)"
+        echo "      -- see ws-audio/README.md and tx-spike/README.md for exactly what"
+        echo "      those need to point at."
     else
-        echo "      Skipped HTTPS. Run 'sudo bash $INSTALL_DIR/tx-spike/setup-https.sh' later if you want browser TX."
-        if bash "$INSTALL_DIR/tx-spike/setup-https.sh" --http-only; then
-            HAVE_APACHE_VHOST=1
+        read -p "  Set up HTTPS now for the browser TX button? Requires a public hostname pointed at this box. [y/N]: " SETUP_HTTPS
+        if [[ "$SETUP_HTTPS" =~ ^[Yy] ]]; then
+            if bash "$INSTALL_DIR/tx-spike/setup-https.sh"; then
+                HAVE_APACHE_VHOST=1
+            else
+                echo "      HTTPS setup failed — you can re-run it later:"
+                echo "        sudo bash $INSTALL_DIR/tx-spike/setup-https.sh"
+            fi
         else
-            echo "      WARNING: plain-HTTP Apache setup failed — low-latency RX audio"
-            echo "      won't be reachable by default. Apply later from Manager > Audio,"
-            echo "      or: sudo bash $INSTALL_DIR/tx-spike/setup-https.sh --http-only"
+            echo "      Skipped HTTPS. Run 'sudo bash $INSTALL_DIR/tx-spike/setup-https.sh' later if you want browser TX."
+            if bash "$INSTALL_DIR/tx-spike/setup-https.sh" --http-only; then
+                HAVE_APACHE_VHOST=1
+            else
+                echo "      WARNING: plain-HTTP Apache setup failed — low-latency RX audio"
+                echo "      won't be reachable by default. Apply later from Manager > Audio,"
+                echo "      or: sudo bash $INSTALL_DIR/tx-spike/setup-https.sh --http-only"
+            fi
         fi
     fi
 else
@@ -428,6 +449,16 @@ sleep 2
 
 if systemctl is-active --quiet "$SERVICE_NAME"; then
     IP=$(hostname -I | awk '{print $1}')
+    # ami-setup.sh's own output (manager.conf dump, AMI login test, service
+    # restart) runs BEFORE this summary, not after -- it's the noisiest part
+    # of the whole install, and printing the URLs first just meant they
+    # scrolled off screen before anyone could read them (issue found via a
+    # live install run). This block is now deliberately the last thing
+    # install.sh prints.
+    echo ""
+    echo "  Running AMI setup now..."
+    bash "$INSTALL_DIR/ami-setup.sh" || true
+
     echo ""
     echo "============================================"
     echo "  Installation complete!"
@@ -449,9 +480,6 @@ if systemctl is-active --quiet "$SERVICE_NAME"; then
     echo "  Backups:   /etc/asterisk/rpt_backups/"
     echo "  Logs:      journalctl -u $SERVICE_NAME -f"
     echo "============================================"
-    echo ""
-    echo "  Running AMI setup now..."
-    bash "$INSTALL_DIR/ami-setup.sh" || true
 else
     echo ""
     echo "WARNING: Service may not have started. Check:"
