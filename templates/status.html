@@ -696,13 +696,20 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
    agree on the connected-but-idle color instead of this one alone falling
    through to gray.
 
-   A rectangle, not a circle: align-self:stretch (rather than .node-row's own
-   align-items:center, which everything else in the row still uses) makes
-   this one child stretch to the row's full rendered height — top of the
-   identity line down to the bottom of the stats line — reading as a status
-   stripe for the whole row rather than a small dot sitting beside it. Width
+   A rectangle, not a circle: .nr-dot-wrap uses align-self:stretch (rather
+   than .node-row's own align-items:center, which everything else in the row
+   still uses) to stretch to the row's full rendered height — top of the
+   identity line down to the bottom of the stats line — and then centers
+   .nr-dot at 75% of that height inside it, reading as a status stripe for
+   the whole row rather than a small dot sitting beside it, without quite
+   touching the row's own top/bottom edges. The percentage height only
+   resolves correctly because .nr-dot-wrap (its containing block) has a
+   definite height from that stretch — a bare percentage height on .nr-dot
+   itself, without the wrapper, wouldn't resolve against anything. Width
    stays ~9px, close to the old dot's diameter. */
-.nr-dot { flex: 0 0 auto; align-self: stretch; width: 9px; border-radius: 2px; background: #2a2a2a; border: 1px solid #333; }
+.nr-dot-wrap { flex: 0 0 auto; align-self: stretch; width: 9px;
+  display: flex; align-items: center; }
+.nr-dot { width: 100%; height: 75%; border-radius: 2px; background: #2a2a2a; border: 1px solid #333; }
 .nr-dot.connected { background: var(--green); border-color: var(--green);
   box-shadow: 0 0 5px rgba(63,185,80,.6); }
 .nr-dot.keyed { background: var(--danger); border-color: var(--danger);
@@ -4510,7 +4517,7 @@ async function refreshBoard() {
           : '<button class="sb-btn disconnect" title="Disconnect" data-label="X" onclick="sbDisconnect(\'' +
               esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)">X</button>';
         return '<div class="node-row">' +
-          '<div class="nr-dot' + dotClass + '"></div>' +
+          '<div class="nr-dot-wrap"><div class="nr-dot' + dotClass + '"></div></div>' +
           '<div class="nr-main">' +
             '<div class="nr-line">' +
               nodeLink(c.node, 'nr-num') +
