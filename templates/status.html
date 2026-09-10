@@ -6990,7 +6990,7 @@ function _doStartListen(audio, node, rxAudioPath) {
   }
   /* Consumed (and cleared) by the "Monitoring node..." success toast in
      _doStartListenMSE()/_doStartListenFallback() below, rather than shown
-     here directly -- that toast fires moments later and would otherwise
+     here directly. That toast fires moments later and would otherwise
      silently overwrite this one in the same single #sb-toast element
      before anyone had a chance to read it. */
   _listenFallbackNotice = (rxAudioPath === 'lowlatency' && !wsCapable)

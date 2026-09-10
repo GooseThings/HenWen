@@ -319,7 +319,7 @@ class TestSeedDefaultFromEnv:
     /ws-audio proxy on a fresh install). Every other test in this suite
     runs with the env var unset, which is what already exercises the no-op/
     backward-compatible case (see TestRxAudioConfigGating and
-    tests/test_internal_audio_api.py's "no save needed" assumption) -- these
+    tests/test_internal_audio_api.py's "no save needed" assumption). These
     two only cover the env var itself, driving get_db()'s schema-creation
     path directly rather than through the fresh_db fixture, so the env var
     is guaranteed set *before* the table is first created."""

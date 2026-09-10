@@ -908,11 +908,12 @@ def get_db():
         conn.execute("ALTER TABLE rx_audio_config ADD COLUMN agc_enabled INTEGER NOT NULL DEFAULT 0")
     # RX_AUDIO_DEFAULT_PATH is set by install.sh only when it successfully
     # provisioned the Apache /ws-audio proxy for a fresh install (see
-    # "Low-latency RX audio" in CLAUDE.md) -- unset/invalid for every
-    # existing install and every test run, in which case this is a no-op
-    # and rx_audio_config stays exactly as it is today (no row, callers fall
-    # back to RX_AUDIO_CONFIG_DEFAULTS). Only ever seeds the row once (guard
-    # is "no row yet"), so a later explicit Manager > Audio save always wins.
+    # "Low-latency RX audio" in CLAUDE.md). It is unset or invalid for
+    # every existing install and every test run, in which case this is a
+    # no-op and rx_audio_config stays exactly as it is today (no row,
+    # callers fall back to RX_AUDIO_CONFIG_DEFAULTS). This only ever seeds
+    # the row once (guard is "no row yet"), so a later explicit
+    # Manager > Audio save always wins.
     _rx_audio_default_path = os.environ.get("RX_AUDIO_DEFAULT_PATH", "").strip().lower()
     if _rx_audio_default_path in RX_AUDIO_PATHS:
         if not conn.execute("SELECT 1 FROM rx_audio_config WHERE id=1").fetchone():
@@ -8279,6 +8280,28 @@ def api_rx_diagnostics():
             "Applied (" + proxy_conf + ")" if proxy_applied else
             "Not applied — only relevant if the Low-Latency RX path is selected")
 
+    # Mirrors api_tx_diagnostics()'s own "This page loaded over HTTPS" check
+    # above (same request.is_secure / X-Forwarded-Proto expression, already
+    # corrected for the Apache TLS proxy by _LocalProxyFix). The low-latency
+    # path's browser decoder is WebCodecs (AudioDecoder), a secure-context-
+    # only API. It's simply undefined on a plain-HTTP origin, so every real
+    # visitor silently keeps using the legacy pipeline no matter what
+    # rx_audio_config.path says. Confirmed live: every other check here can
+    # pass while this is still true, since none of them can see what a
+    # visitor's browser actually has available.
+    is_https = request.is_secure or request.headers.get("X-Forwarded-Proto", "").lower() == "https"
+    if cfg['path'] == 'lowlatency':
+        add("This request arrived over HTTPS", is_https,
+            "Secure context confirmed" if is_https else
+            "This page loaded over plain HTTP. The low-latency path's browser "
+            "decoder (WebCodecs) needs HTTPS (or localhost) to exist at all, so "
+            "every real visitor is silently using the legacy path instead.",
+            warn=not is_https)
+    else:
+        add("This request arrived over HTTPS", True,
+            "Secure context confirmed" if is_https else
+            "Loaded over plain HTTP. Only relevant if the Low-Latency RX path is selected.")
+
     content = read_conf_file(RPT_CONF_PATH)
     nodes = get_node_numbers(content) if content else []
     if not nodes:
@@ -8298,9 +8321,11 @@ def api_rx_diagnostics():
         missing.append("relay process")
     if not proxy_applied:
         missing.append("Apache /ws-audio proxy")
+    if not is_https:
+        missing.append("HTTPS")
     add("Low-latency path ready to use", not missing,
         "All prerequisites met" if not missing else
-        "Missing: " + ", ".join(missing) + " — see Low-Latency Path Requirements above",
+        "Missing: " + ", ".join(missing) + ".",
         warn=bool(missing))
 
     add("Current RX audio settings", True,
@@ -8433,8 +8458,8 @@ def _find_node_channel(node):
     Returns None if neither finds anything.
 
     The two strategies are not interchangeable on a node with active
-    links. Every linked peer gets its own separate Asterisk channel (that
-    peer's own inbound connection into this node's Rpt() application) —
+    links. Every linked peer gets its own separate Asterisk channel, that
+    peer's own inbound connection into this node's Rpt() application.
     app_rpt has no conventional Bridge object, so it composites audio
     across all of them (the node's own rxchannel plus every linked peer's
     channel) via its own internal mixing instead. The heuristic scan below
@@ -8443,10 +8468,10 @@ def _find_node_channel(node):
     lands in a dialplan extension named after the LOCAL node it dialed
     into, not the peer's own identity. Confirmed live on a hub node with 17
     simultaneous links: the heuristic scan matched one specific linked
-    peer's own inbound IAX2 channel instead of the node's actual rxchannel
-    -- a channel that only carries real audio while that ONE peer happens
-    to be transmitting, silent the rest of the time (often well past
-    AudioSocket's fixed 2000ms no-activity timeout), breaking Listen
+    peer's own inbound IAX2 channel instead of the node's actual rxchannel.
+    That channel only carries real audio while that ONE peer happens to be
+    transmitting, silent the rest of the time, often well past
+    AudioSocket's fixed 2000ms no-activity timeout, breaking Listen
     entirely whenever the wrong peer's channel got picked. rpt show
     channels reports the node's real rxchannel directly from app_rpt
     itself, sidestepping the ambiguity altogether.
@@ -8894,17 +8919,23 @@ def _try_audiosocket_tap(node, channel, fifo_out_path, gen, relay_env):
     removed, same moment, same channel). Bare 'q' (suppress the
     announce-tone/interactive-digit behavior ChanSpy has by default) mixes
     both directions, matching MixMonitor's own default behavior. Still
-    strictly listen-only either way — dropping 'o' does not add whisper/
+    strictly listen-only either way. Dropping 'o' does not add whisper/
     barge; only 'w'/'W'/'B' do that, and none are used here. Verified live
     against a real running node channel (SimpleUSB/643930) to have zero
-    effect on the channel's own Rpt() execution, with clean teardown via
-    Hangup-by-ChannelId leaving no stray channels behind.
+    effect on the channel's own Rpt() execution. Hangup-by-ChannelId below
+    is NOT reliable cleanup, though: confirmed live on a hub node with
+    active links that a stuck ChanSpy leg (one whose AudioSocket partner
+    Asterisk already force-closed) does not respond to Hangup even by its
+    correct real channel name, only to an Asterisk restart. See
+    _find_node_channel()'s docstring for the channel-selection bug that
+    was the main trigger for this; this leak is a separate, still-open
+    issue.
 
-    Purely additive: on ANY failure -- most commonly the feature not
-    installed yet (audiosocket-tap/apply.sh never run or failed -- install.sh
+    Purely additive. On ANY failure, most commonly the feature not
+    installed yet (audiosocket-tap/apply.sh never run or failed; install.sh
     applies it automatically on every fresh install, but only when Asterisk
     is already installed and running at install time), but also a handshake
-    timeout or a rejected Originate -- this returns None so the caller
+    timeout or a rejected Originate, this returns None so the caller
     falls straight through to the existing MixMonitor path unchanged.
     Never raises; every failure is logged at DEBUG rather than WARN, since
     "not available" is a real, non-error steady state for any install where
@@ -10975,14 +11006,14 @@ def api_update_launch():
 # ── AudioSocket tap (low-latency Listen audio) ───────────────────────────────
 #
 # Swaps the Status Board's Listen capture path from AMI MixMonitor (buffered,
-# ~2s latency — see "Audio streaming" in CLAUDE.md) to a live AudioSocket
-# tap. install.sh applies this automatically on every fresh install (when
-# Asterisk is already running at install time); these routes exist for
-# installs where that didn't happen yet, or to re-apply after a rollback.
-# See audiosocket-tap/README.md for what apply.sh actually does. Owner-only,
-# matching every other shell/deploy-level action on this page (Force Update,
-# ports, secret key) — misconfiguring Asterisk modules/dialplan isn't
-# something to expose below the top role.
+# adds ~2s of latency; see "Audio streaming" in CLAUDE.md) to a live
+# AudioSocket tap. install.sh applies this automatically on every fresh
+# install (when Asterisk is already running at install time); these routes
+# exist for installs where that didn't happen yet, or to re-apply after a
+# rollback. See audiosocket-tap/README.md for what apply.sh actually does.
+# Owner-only, matching every other shell/deploy-level action on this page
+# (Force Update, ports, secret key). Misconfiguring Asterisk modules or the
+# dialplan isn't something to expose below the top role.
 
 @app.route("/api/audiosocket-tap/status")
 def api_audiosocket_tap_status():
