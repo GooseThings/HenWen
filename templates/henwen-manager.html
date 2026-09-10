@@ -1947,24 +1947,6 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
       </div>
     </div>
 
-    <div class="card">
-      <div class="card-header"><h2>Low-Latency Checklist</h2></div>
-      <div class="card-body">
-        <p class="muted" style="margin-bottom:8px">
-          For listeners on other devices to get Low-Latency audio, two things below both need
-          to be done:
-        </p>
-        <ul style="margin:0 0 10px 20px;padding:0;color:var(--text2);font-size:0.9rem;line-height:1.7">
-          <li>Click <b>Apply Apache Proxy</b> to make Low-Latency reachable from outside this box.</li>
-          <li>Set <b>RX Audio Path</b> to Low-Latency and save it.</li>
-        </ul>
-        <p class="muted" style="margin:0;font-size:0.85rem">
-          Older browsers switch to the standard method automatically. There is nothing to
-          configure for that.
-        </p>
-      </div>
-    </div>
-
     <div class="card" id="audiosocket-tap-settings-card" style="display:none">
       <div class="card-header"><h2>AudioSocket Tap (Listen audio)</h2></div>
       <div class="card-body">
@@ -1987,9 +1969,8 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
         <p class="muted" style="margin-bottom:12px">
           This controls how Listen streams to browsers. <b>Legacy</b> works everywhere with about
           a 1.5s delay. <b>Low-Latency</b> cuts that delay significantly, but needs a fairly
-          modern browser and the Apache proxy applied above. See the checklist above for what
-          that involves. This setting applies to every listener on this node at once, not
-          just you.
+          modern browser and the Apache proxy below applied. This setting applies to every
+          listener on this node at once, not just you.
         </p>
 
         <p id="rx-audio-ws-status" style="margin-bottom:12px;color:var(--text2)">Checking&hellip;</p>
@@ -2001,8 +1982,8 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
         <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px">
           <label class="toggle-label" style="margin:0">RX Audio Path</label>
           <select id="rx-audio-path-select" class="val-input" style="width:auto;min-width:220px">
-            <option value="legacy">Legacy (default)</option>
-            <option value="lowlatency">Low-Latency</option>
+            <option value="legacy">Legacy</option>
+            <option value="lowlatency">Low-Latency (default)</option>
           </select>
         </div>
 
