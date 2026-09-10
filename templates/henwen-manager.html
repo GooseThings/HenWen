@@ -1941,7 +1941,7 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
       <div class="card-body">
         <p style="margin-bottom:10px;color:var(--text2);font-size:0.9rem">
           Checks that Listen is ready to work, and points at whatever's blocking it if not.
-          This only checks — nothing is changed.
+          This only checks. Nothing on the system is changed.
         </p>
         <div id="rx-diag-out"><span class="muted">Click Run Diagnostics to check RX readiness.</span></div>
       </div>
@@ -1955,12 +1955,12 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
           to be done:
         </p>
         <ul style="margin:0 0 10px 20px;padding:0;color:var(--text2);font-size:0.9rem;line-height:1.7">
-          <li><b>Apply Apache Proxy</b> — makes Low-Latency reachable from outside this box</li>
-          <li><b>RX Audio Path</b> set to Low-Latency and saved</li>
+          <li>Click <b>Apply Apache Proxy</b> to make Low-Latency reachable from outside this box.</li>
+          <li>Set <b>RX Audio Path</b> to Low-Latency and save it.</li>
         </ul>
         <p class="muted" style="margin:0;font-size:0.85rem">
-          Older browsers switch to the standard method automatically — nothing to configure
-          for that.
+          Older browsers switch to the standard method automatically. There is nothing to
+          configure for that.
         </p>
       </div>
     </div>
@@ -1969,9 +1969,9 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
       <div class="card-header"><h2>AudioSocket Tap (Listen audio)</h2></div>
       <div class="card-body">
         <p class="muted" style="margin-bottom:12px">
-          Cuts the delay before Listen audio starts. Applied automatically during install —
-          use this if it wasn't, or to re-apply after a rollback. Safe to re-run; Listen
-          keeps working normally even if it fails.
+          This cuts the delay before Listen audio starts. It is applied automatically during
+          install. Use this button if it wasn't applied, or to re-apply it after a rollback.
+          It is safe to re-run, and Listen keeps working normally even if it fails.
         </p>
         <p id="audiosocket-tap-status" style="margin-bottom:12px;color:var(--text2)">Checking&hellip;</p>
         <div class="btn-row">
@@ -1985,10 +1985,11 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
       <div class="card-header"><h2>RX Audio Path (Listen audio)</h2></div>
       <div class="card-body">
         <p class="muted" style="margin-bottom:12px">
-          Controls how Listen streams to browsers. <b>Legacy</b> works everywhere with about
+          This controls how Listen streams to browsers. <b>Legacy</b> works everywhere with about
           a 1.5s delay. <b>Low-Latency</b> cuts that delay significantly, but needs a fairly
-          modern browser and the Apache proxy applied above — see the checklist above. This
-          applies to every listener on this node at once, not just you.
+          modern browser and the Apache proxy applied above. See the checklist above for what
+          that involves. This setting applies to every listener on this node at once, not
+          just you.
         </p>
 
         <p id="rx-audio-ws-status" style="margin-bottom:12px;color:var(--text2)">Checking&hellip;</p>
@@ -6975,13 +6976,13 @@ async function loadAudioSocketTapStatus() {
     return;
   }
   if (!r.data.installed) {
-    el.innerHTML = '<span style="color:var(--warn,#e0a030)">apply.sh not found on this install '
-                  + '— pull the latest HenWen code first.</span>';
+    el.innerHTML = '<span style="color:var(--warn,#e0a030)">Not available on this install. '
+                  + 'Pull the latest HenWen code first.</span>';
     return;
   }
   el.innerHTML = r.data.applied
-    ? '<span style="color:var(--green,#3fb950)">Applied</span> — Listen starts with less delay on this node.'
-    : 'Not applied — Listen is using the standard (slightly slower) method.';
+    ? '<span style="color:var(--green,#3fb950)">Applied.</span> Listen starts with less delay on this node.'
+    : 'Not applied. Listen is using the standard method, which is slightly slower.';
 }
 
 async function applyAudioSocketTap() {
@@ -7026,12 +7027,12 @@ async function loadRxAudioPathStatus() {
     return;
   }
   if (!r.data.installed) {
-    wsEl.innerHTML = '<span style="color:var(--warn,#e0a030)">Not available on this install '
-                    + '— pull the latest HenWen code first.</span>';
+    wsEl.innerHTML = '<span style="color:var(--warn,#e0a030)">Not available on this install. '
+                    + 'Pull the latest HenWen code first.</span>';
   } else {
     wsEl.innerHTML = r.data.applied
-      ? '<span style="color:var(--green,#3fb950)">Applied</span> — Low-Latency mode is reachable from other devices.'
-      : 'Not applied yet — Low-Latency mode only works on this box itself until you apply this.';
+      ? '<span style="color:var(--green,#3fb950)">Applied.</span> Low-Latency mode is reachable from other devices.'
+      : 'Not applied yet. Low-Latency mode only works on this box itself until you apply this.';
   }
   sel.value = r.data.rx_audio_path || 'legacy';
   if (agcCb) agcCb.checked = r.data.agc_enabled !== false;
@@ -7041,9 +7042,9 @@ async function loadRxAudioPathStatus() {
 
 async function applyWsAudioProxy() {
   if (!confirm('Apply the Apache proxy for Low-Latency mode now?\n\n'
-             + 'Reloads Apache, but won\'t restart HenWen or Asterisk. This alone doesn\'t '
-             + 'switch Listen to Low-Latency — use the RX Audio Path selector below for that. '
-             + 'Safe to re-run.')) return;
+             + 'This reloads Apache, but does not restart HenWen or Asterisk. It also does '
+             + 'not switch Listen to Low-Latency by itself. Use the RX Audio Path selector '
+             + 'below for that. It is safe to re-run.')) return;
   var statusEl = document.getElementById('rx-audio-ws-status');
   var outEl = document.getElementById('rx-audio-ws-output');
   if (statusEl) statusEl.textContent = 'Applying…';
