@@ -8143,6 +8143,23 @@ setInterval(fetchNets,       60000);   /* net schedule list every 60s — the we
                                           badge/highlight itself re-derives every second
                                           from tickSecond(), this just catches edits made
                                           from another browser/tab */
+
+/* Background-tab timer throttling (Chrome et al. clamp setInterval to a
+   floor of ~1/sec once hidden, then to ~1/min after several minutes hidden)
+   means refreshBoard()'s normal 2s cadence can silently stretch out while
+   this tab isn't the active one. Two things visibly rot during that stretch:
+   the keyed-activity timeline (renderKeyedTimeline) shows long gaps as
+   empty/transparent bars since recordKeyedHistory never got a sample to
+   record, and the favicon dot (updateFaviconState) sits frozen on whatever
+   state the last throttled poll saw. Neither is fixable while the tab stays
+   backgrounded — that throttling is deliberate browser power-saving, not a
+   bug here — but there's no reason to also wait out however long the
+   browser's own backlogged timer schedule takes to fire again once the tab
+   *is* back in view: refreshing immediately on regained visibility snaps
+   both back to truth the instant anyone actually looks (issue #125). */
+document.addEventListener('visibilitychange', function() {
+  if (document.visibilityState === 'visible') refreshBoard();
+});
 </script>
 </body>
 </html>
