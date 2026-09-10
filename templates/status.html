@@ -665,13 +665,20 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   color: var(--text2); font-size: 0.95rem; min-height: 48px; }
 
 /* A connected node is two deliberate lines: identity (dot, number, callsign,
-   location) then the stats strip (connect time, keyups, mode/idle badges and
-   their admin buttons), with the disconnect X centered on the right spanning
-   both. Nothing truncates — either line wraps further if it still doesn't
-   fit. Always two lines rather than wrap-only-when-needed on purpose: the
-   idle timer and keyup counts re-render every couple of seconds with varying
-   widths, and fit-dependent wrapping would make rows jitter between one and
-   two lines as those tick over. */
+   location — location stays glued to the right of the callsign, truncating
+   with an ellipsis via .nr-loc rather than wrapping to its own line, so it
+   never jumps around) then the stats strip (connect time, keyups, mode/idle
+   badges and their admin buttons). Always two lines rather than
+   wrap-only-when-needed on purpose: the idle timer and keyup counts re-render
+   every couple of seconds with varying widths, and fit-dependent wrapping
+   would make rows jitter between one and two lines as those tick over.
+
+   The right side (.nr-side) mirrors that two-line shape on its own axis: the
+   chime toggle and disconnect X sit on one line, the keyed-activity timeline
+   directly under them on the next — rather than the X spanning the row's
+   full height beside a timeline floating off to the side, so the timeline
+   reads as "this button's own activity strip" instead of an unrelated
+   third column. */
 .node-row { display: flex; align-items: center; gap: 10px; min-width: 0;
   padding: 8px 18px;
   border-bottom: 1px solid var(--border); transition: background .15s; }
@@ -690,47 +697,55 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   box-shadow: 0 0 5px rgba(224,68,68,.7); }
 .nr-dot.connecting { background: #d9a520; border-color: #d9a520;
   box-shadow: 0 0 5px rgba(217,165,32,.6); }
-.nr-main { flex: 0 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.nr-line { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; min-width: 0; }
+/* flex:1 1 auto (not 0 1 auto): grows to fill whatever space .nr-side (fixed/
+   content-sized) isn't using, which is what pins .nr-side flush against the
+   row's right edge with no margin-left:auto trick needed on anything inside
+   it — the old approach, back when the disconnect button sat directly in
+   .node-row's own flex flow. */
+.nr-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+/* nowrap, not wrap: .nr-loc is the only shrinkable item on this line (num/call
+   are flex:0 0 auto), so forcing it to stay put and truncate via its own
+   overflow:ellipsis is what keeps location glued to the right of the
+   callsign instead of dropping to a line of its own under width pressure. */
+.nr-line { display: flex; align-items: baseline; gap: 10px; flex-wrap: nowrap; min-width: 0; }
 .nr-num  { flex: 0 0 auto;
   font-size: 1.05rem; font-weight: 700; font-family: var(--mono); color: var(--accent); text-decoration: none; }
 .nr-call { flex: 0 0 auto;
   font-size: 0.95rem; font-weight: 600; color: var(--text); letter-spacing: .03em; text-decoration: none; }
 .nr-call:hover { text-decoration: underline; }
-.nr-loc  { flex: 0 1 auto; min-width: 0; font-size: 0.82rem; color: var(--text2); }
+.nr-loc  { flex: 0 1 auto; min-width: 0; font-size: 0.82rem; color: var(--text2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .nr-meta { min-width: 0; font-size: 0.72rem; color: var(--text2);
   display: flex; align-items: center; gap: 10px; row-gap: 3px; flex-wrap: wrap; }
 .nr-meta span { white-space: nowrap; }
 .nr-meta strong { color: var(--text); }
-/* margin-left:auto, not just flex:0 0 auto: this used to sit flush against
-   the row's right edge for free, because .nr-timeline's old flex:1 1 0
-   consumed every pixel of leftover row space right up to it. Now that the
-   timeline caps out at a fixed width (see its own comment below) instead of
-   growing to fill the row, nothing claims that leftover space any more —
-   without an explicit auto margin here the button would just sit wherever
-   the timeline's fixed width happens to end, drifting left on wide rows. */
-.node-row > .sb-btn.disconnect { flex: 0 0 auto; margin-left: auto; }
+/* The right-hand column: chime toggle + disconnect X on top, the keyed-
+   activity timeline underneath — see the .node-row comment above for why.
+   min-width:0 lets it shrink below its content size (needed for
+   .nr-timeline's max-width:100% below to actually bite on a narrow
+   dashboard-resized column instead of overflowing the row). */
+.nr-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px;
+  flex: 0 1 auto; min-width: 0; }
+.nr-side-top { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.nr-side-top .sb-btn.disconnect { flex: 0 0 auto; }
 
 /* Keyed-activity timeline: a strip of per-bucket bars, newest on the right.
-   flex-grow:0 on the strip and a fixed flex-basis (not width — see below)
-   keeps every bar a constant, predictable pixel width regardless of screen
-   size or how wide the Connected Nodes panel happens to be resized, instead
-   of the old flex:1 1 0 which stretched all 60 bars to fill whatever space
-   nr-main wasn't using — fine on a phone, but on a wide desktop kiosk each
-   bar could balloon to 10+px, well past what a single 5s sample needs to
-   read clearly. flex-shrink stays 1 (not 0) and min-width stays 60px so a
-   custom-resized narrow column can still compress the strip rather than
-   overflow the row — basis, not a hard width, so that shrink still applies.
-   Bars spike full-height red when that bucket saw any keyup, otherwise sit
-   at a low gray baseline (seen but quiet) or render invisible (no data yet
-   for that slice — e.g. right after the connection appeared or right after
-   page load, before history has had time to fill the window).
+   Sized with width/max-width rather than flex-basis now that it's stacked
+   under the buttons in .nr-side (a column) instead of sitting beside
+   .nr-main as a row sibling — flex-basis governs the *main* axis of its
+   parent, which is vertical (height) in a column container, so a
+   flex-basis here would size the strip's height, not its width. 240px keeps
+   every bar a small, constant, predictable pixel width regardless of screen
+   size; max-width:100% (with .nr-side's own min-width:0 above) still lets a
+   custom-resized narrow dashboard column compress it rather than overflow
+   the row. Bars spike full-height red when that bucket saw any keyup,
+   otherwise sit at a low gray baseline (seen but quiet) or render invisible
+   (no data yet for that slice — e.g. right after the connection appeared or
+   right after page load, before history has had time to fill the window).
 
-   Framed (border + subtle fill) now that it no longer stretches to the
-   row's edge on its own — at a fixed width it would otherwise float
-   unanchored in whatever leftover space sits between nr-main and the
-   (now right-pinned) disconnect button, with nothing marking where the
-   strip actually starts/ends.
+   Framed (border + subtle fill) so the strip reads as its own element under
+   the buttons rather than a bare row of bars with nothing marking where it
+   starts/ends.
 
    No gap between bars: at a static ~240px for 60 of them, each bar is only
    ~3-4px wide, and the same 1px inter-bar gap that was barely visible when
@@ -739,7 +754,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
    rather than bars. Sitting flush removes that, and a real "no history
    yet" .empty bar (genuinely transparent, unlike its solid on/off
    neighbors) still reads as a gap exactly where one belongs. */
-.nr-timeline { flex: 0 1 240px; min-width: 60px; display: flex; align-items: flex-end;
+.nr-timeline { width: 240px; max-width: 100%; min-width: 60px; display: flex; align-items: flex-end;
   height: 24px; padding: 3px 4px; border: 1px solid var(--border); border-radius: 6px;
   background: var(--bg3); }
 .nr-tl-bar { flex: 1 1 0; min-width: 1px; height: 15%; background: #3a3a3a; }
@@ -1180,19 +1195,20 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   .keyed-dot { width: 34px; height: 34px; }
   .keyed-label { font-size: 0.62rem; }
 
-  /* .node-row already wraps instead of truncating (see base styles) — just
-     tighten sizes/gaps so more fits per line before wrapping kicks in. */
+  /* .node-row's stats line already wraps instead of truncating (see base
+     styles) — just tighten sizes/gaps so more fits per line before wrapping
+     kicks in. */
   .node-row { gap: 6px; padding: 10px 12px; }
   .nr-num   { font-size: 1.05rem; }
   .nr-call  { font-size: 0.95rem; }
   .nr-line  { gap: 6px; }
-  .node-row > .sb-btn.disconnect { padding-left: 6px; padding-right: 6px; }
-  /* No room for a 60-bar strip beside nr-main on a phone-width single column.
-     nr-main reverts to flex:1 1 auto here since nr-timeline isn't present to
-     absorb the row's leftover width — without this the disconnect button no
-     longer sits flush right. */
+  .nr-side-top .sb-btn.disconnect { padding-left: 6px; padding-right: 6px; }
+  /* No room for a 60-bar strip on a phone-width single column — .nr-side
+     just holds the chime toggle + disconnect button on their own with
+     nothing underneath. .nr-main is already flex:1 1 auto by default (see
+     base styles), so it still fills the leftover width without needing an
+     override here. */
   .nr-timeline { display: none; }
-  .nr-main { flex: 1 1 auto; }
 
   /* Activity rows: let the optional Fav/Monitor button pair drop to their
      own line under the entry instead of squeezing beside it. With a single
@@ -4481,9 +4497,10 @@ async function refreshBoard() {
             (badges ? '<div class="nr-meta nr-badges">' + badges + '</div>' : '') +
             (!isConn ? '<div class="nr-meta" style="color:var(--warn)">Connecting…</div>' : '') +
           '</div>' +
-          renderChimeToggle(c.local_node, c.node) +
-          renderKeyedTimeline(c.local_node, c.node) +
-          dcBtn +
+          '<div class="nr-side">' +
+            '<div class="nr-side-top">' + renderChimeToggle(c.local_node, c.node) + dcBtn + '</div>' +
+            renderKeyedTimeline(c.local_node, c.node) +
+          '</div>' +
         '</div>';
       }).join('');
     }
