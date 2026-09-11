@@ -1260,6 +1260,10 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
             <label class="switch"><input type="checkbox" id="al-dns-stuck"><span class="slider"></span></label>
           </div>
           <div class="toggle-row">
+            <div class="toggle-info"><div class="toggle-key">Nominatim Geocoding Down</div><div class="toggle-desc">Map/APRS location lookups have failed for a sustained period — new node locations won't show on the map until it clears</div></div>
+            <label class="switch"><input type="checkbox" id="al-geocode-down"><span class="slider"></span></label>
+          </div>
+          <div class="toggle-row">
             <div class="toggle-info">
               <div class="toggle-key">Low Disk Space</div>
               <div class="toggle-desc">
@@ -4617,6 +4621,7 @@ async function alLoad() {
   document.getElementById('al-cpu-high').checked  = !!d.on_cpu_temp_high;
   document.getElementById('al-cpu-thr').value     = d.cpu_temp_threshold || 80;
   document.getElementById('al-dns-stuck').checked = !!d.on_dns_stuck;
+  document.getElementById('al-geocode-down').checked = !!d.on_geocode_down;
   document.getElementById('al-disk-high').checked = !!d.on_disk_high;
   document.getElementById('al-disk-thr').value    = d.disk_pct_threshold || 90;
   document.getElementById('al-pwreset').checked   = !!d.on_password_reset_request;
@@ -4659,6 +4664,7 @@ async function alSave() {
     on_cpu_temp_high:   document.getElementById('al-cpu-high').checked  ? 1 : 0,
     cpu_temp_threshold: parseInt(document.getElementById('al-cpu-thr').value) || 80,
     on_dns_stuck:       document.getElementById('al-dns-stuck').checked ? 1 : 0,
+    on_geocode_down:    document.getElementById('al-geocode-down').checked ? 1 : 0,
     on_disk_high:       document.getElementById('al-disk-high').checked ? 1 : 0,
     disk_pct_threshold: parseInt(document.getElementById('al-disk-thr').value) || 90,
     on_password_reset_request: document.getElementById('al-pwreset').checked ? 1 : 0,

@@ -793,6 +793,13 @@ def get_db():
         # api_forgot_password() the moment a reset is requested, since that's
         # already an event, not a value to sample.
         conn.execute("ALTER TABLE alert_config ADD COLUMN on_password_reset_request INTEGER NOT NULL DEFAULT 1")
+    if 'on_geocode_down' not in _alert_cols:
+        # Same "external network dependency, poll-loop-sampled" shape as
+        # on_dns_stuck -- see _check_geocode_health(). Defaults on for the
+        # same reason on_dns_stuck does: a silently-broken map/APRS location
+        # feed is the kind of thing an owner would want to know about rather
+        # than discover by noticing missing pins.
+        conn.execute("ALTER TABLE alert_config ADD COLUMN on_geocode_down INTEGER NOT NULL DEFAULT 1")
     conn.commit()
     # Singleton config for the NWS severe weather auto-announcement poller —
     # separate from alert_config (that's push notifications; this is
@@ -2854,6 +2861,7 @@ def _poll_loop():
             # AMI state + CPU temp + disk usage alerts — outside lock, OK to do network I/O here
             _check_alerts(_ami_connected, get_cpu_temp(), get_disk_usage())
             _check_asterisk_dns_health()
+            _check_geocode_health()
 
         except Exception as outer:
             log("ERROR", f"[AMI-POLL] Unexpected outer error: {outer}")
@@ -3668,6 +3676,22 @@ _geocode_backoff_sec   = [0.0]
 _GEOCODE_BACKOFF_FLOOR_SEC = 5.0
 _GEOCODE_BACKOFF_CAP_SEC   = 120.0
 
+# Health tracking for the Manager > Alerts "Nominatim Geocoding Down" toggle
+# -- see _check_geocode_health(). Deliberately NOT keyed off backoff/failure
+# *counts*: a burst of dozens of 429s that resolves itself in under two
+# minutes (the normal, expected case the backoff above already handles) is
+# not something an owner needs paged about. What actually indicates a real
+# outage is going a long time with zero successful lookups *despite active
+# attempts* -- so this tracks last-attempt and last-success timestamps
+# instead, and _check_geocode_health() alerts on a sustained gap between them.
+_geocode_last_attempt  = [0.0]
+_geocode_last_success  = [time.time()]  # seeded at import so a quiet start isn't mistaken for an outage
+_geocode_alert_active  = [False]
+_geocode_health_last_check = [0.0]
+_GEOCODE_HEALTH_CHECK_INTERVAL = 30     # seconds between checks (self-throttled)
+_GEOCODE_RECENT_ATTEMPT_SEC    = 120    # an attempt this recent counts as "actively trying"
+_GEOCODE_DOWN_SEC              = 900    # 15 min with no success, while actively trying = "down"
+
 
 def _geocode_cache_get(loc):
     """Return (hit, result) -- hit is False for a miss or an expired failure."""
@@ -3694,19 +3718,25 @@ def _geocode(location: str):
 
     # Nominatim: at most 1 request per 1.1 seconds, plus whatever extra
     # backoff a recent 429 has put us into (see _geocode_backoff_until above).
+    just_recovered = False
     with _geocode_rlock:
         wait = max(1.1 - (time.time() - _geocode_last[0]),
                    _geocode_backoff_until[0] - time.time())
         if wait > 0:
             time.sleep(wait)
         _geocode_last[0] = time.time()
+        _geocode_last_attempt[0] = _geocode_last[0]
         try:
             url = NOMINATIM_URL.format(urlparse.quote_plus(loc))
             req = urlreq.Request(url, headers={"User-Agent": "HenWen/1.0 (ham radio node manager)"})
             with urlreq.urlopen(req, timeout=10) as resp:
                 results = json.loads(resp.read())
             result = {"lat": float(results[0]["lat"]), "lon": float(results[0]["lon"])} if results else None
-            _geocode_backoff_sec[0] = 0.0  # any success clears an earlier backoff
+            _geocode_backoff_sec[0]  = 0.0  # any success clears an earlier backoff
+            _geocode_last_success[0] = time.time()
+            if _geocode_alert_active[0]:
+                _geocode_alert_active[0] = False
+                just_recovered = True
         except Exception as e:
             log("WARN", f"[GEOCODE] '{loc}': {e}")
             result = None
@@ -3718,10 +3748,60 @@ def _geocode(location: str):
                 log("WARN", f"[GEOCODE] Rate-limited by Nominatim — backing off "
                             f"{_geocode_backoff_sec[0]:.0f}s before the next request")
 
+    # _send_alert() does real network I/O (up to ~8s per enabled provider) --
+    # deliberately fired here, after _geocode_rlock is released, so a slow
+    # notification send can't stall every other queued geocode lookup behind
+    # this one request the way holding the lock through it would.
+    if just_recovered:
+        cfg = _get_alert_config()
+        if cfg and cfg["enabled"] and cfg["on_geocode_down"]:
+            log("INFO", "[ALERTS] Nominatim geocoding recovered")
+            _send_alert("HenWen: Nominatim Geocoding Recovered",
+                        "Nominatim is resolving locations again.", "default")
+
     with _geocode_lock:
         expires_at = None if result is not None else time.time() + _GEOCODE_FAIL_TTL
         _geocode_cache[loc] = (result, expires_at)
     return result
+
+
+def _check_geocode_health():
+    """Alert if Nominatim geocoding has gone a long time with no successful
+    lookup despite active attempts -- the Manager > Alerts "Nominatim
+    Geocoding Down" toggle. Deliberately does NOT fire on the short, bursty
+    429 storms _geocode()'s own backoff already absorbs (confirmed live:
+    up to 46 consecutive 429s within ~80s, self-resolving) -- only a
+    sustained gap between attempts and successes means the map/APRS
+    location feed is actually stuck, not just riding out a normal burst.
+    Self-throttled the same way _check_asterisk_dns_health() is."""
+    now = time.time()
+    if now - _geocode_health_last_check[0] < _GEOCODE_HEALTH_CHECK_INTERVAL:
+        return
+    _geocode_health_last_check[0] = now
+
+    cfg = _get_alert_config()
+    if not cfg or not cfg["enabled"] or not cfg["on_geocode_down"]:
+        return
+
+    actively_trying = (now - _geocode_last_attempt[0]) < _GEOCODE_RECENT_ATTEMPT_SEC
+    down = actively_trying and (now - _geocode_last_success[0]) > _GEOCODE_DOWN_SEC
+
+    if down and not _geocode_alert_active[0]:
+        _geocode_alert_active[0] = True
+        log("WARN", f"[ALERTS] Nominatim geocoding appears down (no successful "
+                     f"lookup in over {_GEOCODE_DOWN_SEC // 60} min despite active attempts)")
+        _send_alert(
+            "HenWen: Nominatim Geocoding Down",
+            "Map pin locations aren't resolving — Nominatim has rejected or failed "
+            "every geocode attempt for a sustained period. This is usually external "
+            "rate-limiting that clears on its own; if it doesn't, new/unresolved "
+            "node locations will stay missing from the map.",
+            "default")
+    # Recovery is detected and alerted from inside _geocode() itself, at the
+    # moment a real success happens -- not here. This function only ever
+    # turns the alert ON; doing "not down anymore" turn-off here too would
+    # also fire if attempts simply stopped happening for a while (nobody
+    # asking isn't the same as it having recovered).
 
 
 # Non-blocking geocode for request hot paths (the Status Board). Returns the
@@ -6300,6 +6380,7 @@ def api_alerts_get_config():
             "on_dns_stuck": 1,
             "on_disk_high": 1, "disk_pct_threshold": 90,
             "on_password_reset_request": 1,
+            "on_geocode_down": 1,
         })
     return jsonify(dict(cfg))
 
@@ -6314,8 +6395,8 @@ def api_alerts_save_config():
             ntfy_topic, pushover_token, pushover_user,
             on_ami_disconnect, on_ami_reconnect, on_cpu_temp_high, cpu_temp_threshold,
             on_node_connect, on_node_disconnect, watch_nodes, on_dns_stuck,
-            on_disk_high, disk_pct_threshold, on_password_reset_request)
-           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            on_disk_high, disk_pct_threshold, on_password_reset_request, on_geocode_down)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             1 if data.get("enabled")           else 0,
             1 if data.get("ntfy_enabled")       else 0,
@@ -6337,6 +6418,7 @@ def api_alerts_save_config():
             1 if data.get("on_disk_high")      else 0,
             int(data.get("disk_pct_threshold", 90)),
             1 if data.get("on_password_reset_request") else 0,
+            1 if data.get("on_geocode_down")   else 0,
         )
     )
     db.commit()
