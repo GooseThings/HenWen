@@ -3653,6 +3653,20 @@ _GEOCODE_FAIL_TTL = 300      # retry a failed lookup after 5 min, not never
 _geocode_lock   = threading.Lock()
 _geocode_last   = [0.0]      # time of last Nominatim request (rate-limit: 1 req/s)
 _geocode_rlock  = threading.Lock()
+# Extra global backoff held only while Nominatim is actively 429ing us, on
+# top of the flat 1.1s pace above. Without this, one 429 didn't slow
+# anything down at all -- the very next queued location (a different query
+# string, but the same offending IP as far as Nominatim's concerned) was
+# tried again a flat 1.1s later, at the exact pace that had just gotten
+# rejected. Confirmed live (2026-09-11): that cascaded into 20-80s bursts
+# of up to 46 consecutive 429s in a row, since nothing here ever backed off
+# from the pace provoking them -- each burst only ended when it happened to
+# outlast whatever window Nominatim was enforcing. Doubles on each
+# consecutive 429 (capped), resets to zero on the next success.
+_geocode_backoff_until = [0.0]
+_geocode_backoff_sec   = [0.0]
+_GEOCODE_BACKOFF_FLOOR_SEC = 5.0
+_GEOCODE_BACKOFF_CAP_SEC   = 120.0
 
 
 def _geocode_cache_get(loc):
@@ -3678,9 +3692,11 @@ def _geocode(location: str):
         if hit:
             return cached_result
 
-    # Nominatim: at most 1 request per 1.1 seconds
+    # Nominatim: at most 1 request per 1.1 seconds, plus whatever extra
+    # backoff a recent 429 has put us into (see _geocode_backoff_until above).
     with _geocode_rlock:
-        wait = 1.1 - (time.time() - _geocode_last[0])
+        wait = max(1.1 - (time.time() - _geocode_last[0]),
+                   _geocode_backoff_until[0] - time.time())
         if wait > 0:
             time.sleep(wait)
         _geocode_last[0] = time.time()
@@ -3690,9 +3706,17 @@ def _geocode(location: str):
             with urlreq.urlopen(req, timeout=10) as resp:
                 results = json.loads(resp.read())
             result = {"lat": float(results[0]["lat"]), "lon": float(results[0]["lon"])} if results else None
+            _geocode_backoff_sec[0] = 0.0  # any success clears an earlier backoff
         except Exception as e:
             log("WARN", f"[GEOCODE] '{loc}': {e}")
             result = None
+            if getattr(e, 'code', None) == 429:
+                _geocode_backoff_sec[0] = min(
+                    _GEOCODE_BACKOFF_CAP_SEC,
+                    max(_GEOCODE_BACKOFF_FLOOR_SEC, _geocode_backoff_sec[0] * 2))
+                _geocode_backoff_until[0] = time.time() + _geocode_backoff_sec[0]
+                log("WARN", f"[GEOCODE] Rate-limited by Nominatim — backing off "
+                            f"{_geocode_backoff_sec[0]:.0f}s before the next request")
 
     with _geocode_lock:
         expires_at = None if result is not None else time.time() + _GEOCODE_FAIL_TTL
