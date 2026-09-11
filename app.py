@@ -7168,9 +7168,14 @@ def api_ami_connect():
             # Idle-timeout tracking an earlier connect on this pair already set
             # in _kiosk_temp_conns — this raw ilink panel doesn't manage that
             # state itself, unlike /api/status/connect and /api/ami/perm_connect.
+            # Attribution only: setdefault(..., {}) used to create a bare {}
+            # here when no tracking existed yet, which api_status_board()
+            # would then crash on (missing 'last_active' — see the comment
+            # there). Only tag an entry that already exists; create nothing.
             with _kiosk_temp_lock:
-                entry = _kiosk_temp_conns.setdefault((local_node, remote_node), {})
-                entry['initiated_by'] = session.get('username', '')
+                entry = _kiosk_temp_conns.get((local_node, remote_node))
+                if entry is not None:
+                    entry['initiated_by'] = session.get('username', '')
         return jsonify(result)
     except Exception as e:
         log("ERROR", f"[API] /api/ami/connect error: {e}")
@@ -7235,10 +7240,12 @@ def api_ami_perm_connect():
         result = ami_send_command(_do)
         if result.get("success") and mode in ("2", "3"):
             # Non-permanent connect modes via this panel: attribute only,
-            # same as /api/ami/connect — see the comment there.
+            # same as /api/ami/connect — see the comment there (and its
+            # note on why this must not setdefault(..., {}) a new entry).
             with _kiosk_temp_lock:
-                entry = _kiosk_temp_conns.setdefault((local_node, remote_node), {})
-                entry['initiated_by'] = session.get('username', '')
+                entry = _kiosk_temp_conns.get((local_node, remote_node))
+                if entry is not None:
+                    entry['initiated_by'] = session.get('username', '')
         if result.get("success") and mode in ("12", "13"):
             monitor = (mode == "12")
             with _kiosk_temp_lock:
@@ -7411,12 +7418,23 @@ def api_status_board():
                 idle_remaining = None
                 is_permanent   = False
                 no_timeout     = True
-            elif tc:
+            elif tc and 'last_active' in tc:
                 idle_elapsed   = max(0, int(time.time() - tc['last_active']))
                 idle_remaining = max(0, idle_timeout - idle_elapsed)
                 is_permanent   = False
                 no_timeout     = False
             else:
+                # tc present but missing 'last_active' falls through to here
+                # too (attribution-only entries — see the setdefault() sites
+                # in /api/ami/connect, /api/ami/perm_connect, and the Smart
+                # Connector's scheduled-connect path — intentionally create
+                # no idle-tracking fields at all, only 'initiated_by'). This
+                # used to be a bare `elif tc:` that indexed tc['last_active']
+                # directly and 500'd the entire board for every user the
+                # moment any such entry existed (issue: KeyError crash
+                # 2026-09-10) — reachable from three call sites the render
+                # code has no way to rule out, so it must never trust tc's
+                # shape without checking.
                 idle_elapsed   = None
                 idle_remaining = None
                 is_permanent   = None  # not tracked (pre-existing connection)
@@ -14389,10 +14407,15 @@ def _run_connectors():
                         )
                     # Attribute this connection to Smart Connector for Connection
                     # History (see _db_conn_open()) — this is a scheduled connect,
-                    # not a specific logged-in user's action.
+                    # not a specific logged-in user's action. Attribution only
+                    # (see /api/ami/connect's comment): don't setdefault(..., {})
+                    # a bare entry when none exists yet, since api_status_board()
+                    # assumes any tracked entry has 'last_active' unless it's
+                    # explicitly permanent/no_timeout.
                     with _kiosk_temp_lock:
-                        entry = _kiosk_temp_conns.setdefault((local, target), {})
-                        entry['initiated_by'] = 'Smart Connector'
+                        entry = _kiosk_temp_conns.get((local, target))
+                        if entry is not None:
+                            entry['initiated_by'] = 'Smart Connector'
                     db.execute(
                         "UPDATE connectors SET state='connected', state_msg='Connected', "
                         "state_updated=?, connected_at=?, last_activity=?"
