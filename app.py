@@ -7817,6 +7817,16 @@ def api_status_squash_idle():
     with _kiosk_temp_lock:
         if key in _kiosk_temp_conns:
             _kiosk_temp_conns[key]['no_timeout'] = True
+            # Defensive, not expected to ever fire in practice (every entry
+            # this could find is created fully-formed elsewhere) — but
+            # info['last_active'] below is a hard requirement, and an
+            # unguarded bracket-index on shared, multiply-written state is
+            # exactly the shape of bug fixed in api_status_board() (see its
+            # comment). setdefault() here is deliberately at the field level
+            # (fill in a missing value on an already-known-to-exist dict),
+            # not the collection level (create-if-absent an entire entry)
+            # that caused that bug — the two aren't the same operation.
+            _kiosk_temp_conns[key].setdefault('last_active', time.time())
         else:
             _kiosk_temp_conns[key] = {'permanent': False, 'monitor': False,
                                       'no_timeout': True, 'last_active': time.time()}
