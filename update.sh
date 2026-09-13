@@ -50,6 +50,9 @@ if ! "$INSTALL_DIR/venv/bin/python3" -m py_compile "$INSTALL_DIR/app.py"; then
     exit 1
 fi
 
+echo "$TAG Refreshing sudoers rule for restart/reload/update actions..."
+INSTALL_DIR="$INSTALL_DIR" SERVICE_NAME="$SERVICE_NAME" bash "$INSTALL_DIR/provision-sudoers.sh"
+
 echo "$TAG Reloading systemd and restarting $SERVICE_NAME..."
 systemctl daemon-reload
 systemctl restart "$SERVICE_NAME"
