@@ -178,9 +178,17 @@ echo "== Apache WSS proxy"
 if grep -q "asterisk-ws" "$APACHE_CONF"; then
   echo "   already patched, skipping"
 else
+  # The vhost's ProxyPass target port is whatever install.sh/setup-https.sh
+  # was run with (PORT=..., default 5000). Read it back from the vhost
+  # itself rather than assuming 5000, so a non-default PORT install doesn't
+  # silently fail to match below. The sed finding nothing is not an error
+  # by itself, so without this it would otherwise only surface via the
+  # FAILED check.
+  FLASK_PORT=$(sed -nE 's|.*ProxyPass[[:space:]]+/ http://127\.0\.0\.1:([0-9]+)/.*|\1|p' "$APACHE_CONF" | head -1)
+  FLASK_PORT="${FLASK_PORT:-5000}"
   # Insert the websocket proxy just above the HenWen catch-all ProxyPass.
-  sed -i 's|^    ProxyPass        / http://127.0.0.1:5000/ retry=0 timeout=120$|    # '"$MARKER"': SIP-over-WebSocket signaling to the loopback-only\n    # Asterisk builtin HTTP server; Apache terminates WSS with the same cert.\n    ProxyPass /asterisk-ws ws://127.0.0.1:8088/ws retry=0\n\n    ProxyPass        / http://127.0.0.1:5000/ retry=0 timeout=120|' "$APACHE_CONF"
-  grep -q "asterisk-ws" "$APACHE_CONF" || { echo "   FAILED to insert proxy line"; exit 1; }
+  sed -i 's|^    ProxyPass        / http://127\.0\.0\.1:'"${FLASK_PORT}"'/ retry=0 timeout=120$|    # '"$MARKER"': SIP-over-WebSocket signaling to the loopback-only\n    # Asterisk builtin HTTP server; Apache terminates WSS with the same cert.\n    ProxyPass /asterisk-ws ws://127.0.0.1:8088/ws retry=0\n\n    ProxyPass        / http://127.0.0.1:'"${FLASK_PORT}"'/ retry=0 timeout=120|' "$APACHE_CONF"
+  grep -q "asterisk-ws" "$APACHE_CONF" || { echo "   FAILED to insert proxy line (expected ProxyPass on port ${FLASK_PORT})"; exit 1; }
 fi
 # Belt-and-suspenders regardless of which branch above ran (also heals a
 # box that already hit the stale-permissions bug from a previous version

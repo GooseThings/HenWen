@@ -86,13 +86,17 @@ if grep -q "$MARKER" "$APACHE_CONF"; then
   echo "   already patched, skipping"
 else
   # Insert just above the catch-all ProxyPass line, same placement
-  # tx-spike/apply.sh uses for /asterisk-ws — matched literally rather than
-  # with a variable port, mirroring that script's own existing (accepted)
-  # assumption that HenWen listens on the default port 5000 here.
-  sed -i 's|^    ProxyPass        / http://127.0.0.1:5000/ retry=0 timeout=120$|    # '"$MARKER"': low-latency Listen audio, proxied to\n    # audio_ws_relay.py'"'"'s own loopback-only WebSocket listener\n    # (app.py spawns/supervises that process unconditionally; this line\n    # is what makes it reachable from outside this box).\n    ProxyPass /ws-audio ws://127.0.0.1:'"$WS_PORT"'/ retry=0\n\n    ProxyPass        / http://127.0.0.1:5000/ retry=0 timeout=120|' "$APACHE_CONF"
+  # tx-spike/apply.sh uses for /asterisk-ws. The vhost's ProxyPass target
+  # port is whatever install.sh/setup-https.sh was run with (PORT=...,
+  # default 5000). Read it back from the vhost itself rather than assuming
+  # 5000, so a non-default PORT install doesn't silently fail to match
+  # below.
+  FLASK_PORT=$(sed -nE 's|.*ProxyPass[[:space:]]+/ http://127\.0\.0\.1:([0-9]+)/.*|\1|p' "$APACHE_CONF" | head -1)
+  FLASK_PORT="${FLASK_PORT:-5000}"
+  sed -i 's|^    ProxyPass        / http://127\.0\.0\.1:'"${FLASK_PORT}"'/ retry=0 timeout=120$|    # '"$MARKER"': low-latency Listen audio, proxied to\n    # audio_ws_relay.py'"'"'s own loopback-only WebSocket listener\n    # (app.py spawns/supervises that process unconditionally; this line\n    # is what makes it reachable from outside this box).\n    ProxyPass /ws-audio ws://127.0.0.1:'"$WS_PORT"'/ retry=0\n\n    ProxyPass        / http://127.0.0.1:'"${FLASK_PORT}"'/ retry=0 timeout=120|' "$APACHE_CONF"
   grep -q "$MARKER" "$APACHE_CONF" || {
     echo "   FAILED to insert proxy line — is $APACHE_CONF using the expected"
-    echo "   'ProxyPass        / http://127.0.0.1:5000/ retry=0 timeout=120' line?"
+    echo "   'ProxyPass        / http://127.0.0.1:${FLASK_PORT}/ retry=0 timeout=120' line?"
     echo "   (unmodified from what install.sh/setup-https.sh write). Nothing was"
     echo "   changed; restoring the backup just in case."
     cp "$BACKUP_DIR/$(basename "$APACHE_CONF")" "$APACHE_CONF"
