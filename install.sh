@@ -49,7 +49,7 @@ if ! python3 -c "import ensurepip" &>/dev/null; then
 fi
 
 if [ ${#NEED_PKGS[@]} -gt 0 ]; then
-    echo "[1/10] Missing required package(s): ${NEED_PKGS[*]}"
+    echo "[1/11] Missing required package(s): ${NEED_PKGS[*]}"
     DO_INSTALL=1
     if [ -t 0 ]; then
         read -p "      Install via apt-get now? [Y/n]: " REPLY
@@ -65,11 +65,11 @@ if [ ${#NEED_PKGS[@]} -gt 0 ]; then
     echo "      Installing: ${NEED_PKGS[*]}"
     apt-get install -y "${NEED_PKGS[@]}"
 else
-    echo "[1/10] Python 3 found: $(python3 --version), venv module available."
+    echo "[1/11] Python 3 found: $(python3 --version), venv module available."
 fi
 
 # ── Copy files ────────────────────────────────────────────
-echo "[2/10] Installing to $INSTALL_DIR..."
+echo "[2/11] Installing to $INSTALL_DIR..."
 mkdir -p "$INSTALL_DIR"
 # Re-running this script from inside a checkout that already *is*
 # INSTALL_DIR (e.g. /opt/HenWen's own live git checkout, used to pick up a
@@ -87,13 +87,13 @@ chmod 755 "$INSTALL_DIR"          # standard app dir: owner rwx, group rx, other
 chmod +x "$INSTALL_DIR/"*.sh 2>/dev/null || true
 
 # ── Virtual environment ───────────────────────────────────
-echo "[3/10] Creating Python virtual environment..."
+echo "[3/11] Creating Python virtual environment..."
 python3 -m venv "$INSTALL_DIR/venv"
 "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
 "$INSTALL_DIR/venv/bin/pip" install --quiet flask gunicorn flask-wtf flask-limiter piper-tts
 
 # ── rpt_backups directory ─────────────────────────────────
-echo "[4/10] Creating backup directory..."
+echo "[4/11] Creating backup directory..."
 mkdir -p /etc/asterisk/rpt_backups
 chown asterisk:asterisk /etc/asterisk/rpt_backups
 chmod 750 /etc/asterisk/rpt_backups
@@ -122,7 +122,7 @@ if [ -f /etc/asterisk/henwen.db ]; then
 fi
 
 # ── Verify rpt.conf accessible ────────────────────────────
-echo "[5/10] Checking rpt.conf..."
+echo "[5/11] Checking rpt.conf..."
 if [ -f /etc/asterisk/rpt.conf ]; then
     echo "      Found: /etc/asterisk/rpt.conf"
     ls -la /etc/asterisk/rpt.conf
@@ -138,7 +138,7 @@ fi
 # hasn't been loaded yet on a freshly installed system. Fix what we can
 # here rather than making the user discover it later via a silent Listen
 # button.
-echo "[6/10] Verifying Asterisk MixMonitor module..."
+echo "[6/11] Verifying Asterisk MixMonitor module..."
 MODULES_CONF="/etc/asterisk/modules.conf"
 if [ -f "$MODULES_CONF" ] && grep -qE '^\s*noload\s*=>\s*app_mixmonitor\.so' "$MODULES_CONF"; then
     echo "      Found 'noload => app_mixmonitor.so' in modules.conf — disabling that line."
@@ -166,7 +166,7 @@ else
     echo "      only covers the modules.conf blacklist, not a missing .so file)."
 fi
 
-# ── Optional: AudioSocket tap (low-latency Listen audio) ──
+# ── AudioSocket tap (low-latency Listen audio capture) ────
 # Purely additive and self-falling-back (see audiosocket-tap/README.md) --
 # safe to apply unconditionally on every fresh install so new installs get
 # low-latency Listen audio without a manual Settings-page step. Needs
@@ -174,7 +174,7 @@ fi
 # reload" AMI-CLI commands), same precondition as the MixMonitor check
 # above. Never fatal to the install -- Listen still works via MixMonitor
 # if this fails or is skipped.
-echo "[7/10] Applying AudioSocket tap (low-latency Listen audio)..."
+echo "[7/11] Applying AudioSocket tap (low-latency Listen audio)..."
 if command -v asterisk &>/dev/null && systemctl is-active --quiet asterisk 2>/dev/null; then
     if bash "$INSTALL_DIR/audiosocket-tap/apply.sh"; then
         echo "      Applied."
@@ -188,8 +188,135 @@ else
     echo "      Settings, or: sudo bash $INSTALL_DIR/audiosocket-tap/apply.sh"
 fi
 
+# ── Low-latency RX audio: Apache + ws-audio proxy ─────────
+# Reachable low-latency RX (the browser-facing counterpart to the
+# AudioSocket tap above) needs Apache fronting HenWen -- gunicorn's
+# --worker-class gthread doesn't do WebSocket upgrades, so
+# ws-audio/apply.sh's /ws-audio proxy line needs somewhere to live (see
+# CLAUDE.md's "Audio streaming"/"Background threads" sections). Merged with
+# the (still fully opt-in) "set up HTTPS for browser TX" question so there's
+# one Apache-provisioning pass covering both features rather than two.
+#
+# An interactive run asks two questions, in order: first, whether HenWen is
+# already sitting behind the operator's OWN reverse proxy on this box (nginx,
+# Caddy, another Apache instance) -- answering yes skips Apache entirely, no
+# apache2 install, no vhost, nothing (this used to be folded into the HTTPS
+# question's own "skip this if..." wording, which was wrong: declining HTTPS
+# there still ran setup-https.sh --http-only underneath, which would fight
+# with a real existing reverse proxy exactly like the old wording warned
+# against -- the two are now genuinely separate questions, not one question
+# doing double duty). Answering no (or a non-interactive install, which can't
+# ask either question) moves on to the actual HTTPS question: yes runs the
+# full HTTPS flow (Apache comes along for free), no still gets a minimal
+# plain-HTTP vhost via setup-https.sh --http-only so browser TX and the
+# capture-side AudioSocket tap improvement stay reachable either way. Self-
+# falling-back and non-fatal throughout, exactly like the AudioSocket tap
+# step above -- Listen keeps working over the legacy WebM path (and TX just
+# stays hidden) regardless of what happens here.
+#
+# HTTPS_SUCCEEDED (distinct from HAVE_APACHE_VHOST) tracks specifically
+# whether the FULL HTTPS flow succeeded, not just plain HTTP -- this matters
+# below for whether rx_audio_config.path gets defaulted to lowlatency at all.
+# The low-latency path's browser side uses WebCodecs (AudioDecoder), which
+# is a secure-context-only API: on a plain-HTTP vhost it's simply undefined
+# for every real remote visitor, so _doStartListen() always falls through to
+# the legacy MSE pipeline regardless of the saved rx_audio_config.path value
+# -- defaulting to lowlatency there would just be a misleading label with no
+# behavioral difference from legacy. Found live: a fresh plain-HTTP install's
+# Listen button failed for a remote browser and needed this traced end to end
+# before the actual constraint surfaced.
+echo "[8/11] Setting up Apache for low-latency RX audio..."
+WS_AUDIO_DEFAULT_OK=0
+HAVE_APACHE_VHOST=0
+HTTPS_SUCCEEDED=0
+if [ -f /etc/apache2/sites-enabled/henwen-ssl.conf ]; then
+    echo "      Apache vhost already present (HTTPS) — leaving it as-is."
+    HAVE_APACHE_VHOST=1
+    HTTPS_SUCCEEDED=1
+elif [ -f /etc/apache2/sites-enabled/henwen.conf ]; then
+    echo "      Apache vhost already present (plain HTTP) — leaving it as-is."
+    HAVE_APACHE_VHOST=1
+elif [ -t 0 ]; then
+    echo ""
+    echo "  By default this installs its own Apache on this box (if not already"
+    echo "  present) to front HenWen, which is what lets the low-latency RX audio"
+    echo "  path's WebSocket proxy work out of the box, and optionally sets up"
+    echo "  HTTPS on it for the browser TX button too."
+    read -p "  Is HenWen already running behind YOUR OWN reverse proxy on this box (nginx, Caddy, another Apache instance)? [y/N]: " EXISTING_PROXY
+    if [[ "$EXISTING_PROXY" =~ ^[Yy] ]]; then
+        echo "      Skipping Apache setup entirely so this doesn't fight with your"
+        echo "      existing reverse proxy (e.g. a port-80 bind conflict). Low-latency"
+        echo "      RX audio and browser TX both still work -- point your own reverse"
+        echo "      proxy at this box's Flask port ($PORT) and, for either feature, add"
+        echo "      its own WebSocket proxy rule for /ws-audio (and /asterisk-ws for TX)"
+        echo "      -- see ws-audio/README.md and tx-spike/README.md for exactly what"
+        echo "      those need to point at."
+    else
+        read -p "  Set up HTTPS now for the browser TX button? Requires a public hostname pointed at this box. [y/N]: " SETUP_HTTPS
+        if [[ "$SETUP_HTTPS" =~ ^[Yy] ]]; then
+            if bash "$INSTALL_DIR/tx-spike/setup-https.sh"; then
+                HAVE_APACHE_VHOST=1
+                HTTPS_SUCCEEDED=1
+            else
+                echo "      HTTPS setup failed — you can re-run it later:"
+                echo "        sudo bash $INSTALL_DIR/tx-spike/setup-https.sh"
+            fi
+        else
+            echo "      Skipped HTTPS. Run 'sudo bash $INSTALL_DIR/tx-spike/setup-https.sh' later if you want browser TX and default low-latency RX audio."
+            if bash "$INSTALL_DIR/tx-spike/setup-https.sh" --http-only; then
+                HAVE_APACHE_VHOST=1
+            else
+                echo "      WARNING: plain-HTTP Apache setup failed — TX and low-latency RX"
+                echo "      audio won't be reachable by default. Apply later from Manager >"
+                echo "      Audio, or: sudo bash $INSTALL_DIR/tx-spike/setup-https.sh --http-only"
+            fi
+        fi
+    fi
+else
+    if bash "$INSTALL_DIR/tx-spike/setup-https.sh" --http-only; then
+        HAVE_APACHE_VHOST=1
+    else
+        echo "      WARNING: plain-HTTP Apache setup failed — TX and low-latency RX audio"
+        echo "      won't be reachable by default. Apply later from Manager > Audio,"
+        echo "      or: sudo bash $INSTALL_DIR/tx-spike/setup-https.sh --http-only"
+    fi
+fi
+
+if [ "$HAVE_APACHE_VHOST" = "1" ]; then
+    if bash "$INSTALL_DIR/ws-audio/apply.sh"; then
+        echo "      /ws-audio Apache proxy applied."
+        # Wired up regardless (harmless, and ready for whenever HTTPS gets
+        # added later), but only actually switch Listen's default to
+        # lowlatency when HTTPS succeeded -- see the comment above this
+        # whole step for why plain HTTP can't use the low-latency path at
+        # all (WebCodecs/AudioDecoder needs a secure context), so defaulting
+        # to it there would just mislabel what's actually still the legacy
+        # pipeline under the hood.
+        if [ "$HTTPS_SUCCEEDED" = "1" ]; then
+            WS_AUDIO_DEFAULT_OK=1
+        else
+            echo "      Not defaulting RX Audio Path to Low-Latency -- it needs HTTPS to"
+            echo "      actually work in a browser (WebCodecs requires a secure context)."
+            echo "      Listen still works fine over the legacy path. Set up HTTPS later"
+            echo "      (sudo bash $INSTALL_DIR/tx-spike/setup-https.sh) to make Low-Latency usable."
+        fi
+    else
+        echo "      WARNING: ws-audio/apply.sh failed — Listen will use the legacy"
+        echo "      WebM path. Re-run manually later: sudo bash $INSTALL_DIR/ws-audio/apply.sh"
+    fi
+fi
+
+# Recorded by setup-https.sh's full flow only -- used below to pick the
+# right URL for the final banner and to open the right firewall port(s).
+HTTPS_HOSTNAME=""
+HTTPS_PORT_VAL=""
+if [ -f /etc/asterisk/henwen-https-hostname ] && [ -f /etc/asterisk/henwen-https-port ]; then
+    HTTPS_HOSTNAME=$(cat /etc/asterisk/henwen-https-hostname 2>/dev/null || true)
+    HTTPS_PORT_VAL=$(cat /etc/asterisk/henwen-https-port 2>/dev/null || true)
+fi
+
 # ── Systemd service ───────────────────────────────────────
-echo "[8/10] Installing systemd service ($SERVICE_NAME)..."
+echo "[9/11] Installing systemd service ($SERVICE_NAME)..."
 
 # Remove any old service under the previous name to avoid duplicates
 if [ -f /etc/systemd/system/asl3-rpt-editor.service ]; then
@@ -228,6 +355,20 @@ else
 fi
 sed -i "s|^Environment=\"\?SECRET_KEY=.*|Environment=\"SECRET_KEY=${NEW_SECRET_KEY}\"|" "$SERVICE_FILE_DEST"
 
+# Only ever seeds rx_audio_config.path once, the first time the table is
+# created (see get_db() in app.py) -- an owner's later Manager > Audio save
+# always wins regardless of this env var. Added only when step [8/11] above
+# got the Apache /ws-audio proxy wired up AND HTTPS succeeded -- WebCodecs
+# needs a secure context, so defaulting to lowlatency without HTTPS would be
+# a no-op label with no real behavior change from legacy. Otherwise the
+# checked-in HenWen.service template (no RX_AUDIO_DEFAULT_PATH line at all)
+# is left as-is and the DB falls back to today's 'legacy' default, same as
+# ever.
+if [ "$WS_AUDIO_DEFAULT_OK" = "1" ]; then
+    sed -i '/^\[Install\]/i Environment="RX_AUDIO_DEFAULT_PATH=lowlatency"' "$SERVICE_FILE_DEST"
+    echo "      RX_AUDIO_DEFAULT_PATH=lowlatency added to $SERVICE_FILE_DEST"
+fi
+
 systemctl daemon-reload
 
 # ── Cap systemd journal size ──────────────────────────────
@@ -256,24 +397,26 @@ fi
 # ── Sudoers rule for privileged systemctl actions ─────────
 # The service runs unprivileged as User=asterisk (see HenWen.service), but
 # the Dashboard's "Restart Asterisk" button, secret-key rotation, port
-# rotation, the "Launch Updater" button, and the Settings page's "Apply"
-# button for the optional AudioSocket tap need to run `systemctl restart
-# asterisk`, `systemctl restart HenWen`, `systemctl daemon-reload`,
-# rotate_secret_key.sh / update_service_ports.sh (the only code allowed to
-# edit the root-owned unit file's SECRET_KEY/PORT/AMI_PORT lines — see
-# app.py's api_set_secret_key / api_set_ports), (via systemd-run, so it
-# survives outside HenWen.service's own cgroup) update.sh,
-# audiosocket-tap/apply.sh (edits /etc/asterisk/modules.conf and
-# custom/extensions.conf, loads Asterisk modules live — see
-# audiosocket-tap/README.md), and ws-audio/apply.sh (edits the Apache vhost
-# to add the low-latency RX audio path's WebSocket proxy — see
-# ws-audio/README.md). Without this rule those actions fail with
+# rotation, the "Launch Updater" button, and the Settings/Diagnostics pages'
+# "Apply" buttons for the AudioSocket tap, low-latency RX audio proxy, and
+# browser TX setup need to run `systemctl restart asterisk`, `systemctl
+# restart HenWen`, `systemctl daemon-reload`, rotate_secret_key.sh /
+# update_service_ports.sh (the only code allowed to edit the root-owned unit
+# file's SECRET_KEY/PORT/AMI_PORT lines — see app.py's api_set_secret_key /
+# api_set_ports), (via systemd-run, so it survives outside HenWen.service's
+# own cgroup) update.sh, audiosocket-tap/apply.sh (edits
+# /etc/asterisk/modules.conf and custom/extensions.conf, loads Asterisk
+# modules live — see audiosocket-tap/README.md), ws-audio/apply.sh (edits
+# the Apache vhost to add the low-latency RX audio path's WebSocket proxy —
+# see ws-audio/README.md), and tx-spike/apply.sh (edits Asterisk's PJSIP
+# config and the same Apache vhost to add browser TX's WSS proxy — see
+# tx-spike/README.md). Without this rule those actions fail with
 # "Interactive authentication required" since there's no session for
 # polkit to prompt. Scope is intentionally limited to these exact commands
 # — do not broaden with wildcards. The updater rule only works if
 # $INSTALL_DIR is itself a git checkout of the HenWen repo — update.sh
 # no-ops with an error otherwise.
-echo "[9/10] Installing sudoers rule for restart/reload/update actions..."
+echo "[10/11] Installing sudoers rule for restart/reload/update actions..."
 SUDOERS_FILE=/etc/sudoers.d/henwen-systemctl
 SYSTEMCTL_BIN=$(command -v systemctl || echo /bin/systemctl)
 SYSTEMD_RUN_BIN=$(command -v systemd-run || echo /usr/bin/systemd-run)
@@ -290,6 +433,7 @@ asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/update_service_ports.sh
 asterisk ALL=(root) NOPASSWD: ${SYSTEMD_RUN_BIN} --unit=henwen-updater --collect ${INSTALL_DIR}/update.sh
 asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/audiosocket-tap/apply.sh
 asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/ws-audio/apply.sh
+asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/tx-spike/apply.sh
 EOF
 # visudo ships as part of the sudo package, so "no visudo" means sudo simply
 # isn't installed on this box — a legitimate choice, not an error. Say so
@@ -321,48 +465,60 @@ if command -v firewall-cmd &>/dev/null; then
 elif command -v ufw &>/dev/null; then
     ufw allow ${PORT}/tcp 2>/dev/null || true
 fi
+# Port 80 stays needed even in full-HTTPS mode (Let's Encrypt's HTTP-01
+# challenge/renewal always uses it, --dns-manual aside), plus whichever
+# HTTPS port setup-https.sh recorded, if any.
+if [ "$HAVE_APACHE_VHOST" = "1" ]; then
+    for _fw_port in 80 "${HTTPS_PORT_VAL:-}"; do
+        [ -n "$_fw_port" ] || continue
+        echo "      Opening firewall port $_fw_port (Apache)..."
+        if command -v firewall-cmd &>/dev/null; then
+            firewall-cmd --permanent --add-port=${_fw_port}/tcp 2>/dev/null && firewall-cmd --reload 2>/dev/null || true
+        elif command -v ufw &>/dev/null; then
+            ufw allow ${_fw_port}/tcp 2>/dev/null || true
+        fi
+    done
+fi
 
 # ── Start service ─────────────────────────────────────────
-echo "[10/10] Enabling and starting $SERVICE_NAME..."
+echo "[11/11] Enabling and starting $SERVICE_NAME..."
 systemctl enable "$SERVICE_NAME"
 systemctl restart "$SERVICE_NAME"
 sleep 2
 
 if systemctl is-active --quiet "$SERVICE_NAME"; then
     IP=$(hostname -I | awk '{print $1}')
+    # ami-setup.sh's own output (manager.conf dump, AMI login test, service
+    # restart) runs BEFORE this summary, not after -- it's the noisiest part
+    # of the whole install, and printing the URLs first just meant they
+    # scrolled off screen before anyone could read them (issue found via a
+    # live install run). This block is now deliberately the last thing
+    # install.sh prints.
+    echo ""
+    echo "  Running AMI setup now..."
+    bash "$INSTALL_DIR/ami-setup.sh" || true
+
     echo ""
     echo "============================================"
     echo "  Installation complete!"
     echo ""
     echo "  Open your browser:"
-    echo "    http://${IP}:${PORT}"
+    if [ -n "$HTTPS_HOSTNAME" ]; then
+        HTTPS_PORT_SUFFIX=""
+        [ -n "$HTTPS_PORT_VAL" ] && [ "$HTTPS_PORT_VAL" != "443" ] && HTTPS_PORT_SUFFIX=":${HTTPS_PORT_VAL}"
+        echo "    https://${HTTPS_HOSTNAME}${HTTPS_PORT_SUFFIX}"
+        echo "    http://${IP}:${PORT}   (direct, bypasses Apache -- legacy RX audio only)"
+    elif [ "$HAVE_APACHE_VHOST" = "1" ]; then
+        echo "    http://${IP}/"
+        echo "    http://${IP}:${PORT}   (direct, bypasses Apache -- legacy RX audio only)"
+    else
+        echo "    http://${IP}:${PORT}"
+    fi
     echo ""
     echo "  rpt.conf:  /etc/asterisk/rpt.conf"
     echo "  Backups:   /etc/asterisk/rpt_backups/"
     echo "  Logs:      journalctl -u $SERVICE_NAME -f"
     echo "============================================"
-    echo ""
-    echo "  Running AMI setup now..."
-    bash "$INSTALL_DIR/ami-setup.sh" || true
-
-    # ── Optional: HTTPS for the browser TX button ─────────
-    # Only relevant to the browser-transmit feature (getUserMedia/WebRTC
-    # need a secure context) — the kiosk and everything else work fine
-    # over plain HTTP. Requires a public hostname pointed at this box, so
-    # it's opt-in and skipped entirely on a non-interactive install.
-    if [ -t 0 ]; then
-        echo ""
-        echo "  Note: skip this if HenWen will run behind an existing reverse proxy"
-        echo "  (e.g. nginx, Caddy, or another Apache instance) that already terminates"
-        echo "  HTTPS for you -- this step provisions its own standalone Apache +"
-        echo "  Let's Encrypt HTTPS listener, which isn't what you want in that case."
-        read -p "  Set up HTTPS now for the browser TX button? Requires a public hostname pointed at this box. [y/N]: " SETUP_HTTPS
-        if [[ "$SETUP_HTTPS" =~ ^[Yy] ]]; then
-            bash "$INSTALL_DIR/tx-spike/setup-https.sh" || echo "  HTTPS setup failed — you can re-run it later: sudo bash $INSTALL_DIR/tx-spike/setup-https.sh"
-        else
-            echo "  Skipped. Run 'sudo bash $INSTALL_DIR/tx-spike/setup-https.sh' later if you want browser TX."
-        fi
-    fi
 else
     echo ""
     echo "WARNING: Service may not have started. Check:"

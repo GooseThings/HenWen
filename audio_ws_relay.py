@@ -425,6 +425,11 @@ def _log(level, msg):
 _nodes_lock = threading.Lock()
 _nodes = {}   # node (str) -> _NodeState
 
+# Only one audio_relay.py instance may feed a given node's low-latency
+# encoder at a time -- see _claim_pcm_owner()'s docstring below for why.
+_pcm_owners_lock = threading.Lock()
+_pcm_owners = {}   # node (str) -> the winning PCM connection socket
+
 
 class _NodeState:
     """Everything this process tracks for one node: its currently-connected
@@ -671,6 +676,34 @@ def _stop_node_ffmpeg(state):
     _log('INFO', f'[node {state.node}] Opus encoder stopped')
 
 
+def _claim_pcm_owner(node, conn):
+    """True if `conn` is (or becomes) the sole authoritative PCM sender for
+    `node` right now. Every audio_relay.py instance on the box dual-writes
+    unconditionally -- a legacy WebM broadcast, a low-latency capture-only
+    relay, and (in principle) more than one of either could all be alive for
+    the same node at once. Without this, whichever ones are simultaneously
+    connected all feed this node's shared low-latency ffmpeg at the same
+    time, doubling (or worse) the audio it encodes -- confirmed live as the
+    root cause of persistent choppiness on the low-latency path whenever a
+    concurrent legacy Listen session (or recording, or the stream relay) was
+    also active for the same node. First connection for a node wins;
+    released on disconnect (see _handle_pcm_connection's finally block) so a
+    later connection -- including a legitimate reconnect of the same
+    instance after a drop -- can then claim it."""
+    with _pcm_owners_lock:
+        owner = _pcm_owners.get(node)
+        if owner is None or owner is conn:
+            _pcm_owners[node] = conn
+            return True
+        return False
+
+
+def _release_pcm_owner(node, conn):
+    with _pcm_owners_lock:
+        if _pcm_owners.get(node) is conn:
+            del _pcm_owners[node]
+
+
 def _feed_node_pcm(node, frame):
     """Called by a PCM-ingestion connection thread for every 320-byte frame
     it reads from audio_relay.py's dual-write. A silent no-op if this node
@@ -679,7 +712,8 @@ def _feed_node_pcm(node, frame):
     instance happens to be dual-writing for) -- every audio_relay.py
     instance on the box dual-writes unconditionally (see its own docstring),
     so most received frames for most nodes most of the time are expected to
-    have nowhere to go."""
+    have nowhere to go. Only ever called for the connection _claim_pcm_owner()
+    accepted as this node's owner -- see _handle_pcm_connection()."""
     with _nodes_lock:
         state = _nodes.get(node)
     if state is None or state.ffmpeg_proc is None:
@@ -697,6 +731,7 @@ def _feed_node_pcm(node, frame):
 def _handle_pcm_connection(conn, addr):
     conn.settimeout(5.0)
     buf = b''
+    node = None
     try:
         while b'\n' not in buf:
             chunk = conn.recv(256)
@@ -710,6 +745,12 @@ def _handle_pcm_connection(conn, addr):
             return
         node = line[len(b'NODE '):].decode('ascii', errors='replace').strip()
         if not _NODE_RE.match(node):
+            return
+        if not _claim_pcm_owner(node, conn):
+            _log('INFO', f'[node {node}] duplicate PCM sender from {addr} rejected -- a '
+                         f'low-latency feed for this node is already active from another '
+                         f'audio_relay.py instance (e.g. a concurrent legacy Listen session, '
+                         f'recording, or the stream relay for the same node)')
             return
         conn.settimeout(None)
         frame_buf = bytearray(rest)
@@ -725,6 +766,8 @@ def _handle_pcm_connection(conn, addr):
     except OSError:
         pass
     finally:
+        if node is not None:
+            _release_pcm_owner(node, conn)
         try:
             conn.close()
         except Exception:

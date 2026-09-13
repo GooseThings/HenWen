@@ -338,7 +338,14 @@ WS_AUDIO_APPLY_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file
 # Same marker string ws-audio/apply.sh greps for -- see that script's own
 # comment for why it patches whichever of these two vhost files is present.
 WS_AUDIO_MARKER = "HenWen low-latency RX audio"
-WS_AUDIO_APACHE_CONF_CANDIDATES = (
+# The two names a HenWen Apache vhost can be under -- henwen-ssl.conf from
+# setup-https.sh's full Let's-Encrypt flow, or henwen.conf from its
+# --http-only mode (install.sh's own default, and what an operator fronting
+# HTTPS with their own reverse proxy/tunnel is left with). Shared by
+# api_rx_diagnostics()/api_ws_audio_status() (ws-audio's own proxy check)
+# and api_tx_diagnostics()/api_tx_apply_status() (tx-spike's), mirroring
+# tx-spike/apply.sh's identical candidate-loop.
+HENWEN_APACHE_VHOST_CANDIDATES = (
     "/etc/apache2/sites-enabled/henwen-ssl.conf",
     "/etc/apache2/sites-enabled/henwen.conf",
 )
@@ -906,6 +913,18 @@ def get_db():
     _rx_audio_cfg_cols = {r[1] for r in conn.execute("PRAGMA table_info(rx_audio_config)").fetchall()}
     if 'agc_enabled' not in _rx_audio_cfg_cols:
         conn.execute("ALTER TABLE rx_audio_config ADD COLUMN agc_enabled INTEGER NOT NULL DEFAULT 0")
+    # RX_AUDIO_DEFAULT_PATH is set by install.sh only when it successfully
+    # provisioned the Apache /ws-audio proxy for a fresh install (see
+    # "Low-latency RX audio" in CLAUDE.md). It is unset or invalid for
+    # every existing install and every test run, in which case this is a
+    # no-op and rx_audio_config stays exactly as it is today (no row,
+    # callers fall back to RX_AUDIO_CONFIG_DEFAULTS). This only ever seeds
+    # the row once (guard is "no row yet"), so a later explicit
+    # Manager > Audio save always wins.
+    _rx_audio_default_path = os.environ.get("RX_AUDIO_DEFAULT_PATH", "").strip().lower()
+    if _rx_audio_default_path in RX_AUDIO_PATHS:
+        if not conn.execute("SELECT 1 FROM rx_audio_config WHERE id=1").fetchone():
+            conn.execute("INSERT INTO rx_audio_config (id, path) VALUES (1, ?)", (_rx_audio_default_path,))
     conn.commit()
     # Singleton config for the Meshtastic MQTT panel (meshtastic_mqtt.py) —
     # root topic / channel name / PSK, owner-only. Broker host/port/creds
@@ -8027,6 +8046,24 @@ def api_status_reset_idle():
 TX_SECRET_PATH = os.environ.get("TX_SECRET_PATH", "/etc/asterisk/henwen-tx.secret")
 TX_SIP_USER    = os.environ.get("TX_SIP_USER", "henwen-tx")
 TX_WS_PATH     = os.environ.get("TX_WS_PATH", "/asterisk-ws")
+TX_APPLY_SCRIPT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "tx-spike", "apply.sh"
+)
+
+
+def _find_henwen_apache_vhost():
+    """Which of HENWEN_APACHE_VHOST_CANDIDATES (if any) is actually fronting
+    HenWen's own Flask port right now -- i.e. apply.sh's own candidate-loop,
+    reimplemented read-only so the Manager UI/diagnostics can tell an
+    operator whether apply.sh is even ready to run, before they try it."""
+    for candidate in HENWEN_APACHE_VHOST_CANDIDATES:
+        try:
+            with open(candidate) as f:
+                if re.search(r'ProxyPass\s+/ http://127\.0\.0\.1:\d+/', f.read()):
+                    return candidate
+        except OSError:
+            continue
+    return None
 
 
 @app.route("/api/tx/config")
@@ -8119,6 +8156,20 @@ def api_tx_diagnostics():
             "detail": detail,
         })
 
+    # The true prerequisite gate: apply.sh itself refuses to run at all
+    # without one of these vhosts present (see its own candidate-loop
+    # comment) -- surfaced here first so an operator sees "provision Apache
+    # first" instead of every check below it failing for the same root
+    # cause. Confirmed live: install.sh's own default (--http-only,
+    # henwen.conf) satisfies this just as well as the full Let's-Encrypt
+    # flow's henwen-ssl.conf -- neither name needs to be created by hand.
+    vhost_found = _find_henwen_apache_vhost()
+    add("Apache vhost ready for apply.sh", vhost_found is not None,
+        f"Found: {vhost_found}" if vhost_found else
+        "No HenWen Apache vhost found (checked henwen-ssl.conf and henwen.conf) — "
+        "run setup-https.sh first (--http-only is enough if you front HTTPS "
+        "yourself with an external reverse proxy/tunnel)")
+
     try:
         with open(TX_SECRET_PATH) as f:
             secret_configured = bool(f.read().strip())
@@ -8177,6 +8228,71 @@ def api_tx_diagnostics():
     log("INFO", f"[TX-DIAG] {session.get('username', '?')} ran TX diagnostics: "
                 f"{summary['pass']} pass, {summary['fail']} fail, {summary['warn']} warn")
     return jsonify({"checks": checks, "summary": summary, "raw_output": script_output})
+
+
+# One-click TX setup, mirroring api_ws_audio_status()/api_ws_audio_apply()
+# (and the AudioSocket tap routes those two themselves mirror) exactly —
+# same owner-only gate, same narrowly-scoped passwordless-sudo pattern.
+# Closes the one gap those two already-shipped features didn't have: before
+# this, tx-spike/apply.sh was the only one of the three apply.sh scripts an
+# operator had to SSH in and run by hand.
+
+@app.route("/api/tx/apply-status")
+def api_tx_apply_status():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Owner access required"}), 403
+    try:
+        with open(TX_SECRET_PATH) as f:
+            applied = bool(f.read().strip())
+    except OSError:
+        applied = False
+    vhost_found = _find_henwen_apache_vhost()
+    return jsonify({
+        "applied":     applied,
+        "installed":   os.path.exists(TX_APPLY_SCRIPT_PATH),
+        "vhost_found": vhost_found,
+    })
+
+
+@app.route("/api/tx/apply", methods=["POST"])
+def api_tx_apply():
+    """Runs tx-spike/apply.sh via the same narrowly-scoped passwordless sudo
+    rule pattern as the ws-audio/AudioSocket tap apply routes. Live-loads
+    Asterisk PJSIP modules and generates/keeps a real SIP credential -- see
+    apply.sh's own comments for exactly what it touches. Doesn't restart
+    HenWen or Asterisk."""
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Owner access required"}), 403
+
+    if not os.path.exists(TX_APPLY_SCRIPT_PATH):
+        return jsonify({"error": f"apply.sh not found: {TX_APPLY_SCRIPT_PATH}"}), 404
+
+    cmd = [SUDO_PATH, "-n", TX_APPLY_SCRIPT_PATH]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "apply.sh timed out after 30s — check "
+                                  "journalctl / apache2ctl configtest by hand"}), 500
+    except Exception as e:
+        log("ERROR", f"[API] /api/tx/apply exception: {e}")
+        return jsonify({"error": str(e)}), 500
+
+    output = (r.stdout or "") + (r.stderr or "")
+    if r.returncode != 0:
+        hint = ("Service account lacks sudo rights for apply.sh — re-run install.sh "
+                 "to install the henwen-systemctl sudoers rule."
+                 if "password" in output.lower() or "authoriz" in output.lower()
+                 else None)
+        log("ERROR", f"[API] tx apply failed (exit {r.returncode}): {output.strip()}")
+        resp = {"error": output.strip() or f"apply.sh returned code {r.returncode}", "output": output}
+        if hint:
+            resp["hint"] = hint
+        return jsonify(resp), 500
+
+    log("INFO", f"[API] Browser TX applied by '{session.get('username')}'")
+    return jsonify({"success": True, "output": output,
+                     "message": "Browser TX applied. The TX button should now appear on the "
+                                "kiosk for logged-in users."})
 
 
 @app.route("/api/rx/diagnostics")
@@ -8248,7 +8364,7 @@ def api_rx_diagnostics():
     cfg = _get_rx_audio_config() or RX_AUDIO_CONFIG_DEFAULTS
     proxy_applied = False
     proxy_conf = None
-    for candidate in WS_AUDIO_APACHE_CONF_CANDIDATES:
+    for candidate in HENWEN_APACHE_VHOST_CANDIDATES:
         try:
             with open(candidate) as f:
                 if WS_AUDIO_MARKER in f.read():
@@ -8267,6 +8383,28 @@ def api_rx_diagnostics():
         add("Low-latency Apache proxy applied", True,
             "Applied (" + proxy_conf + ")" if proxy_applied else
             "Not applied — only relevant if the Low-Latency RX path is selected")
+
+    # Mirrors api_tx_diagnostics()'s own "This page loaded over HTTPS" check
+    # above (same request.is_secure / X-Forwarded-Proto expression, already
+    # corrected for the Apache TLS proxy by _LocalProxyFix). The low-latency
+    # path's browser decoder is WebCodecs (AudioDecoder), a secure-context-
+    # only API. It's simply undefined on a plain-HTTP origin, so every real
+    # visitor silently keeps using the legacy pipeline no matter what
+    # rx_audio_config.path says. Confirmed live: every other check here can
+    # pass while this is still true, since none of them can see what a
+    # visitor's browser actually has available.
+    is_https = request.is_secure or request.headers.get("X-Forwarded-Proto", "").lower() == "https"
+    if cfg['path'] == 'lowlatency':
+        add("This request arrived over HTTPS", is_https,
+            "Secure context confirmed" if is_https else
+            "This page loaded over plain HTTP. The low-latency path's browser "
+            "decoder (WebCodecs) needs HTTPS (or localhost) to exist at all, so "
+            "every real visitor is silently using the legacy path instead.",
+            warn=not is_https)
+    else:
+        add("This request arrived over HTTPS", True,
+            "Secure context confirmed" if is_https else
+            "Loaded over plain HTTP. Only relevant if the Low-Latency RX path is selected.")
 
     content = read_conf_file(RPT_CONF_PATH)
     nodes = get_node_numbers(content) if content else []
@@ -8287,9 +8425,11 @@ def api_rx_diagnostics():
         missing.append("relay process")
     if not proxy_applied:
         missing.append("Apache /ws-audio proxy")
+    if not is_https:
+        missing.append("HTTPS")
     add("Low-latency path ready to use", not missing,
         "All prerequisites met" if not missing else
-        "Missing: " + ", ".join(missing) + " — see Low-Latency Path Requirements above",
+        "Missing: " + ", ".join(missing) + ".",
         warn=bool(missing))
 
     add("Current RX audio settings", True,
@@ -8415,15 +8555,43 @@ def _node_rxchannel(node):
 
 def _find_node_channel(node):
     """
-    Return the Asterisk channel name for a local node by scanning
-    'core show channels'. Matches a channel name containing '/<node>'
-    (radio/USB-style local channels), a Location/Application column
-    identifying the node (e.g. a trunked IAX2 channel running Rpt(<node>),
-    where the node number never appears in the channel name itself), or —
-    when neither of those find anything — a channel name literally starting
-    with the node's configured rxchannel value (see _node_rxchannel()).
-    Returns None if not found.
+    Return the Asterisk channel name for a local node to capture audio
+    from. Tries app_rpt's own authoritative "rpt show channels <node>" CLI
+    command first (its rxchannel line), falling back to a heuristic scan of
+    'core show channels' only if that's unavailable or doesn't resolve.
+    Returns None if neither finds anything.
+
+    The two strategies are not interchangeable on a node with active
+    links. Every linked peer gets its own separate Asterisk channel, that
+    peer's own inbound connection into this node's Rpt() application.
+    app_rpt has no conventional Bridge object, so it composites audio
+    across all of them (the node's own rxchannel plus every linked peer's
+    channel) via its own internal mixing instead. The heuristic scan below
+    matches ANY channel whose Location field encodes the target node
+    number, which every linked peer's own channel does too, since each one
+    lands in a dialplan extension named after the LOCAL node it dialed
+    into, not the peer's own identity. Confirmed live on a hub node with 17
+    simultaneous links: the heuristic scan matched one specific linked
+    peer's own inbound IAX2 channel instead of the node's actual rxchannel.
+    That channel only carries real audio while that ONE peer happens to be
+    transmitting, silent the rest of the time, often well past
+    AudioSocket's fixed 2000ms no-activity timeout, breaking Listen
+    entirely whenever the wrong peer's channel got picked. rpt show
+    channels reports the node's real rxchannel directly from app_rpt
+    itself, sidestepping the ambiguity altogether.
     """
+    def _rpt_show(ami):
+        return {'lines': ami.command(f'rpt show channels {node}')}
+    try:
+        for line in ami_send_command(_rpt_show).get('lines', []):
+            if line.strip().startswith('rxchannel'):
+                chan = line.split(':', 1)[1].strip() if ':' in line else ''
+                if chan:
+                    return chan
+                break
+    except Exception as e:
+        log('DEBUG', f'[AUDIO] rpt show channels failed for node {node}: {e}')
+
     def _cmd(ami):
         return {'lines': ami.command('core show channels')}
     try:
@@ -8855,19 +9023,27 @@ def _try_audiosocket_tap(node, channel, fifo_out_path, gen, relay_env):
     removed, same moment, same channel). Bare 'q' (suppress the
     announce-tone/interactive-digit behavior ChanSpy has by default) mixes
     both directions, matching MixMonitor's own default behavior. Still
-    strictly listen-only either way — dropping 'o' does not add whisper/
+    strictly listen-only either way. Dropping 'o' does not add whisper/
     barge; only 'w'/'W'/'B' do that, and none are used here. Verified live
     against a real running node channel (SimpleUSB/643930) to have zero
-    effect on the channel's own Rpt() execution, with clean teardown via
-    Hangup-by-ChannelId leaving no stray channels behind.
+    effect on the channel's own Rpt() execution. Hangup-by-ChannelId below
+    is NOT reliable cleanup, though: confirmed live on a hub node with
+    active links that a stuck ChanSpy leg (one whose AudioSocket partner
+    Asterisk already force-closed) does not respond to Hangup even by its
+    correct real channel name, only to an Asterisk restart. See
+    _find_node_channel()'s docstring for the channel-selection bug that
+    was the main trigger for this; this leak is a separate, still-open
+    issue.
 
-    Purely additive/opt-in: on ANY failure -- most commonly the feature
-    simply not installed yet (audiosocket-tap/apply.sh never run, the
-    common case for every existing install today), but also a handshake
-    timeout or a rejected Originate -- this returns None so the caller
+    Purely additive. On ANY failure, most commonly the feature not
+    installed yet (audiosocket-tap/apply.sh never run or failed; install.sh
+    applies it automatically on every fresh install, but only when Asterisk
+    is already installed and running at install time), but also a handshake
+    timeout or a rejected Originate, this returns None so the caller
     falls straight through to the existing MixMonitor path unchanged.
     Never raises; every failure is logged at DEBUG rather than WARN, since
-    "not available" is the expected steady state until an owner opts in.
+    "not available" is a real, non-error steady state for any install where
+    the automatic apply didn't run or hasn't happened yet.
     Returns (relay_proc, tap_channel_id) on success.
     """
     try:
@@ -10933,12 +11109,15 @@ def api_update_launch():
 
 # ── AudioSocket tap (low-latency Listen audio) ───────────────────────────────
 #
-# Optional opt-in swap of the Status Board's Listen capture path from AMI
-# MixMonitor (buffered, ~2s latency — see "Audio streaming" in CLAUDE.md) to
-# a live AudioSocket tap. See audiosocket-tap/README.md for what apply.sh
-# actually does. Owner-only, matching every other shell/deploy-level action
-# on this page (Force Update, ports, secret key) — misconfiguring Asterisk
-# modules/dialplan isn't something to expose below the top role.
+# Swaps the Status Board's Listen capture path from AMI MixMonitor (buffered,
+# adds ~2s of latency; see "Audio streaming" in CLAUDE.md) to a live
+# AudioSocket tap. install.sh applies this automatically on every fresh
+# install (when Asterisk is already running at install time); these routes
+# exist for installs where that didn't happen yet, or to re-apply after a
+# rollback. See audiosocket-tap/README.md for what apply.sh actually does.
+# Owner-only, matching every other shell/deploy-level action on this page
+# (Force Update, ports, secret key). Misconfiguring Asterisk modules or the
+# dialplan isn't something to expose below the top role.
 
 @app.route("/api/audiosocket-tap/status")
 def api_audiosocket_tap_status():
@@ -10993,11 +11172,18 @@ def api_audiosocket_tap_apply():
                                 "next time it starts for any node — no restart needed."})
 
 
-# Optional Apache proxy for the low-latency RX audio path's WebSocket server
-# (audio_ws_relay.py, always running once HenWen starts) — see
-# ws-audio/README.md for what apply.sh does. Owner-only, same rationale as
-# the AudioSocket tap routes above: this edits an Apache vhost, not
-# something to expose below the top role.
+# Apache proxy for the low-latency RX audio path's WebSocket server
+# (audio_ws_relay.py, always running once HenWen starts). install.sh applies
+# this automatically on every fresh install, provisioning a minimal Apache
+# vhost first if none exists yet, or reusing one from browser TX's HTTPS
+# setup. It only seeds rx_audio_config.path to 'lowlatency' when HTTPS was
+# also set up, since the browser side needs a secure context (WebCodecs)
+# and would otherwise silently keep using the legacy pipeline regardless of
+# this setting. These routes exist for installs that predate that automatic
+# step, or where it failed or was declined. See ws-audio/README.md for what
+# apply.sh does. Owner-only, same rationale as the AudioSocket tap routes
+# above: this edits an Apache vhost, not something to expose below the top
+# role.
 
 @app.route("/api/ws-audio/status")
 def api_ws_audio_status():
@@ -11005,7 +11191,7 @@ def api_ws_audio_status():
         return jsonify({"error": "Owner access required"}), 403
     applied  = False
     conf_used = None
-    for candidate in WS_AUDIO_APACHE_CONF_CANDIDATES:
+    for candidate in HENWEN_APACHE_VHOST_CANDIDATES:
         try:
             with open(candidate) as f:
                 if WS_AUDIO_MARKER in f.read():

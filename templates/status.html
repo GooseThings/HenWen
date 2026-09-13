@@ -6780,6 +6780,7 @@ function _txUnkey() {
 /* ── Audio listen ── */
 var _listenActive    = false;
 var _listenNode      = '';
+var _listenFallbackNotice = '';  // set by _doStartListen(), consumed by the next connect toast
 var _listenCtrl      = null;   // AbortController for in-flight fetch
 var _listenObjURL    = null;   // MediaSource blob URL pending revoke
 var _listenRenewTimer= null;   // safety-valve reconnect (30 min)
@@ -6970,19 +6971,34 @@ function _doStartListen(audio, node, rxAudioPath) {
 
   /* Which pipeline to use is a server-side setting (Manager > Audio's "RX
      Audio Path", near TX Diagnostics), not per-browser capability
-     detection — see the "Low-Latency Listen Path" plan's Context section
-     for why: it changes which encoder runs server-side for every listener,
-     so the server tells every client which one is actually active rather
-     than each browser racing its own preference. _doStartListenWS() still
-     does its own capability check and falls through to the universal
-     plain-<audio> path if the browser can't support it (there's no MSE
-     fallback available server-side while lowlatency mode is selected — no
-     WebM ffmpeg is running for Listen in that mode at all). */
-  if (rxAudioPath === 'lowlatency' &&
-      typeof WebSocket !== 'undefined' && typeof AudioDecoder !== 'undefined' &&
-      typeof AudioContext !== 'undefined' && typeof AudioWorkletNode !== 'undefined') {
+     detection. It changes which encoder runs server-side for every
+     listener, so the server tells every client which one is actually
+     active rather than each browser racing its own preference. The
+     low-latency path still needs a per-browser capability check, since
+     WebCodecs (AudioDecoder) is a secure-context-only API: it's simply
+     undefined on a plain-HTTP origin (other than localhost), which is the
+     single biggest reason this check fails in practice. When it does, the
+     legacy WebM/MSE pipeline is always still a real fallback here: the
+     server spins up the same broadcast pipeline on demand for
+     /api/audio/stream/<node> regardless of what rx_audio_config.path
+     says, since that route isn't gated by it. */
+  var wsCapable = typeof WebSocket !== 'undefined' && typeof AudioDecoder !== 'undefined' &&
+                  typeof AudioContext !== 'undefined' && typeof AudioWorkletNode !== 'undefined';
+  if (rxAudioPath === 'lowlatency' && wsCapable) {
     _doStartListenWS(audio, node);
-  } else if (typeof MediaSource !== 'undefined' &&
+    return;
+  }
+  /* Consumed (and cleared) by the "Monitoring node..." success toast in
+     _doStartListenMSE()/_doStartListenFallback() below, rather than shown
+     here directly. That toast fires moments later and would otherwise
+     silently overwrite this one in the same single #sb-toast element
+     before anyone had a chance to read it. */
+  _listenFallbackNotice = (rxAudioPath === 'lowlatency' && !wsCapable)
+    ? (window.isSecureContext
+        ? 'Low-Latency isn’t supported by this browser, using standard audio. '
+        : 'Low-Latency needs HTTPS, using standard audio. ')
+    : '';
+  if (typeof MediaSource !== 'undefined' &&
       MediaSource.isTypeSupported('audio/webm; codecs=opus')) {
     /* Use MediaSource Extensions when available (Chrome/Firefox/Edge).
        MSE lets us control the buffer directly and jump to the live edge,
@@ -7369,7 +7385,9 @@ function _doStartListenMSE(audio, node) {
         _listenActive = true;
         if (_listenStartTimer) { clearTimeout(_listenStartTimer); _listenStartTimer = null; }
         _listenSetBtn('<svg class="icon"><use href="#icon-pause"></use></svg> Mute', 'var(--green)', false);
-        sbToast('Monitoring node ' + node + ' — audio plays when active', true);
+        sbToast(_listenFallbackNotice + 'Monitoring node ' + node + ' — audio plays when active',
+                !_listenFallbackNotice);
+        _listenFallbackNotice = '';
         console.log('[AUDIO] MSE connected to node', node, new Date().toISOString());
 
         var reader = r.body.getReader();
@@ -7553,7 +7571,9 @@ function _doStartListenFallback(audio, node) {
     _listenActive = true;
     if (_listenStartTimer) { clearTimeout(_listenStartTimer); _listenStartTimer = null; }
     _listenSetBtn('<svg class="icon"><use href="#icon-pause"></use></svg> Mute', 'var(--green)', false);
-    sbToast('Monitoring node ' + node + ' — audio plays when active', true);
+    sbToast(_listenFallbackNotice + 'Monitoring node ' + node + ' — audio plays when active',
+            !_listenFallbackNotice);
+    _listenFallbackNotice = '';
     console.log('[AUDIO] fallback src connected to node', node);
   };
   audio.onerror = function() {

@@ -167,6 +167,33 @@ class TestRxDiagnosticsChecks:
         c = _find(body["checks"], "Node 546054 channel resolves")
         assert c["status"] == "pass"
 
+    def test_https_check_only_warns_when_lowlatency_selected(self, client, create_user):
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        client.put("/api/rx-audio/config", json={"path": "legacy"})
+        body = client.get("/api/rx/diagnostics").get_json()
+        c = _find(body["checks"], "arrived over HTTPS")
+        assert c["status"] == "pass"
+
+        client.put("/api/rx-audio/config", json={"path": "lowlatency"})
+        body = client.get("/api/rx/diagnostics").get_json()
+        c = _find(body["checks"], "arrived over HTTPS")
+        assert c["status"] == "warn"
+
+    def test_https_check_passes_over_the_apache_tls_proxy(self, client, create_user):
+        # _LocalProxyFix restores the real scheme from X-Forwarded-Proto for
+        # a request that reached us via Apache's HTTPS vhost. It is the
+        # same header Apache itself sets, so this exercises the actual
+        # production path rather than just Werkzeug's own (unproxied)
+        # is_secure detection.
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        client.put("/api/rx-audio/config", json={"path": "lowlatency"})
+        body = client.get("/api/rx/diagnostics",
+                           headers={"X-Forwarded-Proto": "https"}).get_json()
+        c = _find(body["checks"], "arrived over HTTPS")
+        assert c["status"] == "pass"
+
     def test_current_settings_row_reports_config(self, client, create_user):
         create_user("owner1", role="owner")
         _login(client, "owner1")
@@ -179,12 +206,17 @@ class TestRxDiagnosticsChecks:
 
 
 class TestLowLatencyReadyRollup:
-    """The 'Low-latency path ready to use' rollup check -- pass only when
-    ffmpeg/libopus, the relay process, and the Apache proxy are all in
-    place; warn naming whichever prerequisite(s) are missing otherwise."""
+    """The 'Low-latency path ready to use' rollup check passes only when
+    ffmpeg/libopus, the relay process, the Apache proxy, and HTTPS are all
+    in place, warning and naming whichever prerequisite(s) are missing
+    otherwise. HTTPS matters because the browser side decodes with
+    WebCodecs (AudioDecoder), a secure-context-only API. Every other
+    prerequisite here could be satisfied and the path would still never
+    actually work for a real visitor without it, which is exactly what
+    this rollup is supposed to catch."""
 
     def _make_ready(self, monkeypatch, tmp_path):
-        """Satisfies all three underlying conditions."""
+        """Satisfies all four underlying conditions."""
         monkeypatch.setattr(app.shutil, "which", lambda name: "/usr/bin/ffmpeg")
 
         class _Proc:
@@ -200,13 +232,18 @@ class TestLowLatencyReadyRollup:
 
         conf = tmp_path / "henwen.conf"
         conf.write_text("; " + app.WS_AUDIO_MARKER + "\n")
-        monkeypatch.setattr(app, "WS_AUDIO_APACHE_CONF_CANDIDATES", (str(conf),))
+        monkeypatch.setattr(app, "HENWEN_APACHE_VHOST_CANDIDATES", (str(conf),))
+
+    def _get(self, client):
+        # X-Forwarded-Proto: https stands in for the request having actually
+        # arrived over Apache's TLS proxy. See _LocalProxyFix.
+        return client.get("/api/rx/diagnostics", headers={"X-Forwarded-Proto": "https"}).get_json()
 
     def test_passes_when_all_prerequisites_met(self, client, create_user, monkeypatch, tmp_path):
         create_user("owner1", role="owner")
         _login(client, "owner1")
         self._make_ready(monkeypatch, tmp_path)
-        body = client.get("/api/rx/diagnostics").get_json()
+        body = self._get(client)
         c = _find(body["checks"], "Low-latency path ready to use")
         assert c["status"] == "pass"
 
@@ -215,7 +252,7 @@ class TestLowLatencyReadyRollup:
         _login(client, "owner1")
         self._make_ready(monkeypatch, tmp_path)
         monkeypatch.setattr(app.shutil, "which", lambda name: None)
-        body = client.get("/api/rx/diagnostics").get_json()
+        body = self._get(client)
         c = _find(body["checks"], "Low-latency path ready to use")
         assert c["status"] == "warn"
         assert "ffmpeg/libopus" in c["detail"]
@@ -225,7 +262,7 @@ class TestLowLatencyReadyRollup:
         _login(client, "owner1")
         self._make_ready(monkeypatch, tmp_path)
         monkeypatch.setattr(app, "_audio_ws_relay_proc", None)
-        body = client.get("/api/rx/diagnostics").get_json()
+        body = self._get(client)
         c = _find(body["checks"], "Low-latency path ready to use")
         assert c["status"] == "warn"
         assert "relay process" in c["detail"]
@@ -234,8 +271,19 @@ class TestLowLatencyReadyRollup:
         create_user("owner1", role="owner")
         _login(client, "owner1")
         self._make_ready(monkeypatch, tmp_path)
-        monkeypatch.setattr(app, "WS_AUDIO_APACHE_CONF_CANDIDATES", (str(tmp_path / "nope.conf"),))
-        body = client.get("/api/rx/diagnostics").get_json()
+        monkeypatch.setattr(app, "HENWEN_APACHE_VHOST_CANDIDATES", (str(tmp_path / "nope.conf"),))
+        body = self._get(client)
         c = _find(body["checks"], "Low-latency path ready to use")
         assert c["status"] == "warn"
         assert "Apache /ws-audio proxy" in c["detail"]
+
+    def test_warns_naming_missing_https(self, client, create_user, monkeypatch, tmp_path):
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        self._make_ready(monkeypatch, tmp_path)
+        # Plain request, no X-Forwarded-Proto. Everything else is ready,
+        # only HTTPS is missing.
+        body = client.get("/api/rx/diagnostics").get_json()
+        c = _find(body["checks"], "Low-latency path ready to use")
+        assert c["status"] == "warn"
+        assert "HTTPS" in c["detail"]

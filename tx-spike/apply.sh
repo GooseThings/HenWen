@@ -12,7 +12,8 @@
 #           /etc/asterisk/pjsip.conf     (append transport/endpoint/auth/aor)
 #           /etc/asterisk/custom/extensions.conf  (create context)
 #           /etc/asterisk/rtp.conf       (stunaddr, for remote WebRTC ICE)
-#           /etc/apache2/sites-enabled/henwen-ssl.conf (WSS proxy line)
+#           /etc/apache2/sites-enabled/henwen-ssl.conf, OR
+#           /etc/apache2/sites-enabled/henwen.conf (whichever is present — WSS proxy line)
 #           /etc/asterisk/henwen-tx.secret        (generated SIP password)
 # Does NOT restart Asterisk — modules are loaded live; app_rpt keeps running.
 set -euo pipefail
@@ -21,22 +22,46 @@ SPIKE_DIR="$(cd "$(dirname "$0")" && pwd)"
 MARKER="HenWen browser transmitter"
 STAMP=$(date +%Y%m%d-%H%M%S)
 BACKUP_DIR="/root/henwen-browsertx-backup-$STAMP"
-APACHE_CONF="/etc/apache2/sites-enabled/henwen-ssl.conf"
 RPT_CONF_PATH="${RPT_CONF_PATH:-/etc/asterisk/rpt.conf}"
 
 [ "$(id -u)" = 0 ] || { echo "Run as root (sudo)"; exit 1; }
 
 # apply.sh only wires up Asterisk PJSIP/WebRTC + the WSS proxy — it assumes
-# setup-https.sh already gave this box HTTPS and left $APACHE_CONF in place.
-# Check that explicitly and fail with a clear pointer rather than letting
-# the "== Backing up" step below die on a bare `cp: cannot stat` a few
-# lines later.
-if [ ! -f "$APACHE_CONF" ]; then
-  echo "ERROR: $APACHE_CONF not found."
+# Apache is already fronting HenWen, either via setup-https.sh's full
+# Let's-Encrypt flow (henwen-ssl.conf) or its --http-only mode (henwen.conf,
+# install.sh's own default — the common case for an operator fronting HTTPS
+# themselves with an external reverse proxy/tunnel instead). Mirrors
+# ws-audio/apply.sh's own candidate-loop exactly, so neither script ever
+# requires manually renaming one vhost file to the other's name.
+APACHE_CONF=""
+for candidate in /etc/apache2/sites-enabled/henwen-ssl.conf /etc/apache2/sites-enabled/henwen.conf; do
+  [ -f "$candidate" ] && { APACHE_CONF="$candidate"; break; }
+done
+if [ -z "$APACHE_CONF" ]; then
+  echo "ERROR: no HenWen Apache vhost found (checked henwen-ssl.conf and henwen.conf)."
   echo ""
-  echo "Browser TX needs HTTPS set up first, before apply.sh:"
-  echo "  sudo bash $SPIKE_DIR/setup-https.sh <hostname> <email>"
+  echo "Browser TX needs Apache fronting HenWen first:"
+  echo "  sudo bash $SPIKE_DIR/setup-https.sh <hostname> <email>   (full HTTPS via Let's Encrypt)"
+  echo "  sudo bash $SPIKE_DIR/setup-https.sh --http-only          (if you front HTTPS yourself —"
+  echo "                                                             Tailscale Serve/Funnel,"
+  echo "                                                             Cloudflare Tunnel, another box)"
   exit 1
+fi
+echo "== Using Apache vhost: $APACHE_CONF"
+
+# a2ensite's sites-enabled entry is a symlink into sites-available -- but
+# `sed -i` below doesn't edit through a symlink, it replaces whatever's at
+# that path with a fresh file it creates (a well-known GNU sed gotcha).
+# Left alone, that both breaks the sites-available/sites-enabled split and
+# can leave the result unreadable by the `asterisk` user running gunicorn,
+# since sed's own temp file doesn't reliably keep the original's
+# permissions -- app.py's own TX diagnostics read-back then silently
+# reports the proxy as not applied even though Apache itself (reading
+# config as root at startup) is proxying it correctly. Resolve to the real
+# underlying file first so the symlink, if any, is never touched.
+if [ -L "$APACHE_CONF" ]; then
+  APACHE_CONF="$(readlink -f "$APACHE_CONF")"
+  echo "== sites-enabled symlink resolves to $APACHE_CONF"
 fi
 
 # Local node number: same convention app.py's get_node_numbers() uses
@@ -75,7 +100,25 @@ fi
 
 echo "== pjsip.conf + secret"
 if grep -q "$MARKER" /etc/asterisk/pjsip.conf; then
-  echo "   already patched, skipping (existing secret kept)"
+  echo "   already patched, skipping"
+  # A prior run can be interrupted between patching pjsip.conf and writing
+  # the secret file (the two used to be assumed atomic together) -- confirmed
+  # live: pjsip.conf had a real password already patched in while
+  # /etc/asterisk/henwen-tx.secret was missing, which left TX_SECRET_PATH's
+  # "missing file = feature off" switch stuck off even though PJSIP itself
+  # was fully configured and working. Recover the already-configured
+  # password straight from pjsip.conf rather than generating a new one --
+  # a fresh secret here wouldn't match the endpoint's actual auth.
+  if [ ! -s /etc/asterisk/henwen-tx.secret ]; then
+    echo "   secret file missing/empty -- recovering existing password from pjsip.conf"
+    TXSECRET=$(sed -n '/^\[henwen-tx-auth\]$/,/^$/p' /etc/asterisk/pjsip.conf | sed -n 's/^password=//p' | head -1)
+    [ -n "$TXSECRET" ] || { echo "   FAILED: could not find password= under [henwen-tx-auth] in pjsip.conf"; exit 1; }
+    printf '%s\n' "$TXSECRET" > /etc/asterisk/henwen-tx.secret
+    chown asterisk:asterisk /etc/asterisk/henwen-tx.secret
+    chmod 600 /etc/asterisk/henwen-tx.secret
+  else
+    echo "   existing secret kept"
+  fi
 else
   TXSECRET=$(openssl rand -hex 16)
   sed -e "s/__TXSECRET__/$TXSECRET/" -e "s/__NODENUM__/$NODENUM/g" "$SPIKE_DIR/pjsip.snippet" >> /etc/asterisk/pjsip.conf
@@ -139,7 +182,11 @@ else
   sed -i 's|^    ProxyPass        / http://127.0.0.1:5000/ retry=0 timeout=120$|    # '"$MARKER"': SIP-over-WebSocket signaling to the loopback-only\n    # Asterisk builtin HTTP server; Apache terminates WSS with the same cert.\n    ProxyPass /asterisk-ws ws://127.0.0.1:8088/ws retry=0\n\n    ProxyPass        / http://127.0.0.1:5000/ retry=0 timeout=120|' "$APACHE_CONF"
   grep -q "asterisk-ws" "$APACHE_CONF" || { echo "   FAILED to insert proxy line"; exit 1; }
 fi
-apache2ctl configtest 2>&1 | grep -q "Syntax OK" || { echo "   Apache configtest FAILED — restoring backup"; cp "$BACKUP_DIR/henwen-ssl.conf" "$APACHE_CONF"; exit 1; }
+# Belt-and-suspenders regardless of which branch above ran (also heals a
+# box that already hit the stale-permissions bug from a previous version
+# of this script): Apache vhosts should always be world-readable.
+chmod 644 "$APACHE_CONF"
+apache2ctl configtest 2>&1 | grep -q "Syntax OK" || { echo "   Apache configtest FAILED — restoring backup"; cp "$BACKUP_DIR/$(basename "$APACHE_CONF")" "$APACHE_CONF"; exit 1; }
 # `reload` requires an already-active service. Config just passed
 # configtest, so if apache2 isn't running, start it fresh instead of
 # failing outright — and if that *also* fails, print the actual log
@@ -166,10 +213,20 @@ WSHOST=$(cat /etc/asterisk/henwen-https-hostname 2>/dev/null || true)
 if [ -z "$WSHOST" ]; then
     WSHOST=$(grep -h "ServerName" "$APACHE_CONF" 2>/dev/null | awk '{print $2}' | head -1)
 fi
-WSHOST="${WSHOST:-$(hostname -f 2>/dev/null || hostname)}"
+FELL_BACK_TO_LOCAL_HOSTNAME=0
+if [ -z "$WSHOST" ]; then
+    WSHOST="$(hostname -f 2>/dev/null || hostname)"
+    FELL_BACK_TO_LOCAL_HOSTNAME=1
+fi
 WSPORT=$(cat /etc/asterisk/henwen-https-port 2>/dev/null || echo 443)
 WSPORT_SUFFIX=""
 [ "$WSPORT" != "443" ] && WSPORT_SUFFIX=":${WSPORT}"
+
+if [ "$FELL_BACK_TO_LOCAL_HOSTNAME" = "1" ]; then
+  echo "NOTE: could not determine a public hostname locally (no HTTPS marker file,"
+  echo "no ServerName in $APACHE_CONF). If you're fronting HTTPS with your own"
+  echo "reverse proxy/tunnel, use ITS public hostname instead of \"$WSHOST\" below."
+fi
 
 echo "Done. SIP credentials for the test page:"
 echo "  WSS URL:  wss://${WSHOST}${WSPORT_SUFFIX}/asterisk-ws"

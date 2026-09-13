@@ -1,6 +1,6 @@
 # AudioSocket tap (low-latency Listen audio capture)
 
-Optional, opt-in replacement for how HenWen captures a node's live RX audio
+Replacement for how HenWen captures a node's live RX audio
 for the Status Board's Listen feature. Without this, Listen uses AMI
 `MixMonitor` on the node's channel, writing to a FIFO through Asterisk's own
 buffered stdio stream — that buffer flushes in ~32KB/~2s lumps, adding ~2s of
@@ -34,11 +34,16 @@ socket as it's produced, with no such buffering.
 originates a Local-channel bridge — one half runs `ChanSpy` on the node's
 channel, the other runs the `AudioSocket()` context above — pointed at
 `audio_relay.py`'s listener, each time Listen starts. **Purely additive**:
-if this isn't installed (the default, every existing install today), or
-anything about the handshake fails, HenWen falls straight back to the
-existing MixMonitor path automatically — Listen keeps working either way.
+if this isn't installed, or anything about the handshake fails, HenWen
+falls straight back to the existing MixMonitor path automatically — Listen
+keeps working either way.
 
 ## Applying
+
+`install.sh` already runs this automatically on every fresh install
+(step `[7/11]`) whenever Asterisk is installed and running, self-falling-back
+to MixMonitor if it fails. Only run it by hand if Asterisk wasn't running
+yet during install, or to re-apply after a rollback:
 
 ```
 sudo bash audiosocket-tap/apply.sh

@@ -1907,20 +1907,32 @@ sudo asterisk -rx "module reload manager"</pre>
       </div>
     </div>
 
-    <div class="card">
-      <div class="card-header"><h2>Setup Guide</h2></div>
+    <div class="card" id="tx-apply-card" style="display:none">
+      <div class="card-header"><h2>Browser TX Setup</h2></div>
       <div class="card-body">
-        <p style="margin-bottom:10px">TX needs HTTPS (skip if this box already has it) and the Asterisk-side PJSIP/WebRTC config, in that order:</p>
-        <pre class="codeblock">sudo bash /opt/HenWen/tx-spike/setup-https.sh &lt;hostname&gt; &lt;email&gt;
-sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
         <p style="margin-bottom:10px;color:var(--text2);font-size:0.9rem">
-          <span class="mono">setup-https.sh</span> requires a public hostname already pointed at this box
-          and port 80 forwarded (plus your chosen HTTPS port — <span class="mono">--port N</span> if not
-          443; <span class="mono">--dns-manual</span> if your ISP blocks port 80 too). No public hostname
-          to point here? A third-party service that can front HTTPS for you (Tailscale Serve/Funnel,
-          Cloudflare Tunnel, etc.) works too — see <span class="mono">tx-spike/README.md</span> for what
-          it needs to proxy. Both scripts are safe to re-run.
+          Wires up Asterisk's PJSIP/WebRTC stack and the Apache WSS proxy for browser TX.
+          Safe to re-run, and won't restart Asterisk or HenWen.
         </p>
+        <p id="tx-apply-status" style="margin-bottom:12px;color:var(--text2)">Checking&hellip;</p>
+        <div class="btn-row" id="tx-apply-btn-row" style="display:none">
+          <button class="btn btn-sm btn-primary" id="tx-apply-btn" onclick="applyTxSetup()">Apply Browser TX Setup</button>
+        </div>
+        <div id="tx-apply-prereq" style="display:none">
+          <p style="margin-bottom:10px">No Apache vhost found yet — provision one first:</p>
+          <pre class="codeblock">sudo bash /opt/HenWen/tx-spike/setup-https.sh &lt;hostname&gt; &lt;email&gt;   # full HTTPS via Let's Encrypt
+sudo bash /opt/HenWen/tx-spike/setup-https.sh --http-only              # fronting HTTPS yourself</pre>
+          <p style="margin-bottom:10px;color:var(--text2);font-size:0.9rem">
+            <span class="mono">setup-https.sh</span> requires a public hostname already pointed at this box
+            and port 80 forwarded (plus your chosen HTTPS port — <span class="mono">--port N</span> if not
+            443; <span class="mono">--dns-manual</span> if your ISP blocks port 80 too). No public hostname
+            to point here? A third-party service that can front HTTPS for you (Tailscale Serve/Funnel,
+            Cloudflare Tunnel, etc.) works too, with <span class="mono">--http-only</span> — see
+            <span class="mono">tx-spike/README.md</span> for what it needs to proxy. Once either has run,
+            reload this page and Apply becomes available above.
+          </p>
+        </div>
+        <pre id="tx-apply-output" class="codeblock" style="display:none;margin-top:12px;white-space:pre-wrap;max-height:260px;overflow-y:auto"></pre>
       </div>
     </div>
 
@@ -1940,32 +1952,10 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
       </div>
       <div class="card-body">
         <p style="margin-bottom:10px;color:var(--text2);font-size:0.9rem">
-          Covers RX capture (AudioSocket tap vs. MixMonitor fallback), ffmpeg/libopus, the
-          Low-Latency path's relay process and Apache proxy, and whether each configured
-          node's Asterisk channel currently resolves. Nothing is changed on the system.
+          Checks that Listen is ready to work, and points at whatever's blocking it if not.
+          This only checks. Nothing on the system is changed.
         </p>
         <div id="rx-diag-out"><span class="muted">Click Run Diagnostics to check RX readiness.</span></div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-header"><h2>Low-Latency Path Requirements</h2></div>
-      <div class="card-body">
-        <p class="muted" style="margin-bottom:8px">
-          Everything the Low-Latency RX Audio Path (below) needs to actually work for a
-          browser that isn't on this box's own localhost:
-        </p>
-        <ul style="margin:0 0 10px 20px;padding:0;color:var(--text2);font-size:0.9rem;line-height:1.7">
-          <li><span class="mono">ffmpeg</span> with a <span class="mono">libopus</span> encoder</li>
-          <li>The low-latency relay process (<span class="mono">audio_ws_relay.py</span>) running — HenWen starts this on its own</li>
-          <li>Apache installed and fronting HenWen, with the <span class="mono">/ws-audio</span> WebSocket proxy applied (<span class="mono">ws-audio/apply.sh</span>) — required because gunicorn's own worker threads can't do WebSocket upgrades, so this is the only way a browser on another machine can reach the relay at all</li>
-          <li>"Low-Latency" actually selected below, not just Apache being ready</li>
-          <li>A browser with <span class="mono">WebSocket</span>, <span class="mono">AudioDecoder</span> (WebCodecs), <span class="mono">AudioContext</span>, and <span class="mono">AudioWorkletNode</span> support — checked client-side only; unsupported browsers fall back to the plain, higher-latency <span class="mono">&lt;audio&gt;</span> tag automatically</li>
-        </ul>
-        <p class="muted" style="margin:0;font-size:0.85rem">
-          "Run Checks" above verifies everything server-side, plus a single rollup row
-          summarizing whether the path is actually ready to use right now.
-        </p>
       </div>
     </div>
 
@@ -1973,17 +1963,13 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
       <div class="card-header"><h2>AudioSocket Tap (Listen audio)</h2></div>
       <div class="card-body">
         <p class="muted" style="margin-bottom:12px">
-          Optional, opt-in low-latency capture path for the Status Board's Listen feature.
-          Without this, Listen uses AMI <span class="mono">MixMonitor</span>, which adds
-          roughly 2 seconds of latency from Asterisk's own buffered file writes. Applying this
-          swaps in a live TCP tap (<span class="mono">AudioSocket</span>) instead — additive
-          and safe to re-run; Listen automatically falls back to MixMonitor if anything about
-          the tap ever fails. See <span class="mono">audiosocket-tap/README.md</span> for
-          details.
+          This cuts the delay before Listen audio starts. It is applied automatically during
+          install. Use this button if it wasn't applied, or to re-apply it after a rollback.
+          It is safe to re-run, and Listen keeps working normally even if it fails.
         </p>
         <p id="audiosocket-tap-status" style="margin-bottom:12px;color:var(--text2)">Checking&hellip;</p>
         <div class="btn-row">
-          <button class="btn btn-sm btn-primary" onclick="applyAudioSocketTap()">Apply AudioSocket Tap</button>
+          <button class="btn btn-sm btn-primary" id="audiosocket-tap-apply-btn" onclick="applyAudioSocketTap()">Apply AudioSocket Tap</button>
         </div>
         <pre id="audiosocket-tap-output" class="codeblock" style="display:none;margin-top:12px;white-space:pre-wrap;max-height:260px;overflow-y:auto"></pre>
       </div>
@@ -1993,31 +1979,26 @@ sudo bash /opt/HenWen/tx-spike/apply.sh</pre>
       <div class="card-header"><h2>RX Audio Path (Listen audio)</h2></div>
       <div class="card-body">
         <p class="muted" style="margin-bottom:12px">
-          Which pipeline the Status Board's Listen feature uses. <b>Legacy</b> is the default:
-          WebM/Opus played back through MediaSource Extensions — a steady-state latency floor
-          of roughly 1.3-1.4s. <b>Low-Latency</b> streams raw Opus over a dedicated WebSocket to
-          WebCodecs/AudioWorklet instead — no container — trading some jitter tolerance for
-          substantially lower latency. This is a node-wide setting, not a per-browser
-          preference: it changes which pipeline runs server-side for every listener.
-          <span class="mono">recording.py</span> and the stream relay are unaffected by
-          <i>this</i> setting either way — both keep using the Legacy WebM pipeline on their
-          own, regardless of what Listen is doing. See <span class="mono">ws-audio/README.md</span>
-          for details.
+          This controls how Listen streams to browsers. <b>Legacy</b> works everywhere with about
+          a 1.5s delay. <b>Low-Latency</b> cuts that delay significantly, but needs a fairly
+          modern browser and the Apache proxy below applied. This setting applies to every
+          listener on this node at once, not just you.
         </p>
 
         <p id="rx-audio-ws-status" style="margin-bottom:12px;color:var(--text2)">Checking&hellip;</p>
         <div class="btn-row" style="margin-bottom:16px">
-          <button class="btn btn-sm btn-primary" onclick="applyWsAudioProxy()">Apply Apache Proxy</button>
+          <button class="btn btn-sm btn-primary" id="rx-audio-ws-apply-btn" onclick="applyWsAudioProxy()">Apply Apache Proxy</button>
         </div>
         <pre id="rx-audio-ws-output" class="codeblock" style="display:none;margin-bottom:16px;white-space:pre-wrap;max-height:260px;overflow-y:auto"></pre>
 
-        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px">
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px">
           <label class="toggle-label" style="margin:0">RX Audio Path</label>
-          <select id="rx-audio-path-select" class="val-input" style="width:auto;min-width:220px">
-            <option value="legacy">Legacy (WebM/MSE, default)</option>
-            <option value="lowlatency">Low-Latency (WebSocket)</option>
+          <select id="rx-audio-path-select" class="val-input" style="width:auto;min-width:220px" onchange="updateRxAudioSecureWarning()">
+            <option value="legacy">Legacy</option>
+            <option value="lowlatency">Low-Latency (default)</option>
           </select>
         </div>
+        <p id="rx-audio-secure-warn" style="display:none;margin:0 0 14px;color:var(--warn,#e0a030);font-size:0.85rem"></p>
 
         <div class="toggle-row" style="margin-bottom:14px">
           <div class="toggle-info">
@@ -3498,6 +3479,7 @@ function showPage(id) {
   else if (id === 'ami-diag')         loadSysInfo();
   else if (id === 'ast-console')  astFetchLog();
   else if (id === 'settings')       { loadSecretKeyStatus(); loadPortsStatus(); syncThemePicker(); mfaLoadStatus(); }
+  else if (id === 'tx-diag')         { if (window._henwenRole === 'owner') { loadTxApplyStatus(); } }
   else if (id === 'rx-diag')         { if (window._henwenRole === 'owner') { loadAudioSocketTapStatus(); loadRxAudioPathStatus(); } }
   else if (id === 'user-mgmt')      { loadUsers(); pwResetLoad(); invitesLoad(); }
   else if (id === 'recordings')         recordingsLoad();
@@ -6868,6 +6850,10 @@ async function applyRoleNav() {
      explicit role==='owner' check on /api/audiosocket-tap/apply. */
   var audiosocketTapCard = document.getElementById('audiosocket-tap-settings-card');
   if (audiosocketTapCard) audiosocketTapCard.style.display = isOwnerRole ? '' : 'none';
+  /* Browser TX apply.sh needs root too — owner-only, matches the backend's
+     explicit role==='owner' check on /api/tx/apply-status and /api/tx/apply. */
+  var txApplyCard = document.getElementById('tx-apply-card');
+  if (txApplyCard) txApplyCard.style.display = isOwnerRole ? '' : 'none';
   /* RX Audio Path (low-latency Listen) is owner-only too — matches the
      backend's explicit role==='owner' check on /api/rx-audio/config and
      /api/ws-audio/apply. */
@@ -6989,20 +6975,21 @@ async function loadAudioSocketTapStatus() {
     return;
   }
   if (!r.data.installed) {
-    el.innerHTML = '<span style="color:var(--warn,#e0a030)">apply.sh not found on this install '
-                  + '— pull the latest HenWen code first.</span>';
+    el.innerHTML = '<span style="color:var(--warn,#e0a030)">Not available on this install. '
+                  + 'Pull the latest HenWen code first.</span>';
     return;
   }
   el.innerHTML = r.data.applied
-    ? '<span style="color:var(--green,#3fb950)">Applied</span> — Listen uses the AudioSocket tap on this node.'
-    : 'Not applied — Listen is using the default MixMonitor path.';
+    ? '<span style="color:var(--green,#3fb950)">Applied.</span> Listen starts with less delay on this node.'
+    : 'Not applied. Listen is using the standard method, which is slightly slower.';
+  var btn = document.getElementById('audiosocket-tap-apply-btn');
+  if (btn) btn.textContent = r.data.applied ? 'Re-apply AudioSocket Tap' : 'Apply AudioSocket Tap';
 }
 
 async function applyAudioSocketTap() {
-  if (!confirm('Apply the AudioSocket tap now?\n\nThis edits /etc/asterisk/modules.conf and '
-             + 'custom/extensions.conf and loads three Asterisk modules live. It does not '
-             + 'restart Asterisk or HenWen, and Listen falls back automatically if anything '
-             + 'about the tap fails. Safe to re-run.')) return;
+  if (!confirm('Apply the AudioSocket tap now?\n\n'
+             + 'Safe to re-run, and won\'t restart Asterisk or HenWen. Listen falls back '
+             + 'automatically if anything about it fails.')) return;
   var statusEl = document.getElementById('audiosocket-tap-status');
   var outEl = document.getElementById('audiosocket-tap-output');
   if (statusEl) statusEl.textContent = 'Applying…';
@@ -7019,6 +7006,66 @@ async function applyAudioSocketTap() {
     log('AudioSocket tap apply failed: ' + err, 'ERROR');
   }
   loadAudioSocketTapStatus();
+}
+
+/* ── Browser TX Setup (tx-spike/apply.sh) ────────────────────────────────── */
+async function loadTxApplyStatus() {
+  var statusEl = document.getElementById('tx-apply-status');
+  var btnRow   = document.getElementById('tx-apply-btn-row');
+  var prereq   = document.getElementById('tx-apply-prereq');
+  if (!statusEl) return;
+  statusEl.textContent = 'Checking…';
+  var r = await api('/api/tx/apply-status');
+  if (!r.ok) {
+    statusEl.textContent = (r.data && r.data.error) || 'Could not check status.';
+    if (btnRow) btnRow.style.display = 'none';
+    if (prereq) prereq.style.display = 'none';
+    return;
+  }
+  if (!r.data.installed) {
+    statusEl.innerHTML = '<span style="color:var(--warn,#e0a030)">Not available on this install. '
+                        + 'Pull the latest HenWen code first.</span>';
+    if (btnRow) btnRow.style.display = 'none';
+    if (prereq) prereq.style.display = 'none';
+    return;
+  }
+  if (!r.data.vhost_found) {
+    statusEl.textContent = 'No Apache vhost found yet — Apply needs one first (see below).';
+    if (btnRow) btnRow.style.display = 'none';
+    if (prereq) prereq.style.display = '';
+    return;
+  }
+  if (prereq) prereq.style.display = 'none';
+  statusEl.innerHTML = (r.data.applied
+    ? '<span style="color:var(--green,#3fb950)">Applied.</span> '
+    : 'Vhost found — ')
+    + 'Using <span class="mono">' + r.data.vhost_found + '</span>';
+  var btn = document.getElementById('tx-apply-btn');
+  if (btn) btn.textContent = r.data.applied ? 'Re-apply Browser TX Setup' : 'Apply Browser TX Setup';
+  if (btnRow) btnRow.style.display = '';
+}
+
+async function applyTxSetup() {
+  if (!confirm('Apply browser TX setup now?\n\n'
+             + 'This live-loads Asterisk\'s PJSIP/WebRTC modules and generates (or reuses) a '
+             + 'real SIP credential for the TX button. Safe to re-run, and won\'t restart '
+             + 'Asterisk or HenWen.')) return;
+  var statusEl = document.getElementById('tx-apply-status');
+  var outEl = document.getElementById('tx-apply-output');
+  if (statusEl) statusEl.textContent = 'Applying…';
+  var r = await api('/api/tx/apply', {method: 'POST'});
+  if (outEl && ((r.data && r.data.output) || '').trim()) {
+    outEl.textContent = r.data.output;
+    outEl.style.display = '';
+  }
+  if (r.ok) {
+    log('Browser TX applied', 'OK');
+  } else {
+    var err = (r.data && (r.data.error || r.data.hint)) || 'Failed to apply browser TX setup.';
+    alert(err);
+    log('Browser TX apply failed: ' + err, 'ERROR');
+  }
+  loadTxApplyStatus();
 }
 
 /* ── RX Audio Path (low-latency Listen) ──────────────────────────────────── */
@@ -7041,27 +7088,48 @@ async function loadRxAudioPathStatus() {
     return;
   }
   if (!r.data.installed) {
-    wsEl.innerHTML = '<span style="color:var(--warn,#e0a030)">ws-audio/apply.sh not found on this install '
-                    + '— pull the latest HenWen code first.</span>';
+    wsEl.innerHTML = '<span style="color:var(--warn,#e0a030)">Not available on this install. '
+                    + 'Pull the latest HenWen code first.</span>';
   } else {
     wsEl.innerHTML = r.data.applied
-      ? '<span style="color:var(--green,#3fb950)">Apache proxy applied</span> ('
-        + esc(r.data.apache_conf || '') + ') — the low-latency path is reachable from outside this box.'
-      : 'Apache proxy not applied yet — the low-latency path only works for browsers on this '
-        + 'box\'s loopback until you apply it.';
+      ? '<span style="color:var(--green,#3fb950)">Applied.</span> Low-Latency mode is reachable from other devices.'
+      : 'Not applied yet. Low-Latency mode only works on this box itself until you apply this.';
   }
+  var wsBtn = document.getElementById('rx-audio-ws-apply-btn');
+  if (wsBtn) wsBtn.textContent = r.data.applied ? 'Re-apply Apache Proxy' : 'Apply Apache Proxy';
   sel.value = r.data.rx_audio_path || 'legacy';
   if (agcCb) agcCb.checked = r.data.agc_enabled !== false;
   _rxAudioLoadedPath = sel.value;
   _rxAudioLoadedAgc  = agcCb ? agcCb.checked : false;
+  updateRxAudioSecureWarning();
+}
+
+/* window.isSecureContext reflects THIS page's own connection, the closest
+   available signal for whether visitor browsers can use the low-latency
+   path at all (WebCodecs/AudioDecoder needs a secure context, so it's
+   simply undefined otherwise). Not a perfect proxy for what every kiosk
+   visitor sees (an admin could be on a different URL than the kiosk), but
+   this page is served from the same origin as the kiosk in the normal
+   case, so it's a reliable, zero-round-trip check. */
+function updateRxAudioSecureWarning() {
+  var el  = document.getElementById('rx-audio-secure-warn');
+  var sel = document.getElementById('rx-audio-path-select');
+  if (!el || !sel) return;
+  if (sel.value === 'lowlatency' && !window.isSecureContext) {
+    el.textContent = 'This page is not loaded over HTTPS. Even with Low-Latency selected, '
+                    + 'visitor browsers will silently keep using the standard method instead. '
+                    + 'Set up HTTPS to actually enable Low-Latency.';
+    el.style.display = '';
+  } else {
+    el.style.display = 'none';
+  }
 }
 
 async function applyWsAudioProxy() {
-  if (!confirm('Apply the low-latency RX audio Apache proxy now?\n\nThis edits your Apache '
-             + 'vhost (henwen-ssl.conf or henwen.conf, whichever is present) to add a '
-             + '/ws-audio WebSocket proxy line, and reloads Apache. It does not restart '
-             + 'HenWen or Asterisk, and does not by itself change which RX audio path Listen '
-             + 'uses — that\'s the separate selector below. Safe to re-run.')) return;
+  if (!confirm('Apply the Apache proxy for Low-Latency mode now?\n\n'
+             + 'This reloads Apache, but does not restart HenWen or Asterisk. It also does '
+             + 'not switch Listen to Low-Latency by itself. Use the RX Audio Path selector '
+             + 'below for that. It is safe to re-run.')) return;
   var statusEl = document.getElementById('rx-audio-ws-status');
   var outEl = document.getElementById('rx-audio-ws-output');
   if (statusEl) statusEl.textContent = 'Applying…';
