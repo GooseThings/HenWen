@@ -523,42 +523,59 @@ class TestPcmOwnership:
     object() sentinels stand in for connection sockets: only identity
     matters to this logic, never actual socket I/O."""
 
+    ADDR = ("127.0.0.1", 0)
+
     def setup_method(self):
         wsrelay._pcm_owners.clear()
+        wsrelay._pcm_reject_counts.clear()
 
     def teardown_method(self):
         wsrelay._pcm_owners.clear()
+        wsrelay._pcm_reject_counts.clear()
 
     def test_first_connection_claims_the_node(self):
         conn = object()
-        assert wsrelay._claim_pcm_owner("628280", conn) is True
+        assert wsrelay._claim_pcm_owner("628280", conn, self.ADDR) is True
 
     def test_same_connection_reclaiming_still_succeeds(self):
         conn = object()
-        wsrelay._claim_pcm_owner("628280", conn)
-        assert wsrelay._claim_pcm_owner("628280", conn) is True
+        wsrelay._claim_pcm_owner("628280", conn, self.ADDR)
+        assert wsrelay._claim_pcm_owner("628280", conn, self.ADDR) is True
 
     def test_second_connection_for_same_node_is_rejected(self):
         first, second = object(), object()
-        assert wsrelay._claim_pcm_owner("628280", first) is True
-        assert wsrelay._claim_pcm_owner("628280", second) is False
+        assert wsrelay._claim_pcm_owner("628280", first, self.ADDR) is True
+        assert wsrelay._claim_pcm_owner("628280", second, self.ADDR) is False
 
     def test_different_nodes_do_not_conflict(self):
         a, b = object(), object()
-        assert wsrelay._claim_pcm_owner("628280", a) is True
-        assert wsrelay._claim_pcm_owner("546054", b) is True
+        assert wsrelay._claim_pcm_owner("628280", a, self.ADDR) is True
+        assert wsrelay._claim_pcm_owner("546054", b, self.ADDR) is True
 
     def test_release_lets_a_new_connection_claim_the_node(self):
         first, second = object(), object()
-        wsrelay._claim_pcm_owner("628280", first)
+        wsrelay._claim_pcm_owner("628280", first, self.ADDR)
         wsrelay._release_pcm_owner("628280", first)
-        assert wsrelay._claim_pcm_owner("628280", second) is True
+        assert wsrelay._claim_pcm_owner("628280", second, self.ADDR) is True
 
     def test_release_by_non_owner_is_a_no_op(self):
         owner, impostor = object(), object()
-        wsrelay._claim_pcm_owner("628280", owner)
+        wsrelay._claim_pcm_owner("628280", owner, self.ADDR)
         wsrelay._release_pcm_owner("628280", impostor)
         # The real owner's claim must survive an unrelated release() call --
         # otherwise a stale/rejected connection's own cleanup could evict the
         # legitimate owner out from under it.
         assert wsrelay._pcm_owners.get("628280") is owner
+
+    def test_rejection_logging_is_throttled(self, monkeypatch):
+        # A losing sender's audio_relay.py retries every RECONNECT_INTERVAL
+        # for as long as the overlap lasts. Confirm only the 1st and 51st
+        # rejection actually log, not all 60, so a long-running overlap
+        # can't spam one INFO line per retry.
+        logged = []
+        monkeypatch.setattr(wsrelay, "_log", lambda level, msg: logged.append(msg))
+        owner = object()
+        wsrelay._claim_pcm_owner("628280", owner, self.ADDR)
+        for _ in range(60):
+            wsrelay._claim_pcm_owner("628280", object(), self.ADDR)
+        assert len(logged) == 2

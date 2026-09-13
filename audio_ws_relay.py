@@ -428,7 +428,8 @@ _nodes = {}   # node (str) -> _NodeState
 # Only one audio_relay.py instance may feed a given node's low-latency
 # encoder at a time -- see _claim_pcm_owner()'s docstring below for why.
 _pcm_owners_lock = threading.Lock()
-_pcm_owners = {}   # node (str) -> the winning PCM connection socket
+_pcm_owners = {}          # node (str) -> the winning PCM connection socket
+_pcm_reject_counts = {}   # node (str) -> consecutive-rejection count since its last successful claim
 
 
 class _NodeState:
@@ -676,7 +677,7 @@ def _stop_node_ffmpeg(state):
     _log('INFO', f'[node {state.node}] Opus encoder stopped')
 
 
-def _claim_pcm_owner(node, conn):
+def _claim_pcm_owner(node, conn, addr):
     """True if `conn` is (or becomes) the sole authoritative PCM sender for
     `node` right now. Every audio_relay.py instance on the box dual-writes
     unconditionally -- a legacy WebM broadcast, a low-latency capture-only
@@ -689,12 +690,26 @@ def _claim_pcm_owner(node, conn):
     also active for the same node. First connection for a node wins;
     released on disconnect (see _handle_pcm_connection's finally block) so a
     later connection -- including a legitimate reconnect of the same
-    instance after a drop -- can then claim it."""
+    instance after a drop -- can then claim it.
+
+    A losing sender's audio_relay.py just retries every RECONNECT_INTERVAL
+    (2s) for as long as the overlap lasts, so a rejection here logs on the
+    1st/51st/101st... occurrence per node rather than once per retry.
+    Otherwise an hours-long net with an overlapping legacy Listen session
+    would spam one INFO line every 2 seconds for its whole duration."""
     with _pcm_owners_lock:
         owner = _pcm_owners.get(node)
         if owner is None or owner is conn:
             _pcm_owners[node] = conn
+            _pcm_reject_counts.pop(node, None)
             return True
+        n = _pcm_reject_counts[node] = _pcm_reject_counts.get(node, 0) + 1
+        if n % 50 == 1:
+            _log('INFO', f'[node {node}] duplicate PCM sender from {addr} rejected -- a '
+                         f'low-latency feed for this node is already active from another '
+                         f'audio_relay.py instance (e.g. a concurrent legacy Listen session, '
+                         f'recording, or the stream relay for the same node) '
+                         f'({n} rejection(s) so far)')
         return False
 
 
@@ -746,11 +761,7 @@ def _handle_pcm_connection(conn, addr):
         node = line[len(b'NODE '):].decode('ascii', errors='replace').strip()
         if not _NODE_RE.match(node):
             return
-        if not _claim_pcm_owner(node, conn):
-            _log('INFO', f'[node {node}] duplicate PCM sender from {addr} rejected -- a '
-                         f'low-latency feed for this node is already active from another '
-                         f'audio_relay.py instance (e.g. a concurrent legacy Listen session, '
-                         f'recording, or the stream relay for the same node)')
+        if not _claim_pcm_owner(node, conn, addr):
             return
         conn.settimeout(None)
         frame_buf = bytearray(rest)
