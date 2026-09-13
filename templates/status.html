@@ -7039,6 +7039,12 @@ function _doStartListenWS(audio, node) {
   function _fallback(reason) {
     if (ctrl.signal.aborted) return;
     console.warn('[AUDIO-WS] falling back to plain <audio>: ' + reason);
+    /* Consumed by the "Monitoring node..." toast in _doStartListenFallback()
+       below, same as _doStartListen()'s own pre-check branch. Without this
+       a runtime failure here (proxy missing, AudioContext/AudioDecoder
+       construction failure, worklet load failure) falls back exactly as
+       silently as the pre-check case this notice already exists to cover. */
+    _listenFallbackNotice = 'Low-Latency failed, using standard audio. ';
     _stopListen();
     _doStartListenFallback(audio, node);
   }
