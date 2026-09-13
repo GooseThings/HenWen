@@ -59,6 +59,23 @@ if [ -z "$APACHE_CONF" ]; then
 fi
 echo "== Using Apache vhost: $APACHE_CONF"
 
+# a2ensite/a2dissite's sites-enabled entries are symlinks into
+# sites-available -- but `sed -i` doesn't edit through a symlink, it
+# replaces whatever's at that path with a fresh file it creates (a
+# well-known GNU sed gotcha). Left alone, that both breaks the
+# sites-available/sites-enabled split (sites-available goes stale, further
+# a2dissite/a2ensite runs get confused) and can leave the result
+# unreadable by the `asterisk` user running gunicorn, since sed's own temp
+# file doesn't reliably keep the original's permissions -- app.py's own
+# read-back check for $MARKER then silently reports "not applied" via its
+# generic `except OSError: continue`, even though Apache itself (reading
+# config as root at startup) is proxying it correctly. Resolve to the real
+# underlying file first so the symlink, if any, is never touched.
+if [ -L "$APACHE_CONF" ]; then
+  APACHE_CONF="$(readlink -f "$APACHE_CONF")"
+  echo "   (sites-enabled symlink resolves to $APACHE_CONF)"
+fi
+
 echo "== Backing up to $BACKUP_DIR"
 mkdir -p "$BACKUP_DIR"
 cp "$APACHE_CONF" "$BACKUP_DIR/"
@@ -69,19 +86,27 @@ if grep -q "$MARKER" "$APACHE_CONF"; then
   echo "   already patched, skipping"
 else
   # Insert just above the catch-all ProxyPass line, same placement
-  # tx-spike/apply.sh uses for /asterisk-ws — matched literally rather than
-  # with a variable port, mirroring that script's own existing (accepted)
-  # assumption that HenWen listens on the default port 5000 here.
-  sed -i 's|^    ProxyPass        / http://127.0.0.1:5000/ retry=0 timeout=120$|    # '"$MARKER"': low-latency Listen audio, proxied to\n    # audio_ws_relay.py'"'"'s own loopback-only WebSocket listener\n    # (app.py spawns/supervises that process unconditionally; this line\n    # is what makes it reachable from outside this box).\n    ProxyPass /ws-audio ws://127.0.0.1:'"$WS_PORT"'/ retry=0\n\n    ProxyPass        / http://127.0.0.1:5000/ retry=0 timeout=120|' "$APACHE_CONF"
+  # tx-spike/apply.sh uses for /asterisk-ws. The vhost's ProxyPass target
+  # port is whatever install.sh/setup-https.sh was run with (PORT=...,
+  # default 5000). Read it back from the vhost itself rather than assuming
+  # 5000, so a non-default PORT install doesn't silently fail to match
+  # below.
+  FLASK_PORT=$(sed -nE 's|.*ProxyPass[[:space:]]+/ http://127\.0\.0\.1:([0-9]+)/.*|\1|p' "$APACHE_CONF" | head -1)
+  FLASK_PORT="${FLASK_PORT:-5000}"
+  sed -i 's|^    ProxyPass        / http://127\.0\.0\.1:'"${FLASK_PORT}"'/ retry=0 timeout=120$|    # '"$MARKER"': low-latency Listen audio, proxied to\n    # audio_ws_relay.py'"'"'s own loopback-only WebSocket listener\n    # (app.py spawns/supervises that process unconditionally; this line\n    # is what makes it reachable from outside this box).\n    ProxyPass /ws-audio ws://127.0.0.1:'"$WS_PORT"'/ retry=0\n\n    ProxyPass        / http://127.0.0.1:'"${FLASK_PORT}"'/ retry=0 timeout=120|' "$APACHE_CONF"
   grep -q "$MARKER" "$APACHE_CONF" || {
     echo "   FAILED to insert proxy line — is $APACHE_CONF using the expected"
-    echo "   'ProxyPass        / http://127.0.0.1:5000/ retry=0 timeout=120' line?"
+    echo "   'ProxyPass        / http://127.0.0.1:${FLASK_PORT}/ retry=0 timeout=120' line?"
     echo "   (unmodified from what install.sh/setup-https.sh write). Nothing was"
     echo "   changed; restoring the backup just in case."
     cp "$BACKUP_DIR/$(basename "$APACHE_CONF")" "$APACHE_CONF"
     exit 1
   }
 fi
+# Belt-and-suspenders regardless of which branch above ran (also heals a
+# box that already hit the stale-permissions bug from a previous version
+# of this script): Apache vhosts should always be world-readable.
+chmod 644 "$APACHE_CONF"
 
 echo "== proxy_wstunnel module"
 if apache2ctl -M 2>/dev/null | grep -q proxy_wstunnel_module; then

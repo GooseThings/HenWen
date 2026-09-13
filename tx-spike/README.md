@@ -19,13 +19,29 @@ outside what these scripts automate — HenWen deliberately doesn't install
 or manage a VPN/tunnel client on your box for you. Any third-party service
 that can front HTTPS for a local port works instead (Tailscale Serve or
 Funnel, Cloudflare Tunnel, a reverse proxy on another box you control,
-etc.); set it up yourself, then run `apply.sh` as usual — it only cares
-that `/etc/apache2/sites-enabled/henwen-ssl.conf` exists with a working
-`ProxyPass / http://127.0.0.1:5000/`. Whatever you use needs to proxy two
-things to this box: plain HTTP to Flask's port (default 5000), and a
-WebSocket-capable proxy to Asterisk's `:8088` for `/asterisk-ws` (see
-`apply.sh`'s "Apache WSS proxy" step for the exact line it inserts, if
-you're wiring that path up by hand instead of via Apache).
+etc.); set it up yourself, then either run `apply.sh` as usual or use the
+Manager's TX Diagnostics page "Apply Browser TX Setup" button. Either way
+it just needs a local Apache vhost fronting HenWen — it checks for
+`/etc/apache2/sites-enabled/henwen-ssl.conf` *or* `henwen.conf`, whichever
+is present, and patches whichever one it finds. `henwen.conf` (plain HTTP,
+no cert of its own) is exactly what `setup-https.sh --http-only` produces
+and what `install.sh` provisions by default on every fresh install — so no
+manual renaming is ever needed, even when the real TLS termination happens
+entirely on your reverse proxy/tunnel, not on this box. Whatever you use
+needs to proxy two things to this box: plain HTTP to Flask's port (default
+5000), and a WebSocket-capable proxy to Asterisk's `:8088` for
+`/asterisk-ws` (see `apply.sh`'s "Apache WSS proxy" step for the exact line
+it inserts, if you're wiring that path up by hand instead of via Apache).
+
+**A reverse proxy only solves the signaling side.** Getting `wss://.../asterisk-ws`
+reachable makes registration and dialing work, but the actual call audio
+(WebRTC/SRTP) is separate, direct UDP — see "Network requirements" below.
+A reverse proxy/tunnel that only carries HTTP(S)/WebSocket traffic
+(Cloudflare Tunnel, Tailscale Serve/Funnel) does **not** carry this UDP
+media, so `UDP 10000-10100` still needs to reach this box directly (a
+router port forward, in the common case) regardless of how the signaling
+path is fronted. `check-ports.sh`'s STUN/NAT probe is how to verify that
+independently of everything else — see the table below.
 
 ## Files
 
@@ -64,8 +80,15 @@ you're wiring that path up by hand instead of via Apache).
   Derives the local node number from `rpt.conf` (same rule as `app.py`'s
   `get_node_numbers()`: first top-level `[NNNN]` stanza) and substitutes it
   into `pjsip.snippet`/`extensions-custom.snippet` — pass it explicitly as
-  `sudo bash apply.sh <node>` to override
-- `rollback.sh` — restores the backups
+  `sudo bash apply.sh <node>` to override. Auto-detects whichever Apache
+  vhost is present (`henwen-ssl.conf` or `henwen.conf`), mirroring
+  `ws-audio/apply.sh`'s identical candidate-loop — no manual renaming ever
+  needed. Also runnable from the Manager's TX Diagnostics page ("Apply
+  Browser TX Setup" button, owner-only, via `POST /api/tx/apply`) instead
+  of SSHing in, the same way `ws-audio`/`audiosocket-tap`'s own Apply
+  buttons already work.
+- `rollback.sh` — restores the backups (whichever vhost name `apply.sh`
+  actually patched)
 - `check-ports.sh` — verifies every network requirement (local listeners,
   WSS handshake, STUN/NAT probe from the RTP range) and reports PASS/FAIL
 - `tx-test.html` — standalone debug page, deliberately NOT web-served

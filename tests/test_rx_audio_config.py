@@ -310,3 +310,38 @@ class TestWsAudioStatus:
         resp = client.post("/api/ws-audio/apply")
         assert resp.status_code == 500
         assert "error" in resp.get_json()
+
+
+class TestSeedDefaultFromEnv:
+    """get_db() seeds a first-ever rx_audio_config row from the
+    RX_AUDIO_DEFAULT_PATH env var (see install.sh's "Low-latency RX audio"
+    step, which sets it only when it successfully wired the Apache
+    /ws-audio proxy on a fresh install). Every other test in this suite
+    runs with the env var unset, which is what already exercises the no-op/
+    backward-compatible case (see TestRxAudioConfigGating and
+    tests/test_internal_audio_api.py's "no save needed" assumption). These
+    two only cover the env var itself, driving get_db()'s schema-creation
+    path directly rather than through the fresh_db fixture, so the env var
+    is guaranteed set *before* the table is first created."""
+
+    def _fresh_schema(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "henwen.db"
+        monkeypatch.setattr(app, "DB_PATH", str(db_path))
+        monkeypatch.setattr(app, "_db_ready", False)
+        monkeypatch.setattr(app._db_local, "conn", None, raising=False)
+        app.get_db()
+
+    def test_seeds_lowlatency_when_env_var_set(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("RX_AUDIO_DEFAULT_PATH", "lowlatency")
+        self._fresh_schema(tmp_path, monkeypatch)
+        assert app._get_rx_audio_config()["path"] == "lowlatency"
+
+    def test_ignores_invalid_env_var(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("RX_AUDIO_DEFAULT_PATH", "webrtc")
+        self._fresh_schema(tmp_path, monkeypatch)
+        assert app._get_rx_audio_config() is None
+
+    def test_no_row_when_env_var_unset(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("RX_AUDIO_DEFAULT_PATH", raising=False)
+        self._fresh_schema(tmp_path, monkeypatch)
+        assert app._get_rx_audio_config() is None
