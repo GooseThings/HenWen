@@ -9,6 +9,11 @@ set -e
 INSTALL_DIR="/opt/HenWen"
 SERVICE_NAME="HenWen"
 PORT="${PORT:-5000}"
+# Opt-out for the Apache/low-latency-audio step below (see "Setting up
+# Apache for low-latency RX audio"). Set to 1 for a scripted/CI/cloud-init
+# install that shouldn't have this script install an extra web server,
+# disable an existing default vhost, or open a firewall port on its own.
+SKIP_APACHE_SETUP="${SKIP_APACHE_SETUP:-0}"
 
 echo ""
 echo "============================================"
@@ -229,7 +234,12 @@ echo "[8/11] Setting up Apache for low-latency RX audio..."
 WS_AUDIO_DEFAULT_OK=0
 HAVE_APACHE_VHOST=0
 HTTPS_SUCCEEDED=0
-if [ -f /etc/apache2/sites-enabled/henwen-ssl.conf ]; then
+if [ "$SKIP_APACHE_SETUP" = "1" ]; then
+    echo "      SKIP_APACHE_SETUP=1 is set. Skipping Apache setup entirely. Low-latency"
+    echo "      RX audio and browser TX both still work if you front HenWen with your"
+    echo "      own reverse proxy. See ws-audio/README.md and tx-spike/README.md for"
+    echo "      exactly what it needs to point at."
+elif [ -f /etc/apache2/sites-enabled/henwen-ssl.conf ]; then
     echo "      Apache vhost already present (HTTPS) — leaving it as-is."
     HAVE_APACHE_VHOST=1
     HTTPS_SUCCEEDED=1
