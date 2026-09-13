@@ -1341,6 +1341,7 @@ def check_auth():
                       'api_audio_client_log',
                       'api_nets_create', 'api_nets_update', 'api_nets_delete',
                       'api_echolink_search', 'api_asl_search',
+                      'api_status_reset_idle',
                       'api_tx_config', 'api_recording_permission',
                       'api_recording_start', 'api_recordings_list', 'api_recording_download',
                       'api_recordings_rename', 'api_recordings_delete',
@@ -8013,9 +8014,10 @@ def api_status_restore_idle():
 def api_status_reset_idle():
     """Reset the idle-timeout clock for a temporary connection back to zero, without
     making it permanent — the connection still auto-disconnects after the configured
-    idle timeout, just measured from now instead of whenever it last went idle."""
-    if session.get('role') not in ('admin', 'superuser', 'owner'):
-        return jsonify({"error": "Admin access required"}), 403
+    idle timeout, just measured from now instead of whenever it last went idle.
+    User-level (any logged-in role, see _USER_OR_ABOVE in check_auth) — unlike squash
+    (disabling the timeout outright) or restore, this can't leave a connection
+    linked indefinitely, so it doesn't need the higher admin+ bar those get."""
     data        = request.json or {}
     local_node  = str(data.get("local_node",  "")).strip()
     remote_node = str(data.get("remote_node", "")).strip()
