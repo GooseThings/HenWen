@@ -193,14 +193,17 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 /* ── Header ── */
 .header {
   display: flex; align-items: center; justify-content: space-between;
-  border-bottom: 1px solid var(--border); padding-bottom: 10px; flex-shrink: 0;
+  border-bottom: 1px solid var(--border); padding-bottom: 13px; flex-shrink: 0;
   position: relative;
 }
-.header-brand { display: flex; align-items: center; gap: 10px; color: var(--text2);
-  font-size: 0.9rem; letter-spacing: 0.06em; }
-.header-brand strong { color: var(--accent); font-size: 1rem; }
+/* Sizes below are the pre-2026.09 desktop values × 1.33 (kiosk header made
+   33% larger for readability from across a room) — mobile's own breakpoint
+   overrides further down are deliberately left at their original size. */
+.header-brand { display: flex; align-items: center; gap: 13px; color: var(--text2);
+  font-size: 1.2rem; letter-spacing: 0.06em; }
+.header-brand strong { color: var(--accent); font-size: 1.33rem; }
 .header-brand-mobile-suffix { display: none; }
-.header-logo { height: 48px; width: 48px; object-fit: contain; flex-shrink: 0;
+.header-logo { height: 64px; width: 64px; object-fit: contain; flex-shrink: 0;
   filter: drop-shadow(0 0 6px rgba(63,185,80,.35)); }
 /* Owner-uploaded club/callsign branding, centered independent of the two
    flex siblings either side (their widths differ, so plain flex centering
@@ -211,7 +214,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
    decorative, not functional. */
 .header-club-logo {
   position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
-  max-height: 44px; max-width: 220px; object-fit: contain; pointer-events: none;
+  max-height: 59px; max-width: 293px; object-fit: contain; pointer-events: none;
 }
 .btn-icon { background: var(--bg3); border: 1px solid var(--border); color: var(--text2);
   border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 0.82rem;
@@ -237,9 +240,17 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
    whole row reliably fits on one line even at phone widths; overflow-x:auto
    is just a safety net for the narrowest devices rather than something
    expected to trigger. */
-.header-actions { display: flex; gap: 5px; align-items: center; flex-wrap: nowrap; overflow-x: auto; }
-.header-actions .btn-icon { padding: 5px 7px; flex-shrink: 0; }
-.header-actions #kiosk-login-btn { padding: 5px 10px; }
+.header-actions { display: flex; gap: 7px; align-items: center; flex-wrap: nowrap; overflow-x: auto; }
+/* font-size/border-radius/gap here are .btn-icon's own base values × 1.33,
+   overridden just for header buttons (see the .header comment above) rather
+   than changed on .btn-icon itself, which is also used outside the header
+   (TX/Listen/Rec, Node Search tabs, dashboard hidden-panel buttons) and
+   isn't meant to grow with it. */
+.header-actions .btn-icon { padding: 7px 9px; font-size: 1.09rem; border-radius: 8px; gap: 5px; flex-shrink: 0; }
+.header-actions #kiosk-login-btn { padding: 7px 13px; }
+/* Icon shown only on mobile (see the media query below) — desktop keeps
+   the plain text-only button unchanged. */
+svg.kiosk-login-icon { display: none; }
 
 /* display:contents on desktop: this wrapper is invisible to layout, so its
    children sit directly in .header-actions' flex row exactly as if it
@@ -971,6 +982,13 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
    well as each target's own size, and the stacked Connect/Monitor pair here
    was failing both. */
 .fav-actions { display: flex; flex-direction: column; gap: 6px; align-items: stretch; width: fit-content; }
+/* Fixed min-width sized for "Disconnect" (the longest label this column
+   ever shows) so the button doesn't visibly resize — and .fav-actions'
+   own fit-content width along with it — when a favorite's state flips
+   between showing Connect and Disconnect. ch scales with .sb-btn's own
+   font-size, so this stays correct through the mobile media query's own
+   font-size override below without needing a duplicate rule there. */
+.fav-actions .sb-btn { min-width: 9ch; text-align: center; }
 /* min-width/min-height/padding push the actual click target to ~24x24px
    (was ~11x10px, failing Lighthouse's target-size audit both on its own
    size and its clearance from the callsign link/Disconnect button next to
@@ -1051,27 +1069,68 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   gap: 4px; user-select: none; cursor: pointer; white-space: nowrap; width: fit-content; }
 .perm-label input[type=checkbox] { cursor: pointer; accent-color: var(--accent); width: auto; flex-shrink: 0; }
 /* idle-countdown badge in node rows — padding/border match .sb-btn's box
-   model (6px vertical padding + 1px border, both border-box) so this and the
-   Reset button below sit exactly as tall as the disconnect X next to them in
-   .nr-side-top; the border is transparent since the badge has no visible
-   outline of its own, but border-box still counts it toward total height. */
+   model (6px vertical padding + 1px border, both border-box) so this sits
+   exactly as tall as the disconnect X next to it in .nr-side-top. Visible
+   border (same ~0.3-alpha tint-of-its-own-color treatment .sb-btn.disconnect
+   uses for the X) rather than the transparent one this used to have — a
+   plain colored label read as just text, not something tappable, and it
+   needed to look like a button now that it is one. Rendered as a real
+   <button> (not a plain <span>) for any logged-in viewer — tap resets the
+   idle timer, admin+ can additionally long-press to squash it (disable
+   auto-disconnect) — see sbIdleBadgeClick() and friends; an anonymous
+   viewer still gets the plain non-interactive <span> version (no border,
+   since there's nothing to press). button.* below resets the two things a
+   bare <button> needs that .idle-badge's own explicit border/background
+   don't already cover. */
 .idle-badge { font-size: 0.68rem; padding: 6px 8px; border-radius: 3px; font-weight: 600;
   border: 1px solid transparent; background: rgba(88,166,255,.1); color: var(--accent);
-  white-space: nowrap; display: inline-flex; align-items: center; }
+  white-space: nowrap; display: inline-flex; align-items: center;
+  transition: background-color .15s, color .15s, border-color .15s; }
+button.idle-badge { font-family: inherit; cursor: pointer; border-color: rgba(88,166,255,.3); }
 .idle-badge.warn { background: rgba(255,179,0,.15); color: var(--warn); }
+button.idle-badge.warn { border-color: rgba(255,179,0,.5); }
+/* Long-press-to-squash progress feedback (sbIdleBadgeDown sets this
+   class and stretches transition-duration to match IDLE_LONGPRESS_MS via
+   inline style, so the fade completes exactly as the hold threshold does;
+   sbIdleBadgeUp/Cancel snap it back over .idle-badge's own quick base
+   duration instead on an early release). Comes after .warn so an actively
+   pressed badge always shows the press color even if it's also currently
+   warn (about to be squashed anyway if the press completes) — the
+   border-color half of that needs its own button.-prefixed rule below to
+   actually win: .idle-badge.warn's own border-color lives on
+   button.idle-badge.warn (0,0,2,1) specifically so a plain <span> (no
+   border at all) isn't affected, which out-specifies a bare
+   .idle-badge.idle-pressing (0,0,2,0) regardless of source order. */
+.idle-badge.idle-pressing { background-color: rgba(224,68,68,.18); color: var(--danger); }
+button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
+/* min-width/min-height/padding for a ~24x24px touch target, same rationale
+   as .idle-restore-btn/.fav-del-btn above; opacity dims it to read as
+   secondary/reference info rather than a primary action next to the idle
+   badge and disconnect X. */
+.idle-info-btn { background: none; border: none; color: var(--text2); cursor: pointer;
+  padding: 6px; min-width: 24px; min-height: 24px; box-sizing: border-box; opacity: 0.6;
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.idle-info-btn:hover { opacity: 1; color: var(--text); }
+.idle-info-btn .icon { width: 0.85rem; height: 0.85rem; }
+/* Single shared popup (like #dash-hidden-menu/.map-legend-dropdown) rather
+   than one per node row — content and position are set fresh by
+   toggleIdleInfo() each time, from whichever row's info button was
+   actually tapped. */
+.idle-info-popup { position: fixed; display: none; background: var(--bg2);
+  border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+  min-width: 200px; max-width: 260px; box-shadow: 0 4px 16px rgba(0,0,0,.4);
+  z-index: 2000; font-size: 0.75rem; color: var(--text); line-height: 1.4; }
 /* No-timeout state: same badge, faded, instead of disappearing entirely */
 .idle-badge.off { opacity: 0.45; }
+/* min-width/min-height/padding push the actual click target to ~24x24px
+   (was just the bare icon glyph at padding:0 — well under any reasonable
+   touch-target size) the same way .fav-del-btn's own comment describes;
+   inline-flex centering keeps the icon itself visually unchanged, the box
+   just grows around it. */
 .idle-restore-btn { background: none; border: none; color: inherit; cursor: pointer;
-  font-size: 0.8rem; padding: 0; line-height: 1; opacity: 0.75; }
+  font-size: 0.8rem; padding: 6px; min-width: 24px; min-height: 24px; box-sizing: border-box;
+  line-height: 1; opacity: 0.75; display: inline-flex; align-items: center; justify-content: center; }
 .idle-restore-btn:hover { opacity: 1; }
-/* ✕ inside the idle badge — dismisses the timeout itself (No Timeout) */
-.idle-squash-btn { background: none; border: none; color: inherit; cursor: pointer;
-  font-size: 0.75rem; padding: 0 0 0 5px; line-height: 1; opacity: 0.6; }
-.idle-squash-btn:hover { opacity: 1; }
-.idle-reset-btn { font-size: 0.68rem; padding: 6px 8px; border-radius: 3px; font-weight: 600;
-  background: rgba(63,185,80,.08); border: 1px solid rgba(63,185,80,.3); color: var(--green);
-  cursor: pointer; white-space: nowrap; }
-.idle-reset-btn:hover { background: rgba(63,185,80,.22); }
 
 /* Browser-transmit PTT bar (inline in the Connected Nodes card while armed) */
 #tx-bar { padding: 8px 18px; border-bottom: 1px solid var(--border);
@@ -1120,14 +1179,50 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
    IDs/classes (nothing here touches markup or JS), just restacked. ── */
 @media (max-width: 860px) {
   html, body { height: auto; overflow: visible; }
-  .board { height: auto; min-height: 100vh; padding: 12px 12px 10px; }
+  .board { height: auto; min-height: 100vh; padding: 17px 17px 15px; gap: 13px; }
+  .board-main { gap: 13px; }
 
-  .header { flex-wrap: wrap; row-gap: 8px; }
-  .header-logo { height: 31px; width: 31px; }
-  .header-brand { font-size: 0.8rem; }
-  .header-brand strong { font-size: 0.92rem; }
+  /* Header logo/wordmark sized up 20% (and row-gap/action-gap +5px, same
+     "more breathing room on a small screen" spacing bump applied throughout
+     this block) for readability — see the desktop .header comment for the
+     equivalent 33% treatment above 860px. */
+  /* Its own standalone card, same box treatment (background/border/radius)
+     every other card gets — NOT fused with the Node card below it (an
+     earlier iteration of this mobile layout fused them; also since dropped
+     is the Node card's own "NODE" title bar that fused box used to rest
+     on — see #node-info further down, now a complete box with no header
+     above it). .board's gap above is what puts normal card-to-card spacing
+     between this and whatever comes next — normally the net-schedule
+     reminder bar, weather-alert ticker, and/or Owner kiosk banner (#net-bar/
+     #nws-alert-bar/#kiosk-banner-bar, each independently shown only when
+     relevant), then the Node card — since those already sit in that DOM
+     order between <header> and .content-area. */
+  .header {
+    flex-wrap: wrap; row-gap: 13px;
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 13px 17px;
+  }
+  .header-logo { height: 37px; width: 37px; }
+  .header-brand { font-size: 0.96rem; }
+  .header-brand strong { font-size: 1.1rem; }
   .header-brand-mobile-suffix { display: inline; }
-  .header-actions { gap: 6px; }
+  /* "KIOSK" dropped on mobile — with .header-brand-mobile-suffix's " MOBILE"
+     already appended right after it, the brand line read as the redundant
+     "HenWen KIOSK MOBILE"; this leaves just "HenWen MOBILE". */
+  .header-brand-kiosk-label { display: none; }
+  .header-actions { gap: 11px; }
+  /* Login is icon-only here (text hidden, icon shown — the reverse of
+     desktop) rather than the plain text button desktop uses: with the
+     logo/wordmark already sized up 20% above, the wider text button was
+     enough extra width in .header-actions to push .header past one line
+     and wrap into two whenever a visitor wasn't logged in (logged-in state
+     never showed this since #kiosk-login-btn is display:none then).
+     Padding matches every other icon-only header button instead of the
+     wider text-button padding .header-actions #kiosk-login-btn normally
+     gets. */
+  svg.kiosk-login-icon { display: inline-block; }
+  .kiosk-login-label { display: none; }
+  .header-actions #kiosk-login-btn { padding: 7px 9px; }
   .header-club-logo { display: none; }
 
   /* No physical keyboard on mobile, so the Space-bar PTT shortcut hint is
@@ -1147,17 +1242,18 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   #header-fs-btn { display: flex !important; }
   #header-fs-menu-btn { display: none !important; }
   .header-menu-items {
-    display: none; position: fixed; flex-direction: column; gap: 6px;
+    display: none; position: fixed; flex-direction: column; gap: 11px;
     background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
-    padding: 8px; min-width: 220px; box-shadow: 0 4px 16px rgba(0,0,0,.4); z-index: 2000;
+    padding: 13px; min-width: 220px; box-shadow: 0 4px 16px rgba(0,0,0,.4); z-index: 2000;
   }
   /* Bigger touch targets than the same buttons get elsewhere (e.g. the
      Connected Nodes header) — this is a vertical list of one-shot taps with
      nothing else competing for the row's width, so there's no reason to
      keep them icon-strip-sized here. ~44px tall meets the usual minimum
-     touch-target guidance. */
+     touch-target guidance. Padding/font-size are the button's own pre-scale
+     values × 1.1 (same "buttons 10% larger" pass as .sb-btn below). */
   .header-menu-items .btn-icon {
-    width: 100%; justify-content: flex-start; padding: 12px 14px; font-size: 1rem;
+    width: 100%; justify-content: flex-start; padding: 13px 15px; font-size: 1.1rem;
   }
   .header-menu-items #kiosk-user-bar { flex-direction: column; align-items: stretch; width: 100%; gap: 6px; }
   .header-menu-label { display: inline; margin-left: 10px; }
@@ -1184,7 +1280,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
      supporting panels. */
   .content-area {
     display: flex; flex-direction: column; grid-template-columns: none;
-    grid-template-rows: none; flex: none; min-height: 0;
+    grid-template-rows: none; flex: 1; min-height: 0;
   }
   .node-card, .connected-card, .map-card, .activity-card, .favorites-card, .chat-card, .meshtastic-card {
     grid-column: auto; grid-row: auto;
@@ -1212,21 +1308,58 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
      first-time mobile visitor still gets the minimal view immediately).
      None of this touches content/data — hidden cards' data still loads and
      updates underneath, same as before, in case they're ever un-hidden. */
-  .content-area { gap: 8px; }
+  .content-area { gap: 13px; }
   .map-card, .activity-card, .meshtastic-card, .chat-card { display: none !important; }
   .favorites-card .card-header { cursor: pointer; }
   .mobile-collapse-chevron { display: flex; align-items: center; margin-left: 4px; color: var(--text2); transition: transform .15s; flex-shrink: 0; }
   .mobile-collapse-chevron .icon { width: 1rem; height: 1rem; }
   .dash-card.mobile-collapsed > :not(.card-header) { display: none !important; }
   .dash-card.mobile-collapsed .mobile-collapse-chevron { transform: rotate(-90deg); }
-  .dash-card.mobile-collapsed { max-height: none; }
+  /* flex:none here too, not just max-height:none — otherwise a collapsed
+     card (Favorites, when the visitor hasn't tapped it open) would still
+     flex-grow to fill .content-area's leftover height, leaving a tall
+     mostly-empty box under its one-line header. See .favorites-card's own
+     flex:1 below for the expanded case this is guarding against. */
+  .dash-card.mobile-collapsed { max-height: none; flex: none; }
 
   /* Cards no longer share an implicit grid-row height, so each gets its own
      cap with an internally-scrolling list instead of flexing to fill a row. */
+  /* .node-card itself carries no visible chrome at all on mobile — it's
+     split into two independent-looking boxes instead, both drawn on its
+     actual children rather than on a wrapper: #node-info (a complete box of
+     its own — no "NODE" title bar above it; the big node number/callsign
+     already identify this card without one, so the label was dead weight)
+     and #node-controls + #listen-vol-row together (the Arm TX/Listen/Rec
+     buttons + volume slider) broken out into what reads as its own separate
+     card below that. .node-body's padding/gap move onto those pieces
+     directly so each can carry its own border/background independently. */
   .node-card {
-    min-height: 0; max-height: none; padding: 12px 14px;
+    min-height: 0; max-height: none;
+    background: none; border: none; border-radius: 0; padding: 0;
   }
-  .activity-card, .favorites-card, .chat-card, .meshtastic-card { max-height: 320px; }
+  .node-card > .card-header { display: none; }
+  .node-body { padding: 0; gap: 0; }
+  #node-info {
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 13px 19px 17px; row-gap: 1px;
+  }
+  #node-controls {
+    margin-top: 13px; background: var(--bg2); border: 1px solid var(--border);
+    border-bottom: none; border-radius: 10px 10px 0 0; padding: 17px 19px 10px;
+  }
+  #listen-vol-row {
+    background: var(--bg2); border: 1px solid var(--border); border-top: none;
+    border-radius: 0 0 10px 10px; padding: 10px 19px 17px;
+  }
+  .activity-card, .chat-card, .meshtastic-card { max-height: 320px; }
+  /* Expanded, Favorites grows to fill whatever's left of the screen below
+     Node + Connected Nodes instead of stopping at a fixed height — min-height:0
+     (already set in its base rule) is what lets it actually shrink to that
+     flexed size rather than just adding flex-grow on top of its natural
+     content height; .fav-list's own overflow-y:auto (also already there)
+     is what makes a longer favorites list scroll within that space instead
+     of pushing the card taller. */
+  .favorites-card { flex: 1; max-height: none; }
   /* Connected Nodes is deliberately uncapped here (unlike the cards above):
      with a fixed max-height, .node-list's own overflow-y:auto (needed for
      the desktop fixed-grid-row layout) kicks in on mobile too, forcing an
@@ -1239,33 +1372,52 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   .connected-card { max-height: none; }
   .connected-card .node-list { overflow-y: visible; }
   .map-card { height: 340px; flex-shrink: 0; }
-  .card-header { padding: 10px 12px 8px; }
+  .card-header { padding: 15px 17px 13px; }
+  /* Card section labels ("NODE", "CONNECTED NODES", "FAVORITES") — same
+     "cards text 20% larger" pass as the node/connected/favorites text
+     below. */
+  .card-title { font-size: 0.82rem; }
 
   /* Node panel: same info-left/status-right grid as desktop now (see
      #node-info above) — just tightened for phone width, since a single
      column has less room to spare than the desktop card's full-height
-     column. */
-  #node-info { row-gap: 1px; }
-  .node-number { font-size: 1.6rem; }
-  .node-callsign { font-size: 0.95rem; }
-  .node-location { font-size: 0.72rem; }
+     column. Text sizes here and in .nr-*/.fav-* below are the pre-scale
+     mobile values × 1.2 ("cards text 20% larger"). */
+  .node-number { font-size: 1.92rem; }
+  .node-callsign { font-size: 1.14rem; }
+  .node-location { font-size: 0.86rem; }
   .keyed-dot { width: 34px; height: 34px; }
-  .keyed-label { font-size: 0.62rem; }
+  .keyed-label { font-size: 0.74rem; }
 
   /* .node-row's stats line already wraps instead of truncating (see base
      styles) — just tighten sizes/gaps so more fits per line before wrapping
      kicks in. */
-  .node-row { gap: 6px; padding: 10px 12px; }
-  .nr-num   { font-size: 1.05rem; }
-  .nr-call  { font-size: 0.95rem; }
-  .nr-line  { gap: 6px; }
-  .nr-side-top .sb-btn.disconnect { padding-left: 6px; padding-right: 6px; }
-  /* No room for a 60-bar strip on a phone-width single column — .nr-side
-     just holds the chime toggle + disconnect button on their own with
-     nothing underneath. .nr-main is already flex:1 1 auto by default (see
-     base styles), so it still fills the leftover width without needing an
-     override here. */
+  .node-row { gap: 11px; padding: 15px 17px; }
+  .nr-num   { font-size: 1.26rem; }
+  .nr-call  { font-size: 1.14rem; }
+  .nr-line  { gap: 11px; }
+  /* Location text dropped from Connected Nodes rows on mobile — with the
+     larger node-number/callsign text above (see the "cards text 20% larger"
+     comment above) there's even less width left on .nr-line for it to
+     truncate into gracefully than there already wasn't at the base sizes. */
+  .nr-loc   { display: none !important; }
+  .nr-side-top .sb-btn.disconnect { padding-left: 7px; padding-right: 7px; }
+  /* .nr-side shares .node-row with .nr-main again (not stacked onto its own
+     line below — that was tried and rejected). What actually fixed the
+     width/wrapping problem was collapsing Reset and squash into tap/long-
+     press gestures on the idle badge itself (see sbIdleBadgeClick() and
+     friends) instead of two separate buttons alongside it — .nr-side-top is
+     back to just the idle badge + disconnect X, no wider than it's always
+     been. */
   .nr-timeline { display: none; }
+  /* With the timeline hidden above, the chime bell + snooze pause button are
+     the only things left in .nr-side-bottom on mobile — sized up well past
+     the ~24px touch-target minimum (both were padding:2px, closer to a
+     10-12px hitbox around a small icon) since these are meant to be a
+     comfortable, easy-to-hit pair of taps on a phone, not just technically
+     tappable. */
+  .chime-toggle-btn, .chime-pause-btn { padding: 8px; min-width: 32px; min-height: 32px; box-sizing: border-box; }
+  .chime-toggle-btn .icon, .chime-pause-btn .icon { width: 1.3rem; height: 1.3rem; }
 
   /* Activity rows: let the optional Fav/Monitor button pair drop to their
      own line under the entry instead of squeezing beside it. With a single
@@ -1282,15 +1434,62 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
      needed control on a small screen" call as Permanent above. */
   .sb-btn.monitor { display: none !important; }
 
+  /* Squash (the idle-badge's own ✕, disabling auto-disconnect) stays
+     available on mobile — an admin needs it just as much from a phone as
+     from the desktop board. .nr-side-top (idle badge incl. squash + Reset
+     + disconnect X) can still wrap onto two lines on a narrow enough phone
+     when all three are present at once; that's the same flex-wrap safety
+     net it already relies on for a narrow dashboard-resized column on
+     desktop, not something worth losing a control over. */
+
   /* Larger touch targets and text for the controls people actually tap on
      a phone — base sizes were tuned for a mouse-driven desktop layout, so
-     bump font-size/padding here rather than just the vertical padding. */
-  .sb-btn { font-size: 0.78rem; padding: 7px 11px; }
-  .btn-icon { padding-top: 6px; padding-bottom: 6px; }
+     bump font-size/padding here rather than just the vertical padding.
+     Values are the pre-scale sizes × 1.1 ("buttons 10% larger"). */
+  .sb-btn { font-size: 0.86rem; padding: 8px 12px; }
+  /* Match .sb-btn's own mobile bump exactly (same font-size + vertical
+     padding) — see the base .idle-badge comment: it's sized to sit exactly
+     as tall as the disconnect X (.sb-btn.disconnect) next to it in
+     .nr-side-top by matching that box model, and this bump would otherwise
+     have broken that parity, leaving the idle badge visibly shorter than
+     the X on mobile. */
+  .idle-badge { font-size: 0.86rem; padding: 8px 12px; }
+  .btn-icon { padding-top: 7px; padding-bottom: 7px; }
   .conn-form-bar input { flex: 1 1 100px; font-size: 0.92rem; padding: 7px 10px; }
   #conn-form-msg { font-size: 0.85rem !important; }
 
-  #sb-toast { white-space: normal; max-width: 88vw; text-align: center; }
+  /* Favorites is the only card left visible on mobile with no prior
+     mobile-specific tuning (see the ordering/visibility comments above) —
+     text × 1.2 ("cards text 20% larger") and row padding +5px ("spacing"),
+     matching the treatment .node-row/.nr-* already got above. */
+  .fav-row { padding: 13px 17px; }
+  .fav-num  { font-size: 1.08rem; }
+  .fav-call { font-size: 0.9rem; }
+  .fav-loc  { font-size: 0.8rem; }
+
+  /* The remove-favorite "✕" sits right next to the callsign in .fav-top
+     with only margin-left:auto pushing it over — on a mouse that's plenty
+     of clearance, but at phone width/touch precision it's an easy accidental
+     hit next to the row a visitor actually means to tap. Hidden on mobile
+     rather than resized/repositioned; removing a favorite is still possible
+     from the desktop board. */
+  .fav-del-btn { display: none !important; }
+
+  /* Sort-by dropdown + direction toggle sits inside .card-header, which is
+     itself a tap target on mobile (onMobileCardHeaderClick expands/collapses
+     the card) — same cramped-touch-target concern as the delete "✕" above,
+     plus a native <select> popover is an awkward fit in a header this
+     narrow. Dropped on mobile entirely rather than resized; whatever sort
+     order was already in effect (default or last set from the desktop
+     board) still applies, it just can't be changed from here. */
+  .fav-sort-controls { display: none !important; }
+
+  /* Moved from bottom (desktop position) to top on mobile — Chrome for
+     Android draws its own "full screen" exit-hint toast low on the screen
+     while fullscreen is active, and it was landing right on top of ours,
+     making ours unreadable right when the Fullscreen button's own toast
+     (e.g. confirming the tap worked) most needed to be seen. */
+  #sb-toast { top: 16px; bottom: auto; white-space: normal; max-width: 88vw; text-align: center; }
 }
 </style>
 </head>
@@ -1500,25 +1699,25 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   <!-- Header -->
   <header class="header">
     <div class="header-brand">
-      <!-- logo-96.png, not logo-128.png: this is the largest on-screen use
-           (48px, 31px on the phone breakpoint), and it's also the one
-           fetched on the critical rendering path (visible immediately at
-           boot, unlike the favicon badge/keyed-dot below which only draw in
-           later once board data or a connection exists). Lighthouse's
-           image-delivery insight flagged this exact <img> on
-           henwen.ironicsandwich.com (issue #104) for shipping the full
-           128px asset here. logo-128.png stays put for _drawFavicon()'s 64px
-           canvas draw and .keyed-dot-logo, which still need the extra
-           headroom this one doesn't. -->
-      <img class="header-logo" src="/static/logo-96.png" alt="HenWen">
-      <strong>HenWen</strong> <span>KIOSK</span><span class="header-brand-mobile-suffix"> Mobile</span>
+      <!-- logo-128.png: the header now displays this at 64px (31px on the
+           phone breakpoint, which stays on the original size — see the
+           .header comment above), so the 128px asset is the one that keeps
+           Lighthouse's original 2x-headroom reasoning (issue #104) rather
+           than upscaling logo-96.png. It's also the one fetched on the
+           critical rendering path (visible immediately at boot, unlike the
+           favicon badge/keyed-dot below which only draw in later once board
+           data or a connection exists) — .keyed-dot-logo and
+           _drawFavicon()'s own 64px canvas draw already share this same
+           asset, so nothing new is being fetched. -->
+      <img class="header-logo" src="/static/logo-128.png" alt="HenWen">
+      <strong>HenWen</strong> <span class="header-brand-kiosk-label">KIOSK</span><span class="header-brand-mobile-suffix"> MOBILE</span>
     </div>
     <img class="header-club-logo" id="club-logo-img" alt="" style="display:none">
     <div class="header-actions">
       <audio id="node-audio" preload="none">
         <source type="audio/webm; codecs=opus">
       </audio>
-      <button class="btn-icon" id="kiosk-login-btn" onclick="openKioskLogin()" style="display:none">Login</button>
+      <button class="btn-icon" id="kiosk-login-btn" onclick="openKioskLogin()" title="Login" style="display:none"><svg class="icon kiosk-login-icon"><use href="#icon-user"></use></svg><span class="kiosk-login-label">Login</span></button>
       <!-- Fullscreen (issue #123): the copy folded into the hamburger below
            still covers desktop, but on mobile that means two extra taps
            (open menu, then Fullscreen) for what's usually the very first
@@ -1556,7 +1755,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
         </div>
         <button class="btn-icon" id="dash-edit-btn" onclick="toggleDashEditMode()" title="Rearrange, resize, or hide the panels below"><svg class="icon"><use href="#icon-layout-dashboard"></use></svg></button>
         <button class="btn-icon" id="header-fs-menu-btn" onclick="toggleFS()" title="Fullscreen"><svg class="icon"><use href="#icon-maximize"></use></svg><span class="header-menu-label">Fullscreen</span></button>
-        <a class="btn-icon" href="/accessible" title="Accessible View — larger text and screen-reader support">Accessible</a>
+        <a class="btn-icon" href="/accessible" title="Accessible View — larger text and screen-reader support"><svg class="icon"><use href="#icon-eye"></use></svg><span class="header-menu-label">Accessible</span></a>
         <a class="btn-icon" id="manager-link-btn" href="/henwen-manager" target="_blank" rel="noopener" title="Manager"><svg class="icon"><use href="#icon-book-open"></use></svg><span class="header-menu-label">Manager</span></a>
       </div>
       <button type="button" class="btn-icon" id="header-menu-btn" onclick="toggleHeaderMenu(event)" title="Menu" aria-haspopup="true" aria-expanded="false" style="display:none"><svg class="icon"><use href="#icon-menu"></use></svg></button>
@@ -2055,6 +2254,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 </div>
 
 <div id="sb-toast"></div>
+<div class="idle-info-popup" id="idle-info-popup" role="tooltip"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js" integrity="sha512-puJW3E/qXDqYp9IfhAI54BJEaWIfloJ7JWs7OeD5i6ruC9JZL1gERT1wjtwXFlh7CjE7ZJ+/vcRZRkIYIb6p4g==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <script src="https://cdn.jsdelivr.net/npm/satellite.js@5/dist/satellite.min.js" integrity="sha512-/L/m1vniwzIFhlCFwxbVDMGj2fQMHZWrR/fGG78cqxllCOHVDJTePM3kiGc00Q5OXA5bvJ1OtfyCzlYyrEtQcw==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <script>
@@ -2503,6 +2703,49 @@ function toggleMapLegend(e) {
   btn.setAttribute('aria-expanded', 'true');
   _mapLegendOpen = true;
   document.addEventListener('click', _mapLegendOutsideClick);
+}
+
+/* Idle-timer info popover (the mobile-visible equivalent of the idle
+   badge's title= tooltip — see the idleBadge markup comment). One shared
+   popup for every node row's info button rather than one per row, same
+   "single floating element, positioned fresh each open" shape as the map
+   legend above, except anchored by *right* edge (r.right), not left —
+   .idle-info-btn sits at the right-aligned end of .nr-side-top, close
+   enough to a narrow phone's right edge that anchoring by left would
+   routinely push this off-screen. */
+var _idleInfoOpen = false;
+var _idleInfoBtn = null;
+
+function _idleInfoOutsideClick(e) {
+  var pop = document.getElementById('idle-info-popup');
+  if (pop && !pop.contains(e.target) && _idleInfoBtn && !_idleInfoBtn.contains(e.target)) closeIdleInfo();
+}
+
+function closeIdleInfo() {
+  var pop = document.getElementById('idle-info-popup');
+  if (pop) pop.style.display = 'none';
+  if (_idleInfoBtn) _idleInfoBtn.setAttribute('aria-expanded', 'false');
+  _idleInfoOpen = false;
+  _idleInfoBtn = null;
+  document.removeEventListener('click', _idleInfoOutsideClick);
+}
+
+function toggleIdleInfo(e, btn, isAdmin) {
+  e.stopPropagation();
+  if (_idleInfoOpen) { closeIdleInfo(); return; }
+  var pop = document.getElementById('idle-info-popup');
+  if (!pop || !btn) return;
+  pop.textContent = isAdmin
+    ? 'This connection disconnects automatically after sitting idle. Tap the idle timer to reset the countdown. Long-press it to disable auto-disconnect for this connection.'
+    : 'This connection disconnects automatically after sitting idle. Tap the idle timer to reset the countdown.';
+  var r = btn.getBoundingClientRect();
+  pop.style.display = 'block';
+  pop.style.top = (r.bottom + 6) + 'px';
+  pop.style.right = (window.innerWidth - r.right) + 'px';
+  btn.setAttribute('aria-expanded', 'true');
+  _idleInfoOpen = true;
+  _idleInfoBtn = btn;
+  document.addEventListener('click', _idleInfoOutsideClick);
 }
 
 /* Tile layer definitions: darkFilter=true means keep OSM invert CSS */
@@ -4207,6 +4450,11 @@ function toggleNodeChime(localNode, remoteNode, btn) {
     var use = btn.querySelector('use');
     if (use) use.setAttribute('href', '#icon-' + (on ? 'bell' : 'bell-off'));
   }
+  /* Neither button has a hover tooltip on touch (same reasoning as the idle
+     badge's info popup) — a toast is the mobile-visible confirmation that
+     the tap actually did something, not just a state readable from the
+     bell icon's own color/fill. */
+  sbToast('Activity chime ' + (on ? 'enabled' : 'disabled') + ' for ' + remoteNode, true);
 }
 
 /* Formats a millisecond duration as e.g. "4m 12s" / "45s" for the pause
@@ -4250,6 +4498,9 @@ function toggleChimePause(localNode, remoteNode, btn) {
     btn.classList.toggle('active', nowActive);
     btn.title = chimePauseLabel(nowActive, ACTIVITY_CHIME_COOLDOWN_SEC * 1000);
   }
+  sbToast(nowActive
+    ? 'Activity chime snoozed for ' + remoteNode + ' (' + _formatChimeCooldown(ACTIVITY_CHIME_COOLDOWN_SEC * 1000) + ')'
+    : 'Activity chime snooze cancelled for ' + remoteNode, true);
 }
 
 function _playActivityChime() {
@@ -4564,18 +4815,42 @@ async function refreshBoard() {
           var ts   = mins + ':' + (secs < 10 ? '0' : '') + secs;
           var warn = (typeof c.idle_remaining === 'number') && c.idle_remaining < 120;
           var isAdmin = window._kioskRole === 'admin' || window._kioskRole === 'superuser' || window._kioskRole === 'owner';
-          /* The ✕ inside the badge dismisses the idle timeout itself (No
-             Timeout); Reset just puts the countdown back to zero. */
-          var squashX = isAdmin
-            ? '<button class="idle-squash-btn" onclick="sbSquashIdle(\'' +
-                esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)" ' +
-                'title="Disable auto-disconnect for this connection — stays a normal, non-permanent link; won\'t auto-reconnect if the far end drops it"><svg class="icon"><use href="#icon-x"></use></svg></button>'
-            : '';
-          idleBadge = '<span class="idle-badge' + (warn ? ' warn' : '') + '">Idle: ' + ts + squashX + '</span>';
-          if (isAdmin) {
-            idleBadge += '<button class="idle-reset-btn" onclick="sbResetIdle(\'' +
-              esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)" ' +
-              'title="Reset idle timer to zero — stays a temporary connection">Reset</button>';
+          var loggedIn = !!window._kioskRole;
+          /* One badge, two gestures, instead of a separate Reset button and
+             squash ✕ crowding .nr-side-top next to the disconnect X (issue:
+             the two-button version kept wrapping/misaligning on a
+             phone-width row). Tap resets the countdown (user-level, any
+             logged-in role, matching /api/status/reset-idle's own gate);
+             a long-press squashes it — disables auto-disconnect outright —
+             gated to admin+ same as before, since that can leave a
+             connection linked indefinitely. The squash itself fires the
+             moment the hold crosses IDLE_LONGPRESS_MS, not on release — see
+             sbIdleBadgeDown, which also fades the badge blue-to-red over
+             that same duration as a progress cue. sbIdleBadgeUp/Cancel just
+             clean up the visual state; sbIdleBadgeClick is what suppresses
+             the tap-to-reset behavior when a press already fired. Pointer
+             events throughout, so this works the same for touch and a held
+             mouse button. */
+          var ln = esc(c.local_node), rn = esc(c.node);
+          if (loggedIn) {
+            var pressAttrs = isAdmin
+              ? ' onpointerdown="sbIdleBadgeDown(event,\'' + ln + '\',\'' + rn + '\',this)" onpointerup="sbIdleBadgeUp(this)" onpointerleave="sbIdleBadgeCancel(this)" onpointercancel="sbIdleBadgeCancel(this)"'
+              : '';
+            idleBadge = '<button class="idle-badge' + (warn ? ' warn' : '') + '"' + pressAttrs +
+              ' onclick="sbIdleBadgeClick(event,\'' + ln + '\',\'' + rn + '\',this)" ' +
+              'title="' + (isAdmin ? 'Tap to reset idle timer — hold to disable auto-disconnect' : 'Tap to reset idle timer') + '">Idle: ' + ts + '</button>';
+            /* Tap/long-press has no hover to discover it on a touch device —
+               this is the mobile-visible equivalent of the title= tooltip
+               above, opened via toggleIdleInfo() (same fixed-position,
+               anchored-off-the-button, outside-click-to-close pattern as
+               the map's legend popover, generalized to work from whichever
+               row's button was actually tapped rather than one fixed
+               button). */
+            idleBadge = '<button type="button" class="idle-info-btn" onclick="toggleIdleInfo(event,this,' +
+              (isAdmin ? 'true' : 'false') + ')" title="What does this mean?" aria-haspopup="true" ' +
+              'aria-expanded="false"><svg class="icon"><use href="#icon-info"></use></svg></button>' + idleBadge;
+          } else {
+            idleBadge = '<span class="idle-badge' + (warn ? ' warn' : '') + '">Idle: ' + ts + '</span>';
           }
         } else if (c.permanent === false && c.no_timeout === true) {
           var isAdmin2 = window._kioskRole === 'admin' || window._kioskRole === 'superuser' || window._kioskRole === 'owner';
@@ -5205,6 +5480,59 @@ async function sbDisconnect(localNode, remoteNode, btn) {
     sbToast('Disconnect error: ' + e.message, false);
     if (btn) { btn.disabled = false; btn.textContent = btn.dataset.label || 'Disconnect'; }
   }
+}
+
+/* Idle badge tap-vs-long-press (see the idleBadge markup comment above for
+   why this replaced two separate buttons). One shared timer/flag is fine —
+   only one press can be in flight across the whole board at a time, since
+   it takes a finger/mouse button actually held down. */
+var _idleLP = { timer: null, longPressed: false };
+var IDLE_LONGPRESS_MS = 550;
+
+function sbIdleBadgeDown(event, localNode, remoteNode, el) {
+  clearTimeout(_idleLP.timer);
+  _idleLP.longPressed = false;
+  /* Stretch the fade to match the hold threshold exactly (base .idle-badge
+     CSS has its own short .15s default for everything else, e.g. reverting
+     on an early release below) — el.style here only touches
+     transition-duration, not which properties transition (still whatever
+     .idle-badge's own `transition` shorthand lists). */
+  el.style.transitionDuration = IDLE_LONGPRESS_MS + 'ms';
+  el.classList.add('idle-pressing');
+  _idleLP.timer = setTimeout(function() {
+    _idleLP.longPressed = true;
+    /* Fires here, at the threshold, not on release — a long-enough hold
+       squashes it even if the finger/mouse never lifts. sbIdleBadgeClick
+       (below) still runs a tap-suppression check afterward for whenever
+       release/click *does* eventually happen, so it doesn't also reset. */
+    sbSquashIdle(localNode, remoteNode, null);
+  }, IDLE_LONGPRESS_MS);
+}
+
+function _idleBadgeRevert(el) {
+  el.style.transitionDuration = '';  // back to .idle-badge's own base .15s
+  el.classList.remove('idle-pressing');
+}
+
+/* Once a press has actually fired the squash (longPressed already true by
+   the time release/leave/cancel gets here), the badge is left showing its
+   fully-pressed red state rather than fading back to normal — it reads as
+   "done" until refreshBoard() replaces the row with the new No-Timeout
+   badge a moment later, instead of flickering back to a countdown that's
+   about to disappear anyway. */
+function sbIdleBadgeCancel(el) {
+  clearTimeout(_idleLP.timer);
+  if (!_idleLP.longPressed) _idleBadgeRevert(el);
+}
+
+function sbIdleBadgeUp(el) {
+  clearTimeout(_idleLP.timer);
+  if (!_idleLP.longPressed) _idleBadgeRevert(el);
+}
+
+function sbIdleBadgeClick(event, localNode, remoteNode, el) {
+  if (_idleLP.longPressed) { _idleLP.longPressed = false; return; }
+  sbResetIdle(localNode, remoteNode, el);
 }
 
 async function sbSquashIdle(localNode, remoteNode, btn) {
@@ -6560,7 +6888,8 @@ async function armTx() {
   document.getElementById('tx-bar').style.display = '';
   /* No _txStatus('Arming…') here — the TX button itself already reads
      "TX arming…" (line above); #tx-status stays blank until there's
-     something new to say (errors, TRANSMITTING while keyed, disconnects). */
+     something new to say (errors, disconnects — not TRANSMITTING while
+     keyed, which the PTT button's own color change already covers). */
   _txSetBtn('<svg class="icon"><use href="#icon-mic"></use></svg> TX arming&hellip;', 'var(--text2)');
   _txStatus('');
   try {
@@ -6637,8 +6966,9 @@ async function armTx() {
         /* No _txStatus() call here — the PTT button's own label already
            says "PTT — hold to transmit"; repeating "Armed — hold PTT to
            transmit" right below it was pure redundancy. #tx-status is left
-           blank at rest and still used for genuinely new info (TRANSMITTING
-           while keyed, errors, disconnects). */
+           blank at rest and still used for genuinely new info (errors,
+           disconnects — not TRANSMITTING while keyed, which the PTT
+           button's own color change already covers, see _txKey()). */
         _txStatus('');
         _txSetBtn('<svg class="icon"><use href="#icon-mic"></use></svg> TX armed', 'var(--warn)');
         document.getElementById('tx-ptt').disabled = false;
@@ -6718,7 +7048,9 @@ function _txKey() {
   _tx.keyed = true;
   var b = document.getElementById('tx-ptt');
   b.classList.add('tx');
-  _txStatus('TRANSMITTING', 'var(--red)');
+  /* No _txStatus('TRANSMITTING') here — the PTT button's own color change
+     (.tx class, added above) already says it; a text line repeating that
+     right next to a button that's just turned red is redundant. */
   _txMuteListen(true);
   try { _tx.session.sendDTMF('*99', { duration: 100, interToneGap: 70 }); }
   catch (e) {
