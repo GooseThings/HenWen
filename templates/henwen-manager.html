@@ -7530,23 +7530,17 @@ async function dtmfSend() {
   var seq  = _dtmfSeq;
   if (!seq) { res.innerHTML = '<span style="color:var(--warn)">Enter a sequence first.</span>'; return; }
   res.innerHTML = '<span class="muted">Sending...</span>';
-  try {
-    var r = await apiFetch('/api/dtmf/send', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ node: node, digits: seq })
-    });
-    var d = await r.json();
-    if (!r.ok) {
-      res.innerHTML = '<span style="color:var(--danger)">' + esc(d.error || 'Error') + '</span>';
-      dtmfAddHistory('DTMF ' + seq + ' → node ' + node, false, d.error || 'Error');
-    } else {
-      res.innerHTML = '<span style="color:var(--green)">Sent: ' + esc(seq) + '</span>';
-      dtmfAddHistory('DTMF ' + seq + ' → node ' + node, true, d.raw || '');
-      dtmfClear();
-    }
-  } catch(e) {
-    res.innerHTML = '<span style="color:var(--danger)">' + esc(String(e)) + '</span>';
-    dtmfAddHistory('DTMF ' + seq + ' → node ' + node, false, String(e));
+  var r = await api('/api/dtmf/send', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ node: node, digits: seq })
+  });
+  if (!r.ok) {
+    res.innerHTML = '<span style="color:var(--danger)">' + esc(r.data.error || 'Error') + '</span>';
+    dtmfAddHistory('DTMF ' + seq + ' → node ' + node, false, r.data.error || 'Error');
+  } else {
+    res.innerHTML = '<span style="color:var(--green)">Sent: ' + esc(seq) + '</span>';
+    dtmfAddHistory('DTMF ' + seq + ' → node ' + node, true, r.data.raw || '');
+    dtmfClear();
   }
 }
 
@@ -7568,22 +7562,17 @@ async function dtmfFunction(family, fn) {
     body.confirm = true;
   }
   res.innerHTML = '<span class="muted">Sending ' + label + '...</span>';
-  try {
-    var r = await apiFetch('/api/dtmf/' + family, {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(body)
-    });
-    var d = await r.json();
-    if (!r.ok) {
-      res.innerHTML = '<span style="color:var(--danger)">' + esc(d.error || 'Error') + '</span>';
-      dtmfAddHistory(label + ' → node ' + node, false, d.error || 'Error');
-    } else {
-      res.innerHTML = '<span style="color:var(--green)">' + label + ' sent</span>';
-      dtmfAddHistory(label + ' → node ' + node, true, d.raw || '');
-    }
-  } catch(e) {
-    res.innerHTML = '<span style="color:var(--danger)">' + esc(String(e)) + '</span>';
-    dtmfAddHistory(label + ' → node ' + node, false, String(e));
+  var r = await api('/api/dtmf/' + family, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(body)
+  });
+  if (!r.ok) {
+    res.innerHTML = '<span style="color:var(--danger)">' + esc(r.data.error || 'Error') + '</span>';
+    dtmfAddHistory(label + ' → node ' + node, false, r.data.error || 'Error');
+  } else {
+    res.innerHTML = '<span style="color:var(--green)">' + label + ' sent' +
+      (r.data.raw ? ' — ' + esc(r.data.raw) : '') + '</span>';
+    dtmfAddHistory(label + ' → node ' + node, true, r.data.raw || '');
   }
 }
 
