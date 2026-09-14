@@ -4891,10 +4891,10 @@ async function refreshBoard() {
           ? '<button class="sb-btn disconnect" data-label="X" disabled ' +
               'style="opacity:.4;cursor:not-allowed" ' +
               'title="Managed by Smart Connector — only an admin or superuser can disconnect this"><svg class="icon"><use href="#icon-lock"></use></svg></button>'
-          : (window._kioskListenOnly && !isAdminRole)
+          : (window._kioskListenOnly && !isAdminRole && !c.connected_by_me)
           ? '<button class="sb-btn disconnect" data-label="X" disabled ' +
               'style="opacity:.4;cursor:not-allowed" ' +
-              'title="Your account is listen-only and can\'t disconnect nodes"><svg class="icon"><use href="#icon-lock"></use></svg></button>'
+              'title="Your account is listen-only and can only disconnect nodes it connected itself"><svg class="icon"><use href="#icon-lock"></use></svg></button>'
           : (window._kioskRestrictDisconnect && !isAdminRole)
           ? '<button class="sb-btn disconnect" data-label="X" disabled ' +
               'style="opacity:.4;cursor:not-allowed" ' +
@@ -5367,15 +5367,10 @@ function sbToast(msg, ok) {
 
 async function sbConnect(localNode, remoteNode, btn, permanent, monitor, skipConfirm) {
   var label = monitor ? 'Monitor' : 'Connect';
-  /* issue #157: Listen-Only accounts can never connect a node — enforced
-     server-side too (this is just the fast client-side reject), but every
-     Connect/Monitor button on the board funnels through this one function
-     (see the #140 comment just below), so this is the single place to catch
-     it rather than repeating the check at each caller. */
-  if (window._kioskListenOnly) {
-    sbToast('Your account is listen-only and can\'t connect nodes.', false);
-    return;
-  }
+  /* issue #157: Listen-Only accounts may connect a node exactly like any
+     other 'user' account (the one-at-a-time restriction below already
+     applies to them) -- what's restricted is disconnecting someone else's
+     link, and Browser TX. No guard needed here. */
   /* issue #140: warn before bridging two networks together. Every Connect/
      Monitor button on the board (node card, Node Search, Favorites, map
      popups, net-schedule Join) funnels through this one function, so this
@@ -5471,13 +5466,13 @@ async function sbAddFavorite(node, btn, label) {
 }
 
 async function sbDisconnect(localNode, remoteNode, btn) {
-  /* issue #157: Listen-Only accounts can never touch a link either, whether
-     or not they made it — same single-chokepoint reasoning as sbConnect()
-     above. Server-enforced too; this is just the fast client-side reject. */
-  if (window._kioskListenOnly) {
-    sbToast('Your account is listen-only and can\'t disconnect nodes.', false);
-    return;
-  }
+  /* issue #157: a Listen-Only account may only disconnect a link it made
+     itself -- per-connection, so unlike sbConnect() above there's no single
+     blanket client-side check to add here. The connected-node-row and
+     Favorites-panel renderers already build a disabled/lock-icon button
+     instead of a live one when board data's connected_by_me is false for
+     that specific connection (see renderFavorites()/the node-row map()
+     below), and the server enforces it regardless either way. */
   if (btn) { btn.disabled = true; btn.textContent = '…'; }
   try {
     var r = await apiFetch('/api/status/disconnect', {
@@ -6040,10 +6035,12 @@ function renderFavorites() {
      admin/superuser because Smart Connector is managing them */
   var connSet = {};
   var connectorManagedSet = {};
+  var connectedByMeSet = {};
   (window._lastBoardNodes || []).forEach(function(n) {
     (n.connected || []).forEach(function(c) {
       connSet[c.node] = true;
       if (c.connector_managed) connectorManagedSet[c.node] = true;
+      if (c.connected_by_me) connectedByMeSet[c.node] = true;
     });
   });
   var anyConn   = Object.keys(connSet).length > 0;
@@ -6081,10 +6078,10 @@ function renderFavorites() {
       actions = '<button class="sb-btn disconnect" disabled ' +
         'style="opacity:.4;cursor:not-allowed" ' +
         'title="Managed by Smart Connector — only an admin or superuser can disconnect this">Disconnect</button>';
-    } else if (isConn && window._kioskListenOnly && !isAdmin) {
+    } else if (isConn && window._kioskListenOnly && !isAdmin && !connectedByMeSet[f.node]) {
       actions = '<button class="sb-btn disconnect" disabled ' +
         'style="opacity:.4;cursor:not-allowed" ' +
-        'title="Your account is listen-only and can\'t disconnect nodes">Disconnect</button>';
+        'title="Your account is listen-only and can only disconnect nodes it connected itself">Disconnect</button>';
     } else if (isConn && window._kioskRestrictDisconnect && !isAdmin) {
       actions = '<button class="sb-btn disconnect" disabled ' +
         'style="opacity:.4;cursor:not-allowed" ' +
@@ -6092,13 +6089,6 @@ function renderFavorites() {
     } else if (isConn) {
       actions = '<button class="sb-btn disconnect" onclick="favDisconnect(\'' +
         esc(localNode) + '\',\'' + esc(f.node) + '\',this)">Disconnect</button>';
-    } else if (window._kioskListenOnly) {
-      actions = '<button class="sb-btn connect" disabled ' +
-        'style="opacity:.4;cursor:not-allowed" ' +
-        'title="Your account is listen-only and can\'t connect nodes">Connect</button>' +
-        '<button class="sb-btn monitor" disabled ' +
-        'style="opacity:.4;cursor:not-allowed" ' +
-        'title="Your account is listen-only and can\'t connect nodes">Monitor</button>';
     } else if (anyConn && !isAdmin) {
       /* Kiosk users can only have one connection at a time */
       actions = '<button class="sb-btn connect" disabled ' +

@@ -1155,12 +1155,15 @@ def get_db():
     except Exception:
         pass  # column already exists
     # Listen-Only accounts (User Management → "Listen only (no RF)"), issue
-    # #157 — for unlicensed listeners: the account can watch the board,
-    # listen to live audio, and use chat, but can never connect/disconnect a
-    # node or pull Browser TX credentials, since both key the repeater's real
-    # transmitter under the club callsign. Only meaningful for role='user'
-    # (every other role already needs no gate here), same restriction as
-    # restrict_disconnect. 0 (default) preserves today's behavior.
+    # #157 — for unlicensed listeners: the account can connect/disconnect a
+    # node exactly like any other 'user' account (one connection at a time,
+    # and only tearing down a link it made itself — never someone else's
+    # pre-existing connection), but can never pull Browser TX credentials,
+    # since that personally keys the repeater's real transmitter via PTT
+    # under the club callsign in a way linking two already-authorized nodes
+    # does not. Only meaningful for role='user' (every other role already
+    # needs no gate here), same restriction as restrict_disconnect. 0
+    # (default) preserves today's behavior.
     try:
         conn.execute("ALTER TABLE users ADD COLUMN listen_only INTEGER NOT NULL DEFAULT 0")
         conn.commit()
@@ -7622,6 +7625,15 @@ def api_status_board():
                 "permanent":      is_permanent,
                 "no_timeout":     no_timeout,
                 "connector_managed": (node_str_local, cn) in connector_managed_pairs,
+                # Whether *this* logged-in caller is the one who made this
+                # connection — used by the kiosk to let a Listen-Only account
+                # (issue #157) disconnect only links it made itself. Deliberately
+                # a bool, not the raw 'initiated_by' username: this board data is
+                # public (no login required), so leaking who-connected-what to
+                # every anonymous viewer would be a real info disclosure this
+                # feature doesn't need to introduce.
+                "connected_by_me": bool(tc and tc.get('initiated_by')
+                                         and tc.get('initiated_by') == session.get('username', '')),
             })
         location = info.get("location", "")
         coords   = _geocode_nonblocking(location) if location else None
@@ -7845,15 +7857,12 @@ def api_status_connect():
         return jsonify({"error": "Invalid remote_node"}), 400
     # Only admin/superuser may request a permanent connection
     caller_role = session.get('role', '')
-    # Listen-Only accounts (issue #157) — for unlicensed users: never allowed
-    # to connect a node at all, checked live against the DB (not cached in
-    # the session) so a mid-session change takes effect on the very next
-    # attempt, same posture as restrict_disconnect below.
-    if caller_role == 'user':
-        urow = get_db().execute("SELECT listen_only FROM users WHERE id=?",
-                                (session.get('user_id'),)).fetchone()
-        if urow and urow["listen_only"]:
-            return jsonify({"error": "Your account is listen-only and can't connect nodes."}), 403
+    # Listen-Only accounts (issue #157) may connect a node exactly like any
+    # other 'user'-role account — the one-at-a-time restriction just below
+    # already applies to them since they're still role='user'. What's
+    # actually restricted for a Listen-Only account is disconnecting a link
+    # it didn't make itself (see api_status_disconnect below) and Browser TX
+    # (see api_tx_config) — connecting is not.
     # Kiosk/user accounts are limited to one connection at a time — the
     # Status Board UI disables Connect/Monitor once any node is connected,
     # but that's client-side only, so enforce it here too (a user-role
@@ -7946,10 +7955,22 @@ def api_status_disconnect():
                           (session.get('user_id'),)).fetchone()
         if urow and urow["restrict_disconnect"]:
             return jsonify({"error": "Your account isn't permitted to disconnect nodes."}), 403
-        # Listen-Only accounts (issue #157) — never allowed to touch a link
-        # either, whether or not they made it.
+        # Listen-Only accounts (issue #157) may connect nodes like any other
+        # 'user' account, but may only tear down a link *they* made — never
+        # someone else's pre-existing connection. Checked against
+        # _kiosk_temp_conns' own 'initiated_by' (the same field every
+        # Connect click already records), not client-supplied data, so a
+        # listen-only session can't just claim credit for a link it didn't
+        # make. A link with no tracked entry at all (pre-existing, made
+        # outside the kiosk, or made by a different session before a
+        # restart lost _kiosk_temp_conns) is treated as "not theirs" too.
         if urow and urow["listen_only"]:
-            return jsonify({"error": "Your account is listen-only and can't disconnect nodes."}), 403
+            with _kiosk_temp_lock:
+                tc = _kiosk_temp_conns.get((local_node, remote_node))
+            initiated_by = tc.get('initiated_by', '') if tc else ''
+            if not initiated_by or initiated_by != session.get('username', ''):
+                return jsonify({"error": "Your account is listen-only and can only disconnect "
+                                          "nodes it connected itself."}), 403
         managed = db.execute(
             "SELECT 1 FROM connectors WHERE enabled=1 AND state='connected' "
             "AND local_node=? AND target_node=?",
@@ -8129,11 +8150,17 @@ def api_tx_config():
     a Listen-Only account (issue #157, User Management → "Listen only (no
     RF)"): created specifically for an unlicensed listener, so it never gets
     a credential regardless of login — checked live against the DB, not
-    cached in the session, matching restrict_disconnect's/listen_only's own
-    posture elsewhere. ?probe=1 answers availability only (no secret, no log
-    line) for deciding button visibility; returning the same 404 here as the
-    "not configured at all" case means a Listen-Only account's kiosk simply
-    never shows the TX button, same as an install with no TX secret."""
+    cached in the session, matching restrict_disconnect's own posture
+    elsewhere. Unlike restrict_disconnect/listen_only, this is the *only*
+    thing a Listen-Only account can't do here — it may still connect/
+    disconnect nodes like any other 'user' account (see
+    api_status_connect()/api_status_disconnect()), since linking the
+    repeater's own control operator-authorized node isn't the same act as
+    personally keying the transmitter via PTT. ?probe=1 answers availability
+    only (no secret, no log line) for deciding button visibility; returning
+    the same 404 here as the "not configured at all" case means a
+    Listen-Only account's kiosk simply never shows the TX button, same as an
+    install with no TX secret."""
     if not session.get('logged_in'):
         return jsonify({"error": "Authentication required"}), 401
     if session.get('role') == 'user':

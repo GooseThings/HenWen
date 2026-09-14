@@ -3064,8 +3064,9 @@ sudo bash /opt/HenWen/tx-spike/setup-https.sh --http-only              # frontin
           <div>
             <label style="display:inline-flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:0.86rem">
               <input type="checkbox" id="inv-listen-only" style="width:auto;margin-top:3px">
-              <span>Listen only (no RF) — for unlicensed users: this account can watch the board, listen to
-                live audio, and use chat, but can never connect/disconnect a node or transmit</span>
+              <span>Listen only (no RF) — for unlicensed users: this account can connect/disconnect nodes
+                like any user account (one at a time, and only ones it connected itself), but can
+                never transmit (no Browser TX)</span>
             </label>
           </div>
         </div>
@@ -3160,8 +3161,9 @@ sudo bash /opt/HenWen/tx-spike/setup-https.sh --http-only              # frontin
           <div>
             <label style="display:inline-flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:0.86rem">
               <input type="checkbox" id="uf-listen-only" style="width:auto;margin-top:3px">
-              <span>Listen only (no RF) — for unlicensed users: this account can watch the board, listen to
-                live audio, and use chat, but can never connect/disconnect a node or transmit</span>
+              <span>Listen only (no RF) — for unlicensed users: this account can connect/disconnect nodes
+                like any user account (one at a time, and only ones it connected itself), but can
+                never transmit (no Browser TX)</span>
             </label>
           </div>
         </div>
@@ -8530,8 +8532,9 @@ async function loadUsers() {
     }
     if (u.listen_only) {
       roleBadge += ' <span style="background:rgba(88,166,255,.12);color:var(--accent);padding:1px 7px;' +
-        'border-radius:3px;font-size:0.72rem;font-weight:600" title="Can watch the board, listen to live ' +
-        'audio, and use chat, but can never connect/disconnect a node or transmit">listen-only</span>';
+        'border-radius:3px;font-size:0.72rem;font-weight:600" title="Can connect/disconnect nodes like ' +
+        'any user account (one at a time, and only ones it connected itself), but can never transmit ' +
+        '(no Browser TX)">listen-only</span>';
     }
     if (u.totp_enabled) {
       roleBadge += ' <span style="background:rgba(88,166,255,.12);color:var(--accent);padding:1px 7px;' +
