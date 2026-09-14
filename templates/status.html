@@ -4891,6 +4891,10 @@ async function refreshBoard() {
           ? '<button class="sb-btn disconnect" data-label="X" disabled ' +
               'style="opacity:.4;cursor:not-allowed" ' +
               'title="Managed by Smart Connector — only an admin or superuser can disconnect this"><svg class="icon"><use href="#icon-lock"></use></svg></button>'
+          : (window._kioskListenOnly && !isAdminRole && !c.connected_by_me)
+          ? '<button class="sb-btn disconnect" data-label="X" disabled ' +
+              'style="opacity:.4;cursor:not-allowed" ' +
+              'title="Your account is listen-only and can only disconnect nodes it connected itself"><svg class="icon"><use href="#icon-lock"></use></svg></button>'
           : (window._kioskRestrictDisconnect && !isAdminRole)
           ? '<button class="sb-btn disconnect" data-label="X" disabled ' +
               'style="opacity:.4;cursor:not-allowed" ' +
@@ -5363,6 +5367,10 @@ function sbToast(msg, ok) {
 
 async function sbConnect(localNode, remoteNode, btn, permanent, monitor, skipConfirm) {
   var label = monitor ? 'Monitor' : 'Connect';
+  /* issue #157: Listen-Only accounts may connect a node exactly like any
+     other 'user' account (the one-at-a-time restriction below already
+     applies to them) -- what's restricted is disconnecting someone else's
+     link, and Browser TX. No guard needed here. */
   /* issue #140: warn before bridging two networks together. Every Connect/
      Monitor button on the board (node card, Node Search, Favorites, map
      popups, net-schedule Join) funnels through this one function, so this
@@ -5458,6 +5466,13 @@ async function sbAddFavorite(node, btn, label) {
 }
 
 async function sbDisconnect(localNode, remoteNode, btn) {
+  /* issue #157: a Listen-Only account may only disconnect a link it made
+     itself -- per-connection, so unlike sbConnect() above there's no single
+     blanket client-side check to add here. The connected-node-row and
+     Favorites-panel renderers already build a disabled/lock-icon button
+     instead of a live one when board data's connected_by_me is false for
+     that specific connection (see renderFavorites()/the node-row map()
+     below), and the server enforces it regardless either way. */
   if (btn) { btn.disabled = true; btn.textContent = '…'; }
   try {
     var r = await apiFetch('/api/status/disconnect', {
@@ -5693,6 +5708,7 @@ function _kioskLoginComplete(d) {
   window._kioskRole = d.role;
   window._kioskUsername = d.username;
   window._kioskRestrictDisconnect = !!d.restrict_disconnect;
+  window._kioskListenOnly = !!d.listen_only;
   /* session.clear() on the server invalidated the CSRF token from the meta tag;
      refresh _csrfToken so subsequent apiFetch calls don't get 400s. */
   if (d.csrf_token) _csrfToken = d.csrf_token;
@@ -5824,11 +5840,13 @@ async function checkKioskSession() {
     window._kioskRole = d.role;
     window._kioskUsername = d.username;
     window._kioskRestrictDisconnect = !!d.restrict_disconnect;
+    window._kioskListenOnly = !!d.listen_only;
     updateKioskUserBar(d.username, d.role);
   } else {
     window._kioskRole = '';
     window._kioskUsername = '';
     window._kioskRestrictDisconnect = false;
+    window._kioskListenOnly = false;
     updateKioskUserBar(null, null);
   }
   /* Show Permanent checkbox only for admin/superuser */
@@ -6017,10 +6035,12 @@ function renderFavorites() {
      admin/superuser because Smart Connector is managing them */
   var connSet = {};
   var connectorManagedSet = {};
+  var connectedByMeSet = {};
   (window._lastBoardNodes || []).forEach(function(n) {
     (n.connected || []).forEach(function(c) {
       connSet[c.node] = true;
       if (c.connector_managed) connectorManagedSet[c.node] = true;
+      if (c.connected_by_me) connectedByMeSet[c.node] = true;
     });
   });
   var anyConn   = Object.keys(connSet).length > 0;
@@ -6058,6 +6078,10 @@ function renderFavorites() {
       actions = '<button class="sb-btn disconnect" disabled ' +
         'style="opacity:.4;cursor:not-allowed" ' +
         'title="Managed by Smart Connector — only an admin or superuser can disconnect this">Disconnect</button>';
+    } else if (isConn && window._kioskListenOnly && !isAdmin && !connectedByMeSet[f.node]) {
+      actions = '<button class="sb-btn disconnect" disabled ' +
+        'style="opacity:.4;cursor:not-allowed" ' +
+        'title="Your account is listen-only and can only disconnect nodes it connected itself">Disconnect</button>';
     } else if (isConn && window._kioskRestrictDisconnect && !isAdmin) {
       actions = '<button class="sb-btn disconnect" disabled ' +
         'style="opacity:.4;cursor:not-allowed" ' +
@@ -6344,7 +6368,10 @@ async function _txUpdateBtn() {
   var btn = document.getElementById('tx-btn');
   if (!btn) return;
   /* Any logged-in role may TX — account creation itself is already gated to
-     admin/superuser/owner, so any account that exists has been vetted. */
+     admin/superuser/owner, so any account that exists has been vetted. The
+     one exception is a Listen-Only account (issue #157): the probe below
+     answers false for one of those, same as an install with no TX secret at
+     all, which is what actually hides the button in that case. */
   var eligible = !!window._kioskRole && window.isSecureContext && navigator.mediaDevices && window.WebSocket;
   if (!eligible) { btn.style.display = 'none'; dashFitNodeCard(); return; }
   try {

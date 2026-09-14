@@ -1154,6 +1154,21 @@ def get_db():
         conn.commit()
     except Exception:
         pass  # column already exists
+    # Listen-Only accounts (User Management → "Listen only (no RF)"), issue
+    # #157 — for unlicensed listeners: the account can connect/disconnect a
+    # node exactly like any other 'user' account (one connection at a time,
+    # and only tearing down a link it made itself — never someone else's
+    # pre-existing connection), but can never pull Browser TX credentials,
+    # since that personally keys the repeater's real transmitter via PTT
+    # under the club callsign in a way linking two already-authorized nodes
+    # does not. Only meaningful for role='user' (every other role already
+    # needs no gate here), same restriction as restrict_disconnect. 0
+    # (default) preserves today's behavior.
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN listen_only INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass  # column already exists
 
     # Auth hardening: TOTP 2FA state, soft-lockout counters, and a password
     # epoch bumped on every password change so an already-open session
@@ -1210,6 +1225,7 @@ def get_db():
         role                TEXT    NOT NULL,
         restrict_disconnect INTEGER NOT NULL DEFAULT 0,
         can_record          INTEGER NOT NULL DEFAULT 0,
+        listen_only         INTEGER NOT NULL DEFAULT 0,
         created_by          TEXT    NOT NULL,
         created_at          REAL    NOT NULL,
         expires_at          REAL    NOT NULL,
@@ -1218,6 +1234,14 @@ def get_db():
         used_at             REAL
     )""")
     conn.commit()
+    # listen_only was added to the invites table after it first shipped
+    # (issue #157) -- CREATE TABLE IF NOT EXISTS above is a no-op against an
+    # existing table, so an in-place upgrade needs the same PRAGMA-checked
+    # ALTER TABLE migration net_schedules.end_time already uses.
+    _invite_cols = {r[1] for r in conn.execute("PRAGMA table_info(invites)").fetchall()}
+    if 'listen_only' not in _invite_cols:
+        conn.execute("ALTER TABLE invites ADD COLUMN listen_only INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
 
     # Seed kiosk defaults
     for _k, _v in [
@@ -1839,6 +1863,7 @@ def api_login():
         # a full page reload.
         return jsonify({"ok": True, "role": user["role"], "username": user["username"],
                         "restrict_disconnect": bool(user["restrict_disconnect"]),
+                        "listen_only": bool(user["listen_only"]),
                         "csrf_token": generate_csrf()})
     if status == 'mfa_required':
         _start_mfa_pending(user)
@@ -1891,6 +1916,7 @@ def api_login_2fa():
     log("INFO", f"[AUTH] API Login: '{user['username']}' (role={user['role']}, via 2FA)")
     return jsonify({"ok": True, "role": user["role"], "username": user["username"],
                     "restrict_disconnect": bool(user["restrict_disconnect"]),
+                    "listen_only": bool(user["listen_only"]),
                     "csrf_token": generate_csrf()})
 
 
@@ -2065,10 +2091,10 @@ def accept_invite():
                                    error=f"Username '{username}' already exists.")
         try:
             cur = db.execute(
-                "INSERT INTO users (username, password_hash, role, restrict_disconnect, can_record) "
-                "VALUES (?,?,?,?,?)",
+                "INSERT INTO users (username, password_hash, role, restrict_disconnect, can_record, listen_only) "
+                "VALUES (?,?,?,?,?,?)",
                 (username, generate_password_hash(_peppered(new_pw)), inv["role"],
-                 inv["restrict_disconnect"], inv["can_record"]))
+                 inv["restrict_disconnect"], inv["can_record"], inv["listen_only"]))
         except sqlite3.IntegrityError:
             return render_template("invite-accept.html", stage="accept", token=token, role=inv["role"],
                                    error=f"Username '{username}' already exists.")
@@ -2091,13 +2117,14 @@ def accept_invite():
 def api_session():
     """Public endpoint — returns current session state for the kiosk page."""
     if session.get("logged_in"):
-        row = get_db().execute("SELECT restrict_disconnect FROM users WHERE id=?",
+        row = get_db().execute("SELECT restrict_disconnect, listen_only FROM users WHERE id=?",
                                (session.get("user_id"),)).fetchone()
         return jsonify({
             "logged_in": True,
             "username":  session.get("username", ""),
             "role":      session.get("role", ""),
             "restrict_disconnect": bool(row["restrict_disconnect"]) if row else False,
+            "listen_only": bool(row["listen_only"]) if row else False,
         })
     return jsonify({"logged_in": False})
 
@@ -6467,7 +6494,7 @@ def api_alerts_test():
 def api_users_list():
     rows = get_db().execute(
         "SELECT id, username, role, created_at, session_idle_timeout, restrict_disconnect, "
-        "can_record, totp_enabled FROM users ORDER BY role DESC, username"
+        "can_record, listen_only, totp_enabled FROM users ORDER BY role DESC, username"
     ).fetchall()
     return jsonify({"users": [dict(r) for r in rows]})
 
@@ -6481,6 +6508,11 @@ def api_users_create():
     # Only meaningful for role='user' — other roles already bypass the
     # disconnect gate entirely, so the flag is simply ignored for them.
     restrict_disconnect = bool(data.get("restrict_disconnect", False)) and role == "user"
+    # Same reasoning — a listen-only restriction only means something for a
+    # plain 'user'/kiosk account; every other role is already vetted to
+    # connect/disconnect and TX by virtue of account creation being admin+
+    # gated (see api_tx_config's docstring).
+    listen_only = bool(data.get("listen_only", False)) and role == "user"
     caller_role = session.get('role', '')
     if "can_record" in data and caller_role != "owner":
         return jsonify({"error": "Only the owner can grant recording access"}), 403
@@ -6507,12 +6539,15 @@ def api_users_create():
         return jsonify({"error": f"Username '{username}' already exists."}), 409
     try:
         cur = db.execute(
-            "INSERT INTO users (username, password_hash, role, restrict_disconnect, can_record) VALUES (?,?,?,?,?)",
-            (username, generate_password_hash(_peppered(password)), role, int(restrict_disconnect), int(can_record)))
+            "INSERT INTO users (username, password_hash, role, restrict_disconnect, can_record, listen_only) "
+            "VALUES (?,?,?,?,?,?)",
+            (username, generate_password_hash(_peppered(password)), role, int(restrict_disconnect),
+             int(can_record), int(listen_only)))
         db.commit()
         _seed_default_favorites(cur.lastrowid)
         log("INFO", f"[USERS] Created user '{username}' role={role} "
-                    f"restrict_disconnect={restrict_disconnect} can_record={can_record} by {caller_role}")
+                    f"restrict_disconnect={restrict_disconnect} can_record={can_record} "
+                    f"listen_only={listen_only} by {caller_role}")
         return jsonify({"ok": True})
     except sqlite3.IntegrityError:
         return jsonify({"error": f"Username '{username}' already exists."}), 409
@@ -6580,6 +6615,11 @@ def api_users_update(uid):
         # gate entirely regardless of this flag.
         restrict_disconnect = bool(data["restrict_disconnect"]) and new_role == "user"
         updates.append("restrict_disconnect=?"); params.append(int(restrict_disconnect))
+    if "listen_only" in data:
+        # Same reasoning as restrict_disconnect — only meaningful for
+        # role='user'.
+        listen_only = bool(data["listen_only"]) and new_role == "user"
+        updates.append("listen_only=?"); params.append(int(listen_only))
     if "can_record" in data:
         # Unlike restrict_disconnect, meaningful for every role — the owner
         # grants recording access explicitly, even to their own account.
@@ -6746,6 +6786,7 @@ def api_invites_create():
     if "can_record" in data and caller_role != "owner":
         return jsonify({"error": "Only the owner can grant recording access"}), 403
     restrict_disconnect = bool(data.get("restrict_disconnect", False)) and role == "user"
+    listen_only = bool(data.get("listen_only", False)) and role == "user"
     can_record = bool(data.get("can_record", False))
 
     db = get_db()
@@ -6754,10 +6795,10 @@ def api_invites_create():
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     now        = time.time()
     cur = db.execute(
-        """INSERT INTO invites (token_hash, role, restrict_disconnect, can_record,
+        """INSERT INTO invites (token_hash, role, restrict_disconnect, can_record, listen_only,
                                  created_by, created_at, expires_at)
-           VALUES (?,?,?,?,?,?,?)""",
-        (token_hash, role, int(restrict_disconnect), int(can_record),
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (token_hash, role, int(restrict_disconnect), int(can_record), int(listen_only),
          session.get('username', ''), now, now + INVITE_TOKEN_TTL))
     db.commit()
     log("INFO", f"[AUTH] Invite created (id={cur.lastrowid}, role={role}) by '{session.get('username','')}'")
@@ -6774,7 +6815,7 @@ def api_invites_list():
     _prune_invites(db)
     caller_role = session.get('role', '')
     rows = db.execute(
-        "SELECT id, role, restrict_disconnect, can_record, created_by, created_at, expires_at "
+        "SELECT id, role, restrict_disconnect, can_record, listen_only, created_by, created_at, expires_at "
         "FROM invites WHERE status='pending' ORDER BY created_at DESC").fetchall()
     # Same visibility rule as password-reset-requests: an admin can only see
     # invites for roles it's allowed to manage.
@@ -7584,6 +7625,15 @@ def api_status_board():
                 "permanent":      is_permanent,
                 "no_timeout":     no_timeout,
                 "connector_managed": (node_str_local, cn) in connector_managed_pairs,
+                # Whether *this* logged-in caller is the one who made this
+                # connection — used by the kiosk to let a Listen-Only account
+                # (issue #157) disconnect only links it made itself. Deliberately
+                # a bool, not the raw 'initiated_by' username: this board data is
+                # public (no login required), so leaking who-connected-what to
+                # every anonymous viewer would be a real info disclosure this
+                # feature doesn't need to introduce.
+                "connected_by_me": bool(tc and tc.get('initiated_by')
+                                         and tc.get('initiated_by') == session.get('username', '')),
             })
         location = info.get("location", "")
         coords   = _geocode_nonblocking(location) if location else None
@@ -7807,6 +7857,12 @@ def api_status_connect():
         return jsonify({"error": "Invalid remote_node"}), 400
     # Only admin/superuser may request a permanent connection
     caller_role = session.get('role', '')
+    # Listen-Only accounts (issue #157) may connect a node exactly like any
+    # other 'user'-role account — the one-at-a-time restriction just below
+    # already applies to them since they're still role='user'. What's
+    # actually restricted for a Listen-Only account is disconnecting a link
+    # it didn't make itself (see api_status_disconnect below) and Browser TX
+    # (see api_tx_config) — connecting is not.
     # Kiosk/user accounts are limited to one connection at a time — the
     # Status Board UI disables Connect/Monitor once any node is connected,
     # but that's client-side only, so enforce it here too (a user-role
@@ -7895,10 +7951,26 @@ def api_status_disconnect():
         # but can never tear one down — checked live against the DB, not
         # cached in the session, so a mid-session restriction change takes
         # effect on the very next attempt.
-        urow = db.execute("SELECT restrict_disconnect FROM users WHERE id=?",
+        urow = db.execute("SELECT restrict_disconnect, listen_only FROM users WHERE id=?",
                           (session.get('user_id'),)).fetchone()
         if urow and urow["restrict_disconnect"]:
             return jsonify({"error": "Your account isn't permitted to disconnect nodes."}), 403
+        # Listen-Only accounts (issue #157) may connect nodes like any other
+        # 'user' account, but may only tear down a link *they* made — never
+        # someone else's pre-existing connection. Checked against
+        # _kiosk_temp_conns' own 'initiated_by' (the same field every
+        # Connect click already records), not client-supplied data, so a
+        # listen-only session can't just claim credit for a link it didn't
+        # make. A link with no tracked entry at all (pre-existing, made
+        # outside the kiosk, or made by a different session before a
+        # restart lost _kiosk_temp_conns) is treated as "not theirs" too.
+        if urow and urow["listen_only"]:
+            with _kiosk_temp_lock:
+                tc = _kiosk_temp_conns.get((local_node, remote_node))
+            initiated_by = tc.get('initiated_by', '') if tc else ''
+            if not initiated_by or initiated_by != session.get('username', ''):
+                return jsonify({"error": "Your account is listen-only and can only disconnect "
+                                          "nodes it connected itself."}), 403
         managed = db.execute(
             "SELECT 1 FROM connectors WHERE enabled=1 AND state='connected' "
             "AND local_node=? AND target_node=?",
@@ -8074,10 +8146,28 @@ def api_tx_config():
     keys an RF transmitter under the club callsign, but account creation
     itself is already gated to admin/superuser/owner, so any account that
     exists has already been vetted to transmit; login alone (enforced by
-    _USER_OR_ABOVE in check_auth) is the real gate here. ?probe=1 answers
-    availability only (no secret, no log line) for deciding button visibility."""
+    _USER_OR_ABOVE in check_auth) is the real gate here. The one exception is
+    a Listen-Only account (issue #157, User Management → "Listen only (no
+    RF)"): created specifically for an unlicensed listener, so it never gets
+    a credential regardless of login — checked live against the DB, not
+    cached in the session, matching restrict_disconnect's own posture
+    elsewhere. Unlike restrict_disconnect/listen_only, this is the *only*
+    thing a Listen-Only account can't do here — it may still connect/
+    disconnect nodes like any other 'user' account (see
+    api_status_connect()/api_status_disconnect()), since linking the
+    repeater's own control operator-authorized node isn't the same act as
+    personally keying the transmitter via PTT. ?probe=1 answers availability
+    only (no secret, no log line) for deciding button visibility; returning
+    the same 404 here as the "not configured at all" case means a
+    Listen-Only account's kiosk simply never shows the TX button, same as an
+    install with no TX secret."""
     if not session.get('logged_in'):
         return jsonify({"error": "Authentication required"}), 401
+    if session.get('role') == 'user':
+        urow = get_db().execute("SELECT listen_only FROM users WHERE id=?",
+                                (session.get('user_id'),)).fetchone()
+        if urow and urow["listen_only"]:
+            return jsonify({"enabled": False}), 404
     try:
         with open(TX_SECRET_PATH) as f:
             secret = f.read().strip()
