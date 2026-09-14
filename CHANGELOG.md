@@ -1,5 +1,18 @@
 # Changelog
 
+## v2026.09.14
+
+- **Added: optional low-latency RX audio delivery path** (closes #30). A new AudioSocket capture tap (applied automatically by `install.sh` when Asterisk is already running) streams Listen audio over a plain TCP socket as it's produced instead of through MixMonitor's buffered file I/O, cutting roughly 2 seconds of baked-in latency; falls straight back to MixMonitor on any failure. A new WebSocket/WebCodecs delivery path (`audio_ws_relay.py`) further lowers end-to-end latency when the board is served over HTTPS — `install.sh` now defaults to it automatically on installs where HTTPS was also set up. RX Diagnostics gained a check for the low-latency path's HTTPS requirement, and the Status Board now tells you when Listen silently falls back off the low-latency path instead of failing quietly.
+- **Added: browser TX now works behind an external reverse proxy** (Tailscale Serve, Cloudflare Tunnel, etc.), not just HenWen's own Apache + Let's Encrypt setup — `apply.sh` auto-detects which vhost is actually present and patches that one. Added a one-click "Apply Browser TX Setup" button on the TX Diagnostics page, so an operator no longer has to SSH in and run it by hand.
+- **Fixed: several low-latency audio races found in a pre-release review.** Concurrent listeners starting the low-latency path for the same node could clobber or leak each other's relay; one stalled listener could block audio to every other listener on that node; the low-latency Listen path didn't auto-reconnect after an unexpected drop (unlike the legacy stream) and leaked resources on each drop; a supervised service restart could abandon live per-node ffmpeg processes instead of stopping them.
+- **Changed: the kiosk header and Node card are redesigned for mobile.** Header is sized up with bigger touch targets; the Node card has no chrome of its own on mobile, with the Arm TX/Listen/Rec/Volume controls broken out into their own card below it. The Connected Nodes idle-countdown badge is now a real button for any logged-in role — tap to reset the timer, admin+ can long-press to squash it — with an explanatory popup since mobile has no hover.
+- **Changed: resetting a connection's idle timer is now available to any logged-in role**, not just admin+ (squash/restore remain admin+-only, since they can leave a connection linked indefinitely).
+- **Changed: updated the app logo** to a new wizard-pig mark, across the kiosk header, browser favicon, and every derived app asset.
+- **Fixed: the Test DTMF page silently swallowed errors** instead of showing them (closes #142) — its quick-action buttons (Parrot Mode Enable/Disable, etc.) now go through the same CSRF/error-handling path as the rest of the app, and app_rpt's raw response is now shown directly in the result line.
+- **Fixed: a live crash in `/api/status/board`** ("everything said loading, no node control") caused by a partially-populated internal connection-tracking entry; also hardened a second, not-yet-reachable spot (idle-timer squash) against the same failure shape before it could recur elsewhere.
+- **Fixed: Nominatim geocode rate-limiting now backs off globally** instead of continuing to hammer at the same pace after a 429 — a rate-limit response now slows every subsequent lookup, not just retries of the one location that failed.
+- **Added: a "Nominatim Geocoding Down" alert** in Manager > Alerts, so a genuine sustained geocoding outage (rather than a normal, self-resolving 429 burst) gets surfaced to the owner.
+
 ## v2026.09.04
 
 - **Changed: dropped the redundant "Arming…" status line under the mic bar** — the TX button itself already reads "TX arming…" during that state.
