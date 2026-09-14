@@ -9092,7 +9092,11 @@ def _try_audiosocket_tap(node, channel, fifo_out_path, gen, relay_env):
     if not port_line or not port_line.startswith('PORT '):
         _abort(f'relay did not report a listen port (got {port_line!r})')
         return None
-    port = int(port_line.split()[1])
+    try:
+        port = int(port_line.split()[1])
+    except (IndexError, ValueError):
+        _abort(f'relay reported an unparseable listen port (got {port_line!r})')
+        return None
 
     tap_channel_id = f'henwen-tap-{node}-{gen}'
     as_uuid = str(uuid.uuid4())
@@ -9493,8 +9497,11 @@ AUDIO_WS_RELAY_PORT = int(os.environ.get('AUDIO_WS_RELAY_PORT', '8099'))
 # proxied by Apache at /ws-audio (see ws-audio/apply.sh).
 AUDIO_WS_PORT = int(os.environ.get('AUDIO_WS_PORT', '8098'))
 
-_capture_only_lock   = threading.Lock()
-_capture_only_active = {}   # node -> _CaptureOnlyRelay
+_capture_only_lock    = threading.Lock()
+_capture_only_active  = {}   # node -> _CaptureOnlyRelay
+_capture_only_starting = {}  # node -> threading.Event, set once a
+                              # concurrent first-listener's start attempt
+                              # (success or failure) has been recorded
 
 
 class _CaptureOnlyRelay:
@@ -9554,6 +9561,16 @@ class _CaptureOnlyRelay:
             self._dead = True
             if _capture_only_active.get(self.node) is self:
                 del _capture_only_active[self.node]
+        self._teardown()
+
+    def _teardown(self):
+        """The actual process/AMI teardown, factored out of shutdown() so
+        _release_capture_only() can mark this relay dead and unregister it
+        from _capture_only_active atomically with its listener_count
+        reaching zero (closing a race where a concurrent
+        _ensure_capture_only() could otherwise attach to a relay that's
+        about to be torn down), then call this directly without re-taking
+        the lock or repeating the now-redundant _dead check."""
         uptime = time.monotonic() - self._started_at
         log('DEBUG', f'[AUDIO-WS] shutting down capture-only relay for node '
                     f'{self.node}: uptime={uptime:.1f}s')
@@ -9700,25 +9717,59 @@ def _start_capture_only(node):
 def _ensure_capture_only(node):
     """Attach one low-latency listener's worth of demand to node's
     capture-only relay, starting it if this is the first. Returns nothing;
-    raises whatever _start_capture_only() raises if a fresh start fails."""
+    raises whatever _start_capture_only() raises if a fresh start fails.
+
+    Two concurrent first-listeners for the same node used to both find no
+    existing relay, both call the slow _start_capture_only() (AMI +
+    subprocess work), and both store into _capture_only_active — the loser
+    silently clobbered, leaking its own subprocess/AMI leg forever. A
+    per-node threading.Event in _capture_only_starting now makes a second
+    caller wait for the first's start to finish (success or failure) and
+    re-check, instead of racing it."""
+    while True:
+        with _capture_only_lock:
+            capture = _capture_only_active.get(node)
+            if capture is not None and not capture._dead:
+                capture.listener_count += 1
+                log('DEBUG', f'[AUDIO-WS] capture-only relay for node {node} now has '
+                            f'{capture.listener_count} listener(s)')
+                return
+            starting = _capture_only_starting.get(node)
+            if starting is None:
+                starting = threading.Event()
+                _capture_only_starting[node] = starting
+                break
+        # Someone else is already starting this node's relay -- wait for
+        # them to finish, then loop back and re-check the outcome.
+        starting.wait(timeout=30)
+
+    # We're the one starting it now; done outside the lock since this does
+    # AMI/subprocess work that must never hold up other nodes' calls.
+    try:
+        capture = _start_capture_only(node)
+    except Exception:
+        with _capture_only_lock:
+            _capture_only_starting.pop(node, None)
+        starting.set()
+        raise
+    capture.listener_count = 1
     with _capture_only_lock:
-        capture = _capture_only_active.get(node)
-        if capture is not None and not capture._dead:
-            capture.listener_count += 1
-            log('DEBUG', f'[AUDIO-WS] capture-only relay for node {node} now has '
-                        f'{capture.listener_count} listener(s)')
-            return
-    # Start outside the lock -- _start_capture_only() does AMI/subprocess
-    # work that must never hold up other nodes' attach/detach calls.
-    capture = _start_capture_only(node)
-    with _capture_only_lock:
-        capture.listener_count = 1
         _capture_only_active[node] = capture
+        _capture_only_starting.pop(node, None)
+    starting.set()
 
 
 def _release_capture_only(node):
     """Detach one low-latency listener's worth of demand; tears the
-    capture-only relay down once the count reaches zero."""
+    capture-only relay down once the count reaches zero.
+
+    The dead-marking and _capture_only_active removal happen here under
+    the same lock acquisition as the count reaching zero, not inside a
+    separate later call to shutdown() -- otherwise a concurrent
+    _ensure_capture_only() could see the still-registered, still-not-dead
+    relay in the window between releasing this lock and the old code's
+    unlocked shutdown() call, attach to it, and have it torn down out from
+    under that new listener anyway."""
     with _capture_only_lock:
         capture = _capture_only_active.get(node)
         if capture is None:
@@ -9728,7 +9779,12 @@ def _release_capture_only(node):
             log('DEBUG', f'[AUDIO-WS] capture-only relay for node {node} now has '
                         f'{capture.listener_count} listener(s)')
             return
-    capture.shutdown()
+        if capture._dead:
+            return
+        capture._dead = True
+        if _capture_only_active.get(node) is capture:
+            del _capture_only_active[node]
+    capture._teardown()
 
 
 def _check_internal_audio_request(req):

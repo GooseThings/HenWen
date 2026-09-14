@@ -7505,9 +7505,18 @@ function _doStartListenWS(audio, node) {
         return;
       }
       console.warn('[AUDIO-WS] socket closed for node', node, e.code, e.reason);
-      _listenActive = false;
-      _listenSetBtn('<svg class="icon"><use href="#icon-headphones"></use></svg> Listen', '', false);
-      sbToast('Audio stream disconnected — click Listen to reconnect', false);
+      /* Full teardown (not just the two flags this used to reset) before
+         scheduling a retry — mirrors _doStartListenMSE()'s own auto-
+         reconnect below (same 3s retry), which this path previously
+         lacked entirely: an unattended kiosk's low-latency Listen used to
+         just stay dead after any drop until someone clicked Listen by
+         hand. Routing through _stopListen() also avoids leaking this
+         session's AudioContext/AudioWorkletNode/decoder and the
+         #node-audio 'volumechange' listener into the next Listen click,
+         which the old two-line reset here didn't close. */
+      _stopListen();
+      sbToast('Audio stream disconnected — reconnecting…', false);
+      setTimeout(function() { if (!_listenActive) _startListen(); }, 3000);
     };
 
     /* Telemetry: mirrors _doStartListenMSE()'s own 10s report shape (same
