@@ -88,6 +88,7 @@ import base64
 import hashlib
 import json
 import os
+import queue
 import re
 import signal
 import socket
@@ -439,24 +440,64 @@ class _NodeState:
 
     def __init__(self, node):
         self.node = node
-        self.clients = []           # list of (socket, addr)
+        self.clients = []           # list of (socket, addr, Queue)
         self.clients_lock = threading.Lock()
         self.ffmpeg_proc = None
         self.udp_sock = None
         self.reader_thread = None
         self.stderr_thread = None
+        # Guards the whole 0-client<->1+-client transition (attach: add
+        # client + maybe ensure-capture + start ffmpeg; detach: remove
+        # client + maybe stop ffmpeg + release-capture) so a departing
+        # client's teardown and an arriving client's setup for the same
+        # node can never interleave -- without this, a slow-to-run
+        # _stop_node_ffmpeg() could read state.ffmpeg_proc *after* a
+        # different thread had already replaced it with a freshly-started
+        # encoder for a brand new first client, and kill that one instead
+        # of the one it meant to. capture_active tracks whether this
+        # node's capture is currently the subject of an outstanding
+        # ensure-capture call, independent of which particular client
+        # connection happened to trigger it, so release-capture is called
+        # exactly once per successful ensure-capture (never on a
+        # connection whose own ensure-capture attempt failed, and never
+        # skipped just because the client that happens to be last out
+        # wasn't the one that originally called ensure-capture).
+        self.lifecycle_lock = threading.Lock()
+        self.capture_active = False
 
     def add_client(self, sock, addr):
+        # Each client gets its own outbound Queue plus a dedicated writer
+        # thread that owns the actual sock.sendall() calls -- mirroring
+        # _AudioBroadcast's per-client-Queue fanout in app.py. Without
+        # this, fanout() below would call sendall() on every client's
+        # socket itself, one after another, from the single per-node UDP-
+        # reader thread: one slow-to-read client (locked screen,
+        # backgrounded tab, flaky network) blocking that call would stall
+        # Opus delivery to every *other* listener on the same node too.
+        q = queue.Queue(maxsize=50)  # ~1s of 20ms frames; drop oldest if a client stalls
+        writer = threading.Thread(target=self._client_writer_loop, args=(sock, addr, q),
+                                  daemon=True, name=f'ws-writer-{addr[1]}')
         with self.clients_lock:
-            self.clients.append((sock, addr))
+            self.clients.append((sock, addr, q))
             count = len(self.clients)
+        writer.start()
         _log('INFO', f'[node {self.node}] client {addr} connected ({count} total)')
         return count
 
     def remove_client(self, sock, addr):
         with self.clients_lock:
-            self.clients = [(s, a) for (s, a) in self.clients if s is not sock]
+            departing = [q for (s, a, q) in self.clients if s is sock]
+            self.clients = [(s, a, q) for (s, a, q) in self.clients if s is not sock]
             count = len(self.clients)
+        for q in departing:
+            try:
+                q.put_nowait(None)  # wake the writer thread so it exits
+            except queue.Full:
+                try:
+                    q.get_nowait()
+                    q.put_nowait(None)
+                except (queue.Empty, queue.Full):
+                    pass
         _log('INFO', f'[node {self.node}] client {addr} disconnected ({count} remaining)')
         return count
 
@@ -464,21 +505,42 @@ class _NodeState:
         frame = build_frame(OP_BINARY, opus_payload)
         with self.clients_lock:
             targets = list(self.clients)
-        dead = []
-        for sock, addr in targets:
+        for sock, addr, q in targets:
             try:
-                sock.sendall(frame)
+                q.put_nowait(frame)
+            except queue.Full:
+                # This client's writer can't keep up -- drop its oldest
+                # queued frame rather than blocking the fanout (which
+                # would stall every other listener on this node) or
+                # growing the queue unboundedly.
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    q.put_nowait(frame)
+                except queue.Full:
+                    pass
+
+    def _client_writer_loop(self, sock, addr, q):
+        """Drains one client's Queue and owns every sendall() to its
+        socket, so a stall on this one connection only blocks this one
+        thread. A None item is the shutdown sentinel remove_client() below
+        pushes so this thread doesn't sit blocked in q.get() forever after
+        its client disconnects."""
+        while True:
+            item = q.get()
+            if item is None:
+                return
+            try:
+                sock.sendall(item)
             except OSError:
-                dead.append((sock, addr))
-        if dead:
-            with self.clients_lock:
-                self.clients = [(s, a) for (s, a) in self.clients if (s, a) not in dead]
-            for sock, addr in dead:
                 _log('WARN', f'[node {self.node}] client {addr} send failed, dropped')
                 try:
                     sock.close()
                 except Exception:
                     pass
+                return
 
 
 def _get_or_create_node(node):
@@ -511,7 +573,7 @@ def _force_disconnect_all():
     total = 0
     for state in states:
         with state.clients_lock:
-            socks = [s for s, _addr in state.clients]
+            socks = [s for s, _addr, _q in state.clients]
         for sock in socks:
             try:
                 sock.shutdown(socket.SHUT_RDWR)
@@ -835,14 +897,18 @@ def _handle_ws_connection(conn, addr):
         conn.settimeout(None)
 
         state = _get_or_create_node(node)
-        count = state.add_client(conn, addr)
-        registered = True
-        if count == 1:
-            ok, agc_enabled = _ensure_capture(node)
-            if not ok:
-                _log('WARN', f'[node {node}] ensure-capture failed; closing {addr}')
-                return
-            _start_node_ffmpeg(state, agc_enabled)
+        with state.lifecycle_lock:
+            count = state.add_client(conn, addr)
+            registered = True
+            if count == 1:
+                ok, agc_enabled = _ensure_capture(node)
+                if not ok:
+                    _log('WARN', f'[node {node}] ensure-capture failed; closing {addr}')
+                    state.remove_client(conn, addr)
+                    registered = False
+                    return
+                state.capture_active = True
+                _start_node_ffmpeg(state, agc_enabled)
 
         # Read loop: this stream is receive-mostly (audio only flows
         # server->client) -- the only thing worth doing with whatever a
@@ -871,10 +937,13 @@ def _handle_ws_connection(conn, addr):
         pass
     finally:
         if registered and state is not None:
-            remaining = state.remove_client(conn, addr)
-            if remaining == 0:
-                _stop_node_ffmpeg(state)
-                _release_capture(node)
+            with state.lifecycle_lock:
+                remaining = state.remove_client(conn, addr)
+                if remaining == 0:
+                    _stop_node_ffmpeg(state)
+                    if state.capture_active:
+                        state.capture_active = False
+                        _release_capture(node)
         try:
             conn.close()
         except Exception:
@@ -904,7 +973,28 @@ def main():
 
     def _stop(signum, frame):
         _log('INFO', f'received signal {signum}, exiting')
-        os._exit(0)   # daemon threads; nothing to flush/join that matters
+        # Unlike _stop_node_ffmpeg()'s other callers, an os._exit() right
+        # after this skips all normal Python cleanup -- so any live
+        # per-node ffmpeg would otherwise be silently abandoned (never
+        # signaled at all) on every supervised restart of this process,
+        # rather than explicitly terminated the way every other teardown
+        # path in this file handles it. Best-effort and bounded: each
+        # node's stop/release does at most a couple of seconds of local
+        # subprocess teardown plus one HTTP call to app.py.
+        with _nodes_lock:
+            states = list(_nodes.values())
+        for state in states:
+            try:
+                _stop_node_ffmpeg(state)
+            except Exception:
+                pass
+            if state.capture_active:
+                state.capture_active = False
+                try:
+                    _release_capture(state.node)
+                except Exception:
+                    pass
+        os._exit(0)   # daemon threads; nothing else to flush/join that matters
 
     def _reload(signum, frame):
         _log('INFO', 'received SIGHUP, force-disconnecting all clients (RX audio settings changed)')

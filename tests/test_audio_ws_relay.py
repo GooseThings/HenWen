@@ -517,6 +517,47 @@ class TestForceDisconnectAll:
         assert wsrelay._force_disconnect_all() == 0
 
 
+class TestNodeStateFanout:
+    """fanout() used to call sock.sendall() on every client directly, one
+    after another, from the single per-node UDP-reader thread that also
+    drains ffmpeg's RTP output -- a stall on one client's socket (locked
+    screen, backgrounded tab, flaky network) blocked Opus delivery to
+    every *other* listener on the same node too. Each client now gets its
+    own Queue plus a dedicated writer thread that owns its sendall()
+    calls, so fanout() itself only ever enqueues and never blocks on I/O."""
+
+    def setup_method(self):
+        wsrelay._nodes.clear()
+
+    def teardown_method(self):
+        wsrelay._nodes.clear()
+
+    def test_fanout_does_not_block_on_a_stalled_client(self):
+        state = wsrelay._get_or_create_node("628280")
+
+        entered_sendall = _threading_mod.Event()
+        release_sendall = _threading_mod.Event()
+
+        class _StallingSocket:
+            def sendall(self, data):
+                entered_sendall.set()
+                release_sendall.wait(timeout=5)  # simulates a stuck/slow client
+
+        state.add_client(_StallingSocket(), ("127.0.0.1", 1))
+        # Give the writer thread's queue.get() a moment to start blocking,
+        # so the very first fanout() below is the one that wakes it.
+        _time_mod.sleep(0.05)
+
+        start = _time_mod.monotonic()
+        state.fanout(b"\x00" * 10)
+        elapsed = _time_mod.monotonic() - start
+
+        assert elapsed < 1.0, "fanout() must not block on a stalled client's sendall()"
+        assert entered_sendall.wait(timeout=2.0), \
+            "the per-client writer thread should still have delivered the frame"
+        release_sendall.set()  # let the writer thread finish so it doesn't linger
+
+
 class TestPcmOwnership:
     """_claim_pcm_owner()/_release_pcm_owner() -- only one audio_relay.py
     connection may feed a given node's low-latency ffmpeg at a time. Plain
