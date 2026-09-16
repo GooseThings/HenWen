@@ -3060,6 +3060,16 @@ sudo bash /opt/HenWen/tx-spike/setup-https.sh --http-only              # frontin
             </label>
           </div>
         </div>
+        <div class="form-row" id="inv-listen-only-row" style="margin-bottom:14px;display:none">
+          <div>
+            <label style="display:inline-flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:0.86rem">
+              <input type="checkbox" id="inv-listen-only" style="width:auto;margin-top:3px">
+              <span>Listen only (no RF) — for unlicensed users: this account can connect/disconnect nodes
+                like any user account (one at a time, and only ones it connected itself), but can
+                never transmit (no Browser TX)</span>
+            </label>
+          </div>
+        </div>
         <div class="form-row" id="inv-can-record-row" style="margin-bottom:14px;display:none">
           <div>
             <label style="display:inline-flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:0.86rem">
@@ -3144,6 +3154,16 @@ sudo bash /opt/HenWen/tx-spike/setup-https.sh --http-only              # frontin
               <input type="checkbox" id="uf-restrict-disconnect" style="width:auto;margin-top:3px">
               <span>Restrict disconnect — this user can listen, TX, and make the first connection if none is
                 active, but can never disconnect a node</span>
+            </label>
+          </div>
+        </div>
+        <div class="form-row" id="uf-listen-only-row" style="margin-bottom:14px;display:none">
+          <div>
+            <label style="display:inline-flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:0.86rem">
+              <input type="checkbox" id="uf-listen-only" style="width:auto;margin-top:3px">
+              <span>Listen only (no RF) — for unlicensed users: this account can connect/disconnect nodes
+                like any user account (one at a time, and only ones it connected itself), but can
+                never transmit (no Browser TX)</span>
             </label>
           </div>
         </div>
@@ -8417,6 +8437,7 @@ function restrictInviteRoleOptions() {
 function onInvRoleChange() {
   var role = document.getElementById('inv-role').value;
   document.getElementById('inv-restrict-disc-row').style.display = (role === 'user') ? '' : 'none';
+  document.getElementById('inv-listen-only-row').style.display = (role === 'user') ? '' : 'none';
   document.getElementById('inv-can-record-row').style.display = (window._henwenRole === 'owner') ? '' : 'none';
 }
 
@@ -8425,6 +8446,7 @@ function showCreateInviteForm() {
   restrictInviteRoleOptions();
   document.getElementById('inv-role').value = 'user';
   document.getElementById('inv-restrict-disconnect').checked = false;
+  document.getElementById('inv-listen-only').checked = false;
   document.getElementById('inv-can-record').checked = false;
   document.getElementById('inv-form-status').textContent = '';
   document.getElementById('inv-link-card').style.display = 'none';
@@ -8440,7 +8462,8 @@ async function createInvite() {
   var st = document.getElementById('inv-form-status');
   var payload = {
     role: document.getElementById('inv-role').value,
-    restrict_disconnect: document.getElementById('inv-restrict-disconnect').checked
+    restrict_disconnect: document.getElementById('inv-restrict-disconnect').checked,
+    listen_only: document.getElementById('inv-listen-only').checked
   };
   if (window._henwenRole === 'owner') payload.can_record = document.getElementById('inv-can-record').checked;
 
@@ -8507,6 +8530,12 @@ async function loadUsers() {
       roleBadge += ' <span style="background:rgba(63,185,80,.15);color:var(--green);padding:1px 7px;' +
         'border-radius:3px;font-size:0.72rem;font-weight:600" title="Can start recordings from the Status Board">can-record</span>';
     }
+    if (u.listen_only) {
+      roleBadge += ' <span style="background:rgba(88,166,255,.12);color:var(--accent);padding:1px 7px;' +
+        'border-radius:3px;font-size:0.72rem;font-weight:600" title="Can connect/disconnect nodes like ' +
+        'any user account (one at a time, and only ones it connected itself), but can never transmit ' +
+        '(no Browser TX)">listen-only</span>';
+    }
     if (u.totp_enabled) {
       roleBadge += ' <span style="background:rgba(88,166,255,.12);color:var(--accent);padding:1px 7px;' +
         'border-radius:3px;font-size:0.72rem;font-weight:600" title="Two-factor authentication is enabled on this account">2FA</span>';
@@ -8523,7 +8552,7 @@ async function loadUsers() {
       + '<td>' + timeoutDisplay + '</td>'
       + '<td style="color:var(--text2);font-size:0.82rem">' + created + '</td>'
       + '<td><div class="btn-row">'
-      + '<button class="btn btn-sm" onclick="editUser(' + u.id + ',\'' + esc(u.username) + '\',\'' + esc(u.role) + '\',' + (u.session_idle_timeout === null || u.session_idle_timeout === undefined ? 'null' : u.session_idle_timeout) + ',' + (u.restrict_disconnect ? 'true' : 'false') + ',' + (u.can_record ? 'true' : 'false') + ')">Edit</button>'
+      + '<button class="btn btn-sm" onclick="editUser(' + u.id + ',\'' + esc(u.username) + '\',\'' + esc(u.role) + '\',' + (u.session_idle_timeout === null || u.session_idle_timeout === undefined ? 'null' : u.session_idle_timeout) + ',' + (u.restrict_disconnect ? 'true' : 'false') + ',' + (u.can_record ? 'true' : 'false') + ',' + (u.listen_only ? 'true' : 'false') + ')">Edit</button>'
       + (u.totp_enabled ? '<button class="btn btn-sm" onclick="resetUserMfa(' + u.id + ',\'' + esc(u.username) + '\')">Reset 2FA</button>' : '')
       + '<button class="btn btn-warn btn-sm" onclick="deleteUser(' + u.id + ',\'' + esc(u.username) + '\')">Delete</button>'
       + '</div></td>'
@@ -8543,11 +8572,15 @@ function restrictRoleOptions() {
   });
 }
 
-/* "Restrict disconnect" only makes sense for role='user' — other roles
-   bypass the disconnect gate entirely regardless of this flag. */
+/* "Restrict disconnect" and "Listen only" only make sense for role='user' —
+   other roles bypass the disconnect/TX gates entirely regardless of these
+   flags. */
 function onUfRoleChange() {
+  var isUser = document.getElementById('uf-role').value === 'user';
   var row = document.getElementById('uf-restrict-disc-row');
-  if (row) row.style.display = (document.getElementById('uf-role').value === 'user') ? '' : 'none';
+  if (row) row.style.display = isUser ? '' : 'none';
+  var loRow = document.getElementById('uf-listen-only-row');
+  if (loRow) loRow.style.display = isUser ? '' : 'none';
 }
 
 function showCreateUserForm() {
@@ -8562,6 +8595,7 @@ function showCreateUserForm() {
   document.getElementById('uf-password2').value     = '';
   document.getElementById('uf-idle-timeout').value  = '';
   document.getElementById('uf-restrict-disconnect').checked = false;
+  document.getElementById('uf-listen-only').checked = false;
   document.getElementById('uf-can-record').checked = false;
   document.getElementById('uf-can-record-row').style.display = (window._henwenRole === 'owner') ? '' : 'none';
   document.getElementById('uf-pw-label').textContent = 'Password';
@@ -8570,7 +8604,7 @@ function showCreateUserForm() {
   document.getElementById('user-form-card').scrollIntoView({behavior:'smooth'});
 }
 
-function editUser(id, username, role, idleTimeoutSecs, restrictDisconnect, canRecord) {
+function editUser(id, username, role, idleTimeoutSecs, restrictDisconnect, canRecord, listenOnly) {
   document.getElementById('user-form-card').style.display = '';
   document.getElementById('user-form-title').textContent = 'Edit: ' + username;
   document.getElementById('uf-id').value            = id;
@@ -8584,6 +8618,7 @@ function editUser(id, username, role, idleTimeoutSecs, restrictDisconnect, canRe
   document.getElementById('uf-status').textContent  = '';
   document.getElementById('uf-restrict-disconnect').checked = !!restrictDisconnect;
   document.getElementById('uf-can-record').checked = !!canRecord;
+  document.getElementById('uf-listen-only').checked = !!listenOnly;
   document.getElementById('uf-can-record-row').style.display = (window._henwenRole === 'owner') ? '' : 'none';
   onUfRoleChange();
   /* Convert stored seconds → minutes for the input; blank = global default */
@@ -8614,7 +8649,8 @@ async function saveUser() {
   if (!id && pw.length < 8) { st.style.color='var(--red)'; st.textContent='Password must be at least 8 characters.'; return; }
   if (pw && pw.length < 8) { st.style.color='var(--red)'; st.textContent='Password must be at least 8 characters.'; return; }
 
-  var payload = {role: role, restrict_disconnect: document.getElementById('uf-restrict-disconnect').checked};
+  var payload = {role: role, restrict_disconnect: document.getElementById('uf-restrict-disconnect').checked,
+                  listen_only: document.getElementById('uf-listen-only').checked};
   if (window._henwenRole === 'owner') payload.can_record = document.getElementById('uf-can-record').checked;
   if (!id) payload.username = uname;
   if (pw) payload.password = pw;
