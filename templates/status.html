@@ -1258,11 +1258,6 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
      so mobile only ever offers the one copy. */
   #header-fs-btn { display: flex !important; }
   #header-fs-menu-btn { display: none !important; }
-  /* Light/dark toggle (issue #153) — mobile-only, see the HTML comment by
-     #header-theme-btn. Unlike Fullscreen there's no desktop twin to hide
-     alongside it — desktop's theme picker lives entirely in Manager, not
-     duplicated anywhere in this header. */
-  #header-theme-btn { display: flex !important; }
   .header-menu-items {
     display: none; position: fixed; flex-direction: column; gap: 11px;
     background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
@@ -1795,18 +1790,21 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
            menu copy there) and forced visible by the mobile media query,
            which also hides #header-fs-menu-btn so it isn't offered twice. -->
       <button class="btn-icon" id="header-fs-btn" onclick="toggleFS()" title="Fullscreen" style="display:none"><svg class="icon"><use href="#icon-maximize"></use></svg></button>
-      <!-- Light/dark toggle (issue #153): mobile-only, like Fullscreen just
-           above — desktop already has the full multi-theme picker in
-           Manager > Settings (admin+), which a mobile visitor usually can't
-           reach at all (a plain 'user'/kiosk account has no Manager access,
-           and a desktop kiosk is more often a shared mounted display than
-           someone's own device anyway). This flips between just 'light' and
-           'dark' via the same henwen-theme localStorage key Manager's own
-           picker uses, so the two stay in sync -- picking one of Manager's
-           other named skins there still shows as "dark" here until toggled,
-           same simplification status-accessible.html's own binary toggle
-           already makes. -->
-      <button class="btn-icon" id="header-theme-btn" onclick="toggleKioskTheme()" title="Switch to light theme" style="display:none"><svg class="icon"><use href="#icon-moon"></use></svg></button>
+      <!-- Light/dark toggle (issue #153): a quick one-tap toggle everywhere
+           (mobile and desktop both) alongside Manager > Settings' full
+           multi-theme picker (admin+ only, and a plain 'user'/kiosk account
+           has no Manager access at all) -- this is the only way most
+           visitors can flip the board's theme themselves. Flips between
+           just 'light' and 'dark' via the same henwen-theme localStorage
+           key Manager's own picker uses, so the two stay in sync -- picking
+           one of Manager's other named skins there still shows as "dark"
+           here until toggled, same simplification status-accessible.html's
+           own binary toggle already makes. Always visible, unlike Login/
+           Fullscreen/Chat just above/below, which each have a real reason
+           to hide sometimes (already logged in, already fullscreen, chat
+           already visible) -- there's no "already toggled" state for this
+           one. -->
+      <button class="btn-icon" id="header-theme-btn" onclick="toggleKioskTheme()" title="Switch to light theme"><svg class="icon"><use href="#icon-moon"></use></svg></button>
       <!-- Chat notification (issue #159): Chat defaults to hidden even on
            desktop (see DASH_DEFAULT_HIDDEN) and has no way to be reached at
            all on mobile (.chat-card's own display:none rule below), so this
@@ -2556,8 +2554,9 @@ function toggleFS() {
   else document.exitFullscreen().catch(function(){});
 }
 
-/* Light/dark toggle (issue #153) — mobile-only header button. Deliberately
-   a plain binary flip between 'light' and 'dark' via the same henwen-theme
+/* Light/dark toggle (issue #153) — header button, shown everywhere (mobile
+   and desktop). Deliberately a plain binary flip between 'light' and 'dark'
+   via the same henwen-theme
    localStorage key Manager's own multi-theme picker writes (see THEME_NAMES
    there), same simplification status-accessible.html's own toggle already
    makes: any of Manager's other named skins (dracula, nord, ...) just reads
