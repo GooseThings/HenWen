@@ -231,6 +231,8 @@ fi
 # Listen button failed for a remote browser and needed this traced end to end
 # before the actual constraint surfaced.
 echo "[8/11] Setting up Apache for low-latency RX audio..."
+# shellcheck source=apache-common.sh
+. "$INSTALL_DIR/apache-common.sh"
 WS_AUDIO_DEFAULT_OK=0
 HAVE_APACHE_VHOST=0
 HTTPS_SUCCEEDED=0
@@ -239,12 +241,22 @@ if [ "$SKIP_APACHE_SETUP" = "1" ]; then
     echo "      RX audio and browser TX both still work if you front HenWen with your"
     echo "      own reverse proxy. See ws-audio/README.md and tx-spike/README.md for"
     echo "      exactly what it needs to point at."
-elif [ -f /etc/apache2/sites-enabled/henwen-ssl.conf ]; then
-    echo "      Apache vhost already present (HTTPS) — leaving it as-is."
-    HAVE_APACHE_VHOST=1
-    HTTPS_SUCCEEDED=1
-elif [ -f /etc/apache2/sites-enabled/henwen.conf ]; then
-    echo "      Apache vhost already present (plain HTTP) — leaving it as-is."
+elif EXISTING_VHOST="$(henwen_discover_vhosts "$PORT" | head -1)" && [ -n "$EXISTING_VHOST" ]; then
+    # Discovered generically instead of checking for exactly one of two
+    # hardcoded filenames -- a renamed or hand-written vhost that's already
+    # fronting HenWen (e.g. from before this box ever ran install.sh, or a
+    # vhost an operator wrote by hand) is "already present" every bit as
+    # much as one setup-https.sh itself created, and should be left alone
+    # here the same way. SSLEngine's presence is what setup-https.sh's own
+    # generated vhost always has on its HTTPS one, so it stands in for "was
+    # this the full Let's-Encrypt flow or just --http-only" without
+    # depending on either script's own filename convention.
+    if grep -qE '^[[:space:]]*SSLEngine[[:space:]]+on' "$EXISTING_VHOST" 2>/dev/null; then
+        echo "      Apache vhost already present (HTTPS: $EXISTING_VHOST) — leaving it as-is."
+        HTTPS_SUCCEEDED=1
+    else
+        echo "      Apache vhost already present (plain HTTP: $EXISTING_VHOST) — leaving it as-is."
+    fi
     HAVE_APACHE_VHOST=1
 elif [ -t 0 ]; then
     echo ""

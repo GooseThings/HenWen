@@ -230,8 +230,17 @@ class TestLowLatencyReadyRollup:
 
         monkeypatch.setattr(app, "_audio_ws_relay_proc", _FakeProc())
 
+        # _find_henwen_apache_vhosts() (app.py) only counts a file as a real
+        # HenWen vhost if it actually proxies HenWen's own Flask port -- a
+        # marker with no such ProxyPass line couldn't exist in practice
+        # (apply.sh only ever inserts its marker into a vhost that's
+        # already been discovered that way), so the fixture needs the same
+        # shape a real one has.
         conf = tmp_path / "henwen.conf"
-        conf.write_text("; " + app.WS_AUDIO_MARKER + "\n")
+        conf.write_text(
+            f"    ProxyPass        / http://127.0.0.1:{app.PORT}/ retry=0 timeout=120\n"
+            f"    # {app.WS_AUDIO_MARKER}\n"
+        )
         monkeypatch.setattr(app, "HENWEN_APACHE_VHOST_CANDIDATES", (str(conf),))
 
     def _get(self, client):

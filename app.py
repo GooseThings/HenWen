@@ -28,6 +28,7 @@ FIXES in this version:
 
 import os
 import re
+import glob
 import html
 import signal
 import subprocess
@@ -338,17 +339,100 @@ WS_AUDIO_APPLY_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file
 # Same marker string ws-audio/apply.sh greps for -- see that script's own
 # comment for why it patches whichever of these two vhost files is present.
 WS_AUDIO_MARKER = "HenWen low-latency RX audio"
-# The two names a HenWen Apache vhost can be under -- henwen-ssl.conf from
+# Where Apache actually loads vhosts from -- overridable (mirroring
+# apache-common.sh's identical HENWEN_APACHE_SITES_DIR env var) so a test
+# suite, or an operator with a non-default Apache layout, can point this
+# somewhere else; production installs never need to set it.
+HENWEN_APACHE_SITES_DIR = os.environ.get("HENWEN_APACHE_SITES_DIR", "/etc/apache2/sites-enabled")
+# Explicit extra vhost paths to check in addition to whatever's discovered
+# by scanning HENWEN_APACHE_SITES_DIR -- empty by default. This used to be
+# THE mechanism (a hardcoded two-item tuple: henwen-ssl.conf from
 # setup-https.sh's full Let's-Encrypt flow, or henwen.conf from its
-# --http-only mode (install.sh's own default, and what an operator fronting
-# HTTPS with their own reverse proxy/tunnel is left with). Shared by
-# api_rx_diagnostics()/api_ws_audio_status() (ws-audio's own proxy check)
-# and api_tx_diagnostics()/api_tx_apply_status() (tx-spike's), mirroring
-# tx-spike/apply.sh's identical candidate-loop.
-HENWEN_APACHE_VHOST_CANDIDATES = (
-    "/etc/apache2/sites-enabled/henwen-ssl.conf",
-    "/etc/apache2/sites-enabled/henwen.conf",
-)
+# --http-only mode), which meant a renamed vhost, or a second one (e.g. one
+# per hostname), was invisible to every check below no matter how many
+# times apply.sh was re-run -- confirmed live on a production install that
+# already runs HenWen behind two independently-named vhosts at once, only
+# one of which that tuple ever found. _find_henwen_apache_vhosts() now
+# discovers vhosts the same way apache-common.sh's shell scripts do --
+# asking Apache's own config what's actually proxying HenWen's real Flask
+# port, rather than guessing filenames -- and this tuple is kept only as an
+# explicit override hook for tests and operators who want to name a path
+# outside HENWEN_APACHE_SITES_DIR.
+HENWEN_APACHE_VHOST_CANDIDATES = ()
+# Matches both Apache's bare ProxyPass syntax (what install.sh/setup-https.sh
+# write: `ProxyPass / http://127.0.0.1:PORT/`) and its equally-valid quoted
+# form (`ProxyPass "/" "http://127.0.0.1:PORT/"`), tolerant of whatever
+# whitespace/trailing params (retry=, timeout=...) happen to be there --
+# a hand-edited or certbot-touched vhost doesn't reliably preserve one
+# exact literal form.
+_APACHE_PROXYPASS_RE = re.compile(r'ProxyPass\s+"?/"?\s+"?http://127\.0\.0\.1:(\d+)/"?')
+
+
+def _find_henwen_apache_vhosts():
+    """Every distinct, real Apache vhost file that currently proxies
+    HenWen's own Flask port at the root path -- i.e. apply.sh's own former
+    candidate-loop, generalized from "one of two hardcoded filenames" to
+    "whichever files in HENWEN_APACHE_SITES_DIR actually do this, however
+    many there are" (see apache-common.sh's henwen_discover_vhosts(), the
+    shell-side twin of this function -- kept in sync by hand since app.py
+    can't source a bash library). Symlinks (the usual sites-enabled entry)
+    are resolved to their sites-available target first, matching every
+    apply.sh's own resolution -- `sed`/other editors don't edit *through*
+    a symlink, they replace it, so the real file is what's actually being
+    read by Apache and by those scripts alike.
+
+    Returns a list of resolved absolute paths, deduplicated, in the order
+    discovered (explicit HENWEN_APACHE_VHOST_CANDIDATES entries first, then
+    a sorted directory scan)."""
+    found = []
+    seen = set()
+    candidates = list(HENWEN_APACHE_VHOST_CANDIDATES)
+    try:
+        candidates += sorted(glob.glob(os.path.join(HENWEN_APACHE_SITES_DIR, "*.conf")))
+    except OSError:
+        pass
+    for candidate in candidates:
+        real = candidate
+        try:
+            if os.path.islink(candidate):
+                real = os.path.realpath(candidate)
+        except OSError:
+            pass
+        if real in seen:
+            continue
+        try:
+            with open(real) as f:
+                content = f.read()
+        except OSError:
+            continue
+        if any(m.group(1) == str(PORT) for m in _APACHE_PROXYPASS_RE.finditer(content)):
+            seen.add(real)
+            found.append(real)
+    return found
+
+
+def _apache_marker_status(marker):
+    """Per-vhost applied/missing status for `marker` across every HenWen-
+    fronting vhost this box has, not just the first one found. A box can
+    (and, confirmed live, does) front HenWen through more than one vhost at
+    once; if an apply.sh was only ever run once, or a vhost was added
+    afterward, remote visitors reaching that *other* vhost's hostname would
+    silently keep missing the proxy line regardless of what a diagnostic
+    reports for the box as a whole -- returning the per-vhost split is what
+    lets a caller surface that instead of reporting "applied" as soon as
+    any single vhost has it.
+
+    Returns (vhosts, applied_to, missing_from) -- three lists of paths."""
+    vhosts = _find_henwen_apache_vhosts()
+    applied_to, missing_from = [], []
+    for v in vhosts:
+        try:
+            with open(v) as f:
+                has_marker = marker in f.read()
+        except OSError:
+            has_marker = False
+        (applied_to if has_marker else missing_from).append(v)
+    return vhosts, applied_to, missing_from
 
 
 def _systemctl(*args, timeout=30):
@@ -8126,18 +8210,12 @@ TX_APPLY_SCRIPT_PATH = os.path.join(
 
 
 def _find_henwen_apache_vhost():
-    """Which of HENWEN_APACHE_VHOST_CANDIDATES (if any) is actually fronting
-    HenWen's own Flask port right now -- i.e. apply.sh's own candidate-loop,
-    reimplemented read-only so the Manager UI/diagnostics can tell an
-    operator whether apply.sh is even ready to run, before they try it."""
-    for candidate in HENWEN_APACHE_VHOST_CANDIDATES:
-        try:
-            with open(candidate) as f:
-                if re.search(r'ProxyPass\s+/ http://127\.0\.0\.1:\d+/', f.read()):
-                    return candidate
-        except OSError:
-            continue
-    return None
+    """The first Apache vhost _find_henwen_apache_vhosts() discovers (if
+    any) actually fronting HenWen's own Flask port right now -- for call
+    sites that only display/use a single path. See that function for the
+    full discovery, which no longer stops at one."""
+    vhosts = _find_henwen_apache_vhosts()
+    return vhosts[0] if vhosts else None
 
 
 @app.route("/api/tx/config")
@@ -8249,16 +8327,19 @@ def api_tx_diagnostics():
         })
 
     # The true prerequisite gate: apply.sh itself refuses to run at all
-    # without one of these vhosts present (see its own candidate-loop
-    # comment) -- surfaced here first so an operator sees "provision Apache
-    # first" instead of every check below it failing for the same root
-    # cause. Confirmed live: install.sh's own default (--http-only,
-    # henwen.conf) satisfies this just as well as the full Let's-Encrypt
-    # flow's henwen-ssl.conf -- neither name needs to be created by hand.
-    vhost_found = _find_henwen_apache_vhost()
+    # without at least one such vhost present (see apache-common.sh's
+    # henwen_discover_vhosts()) -- surfaced here first so an operator sees
+    # "provision Apache first" instead of every check below it failing for
+    # the same root cause. Confirmed live: install.sh's own default
+    # (--http-only) satisfies this just as well as the full Let's-Encrypt
+    # flow -- no particular filename needs to be created by hand, and more
+    # than one vhost can satisfy it at once.
+    all_vhosts = _find_henwen_apache_vhosts()
+    vhost_found = all_vhosts[0] if all_vhosts else None
+    extra = f" (+{len(all_vhosts) - 1} more)" if len(all_vhosts) > 1 else ""
     add("Apache vhost ready for apply.sh", vhost_found is not None,
-        f"Found: {vhost_found}" if vhost_found else
-        "No HenWen Apache vhost found (checked henwen-ssl.conf and henwen.conf) — "
+        f"Found: {vhost_found}{extra}" if vhost_found else
+        f"No HenWen Apache vhost found (scanned {HENWEN_APACHE_SITES_DIR}/*.conf) — "
         "run setup-https.sh first (--http-only is enough if you front HTTPS "
         "yourself with an external reverse proxy/tunnel)")
 
@@ -8454,27 +8535,20 @@ def api_rx_diagnostics():
         "until HenWen restarts it")
 
     cfg = _get_rx_audio_config() or RX_AUDIO_CONFIG_DEFAULTS
-    proxy_applied = False
-    proxy_conf = None
-    for candidate in HENWEN_APACHE_VHOST_CANDIDATES:
-        try:
-            with open(candidate) as f:
-                if WS_AUDIO_MARKER in f.read():
-                    proxy_applied = True
-                    proxy_conf = candidate
-                    break
-        except OSError:
-            continue
+    vhosts, applied_to, missing_from = _apache_marker_status(WS_AUDIO_MARKER)
+    proxy_applied = bool(vhosts) and not missing_from
+    if not vhosts:
+        detail = "No HenWen Apache vhost found — run ws-audio/apply.sh after provisioning Apache"
+    elif missing_from:
+        detail = (f"Applied to {len(applied_to)}/{len(vhosts)} vhost(s) — missing from: "
+                   + ", ".join(missing_from))
+    else:
+        detail = "Applied (" + ", ".join(applied_to) + ")"
     if cfg['path'] == 'lowlatency':
-        add("Low-latency Apache proxy applied", proxy_applied,
-            f"Applied ({proxy_conf})" if proxy_applied else
-            "Not applied — remote browsers can't reach the low-latency path yet "
-            "(loopback-only until this is applied)",
-            warn=not proxy_applied)
+        add("Low-latency Apache proxy applied", proxy_applied, detail, warn=not proxy_applied)
     else:
         add("Low-latency Apache proxy applied", True,
-            "Applied (" + proxy_conf + ")" if proxy_applied else
-            "Not applied — only relevant if the Low-Latency RX path is selected")
+            detail if vhosts else "Not applied — only relevant if the Low-Latency RX path is selected")
 
     # Mirrors api_tx_diagnostics()'s own "This page loaded over HTTPS" check
     # above (same request.is_secure / X-Forwarded-Proto expression, already
@@ -11337,22 +11411,20 @@ def api_audiosocket_tap_apply():
 def api_ws_audio_status():
     if session.get('role') != 'owner':
         return jsonify({"error": "Owner access required"}), 403
-    applied  = False
-    conf_used = None
-    for candidate in HENWEN_APACHE_VHOST_CANDIDATES:
-        try:
-            with open(candidate) as f:
-                if WS_AUDIO_MARKER in f.read():
-                    applied = True
-                    conf_used = candidate
-                    break
-        except OSError:
-            continue
+    # "applied" means every HenWen-fronting vhost this box has has the
+    # proxy line, not just the first one found -- see
+    # _apache_marker_status()'s own docstring for why a box can have more
+    # than one at once. apache_conf keeps its original single-path shape
+    # (the first applied vhost, or None) for whatever already reads it;
+    # missing_from is new and additive.
+    vhosts, applied_to, missing_from = _apache_marker_status(WS_AUDIO_MARKER)
+    applied = bool(vhosts) and not missing_from
     cfg = _get_rx_audio_config() or RX_AUDIO_CONFIG_DEFAULTS
     return jsonify({
-        "applied":     applied,
-        "installed":   os.path.exists(WS_AUDIO_APPLY_SCRIPT_PATH),
-        "apache_conf": conf_used,
+        "applied":      applied,
+        "installed":    os.path.exists(WS_AUDIO_APPLY_SCRIPT_PATH),
+        "apache_conf":  applied_to[0] if applied_to else None,
+        "missing_from": missing_from,
         # Whether the Manager owner can actually select the low-latency
         # path yet -- both the setting AND the Apache proxy have to be in
         # place for a real remote browser to reach it.

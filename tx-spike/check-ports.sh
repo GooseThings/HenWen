@@ -4,34 +4,66 @@
 # Verifies every network requirement the feature has, from this box, and
 # reports PASS/FAIL per item. Run any time; changes nothing.
 #
-# Reads /etc/asterisk/henwen-https-{port,hostname} (written by
-# setup-https.sh) so this adapts to a custom --port instead of assuming
-# 443 unconditionally. Falls back to the 443 default if those markers
-# don't exist yet.
+# Host:port pairs are discovered live from Apache's own config (every
+# VirtualHost block, in every vhost actually fronting HenWen, that both
+# declares a ServerName and proxies /asterisk-ws) rather than assumed to be
+# a single one recorded by setup-https.sh or found in one hardcoded
+# filename -- a box can (and, confirmed live, does) front HenWen through
+# more than one vhost/hostname at once, each potentially on its own port,
+# and every one of them needs its own WSS probe. Falls back to the old
+# marker-file-or-443 guess only if the scan finds nothing at all (e.g. a
+# vhost patched by hand before this discovery mechanism existed but
+# missing a ServerName line entirely).
 #
 # What the browser TX feature needs:
-#   TCP <https-port> in → Apache (HTTPS kiosk + WSS signaling proxy)  [router forward]
+#   TCP <https-port> in → Apache (HTTPS kiosk + WSS signaling proxy)  [router forward, per hostname]
 #   UDP 10000-10100  in → Asterisk RTP media                          [router forward]
 #   UDP out  → STUN (stun.l.google.com) for both sides' ICE candidates
 # Asterisk's builtin HTTP server (8088) must be loopback-ONLY — it is checked
 # as a negative requirement.
 set -u
+SPIKE_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=../apache-common.sh
+. "$SPIKE_DIR/../apache-common.sh"
 PASS=0; FAIL=0; WARN=0
 ok()   { echo "  PASS  $1"; PASS=$((PASS+1)); }
 bad()  { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 warn() { echo "  WARN  $1"; WARN=$((WARN+1)); }
 
-HTTPS_PORT=$(cat /etc/asterisk/henwen-https-port 2>/dev/null || echo 443)
-WSHOST=$(cat /etc/asterisk/henwen-https-hostname 2>/dev/null || true)
-if [ -z "$WSHOST" ]; then
-  WSHOST=$(grep -h "ServerName" /etc/apache2/sites-enabled/henwen-ssl.conf 2>/dev/null | awk '{print $2}' | head -1)
+FLASK_PORT="$(henwen_flask_port)"
+mapfile -t APACHE_CONFS < <(henwen_discover_vhosts "$FLASK_PORT")
+HOSTPORTS=()
+for conf in "${APACHE_CONFS[@]}"; do
+  while IFS= read -r hp; do
+    [ -n "$hp" ] && HOSTPORTS+=("$hp")
+  done < <(henwen_hostports_with_marker "$conf" "asterisk-ws")
+done
+mapfile -t HOSTPORTS < <(printf '%s\n' "${HOSTPORTS[@]:-}" | sort -u)
+
+if [ "${#HOSTPORTS[@]}" -eq 0 ] || [ -z "${HOSTPORTS[0]:-}" ]; then
+  # Fallback for a vhost patched before this discovery mechanism existed,
+  # or one missing a ServerName line entirely.
+  LEGACY_PORT=$(cat /etc/asterisk/henwen-https-port 2>/dev/null || echo 443)
+  LEGACY_HOST=$(cat /etc/asterisk/henwen-https-hostname 2>/dev/null || true)
+  if [ -z "$LEGACY_HOST" ] && [ "${#APACHE_CONFS[@]}" -gt 0 ]; then
+    LEGACY_HOST=$(grep -h "ServerName" "${APACHE_CONFS[@]}" 2>/dev/null | awk '{print $2}' | head -1)
+  fi
+  HOSTPORTS=("${LEGACY_HOST:-?}:${LEGACY_PORT}")
 fi
 
 echo "== Configuration"
-echo "        port: ${HTTPS_PORT}   host: ${WSHOST:-?}"
+echo "        found ${#APACHE_CONFS[@]} Apache vhost(s) fronting HenWen, ${#HOSTPORTS[@]} host:port pair(s) to check:"
+for hp in "${HOSTPORTS[@]}"; do echo "          $hp"; done
 
 echo "== Local services"
-if ss -tln 2>/dev/null | grep -q ":${HTTPS_PORT} "; then ok "Apache listening on TCP ${HTTPS_PORT}"; else bad "nothing listening on TCP ${HTTPS_PORT}"; fi
+UNIQUE_PORTS=()
+for hp in "${HOSTPORTS[@]}"; do
+  p="${hp##*:}"
+  case " ${UNIQUE_PORTS[*]:-} " in *" $p "*) ;; *) UNIQUE_PORTS+=("$p") ;; esac
+done
+for p in "${UNIQUE_PORTS[@]}"; do
+  if ss -tln 2>/dev/null | grep -q ":${p} "; then ok "Apache listening on TCP ${p}"; else bad "nothing listening on TCP ${p}"; fi
+done
 
 HTTP8088=$(ss -tln 2>/dev/null | grep ":8088 ")
 if [ -z "$HTTP8088" ]; then
@@ -64,20 +96,24 @@ else
 fi
 
 echo "== WSS signaling path (through Apache, as a browser would)"
-if [ -n "$WSHOST" ]; then
+for hp in "${HOSTPORTS[@]}"; do
+  WSHOST="${hp%:*}"
+  WSPORT="${hp##*:}"
+  if [ -z "$WSHOST" ] || [ "$WSHOST" = "?" ]; then
+    warn "could not determine a hostname for one discovered vhost; skipped its WSS probe"
+    continue
+  fi
   WSKEY=$(head -c16 /dev/urandom | base64)
   CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 \
     -H "Connection: Upgrade" -H "Upgrade: websocket" \
     -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: $WSKEY" \
-    -H "Sec-WebSocket-Protocol: sip" "https://${WSHOST}:${HTTPS_PORT}/asterisk-ws" 2>/dev/null)
+    -H "Sec-WebSocket-Protocol: sip" "https://${WSHOST}:${WSPORT}/asterisk-ws" 2>/dev/null)
   if [ "$CODE" = "101" ]; then
-    ok "WSS handshake to https://${WSHOST}:${HTTPS_PORT}/asterisk-ws answered 101 (SIP websocket up)"
+    ok "WSS handshake to https://${WSHOST}:${WSPORT}/asterisk-ws answered 101 (SIP websocket up)"
   else
-    bad "WSS handshake to https://${WSHOST}:${HTTPS_PORT}/asterisk-ws returned '$CODE' (expected 101)"
+    bad "WSS handshake to https://${WSHOST}:${WSPORT}/asterisk-ws returned '$CODE' (expected 101)"
   fi
-else
-  warn "could not determine the HTTPS hostname (no henwen-https-hostname marker and no ServerName in henwen-ssl.conf); skipped WSS probe"
-fi
+done
 
 echo "== NAT / router forward (STUN probe from inside the RTP range)"
 STUN_OUT=$(python3 - <<'EOF'
@@ -150,5 +186,5 @@ if ss -uln 2>/dev/null | grep -q ":4569 "; then ok "IAX2 on UDP 4569 listening (
 
 echo
 echo "Summary: $PASS pass, $FAIL fail, $WARN warn"
-echo "Router forwards required for browser TX:  TCP ${HTTPS_PORT},  UDP ${RTPSTART:-10000}-${RTPEND:-10100}"
+echo "Router forwards required for browser TX:  TCP ${UNIQUE_PORTS[*]},  UDP ${RTPSTART:-10000}-${RTPEND:-10100}"
 [ "$FAIL" -eq 0 ]

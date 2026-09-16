@@ -78,6 +78,9 @@
 # unmodified.
 set -euo pipefail
 
+# shellcheck source=../apache-common.sh
+. "$(cd "$(dirname "$0")" && pwd)/../apache-common.sh"
+
 [ "$(id -u)" = 0 ] || { echo "Run as root (sudo)"; exit 1; }
 
 FLASK_PORT="${PORT:-5000}"   # HenWen's own port — distinct from --port (the HTTPS port) below
@@ -253,16 +256,43 @@ HENWEN_RESERVED=(accept-invite accessible api asl3-ez-manager forgot-password
                  henwen-manager login logout reset-password status static)
 EXCL_MARKER="# HenWen: preserve paths this box already served (issue #77)"
 
-# With zero enabled sites (a genuinely empty Apache, e.g. right after
-# removing every vhost by hand) this glob doesn't match anything and bash
-# passes the literal, non-existent "*.conf" pattern straight to awk, which
-# exits non-zero -- 2>/dev/null hides the message but not the exit status,
-# and under set -e that silently killed the whole script here with no
-# visible error at all. Confirmed live. `|| true` is the actual fix; the
-# existing fallback on the next line already covers the resulting empty
-# DOCROOT correctly, so no other logic needs to change.
-DOCROOT=$(awk '/^[[:space:]]*DocumentRoot[[:space:]]+/ {print $2; exit}' \
-          /etc/apache2/sites-enabled/*.conf 2>/dev/null || true)
+# Prefer the DocumentRoot of the vhost Apache actually falls back to for
+# any unmatched Host header -- the one genuinely at risk of being shadowed
+# once --http-only mode disables 000-default and takes over as the new
+# default, or once a named vhost claims a hostname that used to fall
+# through to it (issue #77). That's specifically a vhost with no
+# ServerName of its own, not just "whichever vhost's DocumentRoot line a
+# glob happens to reach first" -- a box can have any number of already-
+# enabled, *named* vhosts with their own distinct DocumentRoots, and none
+# of those are actually at risk from HenWen's own vhost: Apache routes
+# those by hostname, completely independent of what HenWen claims. Only
+# the ServerName-less (default) vhost's docroot is a real collision risk,
+# and excluding a path only works correctly when HenWen's own single
+# DocumentRoot setting is the SAME physical location those files already
+# live under -- picking the wrong one of several unrelated docroots would
+# be actively wrong, not just imprecise.
+DOCROOT=""
+for _conf in /etc/apache2/sites-enabled/*.conf; do
+    [ -f "$_conf" ] || continue
+    if ! grep -qiE '^[[:space:]]*ServerName[[:space:]]' "$_conf"; then
+        _root=$(awk '/^[[:space:]]*DocumentRoot[[:space:]]+/ {print $2; exit}' "$_conf" 2>/dev/null || true)
+        if [ -n "$_root" ]; then DOCROOT="$_root"; break; fi
+    fi
+done
+if [ -z "$DOCROOT" ]; then
+    # No ServerName-less vhost found (or it has no DocumentRoot of its own)
+    # -- fall back to the previous behavior for install layouts that don't
+    # have a distinct default vhost at all. With zero enabled sites (a
+    # genuinely empty Apache, e.g. right after removing every vhost by
+    # hand) this glob doesn't match anything and bash passes the literal,
+    # non-existent "*.conf" pattern straight to awk, which exits non-zero
+    # -- 2>/dev/null hides the message but not the exit status, and under
+    # set -e that silently killed the whole script here with no visible
+    # error at all. Confirmed live. `|| true` is the actual fix; the
+    # fallback below already covers the resulting empty DOCROOT correctly.
+    DOCROOT=$(awk '/^[[:space:]]*DocumentRoot[[:space:]]+/ {print $2; exit}' \
+              /etc/apache2/sites-enabled/*.conf 2>/dev/null || true)
+fi
 [ -n "$DOCROOT" ] || DOCROOT=/var/www/html
 DOCROOT="${DOCROOT%/}"
 
@@ -352,17 +382,7 @@ if [ "$HTTP_ONLY" = "1" ]; then
     a2dissite 000-default >/dev/null 2>&1 || true
 fi
 apache2ctl configtest
-# `reload` requires an already-active service -- apache2 usually starts
-# itself right after `apt-get install`, but don't assume it on a box where
-# the package was already present but stopped. Mirrors ws-audio/apply.sh's
-# own fallback.
-if systemctl is-active --quiet apache2; then
-    systemctl reload apache2
-elif ! systemctl start apache2; then
-    echo "   ERROR: apache2 failed to start. Recent log:"
-    journalctl -u apache2 --no-pager -n 15 | sed 's/^/     /'
-    exit 1
-fi
+henwen_apache_reload_or_start || exit 1
 
 if [ "$HTTP_ONLY" = "1" ]; then
     IP=$(hostname -I | awk '{print $1}')
@@ -443,7 +463,7 @@ fi
 inject_exclusions "$SSL_AVAIL"
 
 apache2ctl configtest
-systemctl reload apache2
+henwen_apache_reload_or_start || exit 1
 
 # ── Record the chosen port/mode/hostname for apply.sh and check-ports.sh ──
 echo "[6/7] Recording configuration..."

@@ -270,12 +270,38 @@ class TestWsAudioStatus:
         assert client.get("/api/ws-audio/status").get_json()["agc_enabled"] is False
 
     def test_status_reports_not_applied_when_no_apache_vhost_present(self, client, create_user):
-        # This sandbox has no /etc/apache2/sites-enabled/henwen*.conf files.
+        # HENWEN_APACHE_SITES_DIR (see conftest.py) points at a directory
+        # that never exists in this sandbox.
         create_user("owner1", role="owner")
         _login(client, "owner1")
         body = client.get("/api/ws-audio/status").get_json()
         assert body["applied"] is False
         assert body["apache_conf"] is None
+
+    def test_status_reports_not_fully_applied_across_multiple_vhosts(
+        self, client, create_user, tmp_path, monkeypatch
+    ):
+        # Regression coverage for the live bug this hardening fixes: a box
+        # can front HenWen through more than one vhost at once, and
+        # "applied" must not go true just because the *first* one found
+        # has the proxy line while another real vhost is still missing it.
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        patched = tmp_path / "patched.conf"
+        patched.write_text(
+            f"    ProxyPass        / http://127.0.0.1:{app.PORT}/ retry=0 timeout=120\n"
+            f"    # {app.WS_AUDIO_MARKER}\n"
+        )
+        unpatched = tmp_path / "unpatched.conf"
+        unpatched.write_text(
+            f"    ProxyPass        / http://127.0.0.1:{app.PORT}/ retry=0 timeout=120\n"
+        )
+        monkeypatch.setattr(app, "HENWEN_APACHE_SITES_DIR", str(tmp_path))
+        monkeypatch.setattr(app, "HENWEN_APACHE_VHOST_CANDIDATES", ())
+        body = client.get("/api/ws-audio/status").get_json()
+        assert body["applied"] is False
+        assert body["apache_conf"] == str(patched)
+        assert body["missing_from"] == [str(unpatched)]
 
     def test_status_includes_current_rx_audio_path(self, client, create_user):
         create_user("owner1", role="owner")
