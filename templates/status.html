@@ -202,7 +202,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .header-brand { display: flex; align-items: center; gap: 13px; color: var(--text2);
   font-size: 1.2rem; letter-spacing: 0.06em; }
 .header-brand strong { color: var(--accent); font-size: 1.33rem; }
-.header-brand-mobile-suffix { display: none; }
 .header-logo { height: 64px; width: 64px; object-fit: contain; flex-shrink: 0;
   filter: drop-shadow(0 0 6px rgba(63,185,80,.35)); }
 /* Owner-uploaded club/callsign branding, centered independent of the two
@@ -1223,10 +1222,10 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
   .header-logo { height: 37px; width: 37px; }
   .header-brand { font-size: 0.96rem; }
   .header-brand strong { font-size: 1.1rem; }
-  .header-brand-mobile-suffix { display: inline; }
-  /* "KIOSK" dropped on mobile — with .header-brand-mobile-suffix's " MOBILE"
-     already appended right after it, the brand line read as the redundant
-     "HenWen KIOSK MOBILE"; this leaves just "HenWen MOBILE". */
+  /* "KIOSK" dropped on mobile — the visitor already knows they're on their
+     own phone, so the label was just redundant noise crowding the header;
+     this leaves the brand line as plain "HenWen" (issue: was "HenWen
+     KIOSK MOBILE" before the "MOBILE" suffix was dropped too). */
   .header-brand-kiosk-label { display: none; }
   .header-actions { gap: 11px; }
   /* Login is icon-only here (text hidden, icon shown — the reverse of
@@ -1780,7 +1779,7 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
            _drawFavicon()'s own 64px canvas draw already share this same
            asset, so nothing new is being fetched. -->
       <img class="header-logo" src="/static/logo-128.png" alt="HenWen">
-      <strong>HenWen</strong> <span class="header-brand-kiosk-label">KIOSK</span><span class="header-brand-mobile-suffix"> MOBILE</span>
+      <strong>HenWen</strong> <span class="header-brand-kiosk-label">KIOSK</span>
     </div>
     <img class="header-club-logo" id="club-logo-img" alt="" style="display:none">
     <div class="header-actions">
