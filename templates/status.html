@@ -202,7 +202,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .header-brand { display: flex; align-items: center; gap: 13px; color: var(--text2);
   font-size: 1.2rem; letter-spacing: 0.06em; }
 .header-brand strong { color: var(--accent); font-size: 1.33rem; }
-.header-brand-mobile-suffix { display: none; }
 .header-logo { height: 64px; width: 64px; object-fit: contain; flex-shrink: 0;
   filter: drop-shadow(0 0 6px rgba(63,185,80,.35)); }
 /* Owner-uploaded club/callsign branding, centered independent of the two
@@ -251,6 +250,19 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 /* Icon shown only on mobile (see the media query below) — desktop keeps
    the plain text-only button unchanged. */
 svg.kiosk-login-icon { display: none; }
+
+/* Chat header notification (issue #159) — a small count/dot pinned to the
+   button's own top-right corner. #header-chat-btn carries position:relative
+   inline (it's otherwise a plain .btn-icon) so this positions against the
+   button itself, not some ancestor further up. The ring uses --bg2 (the
+   button's own resting background per .btn-icon) so the badge reads as
+   sitting on top of the button rather than overlapping it. */
+.header-chat-badge {
+  position: absolute; top: -5px; right: -5px; min-width: 16px; height: 16px;
+  padding: 0 3px; border-radius: 999px; background: var(--danger); color: #fff;
+  font-size: 0.62rem; font-weight: 700; line-height: 16px; text-align: center;
+  box-shadow: 0 0 0 2px var(--bg2); pointer-events: none;
+}
 
 /* display:contents on desktop: this wrapper is invisible to layout, so its
    children sit directly in .header-actions' flex row exactly as if it
@@ -948,6 +960,11 @@ svg.kiosk-login-icon { display: none; }
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; overflow: hidden; min-height: 0;
 }
+/* Only ever shown inside the mobile chat overlay (issue #159) — see the
+   mobile media query for .mobile-chat-open, which is the only place this
+   ever gets shown. */
+.chat-mobile-close-btn { display: none; }
+#chat-mobile-backdrop { display: none; }
 .fav-list { flex: 1; overflow-y: auto; scrollbar-color: var(--border) transparent; }
 .fav-list::-webkit-scrollbar { width: 10px; }
 .fav-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
@@ -1205,10 +1222,10 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
   .header-logo { height: 37px; width: 37px; }
   .header-brand { font-size: 0.96rem; }
   .header-brand strong { font-size: 1.1rem; }
-  .header-brand-mobile-suffix { display: inline; }
-  /* "KIOSK" dropped on mobile — with .header-brand-mobile-suffix's " MOBILE"
-     already appended right after it, the brand line read as the redundant
-     "HenWen KIOSK MOBILE"; this leaves just "HenWen MOBILE". */
+  /* "KIOSK" dropped on mobile — the visitor already knows they're on their
+     own phone, so the label was just redundant noise crowding the header;
+     this leaves the brand line as plain "HenWen" (issue: was "HenWen
+     KIOSK MOBILE" before the "MOBILE" suffix was dropped too). */
   .header-brand-kiosk-label { display: none; }
   .header-actions { gap: 11px; }
   /* Login is icon-only here (text hidden, icon shown — the reverse of
@@ -1299,9 +1316,15 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
 
   /* Fewer visible cards by default (issue #35): Node + Connected Nodes are
      what a phone visitor checks first (see the ordering comment above) and
-     always stay expanded. Map/Global Node Activity/Meshtastic/Chat are hidden
+     always stay expanded. Map/Global Node Activity/Meshtastic are hidden
      outright on mobile (not just collapsed — there's nothing to tap to get
      them back; a phone visitor who wants those checks the desktop site).
+     Chat used to be in that same "nothing to tap" bucket too, but issue
+     #159 added exactly that: the header chat-bubble button's onclick
+     (onHeaderChatClick() -> openMobileChat()) adds .mobile-chat-open below,
+     which promotes this same element back to visible as a full-screen
+     overlay -- so its base rule here still applies normally, it's just no
+     longer the end of the story for this one card.
      Favorites is the one exception left collapsible rather than hidden:
      tap its header to expand (see onMobileCardHeaderClick() and the
      load-time init that reads localStorage — default is collapsed, so a
@@ -1310,6 +1333,30 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
      updates underneath, same as before, in case they're ever un-hidden. */
   .content-area { gap: 13px; }
   .map-card, .activity-card, .meshtastic-card, .chat-card { display: none !important; }
+  /* Issue #159: promotes the chat-card above back to visible, as a
+     full-screen overlay rather than back into its normal stacked-column
+     spot -- opened via the header chat-bubble button, since that's the
+     only way to reach Chat on this breakpoint at all. Reuses the exact
+     same #chat-list/#chat-composer elements and their existing 5s polling
+     rather than building a parallel modal, so there's no separate state to
+     keep in sync. */
+  .chat-card.mobile-chat-open {
+    display: flex !important;
+    position: fixed; inset: 12px; z-index: 2001;
+    /* Overrides the general "capped collapsed-card height" rule below
+       (.activity-card, .chat-card, .meshtastic-card { max-height: 320px })
+       -- that rule still applies to this element in the cascade even while
+       normally display:none, and without this the overlay's fixed inset
+       above gets capped to a small 320px-tall box instead of filling the
+       screen. Higher-specificity selector here (two classes vs. one) wins
+       without needing !important. */
+    max-height: none;
+    box-shadow: 0 8px 32px rgba(0,0,0,.5);
+  }
+  .chat-card.mobile-chat-open .chat-mobile-close-btn { display: inline-flex; }
+  #chat-mobile-backdrop.open {
+    display: block; position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 2000;
+  }
   .favorites-card .card-header { cursor: pointer; }
   .mobile-collapse-chevron { display: flex; align-items: center; margin-left: 4px; color: var(--text2); transition: transform .15s; flex-shrink: 0; }
   .mobile-collapse-chevron .icon { width: 1rem; height: 1rem; }
@@ -1692,6 +1739,23 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
     <path d="m7 10 5 5 5-5" />
   </symbol>
+  <symbol id="icon-sun" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="4" />
+    <path d="M12 2v2" />
+    <path d="M12 20v2" />
+    <path d="m4.93 4.93 1.41 1.41" />
+    <path d="m17.66 17.66 1.41 1.41" />
+    <path d="M2 12h2" />
+    <path d="M20 12h2" />
+    <path d="m6.34 17.66-1.41 1.41" />
+    <path d="m19.07 4.93-1.41 1.41" />
+  </symbol>
+  <symbol id="icon-moon" viewBox="0 0 24 24">
+    <path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401" />
+  </symbol>
+  <symbol id="icon-message-circle" viewBox="0 0 24 24">
+    <path d="M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719" />
+  </symbol>
 </svg>
 
 <div class="board">
@@ -1710,7 +1774,7 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
            _drawFavicon()'s own 64px canvas draw already share this same
            asset, so nothing new is being fetched. -->
       <img class="header-logo" src="/static/logo-128.png" alt="HenWen">
-      <strong>HenWen</strong> <span class="header-brand-kiosk-label">KIOSK</span><span class="header-brand-mobile-suffix"> MOBILE</span>
+      <strong>HenWen</strong> <span class="header-brand-kiosk-label">KIOSK</span>
     </div>
     <img class="header-club-logo" id="club-logo-img" alt="" style="display:none">
     <div class="header-actions">
@@ -1726,6 +1790,32 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
            menu copy there) and forced visible by the mobile media query,
            which also hides #header-fs-menu-btn so it isn't offered twice. -->
       <button class="btn-icon" id="header-fs-btn" onclick="toggleFS()" title="Fullscreen" style="display:none"><svg class="icon"><use href="#icon-maximize"></use></svg></button>
+      <!-- Light/dark toggle (issue #153): a quick one-tap toggle everywhere
+           (mobile and desktop both) alongside Manager > Settings' full
+           multi-theme picker (admin+ only, and a plain 'user'/kiosk account
+           has no Manager access at all) -- this is the only way most
+           visitors can flip the board's theme themselves. Flips between
+           just 'light' and 'dark' via the same henwen-theme localStorage
+           key Manager's own picker uses, so the two stay in sync -- picking
+           one of Manager's other named skins there still shows as "dark"
+           here until toggled, same simplification status-accessible.html's
+           own binary toggle already makes. Always visible, unlike Login/
+           Fullscreen/Chat just above/below, which each have a real reason
+           to hide sometimes (already logged in, already fullscreen, chat
+           already visible) -- there's no "already toggled" state for this
+           one. -->
+      <button class="btn-icon" id="header-theme-btn" onclick="toggleKioskTheme()" title="Switch to light theme"><svg class="icon"><use href="#icon-moon"></use></svg></button>
+      <!-- Chat notification (issue #159): Chat defaults to hidden even on
+           desktop (see DASH_DEFAULT_HIDDEN) and has no way to be reached at
+           all on mobile (.chat-card's own display:none rule below), so this
+           is the one place a viewer can learn new messages exist without
+           already having the panel open. Lives outside the fold like Login/
+           Fullscreen above so the badge stays visible without opening the
+           hamburger first; JS (updateHeaderChatBtn()) is what actually
+           shows/hides it, not a CSS breakpoint, since "chat is reachable
+           right now" depends on runtime dash-hidden/overlay state, not just
+           viewport width. -->
+      <button class="btn-icon" id="header-chat-btn" onclick="onHeaderChatClick()" title="Chat" style="display:none;position:relative"><svg class="icon"><use href="#icon-message-circle"></use></svg><span id="header-chat-badge" class="header-chat-badge" style="display:none"></span></button>
       <!-- Everything else folds into a single hamburger menu on mobile (see
            #header-menu-btn / .header-menu-items below) — desktop keeps them
            as a plain inline row via display:contents, so this wrapper is
@@ -2040,6 +2130,11 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
               ondragstart="dashDragStart(event,'chat')" ondragend="dashDragEnd(event)"><svg class="icon"><use href="#icon-grip-vertical"></use></svg></span>
         <span class="card-title">Chat</span>
         <button class="dash-hide-btn" onclick="toggleDashHide('chat',event)" title="Hide panel"><svg class="icon"><use href="#icon-eye-off"></use></svg></button>
+        <!-- Only ever shown while .mobile-chat-open is set (see the CSS) --
+             chat has no other way to be reached on mobile at all, so this is
+             the one card that needs its own close affordance instead of
+             relying on the (mobile-hidden) grip/hide-btn above. -->
+        <button class="btn-icon chat-mobile-close-btn" onclick="closeMobileChat()" title="Close chat"><svg class="icon"><use href="#icon-x"></use></svg></button>
       </div>
       <div class="chat-login-note" id="chat-login-note">Log in to join the chat.</div>
       <div class="chat-list" id="chat-list" role="log" aria-live="polite" aria-relevant="additions" style="display:none"></div>
@@ -2048,6 +2143,11 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
         <button type="submit" class="sb-btn connect">Send</button>
       </form>
     </div>
+
+    <!-- Backdrop for the mobile chat overlay (issue #159) — a plain sibling
+         div, not part of .chat-card itself, so it can sit behind the card at
+         its own z-index without the card's own overflow:hidden clipping it. -->
+    <div id="chat-mobile-backdrop" onclick="closeMobileChat()"></div>
 
   </div>
 
@@ -2452,6 +2552,37 @@ function toggleFS() {
     }).catch(function(){});
   }
   else document.exitFullscreen().catch(function(){});
+}
+
+/* Light/dark toggle (issue #153) — header button, shown everywhere (mobile
+   and desktop). Deliberately a plain binary flip between 'light' and 'dark'
+   via the same henwen-theme
+   localStorage key Manager's own multi-theme picker writes (see THEME_NAMES
+   there), same simplification status-accessible.html's own toggle already
+   makes: any of Manager's other named skins (dracula, nord, ...) just reads
+   as "not light" here, so tapping this from one of those lands on 'dark'
+   rather than cycling through all twenty. A theme picked via a 'custom'
+   skin sets inline CSS custom properties that would otherwise keep winning
+   over either preset's own rule regardless of the data-theme attribute, so
+   those are explicitly cleared here too — mirrors Manager's own
+   clearCustomColorOverrides(), which this file has no reason to duplicate
+   more of than this one list. */
+var KIOSK_THEME_CUSTOM_COLOR_KEYS = ['bg','bg2','bg3','border','accent','green','warn','danger','text','text2'];
+function toggleKioskTheme() {
+  var isLight = document.documentElement.getAttribute('data-theme') === 'light';
+  var next = isLight ? 'dark' : 'light';
+  KIOSK_THEME_CUSTOM_COLOR_KEYS.forEach(function(k) { document.documentElement.style.removeProperty('--' + k); });
+  document.documentElement.setAttribute('data-theme', next);
+  try { localStorage.setItem('henwen-theme', next); } catch (e) {}
+  updateKioskThemeBtn();
+}
+function updateKioskThemeBtn() {
+  var btn = document.getElementById('header-theme-btn');
+  if (!btn) return;
+  var isLight = document.documentElement.getAttribute('data-theme') === 'light';
+  btn.title = isLight ? 'Switch to dark theme' : 'Switch to light theme';
+  var use = btn.querySelector('use');
+  if (use) use.setAttribute('href', isLight ? '#icon-sun' : '#icon-moon');
 }
 
 /* Screen Wake Lock: tied to fullscreenchange (not toggleFS itself) so it
@@ -5237,7 +5368,82 @@ function _chatUpdateVisibility() {
     list.textContent = '';
     _chatSinceId = 0;
     _chatLastDateKey = null;
+    _chatUnreadCount = 0;   /* issue #159: don't carry a stale count into the next login */
   }
+  updateHeaderChatBtn();
+}
+
+/* ── Header chat notification + mobile chat overlay (issue #159) ──
+   Chat defaults to hidden even on desktop (DASH_DEFAULT_HIDDEN) and has no
+   way to be reached at all on mobile (.chat-card's own display:none rule —
+   see openMobileChat() below), so #header-chat-btn is the one place a
+   viewer can learn new messages exist without the panel already being
+   open, and (on mobile specifically) the only way to reach it at all. */
+var _chatUnreadCount = 0;
+
+/* True exactly when the chat log is already on-screen and doesn't need
+   the header button to surface anything -- desktop: the dash-card itself
+   isn't hidden; mobile: the overlay this file adds is currently open. */
+function _chatIsBeingViewed() {
+  if (window.matchMedia(MOBILE_BREAKPOINT_QUERY).matches) {
+    var card = document.querySelector('.chat-card');
+    return !!(card && card.classList.contains('mobile-chat-open'));
+  }
+  return !_dashHidden['chat'];
+}
+
+function updateHeaderChatBtn() {
+  var btn = document.getElementById('header-chat-btn');
+  var badge = document.getElementById('header-chat-badge');
+  if (!btn || !badge) return;
+  if (_chatIsBeingViewed()) _chatUnreadCount = 0;
+  btn.style.display = (window._kioskRole && !_chatIsBeingViewed()) ? '' : 'none';
+  if (_chatUnreadCount > 0) {
+    badge.textContent = _chatUnreadCount > 9 ? '9+' : String(_chatUnreadCount);
+    badge.style.display = '';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+/* Called on every genuinely-new poll batch (never the first poll after
+   login, which is "most recent window", not unread) -- excludes the
+   caller's own messages so sending one doesn't spike your own badge. */
+function _chatTrackUnread(msgs) {
+  if (_chatIsBeingViewed()) return;
+  var fromOthers = msgs.filter(function(m) { return m.username !== window._kioskUsername; });
+  if (!fromOthers.length) return;
+  _chatUnreadCount += fromOthers.length;
+  updateHeaderChatBtn();
+}
+
+function onHeaderChatClick() {
+  if (window.matchMedia(MOBILE_BREAKPOINT_QUERY).matches) {
+    openMobileChat();
+  } else {
+    dashUnhide('chat');
+    var card = document.querySelector('.dash-card[data-dash-id="chat"]');
+    if (card) card.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+    updateHeaderChatBtn();
+  }
+}
+
+function openMobileChat() {
+  var card = document.querySelector('.chat-card');
+  var backdrop = document.getElementById('chat-mobile-backdrop');
+  if (card) card.classList.add('mobile-chat-open');
+  if (backdrop) backdrop.classList.add('open');
+  updateHeaderChatBtn();
+  var list = document.getElementById('chat-list');
+  if (list) list.scrollTop = list.scrollHeight;
+}
+
+function closeMobileChat() {
+  var card = document.querySelector('.chat-card');
+  var backdrop = document.getElementById('chat-mobile-backdrop');
+  if (card) card.classList.remove('mobile-chat-open');
+  if (backdrop) backdrop.classList.remove('open');
+  updateHeaderChatBtn();
 }
 
 /* Y-M-D of `date` in the kiosk-configured timezone (_clockTZ) — a pure
@@ -5258,6 +5464,11 @@ function _chatDateLabel(date) {
 async function refreshChat() {
   if (!window._kioskRole) return;
   try {
+    /* _chatSinceId === 0 here means this is the first poll since login --
+       that fetch is "the most recent window" of existing history, not
+       actually-new messages, so it must never count toward the unread
+       badge (issue #159) the way every poll after it does. */
+    var isFirstPoll = (_chatSinceId === 0);
     var url = '/api/chat/messages' + (_chatSinceId ? ('?since_id=' + _chatSinceId) : '');
     var r = await apiFetch(url, {cache: 'no-store'});
     if (!r.ok) return;
@@ -5266,6 +5477,7 @@ async function refreshChat() {
     if (!msgs.length) return;
     appendChatMessages(msgs);
     _chatSinceId = msgs[msgs.length - 1].id;
+    if (!isFirstPoll) _chatTrackUnread(msgs);
   } catch (e) {}
 }
 
@@ -8037,6 +8249,15 @@ window.addEventListener('resize', function() {
        re-applying, not just on the next board refresh. */
     dashFitNodeCard();
     dashApply();   /* re-apply a saved custom layout if the window crossed the mobile breakpoint live */
+    /* issue #159: "chat is reachable right now" depends on which breakpoint
+       we're at (see _chatIsBeingViewed()), so a resize crossing it changes
+       whether the header button should show even with nothing else about
+       chat itself having changed. Closing the mobile overlay on a
+       mobile->desktop cross is just tidiness -- its CSS only has any effect
+       inside the mobile media query in the first place, so leaving the
+       class set wouldn't otherwise be visibly wrong, just stale state. */
+    if (!window.matchMedia(MOBILE_BREAKPOINT_QUERY).matches) closeMobileChat();
+    updateHeaderChatBtn();
   }, 200);
 });
 
@@ -8699,6 +8920,7 @@ function toggleDashHide(id, ev) {
   dashApply();
   dashSave();
   updateDashHiddenBtn();
+  if (id === 'chat') updateHeaderChatBtn();   /* issue #159: hiding/unhiding chat changes whether the header button should show */
   /* Unconditional, not just for id==='map': hiding/unhiding *any* card can
      reflow the map's box now that a hidden sibling's space collapses into
      it, same reasoning as dashDividerEnd's "any divider can change the
@@ -8713,6 +8935,7 @@ function dashUnhide(id, ev) {
   dashApply();
   dashSave();
   updateDashHiddenBtn();
+  if (id === 'chat') updateHeaderChatBtn();   /* issue #159: same as toggleDashHide's own call above */
   setTimeout(function() { if (_map) _map.invalidateSize(); }, 50);
 }
 
@@ -8908,6 +9131,7 @@ function dashDividerEnd() {
    container size actually matching reality. */
 initDashLayout();
 initMap();
+updateKioskThemeBtn();   /* issue #153: sync the mobile theme button's icon/title with whatever the <head> inline script already applied */
 refreshBoard();
 refreshWeather();
 refreshNwsAlerts();
