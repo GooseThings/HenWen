@@ -5871,7 +5871,8 @@ def index():
                            templates=templates,
                            macros=macros,
                            schedules=schedules,
-                           conf_path=RPT_CONF_PATH)
+                           conf_path=RPT_CONF_PATH,
+                           app_logo_classic=app_logo_classic())
 
 
 # ── rpt.conf API ──────────────────────────────────────────────────────────────
@@ -6296,6 +6297,17 @@ def _kiosk_logo_url():
     return f"/api/kiosk/logo/file?v={version}"
 
 
+def app_logo_classic():
+    """Whether the app's own HenWen brand mark (header logo/favicon, not the
+    owner-uploaded club logo above) should render as the original pre-#154
+    mark rather than the current wizard-pig one. Read at template-render
+    time (see status_board()/status_board_accessible()/index() below) so the
+    right static asset is picked before first paint, with no logo-swap
+    flash — unlike the club logo, which is genuinely dynamic per-install and
+    has to be fetched after load."""
+    return get_setting('app_logo_style', 'current') == 'classic'
+
+
 def _clear_kiosk_logo_files():
     for ext in ALLOWED_LOGO_EXTS:
         path = os.path.join(KIOSK_LOGO_DIR, f"kiosk-logo{ext}")
@@ -6320,6 +6332,7 @@ def api_kiosk_settings_get():
         "aprs_is_callsign":    get_setting('aprs_is_callsign', ''),
         "aprs_max_stations":   int(get_setting('aprs_max_stations', '100') or 100),
         "logo_url":            _kiosk_logo_url(),
+        "app_logo_style":      get_setting('app_logo_style', 'current'),
     })
 
 
@@ -6379,6 +6392,11 @@ def api_kiosk_settings_put():
             set_setting('aprs_max_stations', str(val))
         except (TypeError, ValueError):
             return jsonify({"error": "aprs_max_stations must be an integer"}), 400
+    if "app_logo_style" in data:
+        val = str(data["app_logo_style"])
+        if val not in ('current', 'classic'):
+            return jsonify({"error": "app_logo_style must be 'current' or 'classic'"}), 400
+        set_setting('app_logo_style', val)
     return jsonify({"ok": True})
 
 
@@ -11364,7 +11382,8 @@ def api_audio_client_log():
 
 @app.route("/")
 def status_board():
-    return render_template("status.html", henwen_version=HENWEN_VERSION)
+    return render_template("status.html", henwen_version=HENWEN_VERSION,
+                            app_logo_classic=app_logo_classic())
 
 
 @app.route("/status")
@@ -11377,7 +11396,8 @@ def status_board_accessible():
     """Alternate Status Board for sight-impaired users — large fonts, real
     semantic HTML/ARIA, no map/APRS/ISS/drag-and-drop. Public like the main
     board; reuses the same JSON endpoints and CSRF/session model."""
-    return render_template("status-accessible.html", henwen_version=HENWEN_VERSION)
+    return render_template("status-accessible.html", henwen_version=HENWEN_VERSION,
+                            app_logo_classic=app_logo_classic())
 
 
 # ── Asterisk console log viewer ───────────────────────────────────────────────
