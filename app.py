@@ -1091,6 +1091,42 @@ def get_db():
         nickserv_password TEXT    NOT NULL DEFAULT ''
     )""")
     conn.commit()
+    # Owner-only, opt-in DMR<->AllStar bridge via the DVSwitch suite
+    # (dvswitch-server: Analog_Bridge + MMDVM_Bridge). Off by default on
+    # every install, including this table only ever being consulted once
+    # `enabled` is set -- see dvswitch/README.md for the guided-setup flow.
+    # network_password is stored plaintext, matching every other credential
+    # column in this file (irc_relay_config.nickserv_password,
+    # stream_relay_config.broadcastify_pass, ...) -- this app has no
+    # secrets-encryption layer to plug into.
+    #
+    # ambe_source defaults to 'software': Analog_Bridge ships a bundled
+    # software AMBE/IMBE codec (mbelib for decode, an op25-derived encoder)
+    # and uses it automatically with zero hardware present -- confirmed
+    # against Analog_Bridge.ini's own shipped default (decoderFallBack =
+    # true). A real hardware dongle (ThumbDV/DVstick, serial) or a network
+    # AMBEServer is an optional quality/CPU-offload upgrade, not a
+    # prerequisite -- do not make ambe_device/ambe_host a required field
+    # anywhere this config is consumed.
+    conn.execute("""CREATE TABLE IF NOT EXISTS dvswitch_config (
+        id                 INTEGER PRIMARY KEY CHECK (id = 1),
+        enabled            INTEGER NOT NULL DEFAULT 0,
+        dmr_id             TEXT    NOT NULL DEFAULT '',
+        callsign           TEXT    NOT NULL DEFAULT '',
+        dmr_network        TEXT    NOT NULL DEFAULT 'brandmeister',
+        network_host       TEXT    NOT NULL DEFAULT '',
+        network_port       INTEGER NOT NULL DEFAULT 62031,
+        network_password   TEXT    NOT NULL DEFAULT '',
+        static_talkgroups  TEXT    NOT NULL DEFAULT '',
+        bridge_node        TEXT    NOT NULL DEFAULT '',
+        allstar_gain       REAL    NOT NULL DEFAULT 1.0,
+        dmr_gain           REAL    NOT NULL DEFAULT 1.0,
+        ambe_source        TEXT    NOT NULL DEFAULT 'software',
+        ambe_device        TEXT    NOT NULL DEFAULT '',
+        ambe_host          TEXT    NOT NULL DEFAULT '',
+        ambe_port          INTEGER NOT NULL DEFAULT 2460
+    )""")
+    conn.commit()
     # Per-node lockout: presence of a row means that node is locked by its
     # Owner. Only one lockout state per node, so `node` is the primary key
     # rather than an autoincrement id.
@@ -5271,6 +5307,39 @@ def update_setting_in_content(content, section, key, value, enable=True):
         result = new_lines
 
     return "".join(result)
+
+
+def append_node_stanza(content, node_number, settings, template=None):
+    """
+    Append a brand-new [node_number] stanza to the end of rpt.conf.
+
+    Every other rpt.conf-writing function in this file (update_setting_in_
+    content() above, parse_stanza_settings()) operates on a stanza that
+    already exists -- update_setting_in_content() in particular walks the
+    file looking for `section`'s header and silently does nothing if it's
+    never found, rather than creating one. This is the one function that
+    actually creates a stanza, needed for guided setup to provision a
+    DVSwitch bridge node (or any other feature that needs a brand-new node)
+    without a human hand-editing rpt.conf first.
+
+    settings: ordered mapping of key -> value, written as plain
+    "key = value" lines -- no per-key enable/disable toggle, since a fresh
+    stanza has nothing to disable yet. template, if given, is written as
+    [node_number](template).
+
+    Raises ValueError if node_number already names a stanza (real node or
+    template) rather than silently overwriting or duplicating it.
+    """
+    if node_number in _collect_stanzas(content):
+        raise ValueError(f"[{node_number}] already exists in rpt.conf")
+
+    header = f"[{node_number}]" if not template else f"[{node_number}]({template})"
+    lines = [header] + [f"{key} = {value}" for key, value in settings.items()]
+    block = "\n".join(lines) + "\n"
+
+    if content and not content.endswith("\n"):
+        content += "\n"
+    return content + "\n" + block
 
 
 # ---------------------------------------------------------------------------
@@ -14193,6 +14262,393 @@ def api_stream_relay_config_save():
     return jsonify({"ok": True})
 
 
+# ---------------------------------------------------------------------------
+# DVSwitch (owner-only, opt-in DMR<->AllStar bridge)
+#
+# Off by default on every install -- not touched by install.sh at all.
+# dvswitch/apply.sh (installed alongside app.py, not a separate package)
+# installs the dvswitch-server apt package and configures/enables exactly
+# two of its systemd units (analog_bridge.service, mmdvm_bridge.service);
+# every other unit that package ships (D-Star/P25/NXDN/YSF gateways) is
+# explicitly left stopped/disabled since only DMR is in scope here. See
+# dvswitch/README.md for the full guided-setup flow and what each script
+# touches.
+#
+# rpt.conf ownership stays with Python (append_node_stanza() above, same
+# backup/write path every other rpt.conf writer in this file uses) --
+# dvswitch/apply.sh never touches rpt.conf itself, only the DVSwitch-side
+# ini files and systemd units, so the two don't duplicate rpt.conf logic.
+# ---------------------------------------------------------------------------
+
+DVSWITCH_CONFIG_DEFAULTS = {
+    "enabled": False, "dmr_id": "", "callsign": "", "dmr_network": "brandmeister",
+    "network_host": "", "network_port": 62031, "network_password": "",
+    "static_talkgroups": "", "bridge_node": "", "allstar_gain": 1.0, "dmr_gain": 1.0,
+    "ambe_source": "software", "ambe_device": "", "ambe_host": "", "ambe_port": 2460,
+}
+_DVSWITCH_DMR_ID_RE   = re.compile(r'^\d{6,7}$')
+_DVSWITCH_CALLSIGN_RE = re.compile(r'^[A-Z0-9]{3,7}$')
+_DVSWITCH_NETWORKS    = ("brandmeister", "tgif", "custom")
+_DVSWITCH_AMBE_SOURCES = ("software", "hardware", "network")
+
+# Fixed USRP loopback ports for the DVSwitch bridge node -- only one
+# DVSwitch bridge is supported per install (matches stream_relay's own
+# "only one node can be relayed at a time" simplicity), so these don't need
+# to be per-config. Values match the pairing confirmed during research
+# (Analog_Bridge.ini's [USRP] txPort=32001/rxPort=34001 paired with rpt.conf's
+# rxchannel = usrp/127.0.0.1:34001:32001) -- Asterisk's rxport is
+# Analog_Bridge's txPort and vice versa, so don't "fix" this to look symmetric.
+DVSWITCH_USRP_ASTERISK_RXPORT = 34001   # Asterisk listens here; Analog_Bridge's txPort
+DVSWITCH_USRP_ASTERISK_TXPORT = 32001   # Asterisk sends here; Analog_Bridge's rxPort
+
+DVSWITCH_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dvswitch")
+DVSWITCH_APPLY_SCRIPT_PATH = os.path.join(DVSWITCH_DIR, "apply.sh")
+DVSWITCH_CHECK_SCRIPT_PATH = os.path.join(DVSWITCH_DIR, "check.sh")
+# Root-only-readable handoff of the DB config to apply.sh -- passing
+# network_password on the command line would put it in `ps aux` output for
+# any local user to read; a file apply.sh reads itself (running as root via
+# the same sudo rule as every other apply.sh) avoids that.
+DVSWITCH_EXPORT_PATH = os.environ.get("DVSWITCH_EXPORT_PATH", "/etc/asterisk/henwen-dvswitch-config.json")
+
+
+def _get_dvswitch_config():
+    row = get_db().execute("SELECT * FROM dvswitch_config WHERE id=1").fetchone()
+    return row
+
+
+def _validate_dvswitch_config(data):
+    """Returns (cleaned_dict, error_string_or_None). Pure validation, no DB/
+    filesystem access, so it's directly unit-testable."""
+    enabled = bool(data.get("enabled", False))
+
+    dmr_id   = str(data.get("dmr_id", "")).strip()
+    callsign = str(data.get("callsign", "")).strip().upper()
+    dmr_network = str(data.get("dmr_network", "brandmeister")).strip().lower()
+    network_host = str(data.get("network_host", "")).strip()
+    network_password = str(data.get("network_password", "")).strip()
+    static_talkgroups = str(data.get("static_talkgroups", "")).strip()
+    bridge_node = str(data.get("bridge_node", "")).strip()
+    ambe_source = str(data.get("ambe_source", "software")).strip().lower()
+    ambe_device = str(data.get("ambe_device", "")).strip()
+    ambe_host   = str(data.get("ambe_host", "")).strip()
+
+    try:
+        network_port = int(data.get("network_port", 62031) or 62031)
+    except (TypeError, ValueError):
+        return None, "network_port must be a number"
+    try:
+        ambe_port = int(data.get("ambe_port", 2460) or 2460)
+    except (TypeError, ValueError):
+        return None, "ambe_port must be a number"
+    try:
+        allstar_gain = float(data.get("allstar_gain", 1.0) or 1.0)
+        dmr_gain     = float(data.get("dmr_gain", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        return None, "gain values must be numbers"
+
+    if dmr_network not in _DVSWITCH_NETWORKS:
+        return None, f"dmr_network must be one of: {', '.join(_DVSWITCH_NETWORKS)}"
+    if ambe_source not in _DVSWITCH_AMBE_SOURCES:
+        return None, f"ambe_source must be one of: {', '.join(_DVSWITCH_AMBE_SOURCES)}"
+    if not (0.1 <= allstar_gain <= 10) or not (0.1 <= dmr_gain <= 10):
+        return None, "gain values must be between 0.1 and 10"
+    if dmr_id and not _DVSWITCH_DMR_ID_RE.match(dmr_id):
+        return None, "DMR ID must be 6-7 digits"
+    if callsign and not _DVSWITCH_CALLSIGN_RE.match(callsign):
+        return None, "Callsign must be 3-7 letters/digits"
+    if bridge_node and not re.match(r'^\d{4,7}$', bridge_node):
+        return None, "Bridge node must be a 4-7 digit node number"
+    if network_port and not (1 <= network_port <= 65535):
+        return None, "network_port must be between 1 and 65535"
+    if ambe_source == "hardware" and enabled and not ambe_device:
+        return None, "An AMBE serial device path is required when ambe_source is 'hardware'"
+    if ambe_source == "network" and enabled and not (ambe_host and ambe_port):
+        return None, "An AMBE server host and port are required when ambe_source is 'network'"
+
+    if enabled and not (dmr_id and callsign and network_host and network_port and bridge_node):
+        return None, ("DMR ID, callsign, network host/port, and a bridge node are all "
+                       "required before enabling DVSwitch")
+
+    return {
+        "enabled": enabled, "dmr_id": dmr_id, "callsign": callsign,
+        "dmr_network": dmr_network, "network_host": network_host,
+        "network_port": network_port, "network_password": network_password,
+        "static_talkgroups": static_talkgroups, "bridge_node": bridge_node,
+        "allstar_gain": allstar_gain, "dmr_gain": dmr_gain,
+        "ambe_source": ambe_source, "ambe_device": ambe_device,
+        "ambe_host": ambe_host, "ambe_port": ambe_port,
+    }, None
+
+
+@app.route("/api/dvswitch/config")
+def api_dvswitch_config_get():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can view DVSwitch settings"}), 403
+    cfg = _get_dvswitch_config()
+    return jsonify(dict(cfg) if cfg else DVSWITCH_CONFIG_DEFAULTS)
+
+
+@app.route("/api/dvswitch/config", methods=["POST", "PUT"])
+def api_dvswitch_config_save():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can change DVSwitch settings"}), 403
+    cleaned, err = _validate_dvswitch_config(request.json or {})
+    if err:
+        return jsonify({"error": err}), 400
+
+    db = get_db()
+    db.execute(
+        """INSERT OR REPLACE INTO dvswitch_config
+           (id, enabled, dmr_id, callsign, dmr_network, network_host, network_port,
+            network_password, static_talkgroups, bridge_node, allstar_gain, dmr_gain,
+            ambe_source, ambe_device, ambe_host, ambe_port)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (int(cleaned["enabled"]), cleaned["dmr_id"], cleaned["callsign"], cleaned["dmr_network"],
+         cleaned["network_host"], cleaned["network_port"], cleaned["network_password"],
+         cleaned["static_talkgroups"], cleaned["bridge_node"], cleaned["allstar_gain"],
+         cleaned["dmr_gain"], cleaned["ambe_source"], cleaned["ambe_device"],
+         cleaned["ambe_host"], cleaned["ambe_port"])
+    )
+    db.commit()
+    log("INFO", f"[DVSWITCH] Config saved by {session.get('username', '')}")
+    return jsonify({"ok": True, "ready": True})
+
+
+def _dvswitch_bridge_node_settings(context):
+    """Pure function: the key=value settings for the DVSwitch bridge node's
+    rpt.conf stanza. Split out from the /api/dvswitch/apply route so it's
+    directly unit-testable without a DB or Flask request context."""
+    return {
+        "rxchannel": f"usrp/127.0.0.1:{DVSWITCH_USRP_ASTERISK_RXPORT}:{DVSWITCH_USRP_ASTERISK_TXPORT}",
+        "duplex":    "0",
+        "context":   context,
+    }
+
+
+def _dvswitch_default_context(content):
+    """Pull a real node's own dialplan context rather than guessing one --
+    context naming is per-install convention (custom/extensions.conf setup
+    varies), so reusing an existing node's value is far safer than a
+    hardcoded default. Falls back to 'radio-secure' (app_rpt's own stock
+    sample value) only if rpt.conf has no other node to copy from yet."""
+    for node in get_node_numbers(content):
+        settings = parse_stanza_settings(content, node)
+        ctx = settings.get("context", {}).get("value")
+        if ctx:
+            return ctx
+    return "radio-secure"
+
+
+@app.route("/api/dvswitch/apply-status")
+def api_dvswitch_apply_status():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Owner access required"}), 403
+    cfg = _get_dvswitch_config()
+    ready = bool(cfg and cfg["enabled"] and cfg["dmr_id"] and cfg["callsign"]
+                 and cfg["network_host"] and cfg["network_port"] and cfg["bridge_node"])
+    content = read_conf_file(RPT_CONF_PATH) or ""
+    bridge_node_exists = bool(cfg) and cfg["bridge_node"] in _collect_stanzas(content)
+    with _dvswitch_status_lock:
+        applied = bool(_dvswitch_status_cache.get("analog_bridge") == "active"
+                        and _dvswitch_status_cache.get("mmdvm_bridge") == "active")
+    return jsonify({
+        "ready":              ready,
+        "installed":          os.path.exists(DVSWITCH_APPLY_SCRIPT_PATH),
+        "bridge_node_exists": bridge_node_exists,
+        "applied":            applied,
+    })
+
+
+@app.route("/api/dvswitch/apply", methods=["POST"])
+def api_dvswitch_apply():
+    """Guided setup: creates the bridge node's rpt.conf stanza (Python-side,
+    via append_node_stanza()) if it doesn't already exist, hands the saved
+    config to dvswitch/apply.sh (apt install + ini config + systemd enable,
+    root via the same narrowly-scoped sudo rule every other apply.sh uses),
+    then reloads rpt.conf live. Owner-only, and refuses to run at all unless
+    the config is complete -- see _validate_dvswitch_config()."""
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Owner access required"}), 403
+    if not os.path.exists(DVSWITCH_APPLY_SCRIPT_PATH):
+        return jsonify({"error": f"apply.sh not found: {DVSWITCH_APPLY_SCRIPT_PATH}"}), 404
+
+    cfg = _get_dvswitch_config()
+    if not cfg or not (cfg["enabled"] and cfg["dmr_id"] and cfg["callsign"]
+                        and cfg["network_host"] and cfg["network_port"] and cfg["bridge_node"]):
+        return jsonify({"error": "Save a complete DVSwitch configuration first "
+                                  "(DMR ID, callsign, network, bridge node)"}), 400
+
+    output_parts = []
+
+    content = read_conf_file(RPT_CONF_PATH)
+    if content is None:
+        return jsonify({"error": f"Cannot read rpt.conf at {RPT_CONF_PATH}"}), 500
+    if cfg["bridge_node"] not in _collect_stanzas(content):
+        settings = _dvswitch_bridge_node_settings(_dvswitch_default_context(content))
+        try:
+            new_content = append_node_stanza(content, cfg["bridge_node"], settings)
+            write_conf_file(RPT_CONF_PATH, new_content)
+            output_parts.append(f"Created rpt.conf node [{cfg['bridge_node']}] "
+                                 f"(rxchannel usrp/127.0.0.1:{DVSWITCH_USRP_ASTERISK_RXPORT}:"
+                                 f"{DVSWITCH_USRP_ASTERISK_TXPORT}, duplex=0, "
+                                 f"context={settings['context']}).")
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        except PermissionError as e:
+            return jsonify({"error": str(e)}), 403
+    else:
+        output_parts.append(f"rpt.conf node [{cfg['bridge_node']}] already exists — left unchanged.")
+
+    export = {
+        "dmr_id": cfg["dmr_id"], "callsign": cfg["callsign"], "dmr_network": cfg["dmr_network"],
+        "network_host": cfg["network_host"], "network_port": cfg["network_port"],
+        "network_password": cfg["network_password"], "static_talkgroups": cfg["static_talkgroups"],
+        "allstar_gain": cfg["allstar_gain"], "dmr_gain": cfg["dmr_gain"],
+        "ambe_source": cfg["ambe_source"], "ambe_device": cfg["ambe_device"],
+        "ambe_host": cfg["ambe_host"], "ambe_port": cfg["ambe_port"],
+        "usrp_asterisk_rxport": DVSWITCH_USRP_ASTERISK_RXPORT,
+        "usrp_asterisk_txport": DVSWITCH_USRP_ASTERISK_TXPORT,
+    }
+    try:
+        fd = os.open(DVSWITCH_EXPORT_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(export, f)
+    except OSError as e:
+        return jsonify({"error": f"Could not write {DVSWITCH_EXPORT_PATH}: {e}"}), 500
+
+    cmd = [SUDO_PATH, "-n", DVSWITCH_APPLY_SCRIPT_PATH, DVSWITCH_EXPORT_PATH]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "apply.sh timed out after 180s (package download/install can be "
+                                  "slow on first run) — check journalctl by hand",
+                         "output": "\n".join(output_parts)}), 500
+    except Exception as e:
+        log("ERROR", f"[API] /api/dvswitch/apply exception: {e}")
+        return jsonify({"error": str(e)}), 500
+
+    output_parts.append((r.stdout or "") + (r.stderr or ""))
+    if r.returncode != 0:
+        hint = ("Service account lacks sudo rights for apply.sh — re-run install.sh "
+                 "to install the henwen-systemctl sudoers rule."
+                 if "password" in (r.stderr or "").lower() or "authoriz" in (r.stderr or "").lower()
+                 else None)
+        log("ERROR", f"[API] dvswitch apply failed (exit {r.returncode})")
+        resp = {"error": f"apply.sh returned code {r.returncode}", "output": "\n".join(output_parts)}
+        if hint:
+            resp["hint"] = hint
+        return jsonify(resp), 500
+
+    # Reuses /api/reload's own command (asterisk -rx "rpt restart", NOT
+    # "rpt reload" -- see api_reload()'s docstring for why) to pick up the
+    # new node stanza live. Whether "rpt restart" alone can bring up a node
+    # number that didn't exist when Asterisk last started (vs. needing a
+    # first-time full "systemctl restart asterisk") was not verified against
+    # real ASL3 behavior -- surfaced to the owner rather than assumed.
+    try:
+        rr = subprocess.run([ASTERISK_PATH, "-rx", "rpt restart"],
+                             capture_output=True, text=True, timeout=15)
+        output_parts.append("rpt restart: " + (rr.stdout.strip() or "(no output)"))
+        output_parts.append("If the bridge node doesn't come up, a full Asterisk restart "
+                             "may be needed for a brand-new node number — Manager > Restart Asterisk.")
+    except Exception as e:
+        output_parts.append(f"rpt restart failed: {e}")
+
+    log("INFO", f"[API] DVSwitch applied by '{session.get('username')}'")
+    return jsonify({"success": True, "output": "\n".join(output_parts),
+                     "message": "DVSwitch guided setup ran. Check the Diagnostics report below "
+                                "before assuming the bridge is live."})
+
+
+@app.route("/api/dvswitch/diagnostics")
+def api_dvswitch_diagnostics():
+    """Mirrors api_tx_diagnostics()'s shape exactly: fast in-process checks
+    (config complete, rpt.conf node present) plus dvswitch/check.sh's own
+    read-only PASS/FAIL/WARN lines for everything that needs real shell
+    access (package/service state, ports, AMBE device reachability)."""
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Owner access required"}), 403
+
+    checks = []
+
+    def add(label, ok, detail, warn=False):
+        checks.append({"label": label, "status": "warn" if warn else ("pass" if ok else "fail"), "detail": detail})
+
+    cfg = _get_dvswitch_config()
+    configured = bool(cfg and cfg["enabled"] and cfg["dmr_id"] and cfg["callsign"]
+                       and cfg["network_host"] and cfg["bridge_node"])
+    add("DVSwitch configuration complete", configured,
+        "All required fields saved" if configured else
+        "Save DMR ID, callsign, network, and a bridge node in Manager > DVSwitch first")
+
+    content = read_conf_file(RPT_CONF_PATH) or ""
+    node_exists = bool(cfg) and cfg["bridge_node"] in _collect_stanzas(content)
+    add("Bridge node present in rpt.conf", node_exists,
+        f"[{cfg['bridge_node']}] found" if (cfg and node_exists) else
+        "Run guided setup to create it" if cfg else "No config saved yet")
+
+    script_output = ""
+    if not os.path.isfile(DVSWITCH_CHECK_SCRIPT_PATH):
+        add("System checks (check.sh)", False,
+            "dvswitch/check.sh not found on disk — reinstall or update HenWen", warn=True)
+    else:
+        try:
+            proc = subprocess.run(["bash", DVSWITCH_CHECK_SCRIPT_PATH, DVSWITCH_EXPORT_PATH],
+                                   capture_output=True, text=True, timeout=30)
+            script_output = proc.stdout + proc.stderr
+            for line in script_output.splitlines():
+                m = re.match(r'^\s*(PASS|FAIL|WARN)\s+(.*)$', line)
+                if m:
+                    status, detail = m.group(1), m.group(2).strip()
+                    add(detail, status == "PASS", detail, warn=(status == "WARN"))
+        except subprocess.TimeoutExpired:
+            add("System checks (check.sh)", False, "Timed out after 30s")
+        except Exception as e:
+            add("System checks (check.sh)", False, str(e))
+
+    summary = {
+        "pass": sum(1 for c in checks if c["status"] == "pass"),
+        "fail": sum(1 for c in checks if c["status"] == "fail"),
+        "warn": sum(1 for c in checks if c["status"] == "warn"),
+    }
+    log("INFO", f"[DVSWITCH-DIAG] {session.get('username', '?')} ran DVSwitch diagnostics: "
+                f"{summary['pass']} pass, {summary['fail']} fail, {summary['warn']} warn")
+    return jsonify({"checks": checks, "summary": summary, "raw_output": script_output})
+
+
+# Lightweight status cache read by /api/dvswitch/apply-status -- polls
+# `systemctl is-active` for the two units DVSwitch guided setup enables.
+# Deliberately NOT a stream_relay.py-style subprocess supervisor: the
+# dvswitch-server package already ships real systemd units with their own
+# restart-on-failure policy, so there's nothing here to hand-supervise --
+# just a cheap shared read of state that already exists, same "one poller,
+# many cheap reads" shape as the favstats/global-activity pollers.
+_dvswitch_status_cache = {"analog_bridge": None, "mmdvm_bridge": None, "checked_at": 0}
+_dvswitch_status_lock  = threading.Lock()
+DVSWITCH_STATUS_POLL_SEC = 30
+
+
+def start_dvswitch_status_poller():
+    def _loop():
+        while True:
+            try:
+                r = subprocess.run(
+                    ["systemctl", "is-active", "analog_bridge.service", "mmdvm_bridge.service"],
+                    capture_output=True, text=True, timeout=10)
+                # is-active exits non-zero if ANY listed unit isn't active, but
+                # still prints one status word per line in argument order --
+                # read the lines regardless of returncode.
+                states = (r.stdout or "").splitlines()
+                with _dvswitch_status_lock:
+                    _dvswitch_status_cache["analog_bridge"] = states[0].strip() if len(states) > 0 else "unknown"
+                    _dvswitch_status_cache["mmdvm_bridge"]  = states[1].strip() if len(states) > 1 else "unknown"
+                    _dvswitch_status_cache["checked_at"] = time.time()
+            except Exception as e:
+                log("DEBUG", f"[DVSWITCH] status poll failed (likely not installed): {e}")
+            time.sleep(DVSWITCH_STATUS_POLL_SEC)
+    threading.Thread(target=_loop, daemon=True, name="dvswitch-status-poller").start()
+
+
 @app.route("/api/meshtastic/config")
 def api_meshtastic_config_get():
     if session.get('role') != 'owner':
@@ -16139,6 +16595,7 @@ if not os.environ.get("HENWEN_SKIP_STARTUP"):
     start_meshtastic_discord_relay_worker()
     start_stream_relay()
     start_irc_relay()
+    start_dvswitch_status_poller()
     start_audio_ws_relay()
 
 if __name__ == "__main__":
