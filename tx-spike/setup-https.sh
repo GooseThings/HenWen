@@ -70,12 +70,16 @@
 #           disables the stock 000-default site
 #           no certbot, no henwen-ssl.conf, no henwen-https-* marker files
 #
-# The resulting file MUST be named exactly .../henwen-ssl.conf — that path
-# is hardcoded in tx-spike/apply.sh (which patches its ProxyPass line to
-# add the /asterisk-ws WSS proxy) and tx-spike/check-ports.sh. Certbot's
+# This script always names the resulting file .../henwen-ssl.conf, by
+# convention rather than requirement — tx-spike/apply.sh and
+# tx-spike/check-ports.sh no longer hardcode that path; both discover
+# whichever vhost(s) are actually fronting HenWen live, via
+# apache-common.sh's henwen_discover_vhosts(), regardless of filename. The
+# fixed name is kept anyway since it's still what rollback.sh's own legacy
+# (pre-hardening) two-name fallback restore looks for, and because a
+# predictable name is easier for an operator to find by hand. Certbot's
 # apache plugin normally names its generated SSL vhost "<name>-le-ssl.conf"
-# — this script renames it after the fact so both scripts keep working
-# unmodified.
+# — this script renames it after the fact to keep that convention.
 set -euo pipefail
 
 # shellcheck source=../apache-common.sh

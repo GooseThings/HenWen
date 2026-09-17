@@ -12,6 +12,10 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=apache-common.sh
+. "$SCRIPT_DIR/apache-common.sh"
+
 MANAGER_CONF="/etc/asterisk/manager.conf"
 SERVICE_FILE="/etc/systemd/system/HenWen.service"
 AMI_PORT=5038
@@ -338,7 +342,11 @@ echo "  To verify in the web UI:"
 # right URL the same way install.sh's own final banner does: prefer HTTPS
 # (setup-https.sh's marker files) over a plain HenWen Apache vhost over the
 # direct :5000 port, since :5000 bypasses Apache and with it the
-# low-latency RX audio path's /ws-audio proxy.
+# low-latency RX audio path's /ws-audio proxy. "A HenWen Apache vhost" is
+# discovered the same way apache-common.sh's henwen_discover_vhosts() does
+# for every other script here -- not a hardcoded henwen.conf/henwen-ssl.conf
+# check, which would silently fall through to the :5000 branch on a box
+# whose vhost has any other name.
 IP=$(hostname -I | awk '{print $1}')
 if [ -f /etc/asterisk/henwen-https-hostname ]; then
     WEBUI_HOSTNAME=$(cat /etc/asterisk/henwen-https-hostname 2>/dev/null || true)
@@ -346,7 +354,7 @@ if [ -f /etc/asterisk/henwen-https-hostname ]; then
     WEBUI_PORT_SUFFIX=""
     [ -n "$WEBUI_HTTPS_PORT" ] && [ "$WEBUI_HTTPS_PORT" != "443" ] && WEBUI_PORT_SUFFIX=":${WEBUI_HTTPS_PORT}"
     echo "    https://${WEBUI_HOSTNAME}${WEBUI_PORT_SUFFIX}"
-elif [ -f /etc/apache2/sites-enabled/henwen.conf ] || [ -f /etc/apache2/sites-enabled/henwen-ssl.conf ]; then
+elif [ -n "$(henwen_discover_vhosts "$(henwen_flask_port)" 2>/dev/null | head -1)" ]; then
     echo "    http://${IP}/"
 else
     echo "    http://${IP}:5000"
