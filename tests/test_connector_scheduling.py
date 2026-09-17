@@ -16,6 +16,7 @@ actually got to connect whenever the local node wasn't idle at that exact
 moment. These need a real sqlite3.Row (not a plain dict), so they go through
 the fresh_db fixture and real INSERTs.
 """
+import time
 from datetime import datetime
 
 import app
@@ -273,6 +274,70 @@ class TestRunConnectorsOnetimeEnabledRace:
         row = fresh_db.execute("SELECT * FROM connectors WHERE id=?", (cid,)).fetchone()
         assert row["state"] == "connected"
         assert row["enabled"] == 1
+
+
+class TestRunConnectorsStaleAmiCacheForcesDisconnect:
+    """_node_active() is a raw, unguarded read of _ami_cache with no
+    staleness awareness -- on a sustained AMI outage, _poll_loop()'s error
+    handler (_ami_invalidate()) drops the socket but never touches
+    _ami_cache, so a node that happened to be keyed right when AMI died
+    reads as "active" forever. Without the cache-staleness guard in the
+    'connected' state's idle-timeout branch, that would refresh
+    last_activity every tick and permanently defeat auto-disconnect --
+    unlike the 'waiting' state's own forced-connect fallback, which doesn't
+    depend on _node_active() once its 2-minute timer trips."""
+
+    def _setup_connected(self, db, **overrides):
+        return _insert_connector(
+            db,
+            state="connected",
+            connected_at="2024-01-01 14:00:00",
+            last_activity="2024-01-01 14:00:00",
+            settle_sec=60,          # long past by AT_1430 (14:30)
+            idle_limit_sec=180,     # also long past
+            **overrides,
+        )
+
+    def test_stale_cache_lets_idle_timeout_force_the_disconnect(self, fresh_db, monkeypatch):
+        cid = self._setup_connected(fresh_db)
+        _patch_now(monkeypatch, AT_1430)
+        # Cache says the link is present (so _connector_link_present doesn't
+        # short-circuit to a plain "link ended" reset), but is never touched
+        # by _ami_cache_ts -- .get(local, 0) defaults to epoch 0, i.e.
+        # maximally stale, exactly like a node whose AMI data was never
+        # refreshed during a sustained outage.
+        monkeypatch.setitem(app._ami_cache, "643931", {"connected": ["546054"]})
+        monkeypatch.setattr(app, "_node_active", lambda node: True)  # would look "active" forever
+        disconnect_calls = []
+        monkeypatch.setattr(app, "_connector_do_disconnect",
+                             lambda *a, **k: (disconnect_calls.append(a), {"raw": ""})[1])
+
+        app._run_connectors()
+
+        row = fresh_db.execute("SELECT * FROM connectors WHERE id=?", (cid,)).fetchone()
+        assert row["state"] == "idle", (
+            "a stale AMI cache must not let a stuck 'active' reading keep "
+            "last_activity refreshed forever -- the idle timer has to be "
+            "allowed to run and eventually force the disconnect"
+        )
+        assert len(disconnect_calls) == 1
+
+    def test_fresh_cache_still_trusts_node_active_and_skips_disconnect(self, fresh_db, monkeypatch):
+        cid = self._setup_connected(fresh_db)
+        _patch_now(monkeypatch, AT_1430)
+        monkeypatch.setitem(app._ami_cache, "643931", {"connected": ["546054"]})
+        monkeypatch.setitem(app._ami_cache_ts, "643931", time.time())  # fresh as of right now
+        monkeypatch.setattr(app, "_node_active", lambda node: True)
+        disconnect_calls = []
+        monkeypatch.setattr(app, "_connector_do_disconnect",
+                             lambda *a, **k: (disconnect_calls.append(a), {"raw": ""})[1])
+
+        app._run_connectors()
+
+        row = fresh_db.execute("SELECT * FROM connectors WHERE id=?", (cid,)).fetchone()
+        assert row["state"] == "connected", "a fresh cache reading 'active' must still be trusted"
+        assert row["last_activity"] == "2024-01-01 14:30:00"
+        assert disconnect_calls == []
 
 
 def _login(client, username):

@@ -15336,7 +15336,26 @@ def _run_connectors():
             if (now - connected_at).total_seconds() < row["settle_sec"]:
                 continue  # still in settle window
 
-            if _node_active(local):
+            # Trust _node_active() only while the AMI cache for `local` is
+            # actually fresh. On a sustained AMI outage, _poll_loop()'s error
+            # handler (_ami_invalidate()) drops the socket but never touches
+            # _ami_cache, so a node that happened to be keyed right when AMI
+            # died would otherwise read as "active" forever, continuously
+            # refreshing last_activity below and permanently defeating the
+            # idle-timeout disconnect. Mirrors the 'waiting' state's own
+            # forced-connect fallback above, but for the disconnect side:
+            # once the cache is stale, stop trusting "active" and let the
+            # idle clock run against whatever activity was last genuinely
+            # observed, so the existing idle_limit_sec check below still
+            # forces the disconnect within a bounded time instead of never.
+            cache_age   = time.time() - _ami_cache_ts.get(local, 0)
+            cache_stale = cache_age > CACHE_TTL
+            if cache_stale:
+                log("WARN", f"[CONNECTOR] '{row['name']}' — AMI status for {local} is "
+                            f"{cache_age:.0f}s stale; not trusting it as active for "
+                            f"idle-timeout purposes")
+
+            if _node_active(local) and not cache_stale:
                 db.execute("UPDATE connectors SET last_activity=? WHERE id=?", (now_str, cid))
                 db.commit()
             else:
