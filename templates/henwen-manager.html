@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <title>HenWen | AllStarLink 3 Node Manager</title>
-<link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+<link rel="icon" type="image/x-icon" href="/static/favicon{{ '-classic' if app_logo_classic else '' }}.ico">
 <script>(function(){var t=localStorage.getItem('henwen-theme')||localStorage.getItem('asl3ez-theme');if(t)document.documentElement.setAttribute('data-theme',t);if(t==='custom'){try{var c=JSON.parse(localStorage.getItem('henwen-custom-colors')||'{}'),r=document.documentElement.style,k;for(k in c){if(c[k])r.setProperty('--'+k,c[k]);}}catch(e){}}})();</script>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1479,6 +1479,26 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
             <span style="font-size:0.82rem;color:var(--text-muted)">
               Caps how many nearby stations are drawn on the Map and listed in Latest
               Activity, closest first (1–1000).
+            </span>
+          </div>
+        </div>
+        <div class="form-group" style="margin-top:24px;padding-top:16px;border-top:1px solid var(--border)">
+          <div style="font-weight:600;margin-bottom:8px">App Logo</div>
+          <div style="display:flex;gap:22px;align-items:flex-start">
+            <label style="cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:6px">
+              <input type="radio" name="ks-app-logo" id="ks-app-logo-current" value="current">
+              <img src="/static/logo-96.png" alt="Current logo" style="height:48px;width:48px;object-fit:contain">
+              Current
+            </label>
+            <label style="cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:6px">
+              <input type="radio" name="ks-app-logo" id="ks-app-logo-classic" value="classic">
+              <img src="/static/logo-96-classic.png" alt="Classic logo" style="height:48px;width:48px;object-fit:contain">
+              Classic
+            </label>
+            <span style="font-size:0.82rem;color:var(--text-muted);align-self:center">
+              Which HenWen mark to show in the Status Board header and browser tab icon.
+              This is the app's own logo, separate from the Club Logo below.
+              Takes effect on next page load.
             </span>
           </div>
         </div>
@@ -6336,6 +6356,9 @@ async function ksLoad() {
   if (aprsInp) aprsInp.value = d.aprs_is_callsign || '';
   var aprsMaxInp = document.getElementById('ks-aprs-max-stations');
   if (aprsMaxInp) aprsMaxInp.value = d.aprs_max_stations || 100;
+  var logoStyle = d.app_logo_style || 'current';
+  var logoRb = document.getElementById('ks-app-logo-' + logoStyle);
+  if (logoRb) logoRb.checked = true;
   clubLogoRender(d.logo_url);
 }
 
@@ -6413,6 +6436,7 @@ async function ksSave() {
   if (isNaN(aprsMax) || aprsMax < 1 || aprsMax > 1000) {
     st.textContent = 'Max APRS stations must be 1–1000.'; st.style.color = 'var(--danger)'; return;
   }
+  var logoEl = document.querySelector('input[name="ks-app-logo"]:checked');
   var payload = {
     idle_timeout_sec:     mins * 60,
     clock_format:         fmtEl ? fmtEl.value : '12',
@@ -6421,6 +6445,7 @@ async function ksSave() {
     chat_retention_hours: chatRet,
     aprs_is_callsign:     aprsCallsign,
     aprs_max_stations:    aprsMax,
+    app_logo_style:       logoEl ? logoEl.value : 'current',
   };
   var r = await api('/api/kiosk/settings', {
     method:  'PUT',
