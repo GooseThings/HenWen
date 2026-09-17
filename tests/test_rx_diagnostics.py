@@ -150,6 +150,28 @@ class TestRxDiagnosticsChecks:
         c = _find(body["checks"], "Apache proxy applied")
         assert c["status"] == "warn"
 
+    def test_proxy_check_stays_calm_when_legacy_and_nothing_applied_anywhere(
+        self, client, create_user, tmp_path, monkeypatch
+    ):
+        # Regression coverage: when the legacy path is selected (so this
+        # check is purely informational) and real vhosts exist but none of
+        # them have ever been patched, the detail text should stay the calm
+        # "not relevant yet" message rather than a per-vhost "Applied to
+        # 0/2 — missing from: ..." breakdown, which reads as alarming next
+        # to a "pass" status for a check that isn't actually gating anything
+        # right now.
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        conf = tmp_path / "unpatched.conf"
+        conf.write_text(f"    ProxyPass        / http://127.0.0.1:{app.PORT}/ retry=0 timeout=120\n")
+        monkeypatch.setattr(app, "HENWEN_APACHE_SITES_DIR", str(tmp_path))
+        monkeypatch.setattr(app, "HENWEN_APACHE_VHOST_CANDIDATES", ())
+        client.put("/api/rx-audio/config", json={"path": "legacy"})
+        body = client.get("/api/rx/diagnostics").get_json()
+        c = _find(body["checks"], "Apache proxy applied")
+        assert c["status"] == "pass"
+        assert c["detail"] == "Not applied — only relevant if the Low-Latency RX path is selected"
+
     def test_no_nodes_configured_fails_channel_check(self, client, create_user):
         create_user("owner1", role="owner")
         _login(client, "owner1")

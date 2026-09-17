@@ -8547,8 +8547,14 @@ def api_rx_diagnostics():
     if cfg['path'] == 'lowlatency':
         add("Low-latency Apache proxy applied", proxy_applied, detail, warn=not proxy_applied)
     else:
+        # Only show the per-vhost "Applied to X/Y — missing from: ..." detail
+        # when it's actually informative (something IS applied somewhere, or
+        # partially). When nothing has ever been applied anywhere, that
+        # detail reads as alarming ("Applied to 0/2...") for a check that's
+        # reporting "pass" -- keep the calm "not relevant yet" message in
+        # that case regardless of how many vhosts were discovered.
         add("Low-latency Apache proxy applied", True,
-            detail if vhosts else "Not applied — only relevant if the Low-Latency RX path is selected")
+            detail if applied_to else "Not applied — only relevant if the Low-Latency RX path is selected")
 
     # Mirrors api_tx_diagnostics()'s own "This page loaded over HTTPS" check
     # above (same request.is_secure / X-Forwarded-Proto expression, already
