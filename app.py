@@ -10480,9 +10480,16 @@ def api_stress_test_audio_start():
                 broadcast = _start_broadcast(node)
                 _audio_active[node] = broadcast
     except Exception as e:
+        # Full detail server-side only, matching api_audio_stream()'s own
+        # except block above -- an exception's own text can carry internal
+        # paths/state that shouldn't ride back out over HTTP even to an
+        # owner-gated route (CodeQL: py/stack-trace-exposure).
+        log('ERROR', f'[STRESS-TEST] could not start audio for node {node}: {e}\n'
+                    f'{traceback.format_exc()}')
+        generic = "Could not start audio for this node — check server logs"
         with _stress_lock:
-            _stress_state["audio"] = {"running": False, "node": node, "error": str(e)}
-        return jsonify({"error": f"Could not start audio for node {node}: {e}"}), 500
+            _stress_state["audio"] = {"running": False, "node": node, "error": generic}
+        return jsonify({"error": generic}), 500
 
     stop_event = threading.Event()
     with _stress_lock:
