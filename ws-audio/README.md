@@ -48,13 +48,15 @@ a listener:
 ## What it does
 
 `apply.sh` adds one Apache `ProxyPass /ws-audio ws://127.0.0.1:8098/` line
-to whichever HenWen vhost is present: `henwen-ssl.conf` if
-`tx-spike/setup-https.sh` has been run, else `henwen.conf` for a plain-HTTP
-install. This script itself works fine against a plain-HTTP vhost. What
-needs HTTPS is the feature as a whole, per requirement 1 above, since the
-browser's `AudioDecoder` won't exist without it. Wiring the proxy on a
-plain-HTTP install still isn't wasted: it's ready the moment HTTPS gets
-added later, and `install.sh` does exactly that (see below).
+to *every* Apache vhost actually fronting HenWen right now, discovered live
+by `../apache-common.sh` rather than assumed to be one of two hardcoded
+filenames — a box can front HenWen through more than one vhost at once
+(e.g. one per hostname), and each one gets patched. This script itself
+works fine against a plain-HTTP vhost. What needs HTTPS is the feature as a
+whole, per requirement 1 above, since the browser's `AudioDecoder` won't
+exist without it. Wiring the proxy on a plain-HTTP install still isn't
+wasted: it's ready the moment HTTPS gets added later, and `install.sh` does
+exactly that (see below).
 
 `install.sh` provisions a plain-HTTP vhost automatically on every fresh
 install (via `tx-spike/setup-https.sh --http-only`, unless the owner opts

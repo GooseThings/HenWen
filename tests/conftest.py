@@ -23,6 +23,13 @@ os.environ.setdefault("RPT_CONF_PATH", os.path.join(_TEST_ROOT, "rpt.conf"))
 os.environ.setdefault("BACKUP_DIR", os.path.join(_TEST_ROOT, "rpt_backups"))
 os.environ.setdefault("SOUNDS_DIR", os.path.join(_TEST_ROOT, "sounds"))
 os.environ.setdefault("TTS_VOICES_DIR", os.path.join(_TEST_ROOT, "tts_voices"))
+# _find_henwen_apache_vhosts() (app.py) globs this directory for *.conf
+# files proxying HenWen's own Flask port -- pointed at a directory that
+# never exists so tests never see this box's real Apache config (this repo
+# checkout can itself be a live install with real vhosts in
+# /etc/apache2/sites-enabled). glob.glob() on a nonexistent directory just
+# returns [], so nothing needs to be created here.
+os.environ.setdefault("HENWEN_APACHE_SITES_DIR", os.path.join(_TEST_ROOT, "apache-sites-enabled"))
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

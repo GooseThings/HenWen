@@ -7,12 +7,15 @@
 # tx-spike/apply.sh's own /asterisk-ws proxy line exactly, reusing the same
 # proxy_wstunnel Apache module. Unlike tx-spike, this does NOT require
 # HTTPS first: Listen already works over plain HTTP today (unlike browser
-# TX's getUserMedia, which needs a secure context), so this patches
-# whichever HenWen Apache vhost is actually present — the HTTPS one
-# (henwen-ssl.conf) if setup-https.sh has been run, else the plain-HTTP one
-# (henwen.conf) if Apache is fronting HenWen at all. Everything is additive
-# and marker-guarded (safe to re-run); a backup is taken first. Companion:
-# rollback.sh restores it.
+# TX's getUserMedia, which needs a secure context), so this patches every
+# HenWen Apache vhost apache-common.sh's henwen_discover_vhosts() finds —
+# however many there are, and whatever they're named (see that file for
+# why this is a live scan rather than two hardcoded filenames; confirmed
+# live that a real install can front HenWen through more than one vhost
+# at once, one per hostname, and a fixed candidate list only ever patched
+# the first). Everything is additive and marker-guarded (safe to re-run);
+# a backup of every touched vhost is taken first. Companion: rollback.sh
+# restores them.
 #
 # This only wires the *network path* to the WebSocket server, which app.py
 # already spawns/supervises unconditionally (audio_ws_relay.py is always
@@ -22,12 +25,14 @@
 # "RX Audio Path" setting (near TX Diagnostics) — this script only makes
 # that choice reachable from outside this box once made.
 #
-# Touches:  /etc/apache2/sites-enabled/henwen-ssl.conf, OR
-#           /etc/apache2/sites-enabled/henwen.conf (whichever is present)
+# Touches: every Apache vhost currently proxying HenWen's own Flask port
+#          (see apache-common.sh's henwen_discover_vhosts())
 # Does NOT touch Asterisk, and does NOT restart HenWen.
 set -euo pipefail
 
 SPIKE_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=../apache-common.sh
+. "$SPIKE_DIR/../apache-common.sh"
 MARKER="HenWen low-latency RX audio"
 STAMP=$(date +%Y%m%d-%H%M%S)
 BACKUP_DIR="/root/henwen-ws-audio-backup-$STAMP"
@@ -38,16 +43,11 @@ WS_PORT="${AUDIO_WS_PORT:-8098}"
 
 [ "$(id -u)" = 0 ] || { echo "Run as root (sudo)"; exit 1; }
 
-APACHE_CONF=""
-for candidate in /etc/apache2/sites-enabled/henwen-ssl.conf /etc/apache2/sites-enabled/henwen.conf; do
-  if [ -f "$candidate" ]; then
-    APACHE_CONF="$candidate"
-    break
-  fi
-done
-if [ -z "$APACHE_CONF" ]; then
+FLASK_PORT="$(henwen_flask_port)"
+mapfile -t APACHE_CONFS < <(henwen_discover_vhosts "$FLASK_PORT")
+if [ "${#APACHE_CONFS[@]}" -eq 0 ]; then
   echo "ERROR: no HenWen Apache vhost found"
-  echo "  (checked /etc/apache2/sites-enabled/henwen-ssl.conf and henwen.conf)."
+  echo "  (scanned $(henwen_apache_sites_dir)/*.conf for a ProxyPass to 127.0.0.1:${FLASK_PORT}/)."
   echo ""
   echo "This feature needs Apache fronting HenWen to reach audio_ws_relay.py's"
   echo "WebSocket port from outside this box — same requirement browser TX"
@@ -57,56 +57,38 @@ if [ -z "$APACHE_CONF" ]; then
   echo "supported by this script — same limitation tx-spike/apply.sh has.)"
   exit 1
 fi
-echo "== Using Apache vhost: $APACHE_CONF"
-
-# a2ensite/a2dissite's sites-enabled entries are symlinks into
-# sites-available -- but `sed -i` doesn't edit through a symlink, it
-# replaces whatever's at that path with a fresh file it creates (a
-# well-known GNU sed gotcha). Left alone, that both breaks the
-# sites-available/sites-enabled split (sites-available goes stale, further
-# a2dissite/a2ensite runs get confused) and can leave the result
-# unreadable by the `asterisk` user running gunicorn, since sed's own temp
-# file doesn't reliably keep the original's permissions -- app.py's own
-# read-back check for $MARKER then silently reports "not applied" via its
-# generic `except OSError: continue`, even though Apache itself (reading
-# config as root at startup) is proxying it correctly. Resolve to the real
-# underlying file first so the symlink, if any, is never touched.
-if [ -L "$APACHE_CONF" ]; then
-  APACHE_CONF="$(readlink -f "$APACHE_CONF")"
-  echo "   (sites-enabled symlink resolves to $APACHE_CONF)"
-fi
+echo "== Found ${#APACHE_CONFS[@]} HenWen Apache vhost(s):"
+printf '     %s\n' "${APACHE_CONFS[@]}"
 
 echo "== Backing up to $BACKUP_DIR"
-mkdir -p "$BACKUP_DIR"
-cp "$APACHE_CONF" "$BACKUP_DIR/"
+henwen_backup_vhosts "$BACKUP_DIR" "${APACHE_CONFS[@]}"
 echo "$BACKUP_DIR" > /root/henwen-ws-audio-last-backup
 
 echo "== Apache WebSocket proxy"
-if grep -q "$MARKER" "$APACHE_CONF"; then
-  echo "   already patched, skipping"
-else
-  # Insert just above the catch-all ProxyPass line, same placement
-  # tx-spike/apply.sh uses for /asterisk-ws. The vhost's ProxyPass target
-  # port is whatever install.sh/setup-https.sh was run with (PORT=...,
-  # default 5000). Read it back from the vhost itself rather than assuming
-  # 5000, so a non-default PORT install doesn't silently fail to match
-  # below.
-  FLASK_PORT=$(sed -nE 's|.*ProxyPass[[:space:]]+/ http://127\.0\.0\.1:([0-9]+)/.*|\1|p' "$APACHE_CONF" | head -1)
-  FLASK_PORT="${FLASK_PORT:-5000}"
-  sed -i 's|^    ProxyPass        / http://127\.0\.0\.1:'"${FLASK_PORT}"'/ retry=0 timeout=120$|    # '"$MARKER"': low-latency Listen audio, proxied to\n    # audio_ws_relay.py'"'"'s own loopback-only WebSocket listener\n    # (app.py spawns/supervises that process unconditionally; this line\n    # is what makes it reachable from outside this box).\n    ProxyPass /ws-audio ws://127.0.0.1:'"$WS_PORT"'/ retry=0\n\n    ProxyPass        / http://127.0.0.1:'"${FLASK_PORT}"'/ retry=0 timeout=120|' "$APACHE_CONF"
-  grep -q "$MARKER" "$APACHE_CONF" || {
-    echo "   FAILED to insert proxy line — is $APACHE_CONF using the expected"
-    echo "   'ProxyPass        / http://127.0.0.1:${FLASK_PORT}/ retry=0 timeout=120' line?"
-    echo "   (unmodified from what install.sh/setup-https.sh write). Nothing was"
-    echo "   changed; restoring the backup just in case."
-    cp "$BACKUP_DIR/$(basename "$APACHE_CONF")" "$APACHE_CONF"
-    exit 1
-  }
-fi
-# Belt-and-suspenders regardless of which branch above ran (also heals a
-# box that already hit the stale-permissions bug from a previous version
-# of this script): Apache vhosts should always be world-readable.
-chmod 644 "$APACHE_CONF"
+INSERT_TEXT="    # ${MARKER}: low-latency Listen audio, proxied to
+    # audio_ws_relay.py's own loopback-only WebSocket listener
+    # (app.py spawns/supervises that process unconditionally; this line
+    # is what makes it reachable from outside this box).
+    ProxyPass /ws-audio ws://127.0.0.1:${WS_PORT}/ retry=0
+"
+for conf in "${APACHE_CONFS[@]}"; do
+  echo "   $conf"
+  rc=0
+  henwen_insert_before_proxypass "$conf" "$FLASK_PORT" "$MARKER" "$INSERT_TEXT" || rc=$?
+  case "$rc" in
+    0) echo "      patched" ;;
+    1) echo "      already patched, skipping" ;;
+    *) echo "      FAILED to insert proxy line — is $conf using the expected"
+       echo "      'ProxyPass        / http://127.0.0.1:${FLASK_PORT}/ retry=0 timeout=120' line"
+       echo "      (or its quoted-directive equivalent)? Restoring every vhost touched this run."
+       henwen_restore_vhosts_from_manifest "$BACKUP_DIR" >/dev/null || true
+       exit 1 ;;
+  esac
+  # Belt-and-suspenders regardless of which branch above ran (also heals a
+  # box that already hit the stale-permissions bug from a previous version
+  # of this script): Apache vhosts should always be world-readable.
+  chmod 644 "$conf"
+done
 
 echo "== proxy_wstunnel module"
 if apache2ctl -M 2>/dev/null | grep -q proxy_wstunnel_module; then
@@ -117,20 +99,11 @@ else
 fi
 
 apache2ctl configtest 2>&1 | grep -q "Syntax OK" || {
-  echo "   Apache configtest FAILED — restoring backup"
-  cp "$BACKUP_DIR/$(basename "$APACHE_CONF")" "$APACHE_CONF"
+  echo "   Apache configtest FAILED — restoring every vhost touched this run"
+  henwen_restore_vhosts_from_manifest "$BACKUP_DIR" >/dev/null || true
   exit 1
 }
-# `reload` requires an already-active service — start fresh if it isn't
-# running yet, and surface the real log rather than systemd's bare
-# "not active, cannot reload" if that also fails. Mirrors tx-spike/apply.sh.
-if systemctl is-active --quiet apache2; then
-  systemctl reload apache2
-elif ! systemctl start apache2; then
-  echo "   ERROR: apache2 failed to start. Recent log:"
-  journalctl -u apache2 --no-pager -n 15 | sed 's/^/     /'
-  exit 1
-fi
+henwen_apache_reload_or_start || exit 1
 
 echo
 echo "== Verification"
@@ -143,7 +116,8 @@ else
 fi
 
 echo
-echo "Done. The low-latency RX audio path is now reachable through Apache at /ws-audio."
+echo "Done. The low-latency RX audio path is now reachable through Apache at /ws-audio"
+echo "on every hostname listed above."
 echo "Select it in Manager > Audio's 'RX Audio Path' card (near TX Diagnostics) to"
 echo "actually switch Listen over to it — this script only wires the network path."
 echo "Rollback:  sudo bash $SPIKE_DIR/rollback.sh"

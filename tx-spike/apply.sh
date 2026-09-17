@@ -12,13 +12,16 @@
 #           /etc/asterisk/pjsip.conf     (append transport/endpoint/auth/aor)
 #           /etc/asterisk/custom/extensions.conf  (create context)
 #           /etc/asterisk/rtp.conf       (stunaddr, for remote WebRTC ICE)
-#           /etc/apache2/sites-enabled/henwen-ssl.conf, OR
-#           /etc/apache2/sites-enabled/henwen.conf (whichever is present — WSS proxy line)
+#           Every Apache vhost apache-common.sh's henwen_discover_vhosts()
+#           finds actually fronting HenWen (WSS proxy line added to each —
+#           see that file for why this is a scan, not two hardcoded names)
 #           /etc/asterisk/henwen-tx.secret        (generated SIP password)
 # Does NOT restart Asterisk — modules are loaded live; app_rpt keeps running.
 set -euo pipefail
 
 SPIKE_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=../apache-common.sh
+. "$SPIKE_DIR/../apache-common.sh"
 MARKER="HenWen browser transmitter"
 STAMP=$(date +%Y%m%d-%H%M%S)
 BACKUP_DIR="/root/henwen-browsertx-backup-$STAMP"
@@ -27,18 +30,17 @@ RPT_CONF_PATH="${RPT_CONF_PATH:-/etc/asterisk/rpt.conf}"
 [ "$(id -u)" = 0 ] || { echo "Run as root (sudo)"; exit 1; }
 
 # apply.sh only wires up Asterisk PJSIP/WebRTC + the WSS proxy — it assumes
-# Apache is already fronting HenWen, either via setup-https.sh's full
-# Let's-Encrypt flow (henwen-ssl.conf) or its --http-only mode (henwen.conf,
-# install.sh's own default — the common case for an operator fronting HTTPS
-# themselves with an external reverse proxy/tunnel instead). Mirrors
-# ws-audio/apply.sh's own candidate-loop exactly, so neither script ever
-# requires manually renaming one vhost file to the other's name.
-APACHE_CONF=""
-for candidate in /etc/apache2/sites-enabled/henwen-ssl.conf /etc/apache2/sites-enabled/henwen.conf; do
-  [ -f "$candidate" ] && { APACHE_CONF="$candidate"; break; }
-done
-if [ -z "$APACHE_CONF" ]; then
-  echo "ERROR: no HenWen Apache vhost found (checked henwen-ssl.conf and henwen.conf)."
+# Apache is already fronting HenWen. henwen_discover_vhosts() (see
+# apache-common.sh) finds *every* Apache vhost currently proxying HenWen's
+# own Flask port, however many there are and whatever they're named —
+# confirmed live that a real install can front HenWen through more than
+# one vhost at once (one per hostname), which a fixed two-filename
+# candidate list silently only ever found one of.
+FLASK_PORT="$(henwen_flask_port)"
+mapfile -t APACHE_CONFS < <(henwen_discover_vhosts "$FLASK_PORT")
+if [ "${#APACHE_CONFS[@]}" -eq 0 ]; then
+  echo "ERROR: no HenWen Apache vhost found (scanned $(henwen_apache_sites_dir)/*.conf"
+  echo "for a ProxyPass to 127.0.0.1:${FLASK_PORT}/)."
   echo ""
   echo "Browser TX needs Apache fronting HenWen first:"
   echo "  sudo bash $SPIKE_DIR/setup-https.sh <hostname> <email>   (full HTTPS via Let's Encrypt)"
@@ -47,22 +49,8 @@ if [ -z "$APACHE_CONF" ]; then
   echo "                                                             Cloudflare Tunnel, another box)"
   exit 1
 fi
-echo "== Using Apache vhost: $APACHE_CONF"
-
-# a2ensite's sites-enabled entry is a symlink into sites-available -- but
-# `sed -i` below doesn't edit through a symlink, it replaces whatever's at
-# that path with a fresh file it creates (a well-known GNU sed gotcha).
-# Left alone, that both breaks the sites-available/sites-enabled split and
-# can leave the result unreadable by the `asterisk` user running gunicorn,
-# since sed's own temp file doesn't reliably keep the original's
-# permissions -- app.py's own TX diagnostics read-back then silently
-# reports the proxy as not applied even though Apache itself (reading
-# config as root at startup) is proxying it correctly. Resolve to the real
-# underlying file first so the symlink, if any, is never touched.
-if [ -L "$APACHE_CONF" ]; then
-  APACHE_CONF="$(readlink -f "$APACHE_CONF")"
-  echo "== sites-enabled symlink resolves to $APACHE_CONF"
-fi
+echo "== Found ${#APACHE_CONFS[@]} HenWen Apache vhost(s):"
+printf '     %s\n' "${APACHE_CONFS[@]}"
 
 # Local node number: same convention app.py's get_node_numbers() uses
 # (first top-level [NNNN] stanza in rpt.conf, 4-7 digits) so the TX feature
@@ -79,8 +67,9 @@ echo "== Using node $NODENUM"
 
 echo "== Backing up to $BACKUP_DIR"
 mkdir -p "$BACKUP_DIR"
-cp /etc/asterisk/modules.conf /etc/asterisk/http.conf /etc/asterisk/pjsip.conf "$APACHE_CONF" "$BACKUP_DIR/"
+cp /etc/asterisk/modules.conf /etc/asterisk/http.conf /etc/asterisk/pjsip.conf /etc/asterisk/rtp.conf "$BACKUP_DIR/"
 [ -f /etc/asterisk/custom/extensions.conf ] && cp /etc/asterisk/custom/extensions.conf "$BACKUP_DIR/custom-extensions.conf"
+henwen_backup_vhosts "$BACKUP_DIR" "${APACHE_CONFS[@]}"
 echo "$BACKUP_DIR" > /root/henwen-browsertx-last-backup
 
 echo "== modules.conf"
@@ -137,7 +126,6 @@ else
 fi
 
 echo "== rtp.conf (STUN for remote WebRTC operators)"
-cp /etc/asterisk/rtp.conf "$BACKUP_DIR/" 2>/dev/null || true
 if grep -qE "^stunaddr" /etc/asterisk/rtp.conf; then
   echo "   stunaddr already set, skipping"
 else
@@ -175,72 +163,72 @@ asterisk -rx "core reload" >/dev/null
 sleep 2
 
 echo "== Apache WSS proxy"
-if grep -q "asterisk-ws" "$APACHE_CONF"; then
-  echo "   already patched, skipping"
-else
-  # The vhost's ProxyPass target port is whatever install.sh/setup-https.sh
-  # was run with (PORT=..., default 5000). Read it back from the vhost
-  # itself rather than assuming 5000, so a non-default PORT install doesn't
-  # silently fail to match below. The sed finding nothing is not an error
-  # by itself, so without this it would otherwise only surface via the
-  # FAILED check.
-  FLASK_PORT=$(sed -nE 's|.*ProxyPass[[:space:]]+/ http://127\.0\.0\.1:([0-9]+)/.*|\1|p' "$APACHE_CONF" | head -1)
-  FLASK_PORT="${FLASK_PORT:-5000}"
-  # Insert the websocket proxy just above the HenWen catch-all ProxyPass.
-  sed -i 's|^    ProxyPass        / http://127\.0\.0\.1:'"${FLASK_PORT}"'/ retry=0 timeout=120$|    # '"$MARKER"': SIP-over-WebSocket signaling to the loopback-only\n    # Asterisk builtin HTTP server; Apache terminates WSS with the same cert.\n    ProxyPass /asterisk-ws ws://127.0.0.1:8088/ws retry=0\n\n    ProxyPass        / http://127.0.0.1:'"${FLASK_PORT}"'/ retry=0 timeout=120|' "$APACHE_CONF"
-  grep -q "asterisk-ws" "$APACHE_CONF" || { echo "   FAILED to insert proxy line (expected ProxyPass on port ${FLASK_PORT})"; exit 1; }
-fi
-# Belt-and-suspenders regardless of which branch above ran (also heals a
-# box that already hit the stale-permissions bug from a previous version
-# of this script): Apache vhosts should always be world-readable.
-chmod 644 "$APACHE_CONF"
-apache2ctl configtest 2>&1 | grep -q "Syntax OK" || { echo "   Apache configtest FAILED — restoring backup"; cp "$BACKUP_DIR/$(basename "$APACHE_CONF")" "$APACHE_CONF"; exit 1; }
-# `reload` requires an already-active service. Config just passed
-# configtest, so if apache2 isn't running, start it fresh instead of
-# failing outright — and if that *also* fails, print the actual log
-# instead of just systemd's bare "not active, cannot reload".
-if systemctl is-active --quiet apache2; then
-  systemctl reload apache2
-elif ! systemctl start apache2; then
-  echo "   ERROR: apache2 failed to start. Recent log:"
-  journalctl -u apache2 --no-pager -n 15 | sed 's/^/     /'
+INSERT_TEXT="    # ${MARKER}: SIP-over-WebSocket signaling to the loopback-only
+    # Asterisk builtin HTTP server; Apache terminates WSS with the same cert.
+    ProxyPass /asterisk-ws ws://127.0.0.1:8088/ws retry=0
+"
+for conf in "${APACHE_CONFS[@]}"; do
+  echo "   $conf"
+  rc=0
+  henwen_insert_before_proxypass "$conf" "$FLASK_PORT" "asterisk-ws" "$INSERT_TEXT" || rc=$?
+  case "$rc" in
+    0) echo "      patched" ;;
+    1) echo "      already patched, skipping" ;;
+    *) echo "      FAILED to insert proxy line — restoring every vhost touched this run"
+       henwen_restore_vhosts_from_manifest "$BACKUP_DIR" >/dev/null || true
+       exit 1 ;;
+  esac
+  # Belt-and-suspenders regardless of which branch above ran (also heals a
+  # box that already hit the stale-permissions bug from a previous version
+  # of this script): Apache vhosts should always be world-readable.
+  chmod 644 "$conf"
+done
+apache2ctl configtest 2>&1 | grep -q "Syntax OK" || {
+  echo "   Apache configtest FAILED — restoring every vhost touched this run"
+  henwen_restore_vhosts_from_manifest "$BACKUP_DIR" >/dev/null || true
+  exit 1
+}
+henwen_apache_reload_or_start || {
   echo "   Browser TX's WSS proxy and the HTTPS kiosk both depend on Apache — fix this before testing TX."
   exit 1
-fi
+}
 
 echo "== Verification"
 asterisk -rx "http show status" | head -6
 asterisk -rx "pjsip show endpoints" | head -12
 echo
 
-# Read back whatever hostname/port setup-https.sh (or the operator, by
-# hand) recorded, rather than assuming any particular domain or that it's
-# always 443. Fall back to grepping the vhost directly for installs set up
-# before these marker files existed.
-WSHOST=$(cat /etc/asterisk/henwen-https-hostname 2>/dev/null || true)
-if [ -z "$WSHOST" ]; then
-    WSHOST=$(grep -h "ServerName" "$APACHE_CONF" 2>/dev/null | awk '{print $2}' | head -1)
+# Print one set of SIP credentials per host:port this feature is now
+# actually reachable on -- every VirtualHost block, in every discovered
+# vhost, that both declares a ServerName and really does proxy
+# /asterisk-ws, rather than the old single global guess (a marker file
+# recorded by setup-https.sh, or the first ServerName found anywhere).
+HOSTPORTS_FILE=$(mktemp)
+for conf in "${APACHE_CONFS[@]}"; do
+  henwen_hostports_with_marker "$conf" "asterisk-ws"
+done | sort -u > "$HOSTPORTS_FILE"
+PORTS_SEEN=()
+while IFS=: read -r host port; do
+  [ -n "$host" ] || continue
+  echo "  WSS URL:  wss://${host}$([ "$port" != "443" ] && echo ":${port}")/asterisk-ws"
+  case " ${PORTS_SEEN[*]:-} " in *" $port "*) ;; *) PORTS_SEEN+=("$port") ;; esac
+done < "$HOSTPORTS_FILE"
+if [ ! -s "$HOSTPORTS_FILE" ]; then
+  WSHOST=$(cat /etc/asterisk/henwen-https-hostname 2>/dev/null || true)
+  [ -z "$WSHOST" ] && WSHOST="$(hostname -f 2>/dev/null || hostname)"
+  WSPORT=$(cat /etc/asterisk/henwen-https-port 2>/dev/null || echo 443)
+  echo "NOTE: could not find a ServerName+asterisk-ws pair in any discovered vhost."
+  echo "If you're fronting HTTPS with your own reverse proxy/tunnel, use ITS public"
+  echo "hostname instead of \"$WSHOST\" below."
+  echo "  WSS URL:  wss://${WSHOST}$([ "$WSPORT" != "443" ] && echo ":${WSPORT}")/asterisk-ws"
+  PORTS_SEEN=("$WSPORT")
 fi
-FELL_BACK_TO_LOCAL_HOSTNAME=0
-if [ -z "$WSHOST" ]; then
-    WSHOST="$(hostname -f 2>/dev/null || hostname)"
-    FELL_BACK_TO_LOCAL_HOSTNAME=1
-fi
-WSPORT=$(cat /etc/asterisk/henwen-https-port 2>/dev/null || echo 443)
-WSPORT_SUFFIX=""
-[ "$WSPORT" != "443" ] && WSPORT_SUFFIX=":${WSPORT}"
-
-if [ "$FELL_BACK_TO_LOCAL_HOSTNAME" = "1" ]; then
-  echo "NOTE: could not determine a public hostname locally (no HTTPS marker file,"
-  echo "no ServerName in $APACHE_CONF). If you're fronting HTTPS with your own"
-  echo "reverse proxy/tunnel, use ITS public hostname instead of \"$WSHOST\" below."
-fi
+rm -f "$HOSTPORTS_FILE"
 
 echo "Done. SIP credentials for the test page:"
-echo "  WSS URL:  wss://${WSHOST}${WSPORT_SUFFIX}/asterisk-ws"
 echo "  Username: henwen-tx"
 echo "  Password: $(cat /etc/asterisk/henwen-tx.secret)"
 echo "  Dial:     2$NODENUM   (node $NODENUM, phone-control mode: *99 = PTT, # = unkey)"
 echo "Port check: sudo bash $SPIKE_DIR/check-ports.sh   (verifies forwards/NAT/WSS)"
-echo "Required router forwards: TCP ${WSPORT}, UDP 10000-10100 -> this machine"
+echo "Required router forwards: TCP ${PORTS_SEEN[*]}, UDP 10000-10100 -> this machine"
 echo "Rollback:  sudo bash $SPIKE_DIR/rollback.sh"
