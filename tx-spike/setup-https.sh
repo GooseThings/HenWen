@@ -274,10 +274,22 @@ EXCL_MARKER="# HenWen: preserve paths this box already served (issue #77)"
 DOCROOT=""
 for _conf in /etc/apache2/sites-enabled/*.conf; do
     [ -f "$_conf" ] || continue
-    if ! grep -qiE '^[[:space:]]*ServerName[[:space:]]' "$_conf"; then
-        _root=$(awk '/^[[:space:]]*DocumentRoot[[:space:]]+/ {print $2; exit}' "$_conf" 2>/dev/null || true)
-        if [ -n "$_root" ]; then DOCROOT="$_root"; break; fi
-    fi
+    # Scoped per <VirtualHost> block, not the whole file -- a single .conf
+    # can hold both a named vhost (e.g. HenWen's own, on another port) and a
+    # genuine ServerName-less default block. Checking the file as a whole
+    # would reject that file outright on the named block's ServerName line,
+    # missing the real default vhost's DocumentRoot entirely.
+    _root=$(awk '
+        BEGIN { in_vh = 0; has_sn = 0; root = "" }
+        tolower($0) ~ /^[[:space:]]*<virtualhost/  { in_vh = 1; has_sn = 0; root = ""; next }
+        tolower($0) ~ /^[[:space:]]*<\/virtualhost>/ {
+            if (in_vh && !has_sn && root != "") { print root; exit }
+            in_vh = 0; next
+        }
+        in_vh && tolower($0) ~ /^[[:space:]]*servername[[:space:]]/ { has_sn = 1; next }
+        in_vh && root == "" && /^[[:space:]]*DocumentRoot[[:space:]]+/ { root = $2; next }
+    ' "$_conf" 2>/dev/null || true)
+    if [ -n "$_root" ]; then DOCROOT="$_root"; break; fi
 done
 if [ -z "$DOCROOT" ]; then
     # No ServerName-less vhost found (or it has no DocumentRoot of its own)

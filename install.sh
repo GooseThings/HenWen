@@ -241,7 +241,7 @@ if [ "$SKIP_APACHE_SETUP" = "1" ]; then
     echo "      RX audio and browser TX both still work if you front HenWen with your"
     echo "      own reverse proxy. See ws-audio/README.md and tx-spike/README.md for"
     echo "      exactly what it needs to point at."
-elif EXISTING_VHOST="$(henwen_discover_vhosts "$PORT" | head -1)" && [ -n "$EXISTING_VHOST" ]; then
+elif DISCOVERED_VHOSTS="$(henwen_discover_vhosts "$PORT")" && [ -n "$DISCOVERED_VHOSTS" ]; then
     # Discovered generically instead of checking for exactly one of two
     # hardcoded filenames -- a renamed or hand-written vhost that's already
     # fronting HenWen (e.g. from before this box ever ran install.sh, or a
@@ -251,10 +251,24 @@ elif EXISTING_VHOST="$(henwen_discover_vhosts "$PORT" | head -1)" && [ -n "$EXIS
     # generated vhost always has on its HTTPS one, so it stands in for "was
     # this the full Let's-Encrypt flow or just --http-only" without
     # depending on either script's own filename convention.
-    if grep -qE '^[[:space:]]*SSLEngine[[:space:]]+on' "$EXISTING_VHOST" 2>/dev/null; then
+    #
+    # Checked across EVERY discovered vhost, not just the first -- a box
+    # can front HenWen through more than one vhost at once (one per
+    # hostname), and picking only the alphabetically-first one here would
+    # call a box with a real HTTPS vhost "plain HTTP" whenever some other,
+    # HTTP-only vhost happened to sort ahead of it.
+    EXISTING_VHOST=""
+    while IFS= read -r _v; do
+        if grep -qE '^[[:space:]]*SSLEngine[[:space:]]+on' "$_v" 2>/dev/null; then
+            EXISTING_VHOST="$_v"
+            break
+        fi
+    done <<< "$DISCOVERED_VHOSTS"
+    if [ -n "$EXISTING_VHOST" ]; then
         echo "      Apache vhost already present (HTTPS: $EXISTING_VHOST) — leaving it as-is."
         HTTPS_SUCCEEDED=1
     else
+        EXISTING_VHOST="$(printf '%s\n' "$DISCOVERED_VHOSTS" | head -1)"
         echo "      Apache vhost already present (plain HTTP: $EXISTING_VHOST) — leaving it as-is."
     fi
     HAVE_APACHE_VHOST=1
