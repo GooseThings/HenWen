@@ -10242,6 +10242,332 @@ def api_audio_stop():
     return jsonify({'ok': True})
 
 
+# ── Stress test (Manager > Stress Test, owner-only) ───────────────────────────
+# On-demand load generation so the owner can sanity-check this box's actual
+# headroom, scoped deliberately to what can be exercised with no real-world
+# side effect on other AllStarLink operators or third-party network state:
+#   - "audio" fans out extra in-process listeners against a real node's
+#     already-running (or freshly-started) broadcast, exercising the exact
+#     same _AudioBroadcast.add_client()/_fanout() path a real browser Listen
+#     session uses -- but entirely in-process, never through a real HTTP
+#     connection, so it never touches gunicorn's 8-thread pool and can't
+#     starve the Manager UI that's running the test.
+#   - "ami" bursts a single, well-known, side-effect-free AMI action
+#     (`core show version`) through ami_send_command() to measure real
+#     contention on _ami_pool_lock. Deliberately NEVER ilink connect/
+#     disconnect, localplay, or anything else that changes real RF/network
+#     state -- that would be hammering other real licensed operators'
+#     equipment and airtime, not this box's own software, and isn't
+#     something an automated tool should ever do unattended.
+# Only one test per kind runs at a time -- _stress_lock guards both start
+# and the shared _stress_state dict so a second click can't pile threads on
+# top of an in-progress run.
+_stress_lock  = threading.Lock()
+_stress_state = {"audio": None, "ami": None}  # each: None (never run) or a result/status dict
+
+STRESS_TEST_MAX_DURATION_SEC      = 120
+STRESS_TEST_AUDIO_MAX_CONCURRENCY = 100
+STRESS_TEST_AMI_MAX_CONCURRENCY   = 30
+
+
+def _proc_rss_kb():
+    """Current process resident memory, read straight from /proc -- stdlib-only,
+    no psutil dependency for what's otherwise a one-line stat."""
+    try:
+        with open('/proc/self/status') as f:
+            for line in f:
+                if line.startswith('VmRSS:'):
+                    return int(line.split()[1])
+    except Exception:
+        pass
+    return None
+
+
+def _stress_pct(sorted_vals, p):
+    """Nearest-rank percentile over an already-sorted list. p in [0, 1]."""
+    if not sorted_vals:
+        return None
+    idx = min(int(len(sorted_vals) * p), len(sorted_vals) - 1)
+    return round(sorted_vals[idx], 1)
+
+
+def _stress_audio_client(broadcast, remote, stop_event, result, idx):
+    """One simulated listener: mirrors api_audio_stream()'s generate() loop
+    (add_client -> drain queue until a None sentinel or our own stop signal
+    -> remove_client in finally) but as a plain background thread instead of
+    a Flask request generator, since there's no HTTP connection here at all."""
+    q = broadcast.add_client(remote)
+    start = time.monotonic()
+    first_chunk_at = None
+    total_bytes = 0
+    total_chunks = 0
+    try:
+        while not stop_event.is_set():
+            try:
+                chunk = q.get(timeout=1.0)
+            except _queue_mod.Empty:
+                continue
+            if chunk is None:
+                break
+            if first_chunk_at is None:
+                first_chunk_at = time.monotonic()
+            total_chunks += 1
+            total_bytes += len(chunk)
+    finally:
+        with broadcast._lock:
+            drops = broadcast._client_meta.get(id(q), {}).get('drops', 0)
+        broadcast.remove_client(q, remote)
+    result[idx] = {
+        "bytes": total_bytes,
+        "chunks": total_chunks,
+        "drops": drops,
+        "join_latency_ms": None if first_chunk_at is None else round((first_chunk_at - start) * 1000, 1),
+        "got_data": first_chunk_at is not None,
+    }
+
+
+def _run_audio_stress_test(broadcast, node, concurrency, duration_sec, stop_event):
+    result  = [None] * concurrency
+    threads = []
+    rss_before = _proc_rss_kb()
+    cpu_before = time.process_time()
+    started_at = time.monotonic()
+
+    for i in range(concurrency):
+        th = threading.Thread(target=_stress_audio_client,
+                               args=(broadcast, f"stress-test:{i}", stop_event, result, i),
+                               daemon=True, name=f"stress-audio-client-{i}")
+        threads.append(th)
+        th.start()
+
+    timer = threading.Timer(duration_sec, stop_event.set)
+    timer.start()
+    for th in threads:
+        th.join(timeout=duration_sec + 15)
+    timer.cancel()
+    stop_event.set()  # covers an early manual /stop; harmless if already set
+
+    elapsed    = time.monotonic() - started_at
+    rss_after  = _proc_rss_kb()
+    cpu_after  = time.process_time()
+
+    connected      = [r for r in result if r is not None]
+    got_data       = [r for r in connected if r["got_data"]]
+    join_latencies = sorted(r["join_latency_ms"] for r in got_data if r["join_latency_ms"] is not None)
+    total_drops    = sum(r["drops"] for r in connected)
+
+    with _stress_lock:
+        _stress_state["audio"] = {
+            "running":            False,
+            "node":               node,
+            "concurrency":        concurrency,
+            "duration_sec":       duration_sec,
+            "elapsed_sec":        round(elapsed, 1),
+            "clients_connected":  len(connected),
+            "clients_got_data":   len(got_data),
+            "clients_no_data":    len(connected) - len(got_data),
+            "total_bytes":        sum(r["bytes"] for r in connected),
+            "total_drops":        total_drops,
+            "join_latency_ms_avg": round(sum(join_latencies) / len(join_latencies), 1) if join_latencies else None,
+            "join_latency_ms_p95": _stress_pct(join_latencies, 0.95),
+            "join_latency_ms_max": join_latencies[-1] if join_latencies else None,
+            "cpu_sec":            round(cpu_after - cpu_before, 2),
+            "rss_kb_before":      rss_before,
+            "rss_kb_after":       rss_after,
+            "rss_kb_delta":       (rss_after - rss_before) if (rss_before is not None and rss_after is not None) else None,
+        }
+    log('INFO', f'[STRESS-TEST] Audio test finished: node={node} connected={len(connected)}/{concurrency} '
+                f'got_data={len(got_data)} drops={total_drops}')
+
+
+def _stress_ami_worker(stop_event, result, idx):
+    """Tight loop of a single known-safe, side-effect-free AMI action, fully
+    serialized through ami_send_command()'s _ami_pool_lock like every other
+    caller -- see that function's own docstring. No pacing/sleep on purpose:
+    this is meant to actually contend for the lock, not simulate polite
+    traffic."""
+    latencies_ms = []
+    calls  = 0
+    errors = 0
+
+    def _probe(ami):
+        return {'lines': ami.command('core show version')}
+
+    while not stop_event.is_set():
+        t0 = time.monotonic()
+        try:
+            ami_send_command(_probe)
+        except Exception:
+            errors += 1
+        else:
+            latencies_ms.append((time.monotonic() - t0) * 1000)
+        calls += 1
+    result[idx] = {"calls": calls, "errors": errors, "latencies_ms": latencies_ms}
+
+
+def _run_ami_stress_test(concurrency, duration_sec, stop_event):
+    result  = [None] * concurrency
+    threads = []
+    started_at = time.monotonic()
+
+    for i in range(concurrency):
+        th = threading.Thread(target=_stress_ami_worker, args=(stop_event, result, i),
+                               daemon=True, name=f"stress-ami-worker-{i}")
+        threads.append(th)
+        th.start()
+
+    timer = threading.Timer(duration_sec, stop_event.set)
+    timer.start()
+    for th in threads:
+        th.join(timeout=duration_sec + 30)
+    timer.cancel()
+    stop_event.set()
+
+    elapsed        = time.monotonic() - started_at
+    all_latencies  = sorted(l for r in result if r for l in r["latencies_ms"])
+    total_calls    = sum(r["calls"] for r in result if r)
+    total_errors   = sum(r["errors"] for r in result if r)
+
+    with _stress_lock:
+        _stress_state["ami"] = {
+            "running":        False,
+            "concurrency":    concurrency,
+            "duration_sec":   duration_sec,
+            "elapsed_sec":    round(elapsed, 1),
+            "total_calls":    total_calls,
+            "total_errors":   total_errors,
+            "calls_per_sec":  round(total_calls / elapsed, 2) if elapsed > 0 else None,
+            "latency_ms_avg": round(sum(all_latencies) / len(all_latencies), 1) if all_latencies else None,
+            "latency_ms_p50": _stress_pct(all_latencies, 0.50),
+            "latency_ms_p95": _stress_pct(all_latencies, 0.95),
+            "latency_ms_max": all_latencies[-1] if all_latencies else None,
+        }
+    log('INFO', f'[STRESS-TEST] AMI test finished: calls={total_calls} errors={total_errors}')
+
+
+@app.route('/api/stress-test/audio/start', methods=['POST'])
+def api_stress_test_audio_start():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can run stress tests"}), 403
+    data = request.json or {}
+    node = str(data.get('node', '')).strip()
+    if not re.match(r'^\d{4,7}$', node):
+        return jsonify({"error": "A valid node number is required"}), 400
+    try:
+        concurrency  = int(data.get('concurrency', 10))
+        duration_sec = int(data.get('duration_sec', 20))
+    except (TypeError, ValueError):
+        return jsonify({"error": "concurrency and duration_sec must be integers"}), 400
+    if not (1 <= concurrency <= STRESS_TEST_AUDIO_MAX_CONCURRENCY):
+        return jsonify({"error": f"concurrency must be between 1 and {STRESS_TEST_AUDIO_MAX_CONCURRENCY}"}), 400
+    if not (1 <= duration_sec <= STRESS_TEST_MAX_DURATION_SEC):
+        return jsonify({"error": f"duration_sec must be between 1 and {STRESS_TEST_MAX_DURATION_SEC}"}), 400
+
+    with _stress_lock:
+        cur = _stress_state.get("audio")
+        if cur and cur.get("running"):
+            return jsonify({"error": "An audio stress test is already running"}), 409
+        _stress_state["audio"] = {"running": True, "node": node, "concurrency": concurrency,
+                                   "duration_sec": duration_sec, "phase": "starting broadcast"}
+
+    # Get-or-create the broadcast synchronously, same pattern as
+    # api_audio_stream(), so a bad node number fails the request immediately
+    # instead of surfacing only via the next status poll.
+    try:
+        with _audio_lock:
+            broadcast = _audio_active.get(node)
+            if broadcast is None or broadcast._dead:
+                broadcast = _start_broadcast(node)
+                _audio_active[node] = broadcast
+    except Exception as e:
+        # Full detail server-side only, matching api_audio_stream()'s own
+        # except block above -- an exception's own text can carry internal
+        # paths/state that shouldn't ride back out over HTTP even to an
+        # owner-gated route (CodeQL: py/stack-trace-exposure).
+        log('ERROR', f'[STRESS-TEST] could not start audio for node {node}: {e}\n'
+                    f'{traceback.format_exc()}')
+        generic = "Could not start audio for this node — check server logs"
+        with _stress_lock:
+            _stress_state["audio"] = {"running": False, "node": node, "error": generic}
+        return jsonify({"error": generic}), 500
+
+    stop_event = threading.Event()
+    with _stress_lock:
+        _stress_state["audio"]["phase"]      = "running"
+        _stress_state["audio"]["stop_event"] = stop_event
+
+    threading.Thread(target=_run_audio_stress_test,
+                      args=(broadcast, node, concurrency, duration_sec, stop_event),
+                      daemon=True, name="stress-audio-runner").start()
+    log('INFO', f'[STRESS-TEST] Audio test started: node={node} concurrency={concurrency} duration={duration_sec}s')
+    return jsonify({"ok": True})
+
+
+@app.route('/api/stress-test/audio/stop', methods=['POST'])
+def api_stress_test_audio_stop():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can control stress tests"}), 403
+    with _stress_lock:
+        cur = _stress_state.get("audio")
+        if not cur or not cur.get("running"):
+            return jsonify({"error": "No audio stress test is running"}), 409
+        cur["stop_event"].set()
+    return jsonify({"ok": True})
+
+
+@app.route('/api/stress-test/ami/start', methods=['POST'])
+def api_stress_test_ami_start():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can run stress tests"}), 403
+    data = request.json or {}
+    try:
+        concurrency  = int(data.get('concurrency', 5))
+        duration_sec = int(data.get('duration_sec', 20))
+    except (TypeError, ValueError):
+        return jsonify({"error": "concurrency and duration_sec must be integers"}), 400
+    if not (1 <= concurrency <= STRESS_TEST_AMI_MAX_CONCURRENCY):
+        return jsonify({"error": f"concurrency must be between 1 and {STRESS_TEST_AMI_MAX_CONCURRENCY}"}), 400
+    if not (1 <= duration_sec <= STRESS_TEST_MAX_DURATION_SEC):
+        return jsonify({"error": f"duration_sec must be between 1 and {STRESS_TEST_MAX_DURATION_SEC}"}), 400
+
+    ev = threading.Event()
+    with _stress_lock:
+        cur = _stress_state.get("ami")
+        if cur and cur.get("running"):
+            return jsonify({"error": "An AMI stress test is already running"}), 409
+        _stress_state["ami"] = {"running": True, "concurrency": concurrency,
+                                 "duration_sec": duration_sec, "stop_event": ev}
+
+    threading.Thread(target=_run_ami_stress_test, args=(concurrency, duration_sec, ev),
+                      daemon=True, name="stress-ami-runner").start()
+    log('INFO', f'[STRESS-TEST] AMI test started: concurrency={concurrency} duration={duration_sec}s')
+    return jsonify({"ok": True})
+
+
+@app.route('/api/stress-test/ami/stop', methods=['POST'])
+def api_stress_test_ami_stop():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can control stress tests"}), 403
+    with _stress_lock:
+        cur = _stress_state.get("ami")
+        if not cur or not cur.get("running"):
+            return jsonify({"error": "No AMI stress test is running"}), 409
+        cur["stop_event"].set()
+    return jsonify({"ok": True})
+
+
+@app.route('/api/stress-test/status')
+def api_stress_test_status():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Only the owner can view stress test status"}), 403
+    with _stress_lock:
+        audio = dict(_stress_state.get("audio") or {})
+        ami   = dict(_stress_state.get("ami") or {})
+    audio.pop("stop_event", None)
+    ami.pop("stop_event", None)
+    return jsonify({"audio": audio or None, "ami": ami or None})
+
+
 @app.route('/api/audio/check/<node>')
 def api_audio_check(node):
     """Diagnostic: verify prerequisites for audio streaming. Also reports

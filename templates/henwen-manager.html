@@ -687,6 +687,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     <button class="nav-item" onclick="showPage('tx-diag')">TX Diagnostics</button>
     <button class="nav-item" onclick="showPage('rx-diag')">RX Diagnostics</button>
     <button class="nav-item" id="nav-ast-console" onclick="showPage('ast-console')">Asterisk Console</button>
+    <button class="nav-item" id="nav-stress-test" onclick="showPage('stress-test')">Stress Test</button>
 
     <div class="nav-section">rpt.conf Editor</div>
     <button class="nav-item" onclick="showPage('general')">General Settings</button>
@@ -2012,6 +2013,82 @@ sudo bash /opt/HenWen/tx-spike/setup-https.sh --http-only              # frontin
           <button class="btn btn-sm btn-primary" onclick="saveRxAudioPath()">Save</button>
           <span id="rx-audio-path-status" style="font-size:0.85rem"></span>
         </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Stress Test (owner-only) -->
+  <section class="page" id="page-stress-test">
+    <div class="page-title">Stress Test</div>
+    <div class="page-sub">
+      Owner-only. On-demand load generation to check this box's real headroom.
+      Deliberately scoped to what's safe to automate: audio load stays entirely
+      in-process (no real HTTP connections, no effect on other listeners),
+      and the AMI load test only ever fires a read-only status query &mdash;
+      never a connect/disconnect or anything else that touches another
+      operator's equipment on the real AllStarLink network.
+    </div>
+
+    <div class="card">
+      <div class="card-header"><h2>Audio Streaming Concurrency</h2></div>
+      <div class="card-body">
+        <p class="muted" style="margin-bottom:12px">
+          Opens N simulated listeners against a real node's live audio broadcast,
+          the same fan-out path a real browser Listen session uses, and measures
+          how it holds up &mdash; join latency, dropped frames under backpressure,
+          and this process's own CPU/memory delta. If the node isn't already
+          being listened to, this starts real audio capture on it (MixMonitor or
+          the AudioSocket tap), exactly like a real Listen click would.
+        </p>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Node</label>
+            <select id="stress-audio-node" class="val-input"></select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Concurrency (1&ndash;100)</label>
+            <input type="number" id="stress-audio-concurrency" class="val-input" value="10" min="1" max="100">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Duration, seconds (1&ndash;120)</label>
+            <input type="number" id="stress-audio-duration" class="val-input" value="20" min="1" max="120">
+          </div>
+        </div>
+        <div class="btn-row" style="margin-top:10px">
+          <button class="btn btn-sm btn-primary" id="stress-audio-start-btn" onclick="stressAudioStart()">Start</button>
+          <button class="btn btn-sm btn-warn" id="stress-audio-stop-btn" onclick="stressAudioStop()" style="display:none">Stop</button>
+        </div>
+        <div id="stress-audio-out" style="margin-top:14px"><span class="muted">No test run yet.</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><h2>AMI Read-Load</h2></div>
+      <div class="card-body">
+        <p class="muted" style="margin-bottom:12px">
+          Bursts a single well-known, side-effect-free AMI query
+          (<code>core show version</code>) across N concurrent workers to
+          measure real contention on the single persistent AMI connection's
+          lock. Read-only by design &mdash; this never issues ilink connect/
+          disconnect, localplay, or any other command that changes real state.
+        </p>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Concurrency (1&ndash;30)</label>
+            <input type="number" id="stress-ami-concurrency" class="val-input" value="5" min="1" max="30">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Duration, seconds (1&ndash;120)</label>
+            <input type="number" id="stress-ami-duration" class="val-input" value="20" min="1" max="120">
+          </div>
+        </div>
+        <div class="btn-row" style="margin-top:10px">
+          <button class="btn btn-sm btn-primary" id="stress-ami-start-btn" onclick="stressAmiStart()">Start</button>
+          <button class="btn btn-sm btn-warn" id="stress-ami-stop-btn" onclick="stressAmiStop()" style="display:none">Stop</button>
+        </div>
+        <div id="stress-ami-out" style="margin-top:14px"><span class="muted">No test run yet.</span></div>
       </div>
     </div>
   </section>
@@ -3478,6 +3555,7 @@ function showPage(id) {
   stopDiagPolling();
   stopRelayStatusPolling();
   stopIrcRelayStatusPolling();
+  stopStressTestPolling();
 
   var page = document.getElementById('page-' + id);
   if (page) page.classList.add('active');
@@ -3501,6 +3579,7 @@ function showPage(id) {
   else if (id === 'settings')       { loadSecretKeyStatus(); loadPortsStatus(); syncThemePicker(); mfaLoadStatus(); }
   else if (id === 'tx-diag')         { if (window._henwenRole === 'owner') { loadTxApplyStatus(); } }
   else if (id === 'rx-diag')         { if (window._henwenRole === 'owner') { loadAudioSocketTapStatus(); loadRxAudioPathStatus(); } }
+  else if (id === 'stress-test')     { if (window._henwenRole === 'owner') { populateStressTestNodeSelect(); stressTestLoadStatus(); } }
   else if (id === 'user-mgmt')      { loadUsers(); pwResetLoad(); invitesLoad(); }
   else if (id === 'recordings')         recordingsLoad();
   else if (id === 'recording-settings') recLoad();
@@ -6654,6 +6733,180 @@ function stopRelayStatusPolling() {
   if (_relayStatusTimer) { clearTimeout(_relayStatusTimer); _relayStatusTimer = null; }
 }
 
+/* ── Stress Test (owner-only) ──────────────────────────────────────────── */
+var _stressStatusTimer   = null;
+var _stressAudioStartedAt = null;
+var _stressAmiStartedAt   = null;
+
+function populateStressTestNodeSelect() {
+  var sel = document.getElementById('stress-audio-node');
+  if (!sel) return;
+  var nodes = [];
+  document.querySelectorAll('[id^="page-node-"]').forEach(function(el) {
+    var m = el.id.match(/^page-node-(\d+)$/);
+    if (m) nodes.push(m[1]);
+  });
+  var current = sel.value;
+  sel.innerHTML = '';
+  nodes.forEach(function(n) {
+    var o = document.createElement('option'); o.value = n; o.textContent = n; sel.appendChild(o);
+  });
+  if (!nodes.length) {
+    var o = document.createElement('option'); o.value = ''; o.textContent = '(no nodes found)'; sel.appendChild(o);
+  }
+  if (current) sel.value = current;
+}
+
+function _stressFmtBytes(n) {
+  if (n == null) return '?';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1024 / 1024).toFixed(2) + ' MB';
+}
+
+function _renderStressAudioResult(d) {
+  var el       = document.getElementById('stress-audio-out');
+  var startBtn = document.getElementById('stress-audio-start-btn');
+  var stopBtn  = document.getElementById('stress-audio-stop-btn');
+  if (!d) {
+    el.innerHTML = '<span class="muted">No test run yet.</span>';
+    startBtn.disabled = false; stopBtn.style.display = 'none';
+    return;
+  }
+  if (d.error) {
+    el.innerHTML = '<div class="alert alert-danger">' + esc(d.error) + '</div>';
+    startBtn.disabled = false; stopBtn.style.display = 'none';
+    return;
+  }
+  if (d.running) {
+    var elapsed = _stressAudioStartedAt ? Math.round((Date.now() - _stressAudioStartedAt) / 1000) : 0;
+    el.innerHTML = '<span class="muted"><span class="spinner"></span> Running against node ' + esc(d.node)
+      + ' (' + d.concurrency + ' clients, ~' + elapsed + 's / ' + d.duration_sec + 's)&hellip;</span>';
+    startBtn.disabled = true; stopBtn.style.display = '';
+    return;
+  }
+  startBtn.disabled = false; stopBtn.style.display = 'none';
+  var noDataBadge = d.clients_no_data > 0
+    ? '<span class="badge badge-err" style="margin-left:6px">' + d.clients_no_data + ' got no data</span>' : '';
+  var dropsBadge = d.total_drops > 0
+    ? '<span class="badge badge-warn" style="margin-left:6px">' + d.total_drops + ' dropped frame(s)</span>' : '';
+  el.innerHTML =
+      '<div style="margin-bottom:10px">'
+    +   '<span class="badge badge-ok">' + d.clients_connected + '/' + d.concurrency + ' connected</span>'
+    +   noDataBadge + dropsBadge
+    + '</div>'
+    + '<table class="tbl"><tbody>'
+    +   '<tr><td>Node</td><td>' + esc(d.node) + '</td></tr>'
+    +   '<tr><td>Elapsed</td><td>' + d.elapsed_sec + 's</td></tr>'
+    +   '<tr><td>Total audio received</td><td>' + _stressFmtBytes(d.total_bytes) + '</td></tr>'
+    +   '<tr><td>Join latency (avg / p95 / max)</td><td>'
+    +     (d.join_latency_ms_avg != null
+             ? d.join_latency_ms_avg + ' / ' + d.join_latency_ms_p95 + ' / ' + d.join_latency_ms_max + ' ms'
+             : 'n/a')
+    +   '</td></tr>'
+    +   '<tr><td>This process’s CPU time used</td><td>' + d.cpu_sec + 's</td></tr>'
+    +   '<tr><td>This process’s memory (before &rarr; after)</td><td>'
+    +     (d.rss_kb_before != null
+             ? Math.round(d.rss_kb_before / 1024) + ' MB → ' + Math.round(d.rss_kb_after / 1024) + ' MB'
+             : 'n/a')
+    +   '</td></tr>'
+    + '</tbody></table>';
+}
+
+function _renderStressAmiResult(d) {
+  var el       = document.getElementById('stress-ami-out');
+  var startBtn = document.getElementById('stress-ami-start-btn');
+  var stopBtn  = document.getElementById('stress-ami-stop-btn');
+  if (!d) {
+    el.innerHTML = '<span class="muted">No test run yet.</span>';
+    startBtn.disabled = false; stopBtn.style.display = 'none';
+    return;
+  }
+  if (d.running) {
+    var elapsed = _stressAmiStartedAt ? Math.round((Date.now() - _stressAmiStartedAt) / 1000) : 0;
+    el.innerHTML = '<span class="muted"><span class="spinner"></span> Running (' + d.concurrency + ' workers, ~'
+      + elapsed + 's / ' + d.duration_sec + 's)&hellip;</span>';
+    startBtn.disabled = true; stopBtn.style.display = '';
+    return;
+  }
+  startBtn.disabled = false; stopBtn.style.display = 'none';
+  var errBadge = d.total_errors > 0
+    ? '<span class="badge badge-err" style="margin-left:6px">' + d.total_errors + ' error(s)</span>' : '';
+  el.innerHTML =
+      '<div style="margin-bottom:10px">'
+    +   '<span class="badge badge-ok">' + d.total_calls + ' call(s)</span>' + errBadge
+    + '</div>'
+    + '<table class="tbl"><tbody>'
+    +   '<tr><td>Elapsed</td><td>' + d.elapsed_sec + 's</td></tr>'
+    +   '<tr><td>Calls/sec</td><td>' + (d.calls_per_sec != null ? d.calls_per_sec : 'n/a') + '</td></tr>'
+    +   '<tr><td>Latency (avg / p50 / p95 / max)</td><td>'
+    +     (d.latency_ms_avg != null
+             ? d.latency_ms_avg + ' / ' + d.latency_ms_p50 + ' / ' + d.latency_ms_p95 + ' / ' + d.latency_ms_max + ' ms'
+             : 'n/a')
+    +   '</td></tr>'
+    + '</tbody></table>';
+}
+
+async function stressTestLoadStatus() {
+  var r = await api('/api/stress-test/status');
+  if (!r.ok) return;
+  var d = r.data || {};
+  _renderStressAudioResult(d.audio);
+  _renderStressAmiResult(d.ami);
+
+  var anyRunning = (d.audio && d.audio.running) || (d.ami && d.ami.running);
+  if (_stressStatusTimer) clearTimeout(_stressStatusTimer);
+  if (anyRunning && document.getElementById('page-stress-test').classList.contains('active')) {
+    _stressStatusTimer = setTimeout(stressTestLoadStatus, 2000);
+  }
+}
+
+function stopStressTestPolling() {
+  if (_stressStatusTimer) { clearTimeout(_stressStatusTimer); _stressStatusTimer = null; }
+}
+
+async function stressAudioStart() {
+  var node = document.getElementById('stress-audio-node').value;
+  if (!node) { log('Stress test: no node selected.', 'ERROR'); return; }
+  var concurrency  = parseInt(document.getElementById('stress-audio-concurrency').value, 10) || 10;
+  var duration_sec = parseInt(document.getElementById('stress-audio-duration').value, 10) || 20;
+  var r = await api('/api/stress-test/audio/start', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({node: node, concurrency: concurrency, duration_sec: duration_sec}),
+  });
+  if (!r.ok) { log('Audio stress test failed to start: ' + ((r.data && r.data.error) || 'unknown'), 'ERROR'); return; }
+  _stressAudioStartedAt = Date.now();
+  log('Audio stress test started: node ' + node + ', ' + concurrency + ' clients, ' + duration_sec + 's.', 'INFO');
+  stressTestLoadStatus();
+}
+
+async function stressAudioStop() {
+  var r = await api('/api/stress-test/audio/stop', {method: 'POST'});
+  if (!r.ok) { log('Failed to stop audio stress test: ' + ((r.data && r.data.error) || 'unknown'), 'ERROR'); return; }
+  log('Audio stress test stopped.', 'INFO');
+  stressTestLoadStatus();
+}
+
+async function stressAmiStart() {
+  var concurrency  = parseInt(document.getElementById('stress-ami-concurrency').value, 10) || 5;
+  var duration_sec = parseInt(document.getElementById('stress-ami-duration').value, 10) || 20;
+  var r = await api('/api/stress-test/ami/start', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({concurrency: concurrency, duration_sec: duration_sec}),
+  });
+  if (!r.ok) { log('AMI stress test failed to start: ' + ((r.data && r.data.error) || 'unknown'), 'ERROR'); return; }
+  _stressAmiStartedAt = Date.now();
+  log('AMI stress test started: ' + concurrency + ' workers, ' + duration_sec + 's.', 'INFO');
+  stressTestLoadStatus();
+}
+
+async function stressAmiStop() {
+  var r = await api('/api/stress-test/ami/stop', {method: 'POST'});
+  if (!r.ok) { log('Failed to stop AMI stress test: ' + ((r.data && r.data.error) || 'unknown'), 'ERROR'); return; }
+  log('AMI stress test stopped.', 'INFO');
+  stressTestLoadStatus();
+}
+
 async function relaySave() {
   var st = document.getElementById('relay-status');
   var portVal = document.getElementById('relay-bc-port').value.trim();
@@ -6852,6 +7105,10 @@ async function applyRoleNav() {
   if (recNavBtn) recNavBtn.style.display = isOwnerRole ? '' : 'none';
   var relayNavBtn = document.getElementById('nav-stream-relay');
   if (relayNavBtn) relayNavBtn.style.display = isOwnerRole ? '' : 'none';
+  /* Stress Test is owner-only too -- matches the backend's explicit
+     role==='owner' check on every /api/stress-test/* route. */
+  var stressNavBtn = document.getElementById('nav-stress-test');
+  if (stressNavBtn) stressNavBtn.style.display = isOwnerRole ? '' : 'none';
   /* Meshtastic panel config is owner-only too — matches the backend's
      explicit role==='owner' check on /api/meshtastic/config. */
   var meshNavBtn = document.getElementById('nav-meshtastic');
