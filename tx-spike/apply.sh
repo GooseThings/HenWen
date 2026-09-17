@@ -167,13 +167,12 @@ INSERT_TEXT="    # ${MARKER}: SIP-over-WebSocket signaling to the loopback-only
     # Asterisk builtin HTTP server; Apache terminates WSS with the same cert.
     ProxyPass /asterisk-ws ws://127.0.0.1:8088/ws retry=0
 "
-PATCHED_CONFS=()
 for conf in "${APACHE_CONFS[@]}"; do
   echo "   $conf"
   rc=0
   henwen_insert_before_proxypass "$conf" "$FLASK_PORT" "asterisk-ws" "$INSERT_TEXT" || rc=$?
   case "$rc" in
-    0) echo "      patched"; PATCHED_CONFS+=("$conf") ;;
+    0) echo "      patched" ;;
     1) echo "      already patched, skipping" ;;
     *) echo "      FAILED to insert proxy line — restoring every vhost touched this run"
        henwen_restore_vhosts_from_manifest "$BACKUP_DIR" >/dev/null || true
