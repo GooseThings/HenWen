@@ -2151,6 +2151,21 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
 
   </div>
 
+  <!-- DVSwitch DMR bridge status/control -- only shown when the owner has
+       DVSwitch enabled and configured (see /api/dvswitch/status). Deliberately
+       NOT part of the drag/drop dash-card grid above (.content-area): that
+       grid's 12-column/24-row placement is precisely tuned per breakpoint for
+       the existing cards, and this is a niche, opt-in panel most installs
+       will never enable -- a plain full-width bar below the grid avoids any
+       risk of disturbing that layout for every other install. -->
+  <div id="dvswitch-panel" style="display:none;margin:0 16px 10px;padding:10px 14px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;font-size:0.85rem">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <strong>DMR Bridge</strong>
+      <span id="dvswitch-status-line" style="color:var(--text2)"></span>
+      <div id="dvswitch-tg-buttons" style="display:flex;gap:6px;flex-wrap:wrap;margin-left:auto"></div>
+    </div>
+  </div>
+
   </main>
 
   <!-- Footer -->
@@ -5307,6 +5322,60 @@ async function loadMeshtasticMessages() {
   } catch (e) { /* transient network hiccup — next poll retries */ }
 }
 
+/* DVSwitch DMR bridge status/control panel -- public read (matches the rest
+   of the board's status data), but switching talkgroup requires being
+   logged in (any role), same gate as Connect/Disconnect. Hidden entirely
+   ({available:false}) unless the owner has actually enabled and configured
+   DVSwitch, so this is a no-op fetch on the overwhelming majority of
+   installs that never touch the feature. */
+async function loadDvswitchStatus() {
+  var panel = document.getElementById('dvswitch-panel');
+  if (!panel) return;
+  try {
+    var r = await apiFetch('/api/dvswitch/status', {cache: 'no-store'});
+    if (!r.ok) { panel.style.display = 'none'; return; }
+    var d = await r.json();
+    if (!d.available) { panel.style.display = 'none'; return; }
+    panel.style.display = '';
+
+    var networkLabel = {brandmeister: 'BrandMeister', tgif: 'TGIF'}[d.network] || (d.network || 'Custom');
+    var line = networkLabel + ' &middot; TG ' + esc(d.tg || '?');
+    if (d.ts) line += ' &middot; TS' + esc(d.ts);
+    document.getElementById('dvswitch-status-line').innerHTML = line;
+
+    var loggedIn = !!window._kioskRole;
+    var btnWrap = document.getElementById('dvswitch-tg-buttons');
+    btnWrap.innerHTML = (d.presets || []).map(function(p) {
+      var active = String(p.tg) === String(d.tg);
+      var style = 'padding:3px 10px;border-radius:5px;font-size:0.8rem;cursor:pointer;border:1px solid var(--border);'
+        + (active ? 'background:var(--accent);color:var(--bg);border-color:var(--accent);' : 'background:var(--bg3);color:var(--text)');
+      var disabledAttr = loggedIn ? '' : ' disabled title="Log in to switch talkgroups"';
+      return '<button style="' + style + '"' + disabledAttr
+        + ' onclick="tuneDvswitchTG(\'' + esc(p.tg) + '\')">' + esc(p.label) + '</button>';
+    }).join('');
+  } catch (e) { /* transient network hiccup — next poll retries */ }
+}
+
+async function tuneDvswitchTG(tg) {
+  if (!window._kioskRole) { openKioskLogin(tuneDvswitchTG, [tg]); return; }
+  try {
+    var r = await apiFetch('/api/dvswitch/tune', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({tg: tg})
+    });
+    var d = await r.json();
+    if (r.ok && d.ok) {
+      sbToast('Tuned to TG ' + tg, true);
+      loadDvswitchStatus();
+    } else {
+      sbToast((d && d.error) || 'Could not switch talkgroup', false);
+    }
+  } catch (e) {
+    sbToast('Could not switch talkgroup', false);
+  }
+}
+
 async function refreshActivity() {
   try {
     var r = await apiFetch('/api/status/activity', {cache: 'no-store'});
@@ -5942,6 +6011,7 @@ function _kioskLoginComplete(d) {
   _searchUpdateBtn();
   _recordUpdateBtn();
   _chatUpdateVisibility();
+  loadDvswitchStatus();   /* re-render TG buttons' enabled/disabled state immediately on login/logout, not just on the next 20s poll */
   _managerUpdateBtn();
   updateActiveUsersToggle();
   loadFavorites();
@@ -6082,6 +6152,7 @@ async function checkKioskSession() {
   _searchUpdateBtn();
   _recordUpdateBtn();
   _chatUpdateVisibility();
+  loadDvswitchStatus();   /* re-render TG buttons' enabled/disabled state immediately on login/logout, not just on the next 20s poll */
   _managerUpdateBtn();
 
   updateActiveUsersToggle();
@@ -9147,6 +9218,7 @@ refreshWeather();
 refreshNwsAlerts();
 refreshActivity();
 loadMeshtasticMessages();
+loadDvswitchStatus();
 initFavSort();
 loadFavorites();
 loadFavStatus();
@@ -9162,6 +9234,7 @@ setInterval(boardWatchdog,   2000);    /* catches a refreshBoard() request that 
                                           comment above markServerUnreachable() */
 setInterval(refreshActivity, 15000);   /* activity every 15s */
 setInterval(loadMeshtasticMessages, 20000);   /* meshtastic panel every 20s */
+setInterval(loadDvswitchStatus, 15000);       /* DVSwitch TG/status panel every 15s */
 setInterval(refreshWeather,  600000);  /* weather every 10min */
 setInterval(refreshNwsAlerts, 60000);  /* NWS alert ticker every 60s — well under the
                                           poller's own 120s cadence, just catches up
