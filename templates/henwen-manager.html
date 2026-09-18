@@ -1822,6 +1822,17 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
       </div>
     </div>
 
+    <div class="card" style="max-width:620px">
+      <div class="card-header"><h2>Talkgroup Presets</h2></div>
+      <div class="card-body">
+        <div style="font-size:0.75rem;color:var(--text2);margin-bottom:10px">
+          Shown as buttons on the Kiosk board and here, so anyone logged in can switch talkgroup without touching this page again. Switching is restricted to this list — there's no free-entry talkgroup field, so a mistyped number can't send you somewhere unintended.
+        </div>
+        <div id="dvs-tg-preset-rows"></div>
+        <button type="button" class="btn btn-sm" onclick="dvswitchAddPresetRow()">+ Add Talkgroup</button>
+      </div>
+    </div>
+
     <button class="btn btn-primary" onclick="dvswitchSave()">Save</button>
     <div id="dvs-status" style="margin-top:8px;font-size:0.82rem"></div>
 
@@ -6915,9 +6926,40 @@ function dvswitchAmbeSourceChanged() {
   document.getElementById('dvs-ambe-network-row').style.display  = (source === 'network')  ? '' : 'none';
 }
 
+/* Curated talkgroup presets -- in-memory array kept in sync with the DOM
+   rows, collected into the save payload. See dvswitch_config.talkgroup_
+   presets' own comment in app.py for why this is curated-only, no free
+   TG-entry field. */
+var _dvsTalkgroupPresets = [];
+
+function dvswitchRenderPresetRows() {
+  var wrap = document.getElementById('dvs-tg-preset-rows');
+  wrap.innerHTML = _dvsTalkgroupPresets.map(function(p, i) {
+    return '<div style="display:flex;gap:8px;margin-bottom:6px;align-items:center">'
+      + '<input type="text" class="val-input" placeholder="Label (e.g. Local)" style="flex:2" value="' + esc(p.label)
+        + '" oninput="_dvsTalkgroupPresets[' + i + '].label = this.value">'
+      + '<input type="text" class="val-input" placeholder="TG" style="flex:1" value="' + esc(p.tg)
+        + '" oninput="_dvsTalkgroupPresets[' + i + '].tg = this.value">'
+      + '<button type="button" class="btn btn-sm" onclick="dvswitchRemovePresetRow(' + i + ')">&times;</button>'
+      + '</div>';
+  }).join('') || '<div class="muted" style="font-size:0.8rem">No presets yet -- add one below.</div>';
+}
+
+function dvswitchAddPresetRow() {
+  _dvsTalkgroupPresets.push({label: '', tg: ''});
+  dvswitchRenderPresetRows();
+}
+
+function dvswitchRemovePresetRow(i) {
+  _dvsTalkgroupPresets.splice(i, 1);
+  dvswitchRenderPresetRows();
+}
+
 async function dvswitchLoad() {
   var r = await api('/api/dvswitch/config');
   var d = r.ok ? r.data : {};
+  _dvsTalkgroupPresets = (d.talkgroup_presets || []).map(function(p) { return {label: p.label, tg: p.tg}; });
+  dvswitchRenderPresetRows();
   document.getElementById('dvs-enabled').checked        = !!d.enabled;
   document.getElementById('dvs-dmr-id').value            = d.dmr_id || '';
   document.getElementById('dvs-callsign').value          = d.callsign || '';
@@ -6955,6 +6997,7 @@ async function dvswitchSave() {
     ambe_device:         document.getElementById('dvs-ambe-device').value.trim(),
     ambe_host:           document.getElementById('dvs-ambe-host').value.trim(),
     ambe_port:           parseInt(document.getElementById('dvs-ambe-port').value, 10),
+    talkgroup_presets:   _dvsTalkgroupPresets.map(function(p) { return {label: p.label.trim(), tg: p.tg.trim()}; }),
   };
   var r = await api('/api/dvswitch/config', {
     method:  'POST',

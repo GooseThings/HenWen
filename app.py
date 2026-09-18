@@ -1124,8 +1124,17 @@ def get_db():
         ambe_source        TEXT    NOT NULL DEFAULT 'software',
         ambe_device        TEXT    NOT NULL DEFAULT '',
         ambe_host          TEXT    NOT NULL DEFAULT '',
-        ambe_port          INTEGER NOT NULL DEFAULT 2460
+        ambe_port          INTEGER NOT NULL DEFAULT 2460,
+        talkgroup_presets  TEXT    NOT NULL DEFAULT '[]'
     )""")
+    _dvswitch_cfg_cols = {r[1] for r in conn.execute("PRAGMA table_info(dvswitch_config)").fetchall()}
+    if 'talkgroup_presets' not in _dvswitch_cfg_cols:
+        # Curated {"label","tg"} pairs the owner defines in Manager, shown as
+        # buttons on both Manager and the Kiosk (see /api/dvswitch/status,
+        # /api/dvswitch/tune) -- deliberately not a free-entry TG number
+        # field, so switching is a guardrailed pick from a known-good list
+        # rather than a typo-prone raw number any logged-in user could enter.
+        conn.execute("ALTER TABLE dvswitch_config ADD COLUMN talkgroup_presets TEXT NOT NULL DEFAULT '[]'")
     conn.commit()
     # Per-node lockout: presence of a row means that node is locked by its
     # Owner. Only one lockout state per node, so `node` is the primary key
@@ -1451,7 +1460,7 @@ def check_auth():
     _PUBLIC          = {'login', 'logout', 'static', None,
                         'status_board', 'status_board_redirect', 'status_board_accessible',
                         'api_status_board', 'api_status_weather', 'api_status_activity',
-                        'api_status_nws_alerts',
+                        'api_status_nws_alerts', 'api_dvswitch_status',
                         'api_aprs_stations', 'api_iss_tle', 'api_meshtastic_messages',
                         'api_login', 'api_session', 'api_csrf_token',
                         'api_favorites', 'api_favorites_status',
@@ -1479,7 +1488,7 @@ def check_auth():
     # Any logged-in user (superuser / admin / user) — live audio requires a
     # session (previously public, letting anyone on the network listen and
     # spawn server-side encoder/relay processes with no authentication).
-    _USER_OR_ABOVE = {'api_status_connect', 'api_status_disconnect',
+    _USER_OR_ABOVE = {'api_status_connect', 'api_status_disconnect', 'api_dvswitch_tune',
                       'api_fav_add', 'api_fav_delete', 'api_fav_label',
                       'api_audio_stream', 'api_audio_check', 'api_audio_stop',
                       'api_audio_client_log',
@@ -14300,11 +14309,13 @@ DVSWITCH_CONFIG_DEFAULTS = {
     "network_host": "", "network_port": 62031, "network_password": "",
     "static_talkgroups": "", "bridge_node": "", "allstar_gain": 1.0, "dmr_gain": 1.0,
     "ambe_source": "software", "ambe_device": "", "ambe_host": "", "ambe_port": 2460,
+    "talkgroup_presets": [],
 }
 _DVSWITCH_DMR_ID_RE   = re.compile(r'^\d{6,7}$')
 _DVSWITCH_CALLSIGN_RE = re.compile(r'^[A-Z0-9]{3,7}$')
 _DVSWITCH_NETWORKS    = ("brandmeister", "tgif", "custom")
 _DVSWITCH_AMBE_SOURCES = ("software", "hardware", "network")
+_DVSWITCH_TG_RE        = re.compile(r'^\d{1,8}$')
 
 # Fixed USRP loopback ports for the DVSwitch bridge node -- only one
 # DVSwitch bridge is supported per install (matches stream_relay's own
@@ -14315,6 +14326,20 @@ _DVSWITCH_AMBE_SOURCES = ("software", "hardware", "network")
 # Analog_Bridge's txPort and vice versa, so don't "fix" this to look symmetric.
 DVSWITCH_USRP_ASTERISK_RXPORT = 34001   # Asterisk listens here; Analog_Bridge's txPort
 DVSWITCH_USRP_ASTERISK_TXPORT = 32001   # Asterisk sends here; Analog_Bridge's rxPort
+
+# Analog_Bridge writes live status here -- confirmed live on a real running
+# bridge -- as {"digital": {"tg", "ts", "cc", "call", ...}, "tlv": {"ambe_mode", ...},
+# "last_tune": ...}. Filename is keyed by Analog_Bridge's own [USRP] rxPort
+# (which is DVSWITCH_USRP_ASTERISK_TXPORT above -- Asterisk's txport is
+# Analog_Bridge's rxport), confirmed against the real file DVSwitch's own
+# dvswitch.sh discovers via its getUSRPPort() helper.
+DVSWITCH_ABINFO_PATH = f"/tmp/ABInfo_{DVSWITCH_USRP_ASTERISK_TXPORT}.json"
+# DVSwitch's own script -- `tune <tg>` sends a live USRP metadata command to
+# Analog_Bridge over a local UDP socket (no root needed; confirmed it reads
+# world-readable files under /var/lib/dvswitch and discovers its own ports
+# from DVSWITCH_ABINFO_PATH above, not passed anything sensitive). Reused
+# rather than reimplementing DVSwitch's own USRP TLV framing in Python.
+DVSWITCH_TUNE_SCRIPT_PATH = "/opt/MMDVM_Bridge/dvswitch.sh"
 
 DVSWITCH_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dvswitch")
 DVSWITCH_APPLY_SCRIPT_PATH = os.path.join(DVSWITCH_DIR, "apply.sh")
@@ -14329,6 +14354,36 @@ DVSWITCH_EXPORT_PATH = os.environ.get("DVSWITCH_EXPORT_PATH", "/etc/asterisk/hen
 def _get_dvswitch_config():
     row = get_db().execute("SELECT * FROM dvswitch_config WHERE id=1").fetchone()
     return row
+
+
+def _validate_talkgroup_presets(raw):
+    """Returns (list_of_{label,tg}_or_None, error_string_or_None). raw is
+    whatever JSON-decodable value the client sent for talkgroup_presets --
+    a list of {"label": str, "tg": str} dicts. Curated on purpose (see
+    dvswitch_config's own column comment): every preset's tg is validated
+    here so a bad value can never be saved, not just filtered client-side."""
+    if raw is None:
+        return [], None
+    if not isinstance(raw, list):
+        return None, "talkgroup_presets must be a list"
+    cleaned = []
+    seen_tgs = set()
+    for entry in raw:
+        if not isinstance(entry, dict):
+            return None, "each talkgroup preset must be an object with label/tg"
+        label = str(entry.get("label", "")).strip()
+        tg    = str(entry.get("tg", "")).strip()
+        if not label:
+            return None, "each talkgroup preset needs a label"
+        if not _DVSWITCH_TG_RE.match(tg):
+            return None, f"talkgroup {tg!r} must be 1-8 digits"
+        if tg in seen_tgs:
+            return None, f"talkgroup {tg!r} is listed more than once"
+        seen_tgs.add(tg)
+        cleaned.append({"label": label, "tg": tg})
+    if len(cleaned) > 20:
+        return None, "at most 20 talkgroup presets are supported"
+    return cleaned, None
 
 
 def _validate_dvswitch_config(data):
@@ -14384,6 +14439,10 @@ def _validate_dvswitch_config(data):
         return None, ("DMR ID, callsign, network host/port, and a bridge node are all "
                        "required before enabling DVSwitch")
 
+    talkgroup_presets, tg_err = _validate_talkgroup_presets(data.get("talkgroup_presets"))
+    if tg_err:
+        return None, tg_err
+
     return {
         "enabled": enabled, "dmr_id": dmr_id, "callsign": callsign,
         "dmr_network": dmr_network, "network_host": network_host,
@@ -14392,6 +14451,7 @@ def _validate_dvswitch_config(data):
         "allstar_gain": allstar_gain, "dmr_gain": dmr_gain,
         "ambe_source": ambe_source, "ambe_device": ambe_device,
         "ambe_host": ambe_host, "ambe_port": ambe_port,
+        "talkgroup_presets": talkgroup_presets,
     }, None
 
 
@@ -14400,7 +14460,14 @@ def api_dvswitch_config_get():
     if session.get('role') != 'owner':
         return jsonify({"error": "Only the owner can view DVSwitch settings"}), 403
     cfg = _get_dvswitch_config()
-    return jsonify(dict(cfg) if cfg else DVSWITCH_CONFIG_DEFAULTS)
+    if not cfg:
+        return jsonify(DVSWITCH_CONFIG_DEFAULTS)
+    result = dict(cfg)
+    try:
+        result["talkgroup_presets"] = json.loads(result.get("talkgroup_presets") or "[]")
+    except (TypeError, ValueError):
+        result["talkgroup_presets"] = []
+    return jsonify(result)
 
 
 @app.route("/api/dvswitch/config", methods=["POST", "PUT"])
@@ -14416,17 +14483,99 @@ def api_dvswitch_config_save():
         """INSERT OR REPLACE INTO dvswitch_config
            (id, enabled, dmr_id, callsign, dmr_network, network_host, network_port,
             network_password, static_talkgroups, bridge_node, allstar_gain, dmr_gain,
-            ambe_source, ambe_device, ambe_host, ambe_port)
-           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ambe_source, ambe_device, ambe_host, ambe_port, talkgroup_presets)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (int(cleaned["enabled"]), cleaned["dmr_id"], cleaned["callsign"], cleaned["dmr_network"],
          cleaned["network_host"], cleaned["network_port"], cleaned["network_password"],
          cleaned["static_talkgroups"], cleaned["bridge_node"], cleaned["allstar_gain"],
          cleaned["dmr_gain"], cleaned["ambe_source"], cleaned["ambe_device"],
-         cleaned["ambe_host"], cleaned["ambe_port"])
+         cleaned["ambe_host"], cleaned["ambe_port"], json.dumps(cleaned["talkgroup_presets"]))
     )
     db.commit()
     log("INFO", f"[DVSWITCH] Config saved by {session.get('username', '')}")
     return jsonify({"ok": True, "ready": True})
+
+
+@app.route("/api/dvswitch/status")
+def api_dvswitch_status():
+    """Public, like /api/status/board's own status data -- read-only live
+    state (current talkgroup/mode), not a control surface, so it doesn't
+    need a login any more than the rest of the board does. Reads
+    Analog_Bridge's own live-status export directly rather than shelling
+    out to `dvswitch.sh show`, since the file is already world-readable and
+    parsing its JSON ourselves avoids a subprocess per poll."""
+    cfg = _get_dvswitch_config()
+    if not cfg or not cfg["enabled"]:
+        return jsonify({"available": False})
+
+    try:
+        with open(DVSWITCH_ABINFO_PATH) as f:
+            info = json.load(f)
+    except (OSError, ValueError):
+        # Not a real error -- Analog_Bridge may just not have started yet,
+        # or the feature was enabled but guided setup never actually ran.
+        return jsonify({"available": False})
+
+    try:
+        presets = json.loads(cfg["talkgroup_presets"] or "[]")
+    except (TypeError, ValueError):
+        presets = []
+
+    digital = info.get("digital", {})
+    return jsonify({
+        "available":  True,
+        "network":    cfg["dmr_network"],
+        "network_host": cfg["network_host"],
+        "tg":         digital.get("tg", ""),
+        "ts":         digital.get("ts", ""),
+        "cc":         digital.get("cc", ""),
+        "call":       digital.get("call", ""),
+        "mode":       info.get("tlv", {}).get("ambe_mode", ""),
+        "last_tune":  info.get("last_tune", ""),
+        "presets":    presets,
+    })
+
+
+@app.route("/api/dvswitch/tune", methods=["POST"])
+def api_dvswitch_tune():
+    """Any logged-in role may switch talkgroup -- matches api_status_connect/
+    disconnect's own gate (see _USER_OR_ABOVE in check_auth()), since this is
+    the same kind of shared-board control action, not an owner-only setting
+    change. Deliberately restricted to the owner's curated preset list
+    (talkgroup_presets) rather than accepting an arbitrary TG number, so a
+    logged-in kiosk user can't fat-finger or deliberately dial into an
+    unrelated talkgroup -- see _validate_talkgroup_presets()'s own comment."""
+    cfg = _get_dvswitch_config()
+    if not cfg or not cfg["enabled"]:
+        return jsonify({"error": "DVSwitch is not enabled"}), 400
+
+    try:
+        presets = json.loads(cfg["talkgroup_presets"] or "[]")
+    except (TypeError, ValueError):
+        presets = []
+    allowed_tgs = {p["tg"] for p in presets}
+
+    tg = str((request.json or {}).get("tg", "")).strip()
+    if tg not in allowed_tgs:
+        return jsonify({"error": "That talkgroup isn't in the configured preset list"}), 400
+
+    if not os.path.isfile(DVSWITCH_TUNE_SCRIPT_PATH):
+        return jsonify({"error": f"{DVSWITCH_TUNE_SCRIPT_PATH} not found -- is DVSwitch installed?"}), 404
+
+    try:
+        r = subprocess.run([DVSWITCH_TUNE_SCRIPT_PATH, "tune", tg],
+                            capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "dvswitch.sh timed out"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    if r.returncode != 0:
+        detail = (r.stdout or "").strip() or (r.stderr or "").strip()
+        return jsonify({"error": detail or f"dvswitch.sh returned code {r.returncode}"}), 500
+
+    log("INFO", f"[DVSWITCH] {session.get('username', '?')} tuned to TG {tg}")
+    return jsonify({"ok": True, "tg": tg})
 
 
 def _dvswitch_bridge_node_settings(context):

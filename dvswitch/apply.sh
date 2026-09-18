@@ -88,8 +88,20 @@ else
   apt-get update -qq
 fi
 
-echo "== Installing dvswitch-server (this can take a while on first run)"
-DEBIAN_FRONTEND=noninteractive apt-get install -y dvswitch-server
+echo "== Installing analog-bridge + mmdvm-bridge (this can take a while on first run)"
+# Deliberately NOT `apt-get install dvswitch-server` -- that's a pure
+# metapackage with everything as Recommends, not Depends (confirmed via
+# `dpkg -s dvswitch-server`: Recommends: dvswitch, dvswitch-monit,
+# dvswitch-dashboard, dvswitch-menu). Installing it pulled in dvswitch-
+# dashboard, a PHP control panel with NO LOGIN, which installed its own
+# Apache config (Alias /dvswitch ...) globally across every vhost --
+# confirmed live that this made an unauthenticated DMR-bridge control panel
+# reachable on this box's real public HTTPS hostnames. --no-install-
+# recommends installs exactly the two packages this feature needs and
+# nothing else DVSwitch ships (D-Star/P25/NXDN/YSF gateways, the dashboard,
+# Quantar_Bridge) -- their own hard Depends (actual libraries) still install
+# normally, only the optional companion packages are skipped.
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends analog-bridge mmdvm-bridge
 
 echo "== Verifying expected ini paths"
 for f in "$ANALOG_BRIDGE_INI" "$MMDVM_BRIDGE_INI"; do

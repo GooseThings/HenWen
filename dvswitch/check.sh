@@ -22,10 +22,24 @@ ANALOG_BRIDGE_INI="${ANALOG_BRIDGE_INI:-/opt/Analog_Bridge/Analog_Bridge.ini}"
 MMDVM_BRIDGE_INI="${MMDVM_BRIDGE_INI:-/opt/MMDVM_Bridge/MMDVM_Bridge.ini}"
 
 echo "== Package"
-if dpkg -s dvswitch-server >/dev/null 2>&1; then
-  ok "dvswitch-server package installed"
+if dpkg -s analog-bridge >/dev/null 2>&1 && dpkg -s mmdvm-bridge >/dev/null 2>&1; then
+  ok "analog-bridge + mmdvm-bridge packages installed"
 else
-  bad "dvswitch-server not installed — run guided setup from Manager > DVSwitch"
+  bad "analog-bridge/mmdvm-bridge not installed — run guided setup from Manager > DVSwitch"
+fi
+
+# apply.sh no longer installs the dvswitch-server metapackage (only the two
+# packages actually needed -- see its own comment), specifically because
+# that metapackage's Recommends pull in dvswitch-dashboard, a PHP control
+# panel with no login that installs its own global Apache Alias -- confirmed
+# live this made an unauthenticated DMR-bridge control panel reachable on
+# real public HTTPS hostnames. Checked here so an install that ran an older
+# apply.sh (or had it installed some other way) gets flagged, not silently
+# left exposed.
+if [ -e /etc/apache2/conf-enabled/dvswitch.conf ]; then
+  bad "dvswitch-dashboard's Apache config is enabled (/etc/apache2/conf-enabled/dvswitch.conf) -- this is an UNAUTHENTICATED control panel reachable on every vhost fronting this box. Disable it: sudo a2disconf dvswitch && sudo systemctl reload apache2"
+else
+  ok "dvswitch-dashboard's Apache config is not enabled"
 fi
 
 if ls /etc/apt/sources.list.d/dvswitch*.list >/dev/null 2>&1; then

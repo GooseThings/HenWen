@@ -4,7 +4,15 @@ lookup. No DB or Flask app context needed for any of these, same posture
 as test_rpt_conf_parser.py; the apt/systemd/AMBE-hardware parts of
 dvswitch/apply.sh and check.sh need a real install to verify (see
 dvswitch/README.md).
+
+TestDvswitchStatusRoute/TestDvswitchTuneRoute cover the live-status and
+talkgroup-switch routes added after a real deploy surfaced two things: no
+Kiosk-facing way to see current TG, and dvswitch.sh needing to be invoked
+correctly and gated to the owner's curated preset list.
 """
+import json
+from unittest.mock import MagicMock, patch
+
 import app
 
 
@@ -251,3 +259,172 @@ class TestDvswitchDefaultContext:
 
     def test_falls_back_on_empty_conf(self):
         assert app._dvswitch_default_context("") == "radio-secure"
+
+
+def _login(client, username):
+    row = app.get_db().execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+    with client.session_transaction() as sess:
+        sess["logged_in"]      = True
+        sess["username"]       = username
+        sess["role"]           = row["role"]
+        sess["user_id"]        = row["id"]
+        sess["password_epoch"] = row["password_epoch"]
+        sess["idle_timeout"]   = app.SESSION_IDLE_TIMEOUT
+        sess["sid"]            = "test-sid-" + username
+
+
+class TestValidateTalkgroupPresets:
+    def test_none_returns_empty_list(self):
+        cleaned, err = app._validate_talkgroup_presets(None)
+        assert err is None
+        assert cleaned == []
+
+    def test_valid_list_passes(self):
+        cleaned, err = app._validate_talkgroup_presets([{"label": "Local", "tg": "9"}, {"label": "Statewide", "tg": "3120"}])
+        assert err is None
+        assert cleaned == [{"label": "Local", "tg": "9"}, {"label": "Statewide", "tg": "3120"}]
+
+    def test_not_a_list_rejected(self):
+        cleaned, err = app._validate_talkgroup_presets({"label": "Local", "tg": "9"})
+        assert err is not None
+
+    def test_entry_not_a_dict_rejected(self):
+        cleaned, err = app._validate_talkgroup_presets(["9"])
+        assert err is not None
+
+    def test_missing_label_rejected(self):
+        cleaned, err = app._validate_talkgroup_presets([{"label": "", "tg": "9"}])
+        assert err is not None and "label" in err
+
+    def test_non_numeric_tg_rejected(self):
+        cleaned, err = app._validate_talkgroup_presets([{"label": "Local", "tg": "not-a-number"}])
+        assert err is not None
+
+    def test_duplicate_tg_rejected(self):
+        cleaned, err = app._validate_talkgroup_presets([{"label": "A", "tg": "9"}, {"label": "B", "tg": "9"}])
+        assert err is not None and "more than once" in err
+
+    def test_too_many_presets_rejected(self):
+        presets = [{"label": f"TG{i}", "tg": str(i)} for i in range(21)]
+        cleaned, err = app._validate_talkgroup_presets(presets)
+        assert err is not None and "20" in err
+
+    def test_labels_and_tgs_are_stripped(self):
+        cleaned, err = app._validate_talkgroup_presets([{"label": "  Local  ", "tg": " 9 "}])
+        assert err is None
+        assert cleaned == [{"label": "Local", "tg": "9"}]
+
+
+class TestDvswitchStatusRoute:
+    def test_unavailable_when_not_enabled(self, client, create_user):
+        create_user("owner1", role="owner")
+        resp = client.get("/api/dvswitch/status")
+        assert resp.status_code == 200
+        assert resp.get_json() == {"available": False}
+
+    def test_unavailable_when_enabled_but_no_abinfo_file(self, client, create_user, monkeypatch, tmp_path):
+        create_user("owner1", role="owner")
+        db = app.get_db()
+        db.execute("INSERT OR REPLACE INTO dvswitch_config (id, enabled, dmr_network, network_host) "
+                   "VALUES (1, 1, 'brandmeister', 'master.example.org')")
+        db.commit()
+        monkeypatch.setattr(app, "DVSWITCH_ABINFO_PATH", str(tmp_path / "nonexistent.json"))
+
+        resp = client.get("/api/dvswitch/status")
+        assert resp.status_code == 200
+        assert resp.get_json() == {"available": False}
+
+    def test_available_with_live_abinfo_data(self, client, create_user, monkeypatch, tmp_path):
+        create_user("owner1", role="owner")
+        db = app.get_db()
+        db.execute(
+            "INSERT OR REPLACE INTO dvswitch_config (id, enabled, dmr_network, network_host, talkgroup_presets) "
+            "VALUES (1, 1, 'brandmeister', 'master.example.org', ?)",
+            (json.dumps([{"label": "Local", "tg": "9"}]),)
+        )
+        db.commit()
+        abinfo = tmp_path / "ABInfo.json"
+        abinfo.write_text(json.dumps({
+            "digital": {"gw": "3206012", "tg": "9", "ts": "2", "cc": "1", "call": "N8GMZ"},
+            "tlv": {"ambe_mode": "DMR"},
+            "last_tune": "",
+        }))
+        monkeypatch.setattr(app, "DVSWITCH_ABINFO_PATH", str(abinfo))
+
+        resp = client.get("/api/dvswitch/status")
+        assert resp.status_code == 200
+        d = resp.get_json()
+        assert d["available"] is True
+        assert d["tg"] == "9"
+        assert d["mode"] == "DMR"
+        assert d["network"] == "brandmeister"
+        assert d["presets"] == [{"label": "Local", "tg": "9"}]
+
+    def test_public_no_login_required(self, client, create_user):
+        # No _login() call -- confirms api_dvswitch_status is in check_auth()'s
+        # _PUBLIC set, matching /api/status/board's own public status data.
+        create_user("owner1", role="owner")
+        resp = client.get("/api/dvswitch/status")
+        assert resp.status_code == 200
+
+
+class TestDvswitchTuneRoute:
+    def _enable_with_preset(self, tg="9", label="Local"):
+        db = app.get_db()
+        db.execute(
+            "INSERT OR REPLACE INTO dvswitch_config (id, enabled, dmr_network, network_host, talkgroup_presets) "
+            "VALUES (1, 1, 'brandmeister', 'master.example.org', ?)",
+            (json.dumps([{"label": label, "tg": tg}]),)
+        )
+        db.commit()
+
+    def test_requires_login(self, client, create_user):
+        create_user("owner1", role="owner")
+        self._enable_with_preset()
+        resp = client.post("/api/dvswitch/tune", json={"tg": "9"})
+        assert resp.status_code in (401, 403)
+
+    def test_any_logged_in_role_can_tune(self, client, create_user):
+        create_user("owner1", role="owner")
+        create_user("user1", role="user")
+        _login(client, "user1")
+        self._enable_with_preset()
+        with patch("app.os.path.isfile", return_value=True), \
+             patch("app.subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")):
+            resp = client.post("/api/dvswitch/tune", json={"tg": "9"})
+        assert resp.status_code == 200
+        assert resp.get_json()["ok"] is True
+
+    def test_rejects_tg_not_in_preset_list(self, client, create_user):
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        self._enable_with_preset(tg="9")
+        resp = client.post("/api/dvswitch/tune", json={"tg": "4000"})
+        assert resp.status_code == 400
+        assert "preset" in resp.get_json()["error"]
+
+    def test_rejects_when_not_enabled(self, client, create_user):
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        resp = client.post("/api/dvswitch/tune", json={"tg": "9"})
+        assert resp.status_code == 400
+
+    def test_invokes_dvswitch_sh_with_correct_args(self, client, create_user):
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        self._enable_with_preset(tg="3120")
+        mock_run = MagicMock(return_value=MagicMock(returncode=0, stdout="", stderr=""))
+        with patch("app.os.path.isfile", return_value=True), patch("app.subprocess.run", mock_run):
+            client.post("/api/dvswitch/tune", json={"tg": "3120"})
+        args = mock_run.call_args[0][0]
+        assert args == [app.DVSWITCH_TUNE_SCRIPT_PATH, "tune", "3120"]
+
+    def test_surfaces_script_failure(self, client, create_user):
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        self._enable_with_preset(tg="9")
+        with patch("app.os.path.isfile", return_value=True), \
+             patch("app.subprocess.run", return_value=MagicMock(returncode=1, stdout="", stderr="boom")):
+            resp = client.post("/api/dvswitch/tune", json={"tg": "9"})
+        assert resp.status_code == 500
+        assert "boom" in resp.get_json()["error"]
