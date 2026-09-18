@@ -149,20 +149,34 @@ patch_ini "$ANALOG_BRIDGE_INI" "USRP" "usrpAudio" "AUDIO_USE_GAIN"
 patch_ini "$ANALOG_BRIDGE_INI" "USRP" "usrpGain" "$DVS_ALLSTAR_GAIN"
 patch_ini "$ANALOG_BRIDGE_INI" "USRP" "tlvAudio" "AUDIO_USE_GAIN"
 patch_ini "$ANALOG_BRIDGE_INI" "USRP" "tlvGain" "$DVS_DMR_GAIN"
-patch_ini "$ANALOG_BRIDGE_INI" "GENERAL" "ambeMode" "DMR"
+# ambeMode belongs to [AMBE_AUDIO], NOT [GENERAL] -- confirmed against a
+# real installed Analog_Bridge.ini (patching it into [GENERAL] produced a
+# stray line Analog_Bridge's parser treated as fatal: "parse error ... line
+# 31", reproduced live on a real box). [AMBE_AUDIO]'s own shipped default is
+# already "DMR", but set it explicitly rather than relying on that default
+# holding across package versions, since this feature is DMR-only.
+patch_ini "$ANALOG_BRIDGE_INI" "AMBE_AUDIO" "ambeMode" "DMR"
 # decoderFallBack=true is Analog_Bridge's own shipped default (software AMBE
 # codec, no hardware needed) — only overridden here when the owner picked a
 # real device. See app.py's dvswitch_config table comment for why software
 # is the sane default rather than something requiring hardware.
+#
+# [DV3000]'s real keys (confirmed against a real installed ini's own
+# commented-out example block) are `serial` (true = local USB dongle, false
+# = network AMBEServer) and `address` (doubles as either the serial device
+# path or the AMBEServer's IP, depending on `serial`) plus `rxPort` for the
+# AMBEServer's port -- NOT the `type`/`device`/`port` keys an earlier
+# version of this script used, which Analog_Bridge would have silently
+# ignored as unknown keys rather than actually configuring the device.
 if [ "$DVS_AMBE_SOURCE" = "hardware" ]; then
   patch_ini "$ANALOG_BRIDGE_INI" "GENERAL" "decoderFallBack" "false"
-  patch_ini "$ANALOG_BRIDGE_INI" "DV3000" "type" "serial"
-  patch_ini "$ANALOG_BRIDGE_INI" "DV3000" "device" "$DVS_AMBE_DEVICE"
+  patch_ini "$ANALOG_BRIDGE_INI" "DV3000" "serial" "true"
+  patch_ini "$ANALOG_BRIDGE_INI" "DV3000" "address" "$DVS_AMBE_DEVICE"
 elif [ "$DVS_AMBE_SOURCE" = "network" ]; then
   patch_ini "$ANALOG_BRIDGE_INI" "GENERAL" "decoderFallBack" "false"
-  patch_ini "$ANALOG_BRIDGE_INI" "DV3000" "type" "ip"
+  patch_ini "$ANALOG_BRIDGE_INI" "DV3000" "serial" "false"
   patch_ini "$ANALOG_BRIDGE_INI" "DV3000" "address" "$DVS_AMBE_HOST"
-  patch_ini "$ANALOG_BRIDGE_INI" "DV3000" "port" "$DVS_AMBE_PORT"
+  patch_ini "$ANALOG_BRIDGE_INI" "DV3000" "rxPort" "$DVS_AMBE_PORT"
 else
   patch_ini "$ANALOG_BRIDGE_INI" "GENERAL" "decoderFallBack" "true"
 fi

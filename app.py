@@ -7701,6 +7701,21 @@ def api_status_board():
     """
     content    = read_conf_file(RPT_CONF_PATH)
     nodes      = get_node_numbers(content) if content else []
+    # The DVSwitch bridge node (see dvswitch_config) is a real rpt.conf node
+    # stanza -- append_node_stanza() has to create one for Analog_Bridge's
+    # USRP channel to attach to -- but it's internal plumbing, not a real
+    # repeater meant for the public kiosk board: confirmed live that
+    # showing it as its own hosted-node card made the board display "node X
+    # connected to node Y" and "node Y connected to node X" side by side,
+    # which read as a confusing/erroneous self-connection even though both
+    # sides were individually correct. Every other consumer of
+    # get_node_numbers() (Manager's per-node settings pages, the raw
+    # editor, /api/conf, /api/ami/status) deliberately still lists it, since
+    # an owner needs to be able to inspect/edit that stanza same as any
+    # other -- only the public board display filters it out.
+    dvs_cfg = _get_dvswitch_config()
+    if dvs_cfg and dvs_cfg["enabled"] and dvs_cfg["bridge_node"]:
+        nodes = [n for n in nodes if n != dvs_cfg["bridge_node"]]
     ast_status = get_asterisk_status()
 
     db = get_db()

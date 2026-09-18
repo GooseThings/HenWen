@@ -185,6 +185,61 @@ class TestDvswitchBridgeNodeSettings:
         assert settings["context"] == "radio-secure"
 
 
+class TestDvswitchBridgeNodeExcludedFromBoard:
+    """The DVSwitch bridge node is a real rpt.conf node stanza (Analog_Bridge's
+    USRP channel needs one to attach to), but it's internal plumbing, not a
+    real repeater -- confirmed live that showing it as its own hosted-node
+    card on the public kiosk board produced a confusing "node X connected to
+    node Y" / "node Y connected to node X" pair that read as an erroneous
+    self-connection. api_status_board() filters it out of the top-level node
+    list (while the real node's own "connected" sub-list, driven by live AMI
+    state rather than this list, still correctly shows the bridge link)."""
+
+    def test_bridge_node_hidden_from_board_when_enabled(self, client, create_user, monkeypatch, tmp_path):
+        create_user("owner1", role="owner")
+        rpt_conf = tmp_path / "rpt.conf"
+        rpt_conf.write_text(
+            "[643930]\ncontext = radio-secure\nrxchannel = SimpleUSB/643930\n\n"
+            "[1999]\nrxchannel = usrp/127.0.0.1:34001:32001\nduplex = 0\n"
+        )
+        monkeypatch.setattr(app, "RPT_CONF_PATH", str(rpt_conf))
+        db = app.get_db()
+        db.execute("INSERT OR REPLACE INTO dvswitch_config (id, enabled, bridge_node) VALUES (1, 1, '1999')")
+        db.commit()
+
+        resp = client.get("/api/status/board")
+        assert resp.status_code == 200
+        node_numbers = [n["node"] for n in resp.get_json()["nodes"]]
+        assert "1999" not in node_numbers
+        assert "643930" in node_numbers
+
+    def test_bridge_node_shown_when_dvswitch_disabled(self, client, create_user, monkeypatch, tmp_path):
+        create_user("owner1", role="owner")
+        rpt_conf = tmp_path / "rpt.conf"
+        rpt_conf.write_text(
+            "[643930]\nrxchannel = SimpleUSB/643930\n\n[1999]\nrxchannel = usrp/127.0.0.1:34001:32001\n"
+        )
+        monkeypatch.setattr(app, "RPT_CONF_PATH", str(rpt_conf))
+
+        resp = client.get("/api/status/board")
+        assert resp.status_code == 200
+        node_numbers = [n["node"] for n in resp.get_json()["nodes"]]
+        assert "1999" in node_numbers
+
+    def test_bridge_node_shown_when_no_dvswitch_config_row(self, client, create_user, monkeypatch, tmp_path):
+        create_user("owner1", role="owner")
+        rpt_conf = tmp_path / "rpt.conf"
+        rpt_conf.write_text(
+            "[643930]\nrxchannel = SimpleUSB/643930\n\n[1999]\nrxchannel = usrp/127.0.0.1:34001:32001\n"
+        )
+        monkeypatch.setattr(app, "RPT_CONF_PATH", str(rpt_conf))
+
+        resp = client.get("/api/status/board")
+        assert resp.status_code == 200
+        node_numbers = [n["node"] for n in resp.get_json()["nodes"]]
+        assert "1999" in node_numbers
+
+
 class TestDvswitchDefaultContext:
     def test_reuses_existing_node_context(self):
         content = "[64393]\ncontext = radio-secure\nrxchannel = Local/64393@nodes\n"
