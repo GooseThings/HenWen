@@ -46,6 +46,7 @@ asterisk ALL=(root) NOPASSWD: ${SYSTEMD_RUN_BIN} --unit=henwen-updater --collect
 asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/audiosocket-tap/apply.sh
 asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/ws-audio/apply.sh
 asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/tx-spike/apply.sh
+asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/dvswitch/apply.sh
 EOF
 # visudo ships as part of the sudo package, so its absence is already
 # handled above as a legitimate "not installed" case, not an error path.
