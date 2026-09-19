@@ -2183,28 +2183,6 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
       <div id="bmtg-pager" style="display:flex;align-items:center;justify-content:center;gap:10px;margin-top:10px;font-size:0.82rem"></div>
     </div>
   </div>
-  <div id="bmtg-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;align-items:center;justify-content:center">
-    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:22px 26px;width:640px;max-width:92vw;max-height:86vh;overflow-y:auto">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-        <div style="font-size:0.95rem;font-weight:700"><svg class="icon"><use href="#icon-book-open"></use></svg> BrandMeister Talkgroups</div>
-        <button onclick="closeBmTalkgroupsModal()" style="background:none;border:none;color:var(--text2);font-size:1.1rem;cursor:pointer;line-height:1;padding:2px 6px"><svg class="icon"><use href="#icon-x"></use></svg></button>
-      </div>
-      <div style="font-size:0.76rem;color:var(--text2);margin-bottom:8px">Click a talkgroup to tune the bridge to it.</div>
-      <div id="bmtg-updated" style="font-size:0.7rem;color:var(--text2);margin-bottom:10px"></div>
-      <input id="bmtg-filter" type="text" placeholder="Filter by country, number, or name&hellip;" maxlength="60"
-             oninput="_bmTgFilterChanged()" autocomplete="off"
-             style="width:100%;box-sizing:border-box;margin-bottom:10px;padding:6px 9px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-size:0.85rem">
-      <div style="display:flex;gap:8px;padding:4px 10px;font-size:0.7rem;letter-spacing:.04em;text-transform:uppercase;color:var(--text2)">
-        <div style="flex:1.1;min-width:0">Country</div>
-        <div style="width:64px;text-align:right">TG</div>
-        <div style="flex:1.6;min-width:0">Name</div>
-      </div>
-      <div id="bmtg-list" style="display:flex;flex-direction:column;gap:2px;min-height:120px">
-        <div class="empty-msg" style="font-size:0.8rem">Loading&hellip;</div>
-      </div>
-      <div id="bmtg-pager" style="display:flex;align-items:center;justify-content:center;gap:10px;margin-top:10px;font-size:0.82rem"></div>
-    </div>
-  </div>
 
   </main>
 
