@@ -14658,6 +14658,7 @@ def api_dvswitch_status():
         "available":  True,
         "network":    cfg["dmr_network"],
         "network_host": cfg["network_host"],
+        "bridge_node": cfg["bridge_node"],
         "tg":         digital.get("tg", ""),
         "ts":         digital.get("ts", ""),
         "cc":         digital.get("cc", ""),

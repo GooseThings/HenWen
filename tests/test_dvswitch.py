@@ -340,8 +340,8 @@ class TestDvswitchStatusRoute:
         create_user("owner1", role="owner")
         db = app.get_db()
         db.execute(
-            "INSERT OR REPLACE INTO dvswitch_config (id, enabled, dmr_network, network_host, talkgroup_presets) "
-            "VALUES (1, 1, 'brandmeister', 'master.example.org', ?)",
+            "INSERT OR REPLACE INTO dvswitch_config (id, enabled, dmr_network, network_host, bridge_node, talkgroup_presets) "
+            "VALUES (1, 1, 'brandmeister', 'master.example.org', '1999', ?)",
             (json.dumps([{"label": "Local", "tg": "9"}]),)
         )
         db.commit()
@@ -360,6 +360,7 @@ class TestDvswitchStatusRoute:
         assert d["tg"] == "9"
         assert d["mode"] == "DMR"
         assert d["network"] == "brandmeister"
+        assert d["bridge_node"] == "1999"
         assert d["presets"] == [{"label": "Local", "tg": "9"}]
 
     def test_public_no_login_required(self, client, create_user):
