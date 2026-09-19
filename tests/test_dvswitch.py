@@ -8,7 +8,9 @@ dvswitch/README.md).
 TestDvswitchStatusRoute/TestDvswitchTuneRoute cover the live-status and
 talkgroup-switch routes added after a real deploy surfaced two things: no
 Kiosk-facing way to see current TG, and dvswitch.sh needing to be invoked
-correctly and gated to the owner's curated preset list.
+correctly. Tuning was originally gated to the owner's curated preset list;
+since the Browse Talkgroups popup shipped it accepts any numeric TG from
+any logged-in role instead (see api_dvswitch_tune()'s own docstring).
 """
 import json
 from unittest.mock import MagicMock, patch
@@ -395,13 +397,26 @@ class TestDvswitchTuneRoute:
         assert resp.status_code == 200
         assert resp.get_json()["ok"] is True
 
-    def test_rejects_tg_not_in_preset_list(self, client, create_user):
+    def test_accepts_tg_not_in_preset_list(self, client, create_user):
+        # The Browse Talkgroups popup lets any logged-in role tune to any
+        # numeric TG from BrandMeister's full directory, not just the
+        # owner's curated presets -- see api_dvswitch_tune()'s docstring
+        # for why this was loosened from an earlier preset-only allowlist.
         create_user("owner1", role="owner")
         _login(client, "owner1")
         self._enable_with_preset(tg="9")
-        resp = client.post("/api/dvswitch/tune", json={"tg": "4000"})
+        with patch("app.os.path.isfile", return_value=True), \
+             patch("app.subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")):
+            resp = client.post("/api/dvswitch/tune", json={"tg": "4000"})
+        assert resp.status_code == 200
+        assert resp.get_json()["ok"] is True
+
+    def test_rejects_non_numeric_tg(self, client, create_user):
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        self._enable_with_preset(tg="9")
+        resp = client.post("/api/dvswitch/tune", json={"tg": "not-a-number"})
         assert resp.status_code == 400
-        assert "preset" in resp.get_json()["error"]
 
     def test_rejects_when_not_enabled(self, client, create_user):
         create_user("owner1", role="owner")

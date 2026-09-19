@@ -2171,17 +2171,21 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
     <div id="dvswitch-caller-line" style="display:none;margin-top:6px;color:var(--text2)"></div>
   </div>
 
-  <!-- BrandMeister talkgroup directory popup -- reference-only browse/search
-       of the full ~1800-entry list (see /api/dvswitch/talkgroups), triggered
-       from the DMR Bridge panel above. Public, like the panel itself; not a
-       control surface -- picking a talkgroup here doesn't tune anything,
-       it's just a lookup ("what's TG 91 called again?"). -->
+  <!-- BrandMeister talkgroup directory popup -- browse/search of the full
+       ~1800-entry list (see /api/dvswitch/talkgroups), triggered from the
+       DMR Bridge panel above. Public to view, like the panel itself, but
+       clicking a row tunes the bridge to that talkgroup -- same
+       any-logged-in-role gate as the panel's own quick-tune preset buttons
+       (see api_dvswitch_tune()'s docstring); a click while logged out pops
+       the login modal via tuneDvswitchTG()'s existing fallback rather than
+       silently doing nothing. -->
   <div id="bmtg-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;align-items:center;justify-content:center">
     <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:22px 26px;width:640px;max-width:92vw;max-height:86vh;overflow-y:auto">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
         <div style="font-size:0.95rem;font-weight:700"><svg class="icon"><use href="#icon-book-open"></use></svg> BrandMeister Talkgroups</div>
         <button onclick="closeBmTalkgroupsModal()" style="background:none;border:none;color:var(--text2);font-size:1.1rem;cursor:pointer;line-height:1;padding:2px 6px"><svg class="icon"><use href="#icon-x"></use></svg></button>
       </div>
+      <div style="font-size:0.76rem;color:var(--text2);margin-bottom:8px">Click a talkgroup to tune the bridge to it.</div>
       <div id="bmtg-updated" style="font-size:0.7rem;color:var(--text2);margin-bottom:10px"></div>
       <input id="bmtg-filter" type="text" placeholder="Filter by country, number, or name&hellip;" maxlength="60"
              oninput="_bmTgFilterChanged()" autocomplete="off"
@@ -5405,7 +5409,7 @@ async function loadDvswitchStatus() {
 }
 
 async function tuneDvswitchTG(tg) {
-  if (!window._kioskRole) { openKioskLogin(tuneDvswitchTG, [tg]); return; }
+  if (!window._kioskRole) { openKioskLogin(tuneDvswitchTG, [tg]); return false; }
   try {
     var r = await apiFetch('/api/dvswitch/tune', {
       method: 'POST',
@@ -5416,11 +5420,14 @@ async function tuneDvswitchTG(tg) {
     if (r.ok && d.ok) {
       sbToast('Tuned to TG ' + tg, true);
       loadDvswitchStatus();
+      return true;
     } else {
       sbToast((d && d.error) || 'Could not switch talkgroup', false);
+      return false;
     }
   } catch (e) {
     sbToast('Could not switch talkgroup', false);
+    return false;
   }
 }
 
@@ -5443,6 +5450,17 @@ function openBmTalkgroupsModal() {
 
 function closeBmTalkgroupsModal() {
   document.getElementById('bmtg-modal-overlay').style.display = 'none';
+}
+
+/* Clicking a row tunes the bridge straight to that talkgroup -- see
+   api_dvswitch_tune()'s own docstring for why this is allowed for any
+   logged-in role rather than just the owner's curated preset buttons.
+   tuneDvswitchTG() already handles the not-logged-in case (pops the login
+   modal and retries on success), so this only needs to close the popup
+   once the tune itself actually succeeded. */
+async function _bmTgClickRow(tg) {
+  var ok = await tuneDvswitchTG(String(tg));
+  if (ok) closeBmTalkgroupsModal();
 }
 
 async function _fetchBmTalkgroups() {
@@ -5498,7 +5516,9 @@ function _renderBmTgPage() {
   var pageRows = _bmTg.filtered.slice(start, start + BM_TG_PAGE_SIZE);
 
   list.innerHTML = pageRows.map(function(row) {
-    return '<div style="display:flex;gap:8px;padding:5px 10px;border-radius:5px;font-size:0.83rem" onmouseover="this.style.background=\'var(--bg3)\'" onmouseout="this.style.background=\'\'">'
+    return '<div style="display:flex;gap:8px;padding:5px 10px;border-radius:5px;font-size:0.83rem;cursor:pointer"'
+      + ' onclick="_bmTgClickRow(' + row.tg + ')" title="Tune the bridge to TG ' + row.tg + '"'
+      + ' onmouseover="this.style.background=\'var(--bg3)\'" onmouseout="this.style.background=\'\'">'
       + '<div style="flex:1.1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text2)">' + (row.country ? esc(row.country) : '&mdash;') + '</div>'
       + '<div style="width:64px;text-align:right;font-variant-numeric:tabular-nums">' + esc(row.tg) + '</div>'
       + '<div style="flex:1.6;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(row.name) + '</div>'

@@ -1130,10 +1130,13 @@ def get_db():
     _dvswitch_cfg_cols = {r[1] for r in conn.execute("PRAGMA table_info(dvswitch_config)").fetchall()}
     if 'talkgroup_presets' not in _dvswitch_cfg_cols:
         # Curated {"label","tg"} pairs the owner defines in Manager, shown as
-        # buttons on both Manager and the Kiosk (see /api/dvswitch/status,
-        # /api/dvswitch/tune) -- deliberately not a free-entry TG number
-        # field, so switching is a guardrailed pick from a known-good list
-        # rather than a typo-prone raw number any logged-in user could enter.
+        # one-tap buttons on both Manager and the Kiosk (see
+        # /api/dvswitch/status). Originally the *only* way to switch
+        # talkgroup at all (api_dvswitch_tune once rejected anything not in
+        # this list) -- since the Browse Talkgroups popup shipped, any
+        # logged-in user can tune to any numeric TG directly (see
+        # api_dvswitch_tune's own docstring for why), so this list is now
+        # just the owner's curated shortcuts, not a gate.
         conn.execute("ALTER TABLE dvswitch_config ADD COLUMN talkgroup_presets TEXT NOT NULL DEFAULT '[]'")
     conn.commit()
     # Per-node lockout: presence of a row means that node is locked by its
@@ -14688,23 +14691,27 @@ def api_dvswitch_tune():
     """Any logged-in role may switch talkgroup -- matches api_status_connect/
     disconnect's own gate (see _USER_OR_ABOVE in check_auth()), since this is
     the same kind of shared-board control action, not an owner-only setting
-    change. Deliberately restricted to the owner's curated preset list
-    (talkgroup_presets) rather than accepting an arbitrary TG number, so a
-    logged-in kiosk user can't fat-finger or deliberately dial into an
-    unrelated talkgroup -- see _validate_talkgroup_presets()'s own comment."""
+    change.
+
+    Originally restricted to the owner's curated preset list
+    (talkgroup_presets) so a logged-in kiosk user couldn't fat-finger or
+    deliberately dial into an unrelated talkgroup. Superseded once the
+    Browse Talkgroups popup shipped (see start_bm_talkgroups_poller() and
+    api_dvswitch_talkgroups()): any logged-in user can now tune to any
+    numeric talkgroup, matching the same trust level Connect/Disconnect
+    already has for AllStar nodes via Node Search (api_status_connect
+    already lets any logged-in role link to any node in the AllStar
+    directory, not just a curated list) -- there is no reason BrandMeister
+    TG selection should be more locked-down than that. talkgroup_presets
+    remains as the owner's curated quick-tune shortcuts on the panel
+    itself; it's no longer an allowlist gating this route."""
     cfg = _get_dvswitch_config()
     if not cfg or not cfg["enabled"]:
         return jsonify({"error": "DVSwitch is not enabled"}), 400
 
-    try:
-        presets = json.loads(cfg["talkgroup_presets"] or "[]")
-    except (TypeError, ValueError):
-        presets = []
-    allowed_tgs = {p["tg"] for p in presets}
-
     tg = str((request.json or {}).get("tg", "")).strip()
-    if tg not in allowed_tgs:
-        return jsonify({"error": "That talkgroup isn't in the configured preset list"}), 400
+    if not _DVSWITCH_TG_RE.match(tg):
+        return jsonify({"error": "tg must be a talkgroup number"}), 400
 
     if not os.path.isfile(DVSWITCH_TUNE_SCRIPT_PATH):
         return jsonify({"error": f"{DVSWITCH_TUNE_SCRIPT_PATH} not found -- is DVSwitch installed?"}), 404
