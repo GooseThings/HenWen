@@ -2151,20 +2151,39 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
 
   </div>
 
-  <!-- DVSwitch DMR bridge status/control -- only shown when the owner has
-       DVSwitch enabled and configured (see /api/dvswitch/status). Deliberately
-       NOT part of the drag/drop dash-card grid above (.content-area): that
-       grid's 12-column/24-row placement is precisely tuned per breakpoint for
-       the existing cards, and this is a niche, opt-in panel most installs
-       will never enable -- a plain full-width bar below the grid avoids any
-       risk of disturbing that layout for every other install. -->
-  <div id="dvswitch-panel" style="display:none;margin:0 16px 10px;padding:10px 14px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;font-size:0.85rem">
-    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-      <strong>DMR Bridge</strong>
-      <span id="dvswitch-status-line" style="color:var(--text2)"></span>
-      <div id="dvswitch-tg-buttons" style="display:flex;gap:6px;flex-wrap:wrap;margin-left:auto"></div>
+  <!-- BrandMeister talkgroup directory popup -- browse/search of the full
+       ~1800-entry list (see /api/dvswitch/talkgroups). Triggered from a
+       "Talkgroups" button on the DVSwitch bridge node's own row in
+       Connected Nodes (see the tgBtn block in refreshBoard()), shown only
+       while that node is actually connected and on the BrandMeister
+       network -- not a standalone panel. Public to view, but clicking a
+       row tunes the bridge to that talkgroup -- any logged-in role (see
+       api_dvswitch_tune()'s docstring); a click while logged out pops the
+       login modal via tuneDvswitchTG()'s existing fallback rather than
+       silently doing nothing. -->
+  <div id="bmtg-modal-overlay" onclick="if(event.target===this) closeBmTalkgroupsModal()"
+       style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;align-items:center;justify-content:center">
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:22px 26px;width:640px;max-width:92vw;max-height:86vh;overflow-y:auto">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <div style="font-size:0.95rem;font-weight:700"><svg class="icon"><use href="#icon-book-open"></use></svg> BrandMeister Talkgroups</div>
+        <button onclick="closeBmTalkgroupsModal()" style="background:none;border:none;color:var(--text2);font-size:1.1rem;cursor:pointer;line-height:1;padding:2px 6px"><svg class="icon"><use href="#icon-x"></use></svg></button>
+      </div>
+      <div style="font-size:0.76rem;color:var(--text2);margin-bottom:8px">Click a talkgroup to tune the bridge to it.</div>
+      <div id="bmtg-updated" style="font-size:0.7rem;color:var(--text2);margin-bottom:10px"></div>
+      <input id="bmtg-filter" type="text" placeholder="Filter by country, number, or name&hellip;" maxlength="60"
+             oninput="_bmTgFilterChanged()" autocomplete="off"
+             style="width:100%;box-sizing:border-box;margin-bottom:10px;padding:6px 9px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-size:0.85rem">
+      <div class="bmtg-pager" style="display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:8px;font-size:0.82rem"></div>
+      <div style="display:flex;gap:8px;padding:4px 10px;font-size:0.7rem;letter-spacing:.04em;text-transform:uppercase;color:var(--text2)">
+        <div style="flex:1.1;min-width:0">Country</div>
+        <div style="width:64px;text-align:right">TG</div>
+        <div style="flex:1.6;min-width:0">Name</div>
+      </div>
+      <div id="bmtg-list" style="display:flex;flex-direction:column;gap:2px;min-height:120px">
+        <div class="empty-msg" style="font-size:0.8rem">Loading&hellip;</div>
+      </div>
+      <div class="bmtg-pager" style="display:flex;align-items:center;justify-content:center;gap:10px;margin-top:10px;font-size:0.82rem"></div>
     </div>
-    <div id="dvswitch-caller-line" style="display:none;margin-top:6px;color:var(--text2)"></div>
   </div>
 
   </main>
@@ -5041,7 +5060,22 @@ async function refreshBoard() {
             : '<span title="Not tracked for idle timeout — connected outside the kiosk"><svg class="icon"><use href="#icon-clock"></use></svg></span>';
           idleBadge = '<span class="idle-badge off">' + trackBtn + '</span>';
         }
-        var badges = modeBadge;
+        /* "Talkgroups" button -- only on the DVSwitch bridge node's own row,
+           and only while it's actually up and on BrandMeister (TGIF/custom
+           networks have no BrandMeister directory to browse). window.
+           _dvswitchStatus is refreshed independently every 15s by
+           loadDvswitchStatus() rather than fetched here on every 2s board
+           poll -- see that function's own comment. */
+        var tgBtn = '';
+        var dvs = window._dvswitchStatus;
+        if (dvs && dvs.available && dvs.network === 'brandmeister' && dvs.bridge_node &&
+            String(c.node) === String(dvs.bridge_node)) {
+          tgBtn = '<button class="mode-badge" style="cursor:pointer;border:1px solid rgba(63,185,80,.35);' +
+            'background:rgba(63,185,80,.12);color:var(--green)" onclick="openBmTalkgroupsModal()" ' +
+            'title="Browse BrandMeister talkgroups"><svg class="icon" style="width:0.8em;height:0.8em;' +
+            'vertical-align:-0.1em"><use href="#icon-book-open"></use></svg> Talkgroups</button>';
+        }
+        var badges = modeBadge + tgBtn;
         var dotClass = !isConn ? ' connecting' : (c.keyed ? ' keyed' : ' connected');
         var isAdminRole = window._kioskRole === 'admin' || window._kioskRole === 'superuser' || window._kioskRole === 'owner';
         var dcBtn = (c.connector_managed && !isAdminRole)
@@ -5323,58 +5357,28 @@ async function loadMeshtasticMessages() {
   } catch (e) { /* transient network hiccup — next poll retries */ }
 }
 
-/* DVSwitch DMR bridge status/control panel -- public read (matches the rest
-   of the board's status data), but switching talkgroup requires being
-   logged in (any role), same gate as Connect/Disconnect. Hidden entirely
-   ({available:false}) unless the owner has actually enabled and configured
-   DVSwitch, so this is a no-op fetch on the overwhelming majority of
-   installs that never touch the feature. */
+/* DVSwitch DMR bridge status -- no dedicated panel any more (there used to
+   be a standalone "DMR Bridge" bar; removed in favor of a "Talkgroups"
+   button that appears directly on the bridge node's own row in Connected
+   Nodes instead, see refreshBoard()'s tgBtn block). This poll just keeps
+   window._dvswitchStatus current so that row-render has something to
+   check every 2s without hitting the API itself that often -- public read
+   (matches the rest of the board's status data), a no-op fetch on the
+   overwhelming majority of installs that never enable DVSwitch. */
+window._dvswitchStatus = {available: false};
+
 async function loadDvswitchStatus() {
-  var panel = document.getElementById('dvswitch-panel');
-  if (!panel) return;
   try {
     var r = await apiFetch('/api/dvswitch/status', {cache: 'no-store'});
-    if (!r.ok) { panel.style.display = 'none'; return; }
-    var d = await r.json();
-    if (!d.available) { panel.style.display = 'none'; return; }
-    panel.style.display = '';
-
-    var networkLabel = {brandmeister: 'BrandMeister', tgif: 'TGIF'}[d.network] || (d.network || 'Custom');
-    var line = networkLabel + ' &middot; TG ' + esc(d.tg || '?');
-    if (d.ts) line += ' &middot; TS' + esc(d.ts);
-    document.getElementById('dvswitch-status-line').innerHTML = line;
-
-    var loggedIn = !!window._kioskRole;
-    var btnWrap = document.getElementById('dvswitch-tg-buttons');
-    btnWrap.innerHTML = (d.presets || []).map(function(p) {
-      var active = String(p.tg) === String(d.tg);
-      var style = 'padding:3px 10px;border-radius:5px;font-size:0.8rem;cursor:pointer;border:1px solid var(--border);'
-        + (active ? 'background:var(--accent);color:var(--bg);border-color:var(--accent);' : 'background:var(--bg3);color:var(--text)');
-      var disabledAttr = loggedIn ? '' : ' disabled title="Log in to switch talkgroups"';
-      return '<button style="' + style + '"' + disabledAttr
-        + ' onclick="tuneDvswitchTG(\'' + esc(p.tg) + '\')">' + esc(p.label) + '</button>';
-    }).join('');
-
-    /* "Who's talking" -- DVSwitch-dashboard-style caller display, only
-       populated for BrandMeister/STFU (see api_dvswitch_status()'s own
-       docstring); caller_id is null before any traffic has been seen or
-       for a network this doesn't cover, so the line just stays hidden. */
-    var callerLine = document.getElementById('dvswitch-caller-line');
-    if (d.caller_id) {
-      var who = esc(d.caller_callsign || d.caller_id) + (d.caller_callsign ? ' (' + esc(d.caller_id) + ')' : '');
-      callerLine.innerHTML = (d.caller_active
-        ? '<span style="color:var(--accent)">&#9679; Now: </span>'
-        : '<span>Last heard: </span>') + who
-        + (d.caller_tg ? ' on TG ' + esc(d.caller_tg) : '');
-      callerLine.style.display = '';
-    } else {
-      callerLine.style.display = 'none';
-    }
-  } catch (e) { /* transient network hiccup — next poll retries */ }
+    window._dvswitchStatus = r.ok ? await r.json() : {available: false};
+  } catch (e) {
+    /* transient network hiccup — next poll retries; leave the last-known
+       status in place rather than flickering the row button off. */
+  }
 }
 
 async function tuneDvswitchTG(tg) {
-  if (!window._kioskRole) { openKioskLogin(tuneDvswitchTG, [tg]); return; }
+  if (!window._kioskRole) { openKioskLogin(tuneDvswitchTG, [tg]); return false; }
   try {
     var r = await apiFetch('/api/dvswitch/tune', {
       method: 'POST',
@@ -5385,12 +5389,122 @@ async function tuneDvswitchTG(tg) {
     if (r.ok && d.ok) {
       sbToast('Tuned to TG ' + tg, true);
       loadDvswitchStatus();
+      return true;
     } else {
       sbToast((d && d.error) || 'Could not switch talkgroup', false);
+      return false;
     }
   } catch (e) {
     sbToast('Could not switch talkgroup', false);
+    return false;
   }
+}
+
+/* BrandMeister talkgroup directory popup -- fetched once per page load
+   (the server-side cache itself only refreshes once a day, see
+   start_bm_talkgroups_poller() in app.py) and paginated/filtered entirely
+   client-side: ~1800 small rows is trivial to hold and slice in JS, so
+   there's no reason to round-trip the server for paging. */
+var BM_TG_PAGE_SIZE = 50;
+var _bmTg = {rows: [], filtered: [], page: 0, updated: null, loaded: false};
+
+function openBmTalkgroupsModal() {
+  document.getElementById('bmtg-modal-overlay').style.display = 'flex';
+  if (!_bmTg.loaded) {
+    _fetchBmTalkgroups();
+  } else {
+    _renderBmTgPage();
+  }
+}
+
+function closeBmTalkgroupsModal() {
+  document.getElementById('bmtg-modal-overlay').style.display = 'none';
+}
+
+/* Clicking a row tunes the bridge straight to that talkgroup -- see
+   api_dvswitch_tune()'s own docstring for why this is allowed for any
+   logged-in role rather than just the owner's curated preset buttons.
+   tuneDvswitchTG() already handles the not-logged-in case (pops the login
+   modal and retries on success), so this only needs to close the popup
+   once the tune itself actually succeeded. */
+async function _bmTgClickRow(tg) {
+  var ok = await tuneDvswitchTG(String(tg));
+  if (ok) closeBmTalkgroupsModal();
+}
+
+async function _fetchBmTalkgroups() {
+  var list = document.getElementById('bmtg-list');
+  list.innerHTML = '<div class="empty-msg" style="font-size:0.8rem">Loading&hellip;</div>';
+  try {
+    var r = await apiFetch('/api/dvswitch/talkgroups', {cache: 'no-store'});
+    var d = await r.json();
+    if (!r.ok) throw new Error((d && d.error) || 'request failed');
+    _bmTg.rows = d.talkgroups || [];
+    _bmTg.updated = d.updated || null;
+    _bmTg.loaded = true;
+    _bmTgFilterChanged();
+  } catch (e) {
+    list.innerHTML = '<div class="empty-msg" style="font-size:0.8rem">Could not load the talkgroup directory — try again shortly.</div>';
+    _bmTgSetPagerHTML('');
+  }
+}
+
+/* Top and bottom pagers (.bmtg-pager, one above the list one below -- a
+   ~1800-entry list is a long scroll, so Prev/Next needs to reachable
+   without scrolling back up every time) share the same markup. */
+function _bmTgSetPagerHTML(html) {
+  document.querySelectorAll('.bmtg-pager').forEach(function(el) { el.innerHTML = html; });
+}
+
+function _bmTgFilterChanged() {
+  var q = document.getElementById('bmtg-filter').value.trim().toLowerCase();
+  _bmTg.filtered = !q ? _bmTg.rows : _bmTg.rows.filter(function(row) {
+    return String(row.tg).indexOf(q) !== -1
+      || (row.name || '').toLowerCase().indexOf(q) !== -1
+      || (row.country || '').toLowerCase().indexOf(q) !== -1;
+  });
+  _bmTg.page = 0;
+  _renderBmTgPage();
+}
+
+function _bmTgGoPage(delta) {
+  var maxPage = Math.max(0, Math.ceil(_bmTg.filtered.length / BM_TG_PAGE_SIZE) - 1);
+  _bmTg.page = Math.min(maxPage, Math.max(0, _bmTg.page + delta));
+  _renderBmTgPage();
+}
+
+function _renderBmTgPage() {
+  var list  = document.getElementById('bmtg-list');
+  var updEl = document.getElementById('bmtg-updated');
+  updEl.textContent = _bmTg.updated
+    ? ('Updated ' + new Date(_bmTg.updated).toLocaleString() + ' · ' + _bmTg.rows.length + ' talkgroups')
+    : '';
+
+  if (!_bmTg.filtered.length) {
+    list.innerHTML = '<div class="empty-msg" style="font-size:0.8rem">No talkgroups match that filter.</div>';
+    _bmTgSetPagerHTML('');
+    return;
+  }
+
+  var totalPages = Math.ceil(_bmTg.filtered.length / BM_TG_PAGE_SIZE);
+  var start = _bmTg.page * BM_TG_PAGE_SIZE;
+  var pageRows = _bmTg.filtered.slice(start, start + BM_TG_PAGE_SIZE);
+
+  list.innerHTML = pageRows.map(function(row) {
+    return '<div style="display:flex;gap:8px;padding:5px 10px;border-radius:5px;font-size:0.83rem;cursor:pointer"'
+      + ' onclick="_bmTgClickRow(' + row.tg + ')" title="Tune the bridge to TG ' + row.tg + '"'
+      + ' onmouseover="this.style.background=\'var(--bg3)\'" onmouseout="this.style.background=\'\'">'
+      + '<div style="flex:1.1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text2)">' + (row.country ? esc(row.country) : '&mdash;') + '</div>'
+      + '<div style="width:64px;text-align:right;font-variant-numeric:tabular-nums">' + esc(row.tg) + '</div>'
+      + '<div style="flex:1.6;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(row.name) + '</div>'
+      + '</div>';
+  }).join('');
+
+  _bmTgSetPagerHTML(
+    '<button onclick="_bmTgGoPage(-1)"' + (_bmTg.page === 0 ? ' disabled' : '') + ' style="padding:4px 10px;border-radius:5px;border:1px solid var(--border);background:var(--bg3);color:var(--text);cursor:pointer">&larr; Prev</button>'
+    + '<span style="color:var(--text2)">Page ' + (_bmTg.page + 1) + ' of ' + totalPages + '</span>'
+    + '<button onclick="_bmTgGoPage(1)"' + (_bmTg.page >= totalPages - 1 ? ' disabled' : '') + ' style="padding:4px 10px;border-radius:5px;border:1px solid var(--border);background:var(--bg3);color:var(--text);cursor:pointer">Next &rarr;</button>'
+  );
 }
 
 async function refreshActivity() {
