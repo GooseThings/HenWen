@@ -77,6 +77,24 @@ If a future `mmdvm-bridge` package release fixes this, switching back to
 the Homebrew path for BrandMeister would just mean re-enabling that branch
 in `apply.sh` — nothing about the STFU integration is a one-way door.
 
+### `stfu.service` doesn't auto-restart on its own by default
+
+`stfu`'s own shipped systemd unit lists exit code 255 (its own documented
+`ERROR_SERVER_TIMEOUT`, see the comment block at the bottom of
+`/usr/lib/systemd/system/stfu.service`) in `RestartPreventExitStatus`, so
+systemd deliberately does **not** auto-restart it on that exit. Confirmed
+live: an idle-period BrandMeister connection timeout left the bridge
+silently dead — no audio, no error surfaced anywhere in HenWen — for hours
+until manually noticed and restarted. A server timeout is exactly the kind
+of transient condition that should just retry, unlike the unit's other
+prevented codes (251 port-in-use, 253 ini-parse-error, 254 fatal-error),
+which really do need a human to look at the config before retrying would
+help. `apply.sh` installs a systemd drop-in
+(`/etc/systemd/system/stfu.service.d/henwen-restart-on-timeout.conf`) that
+removes only 255 from that list, leaving the other three untouched. A
+drop-in rather than editing the package's own unit file directly, so it
+survives a `stfu` package upgrade.
+
 ## What `apply.sh` does
 
 - Adds the DVSwitch apt repository for this box's Debian codename

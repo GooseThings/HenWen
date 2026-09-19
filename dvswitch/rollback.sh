@@ -21,6 +21,11 @@ systemctl disable --now analog_bridge.service 2>/dev/null || true
 systemctl disable --now mmdvm_bridge.service 2>/dev/null || true
 systemctl disable --now stfu.service 2>/dev/null || true
 
+echo "== Removing stfu.service systemd drop-in"
+rm -f /etc/systemd/system/stfu.service.d/henwen-restart-on-timeout.conf
+rmdir --ignore-fail-on-non-empty /etc/systemd/system/stfu.service.d 2>/dev/null || true
+systemctl daemon-reload
+
 echo "== Restoring ini files from $BACKUP_DIR"
 [ -f "$BACKUP_DIR/$(basename "$ANALOG_BRIDGE_INI")" ] && \
   cp "$BACKUP_DIR/$(basename "$ANALOG_BRIDGE_INI")" "$ANALOG_BRIDGE_INI"

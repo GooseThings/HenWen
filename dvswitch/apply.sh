@@ -274,6 +274,28 @@ if [ "$DVS_DMR_NETWORK" = "brandmeister" ]; then
     patch_ini "$DVSWITCH_INI" "STFU" "StartTG" "$DVS_STFU_STARTTG"
   fi
 
+  # stfu.service's own shipped unit lists exit code 255 (its own
+  # documented ERROR_SERVER_TIMEOUT, per the comment block at the bottom of
+  # /usr/lib/systemd/system/stfu.service) in RestartPreventExitStatus,
+  # so systemd deliberately does NOT auto-restart it on that exit --
+  # confirmed live this left the bridge silently dead (no audio, no error
+  # anywhere) for hours after an idle-period BrandMeister connection
+  # timeout, requiring a manual restart to notice and fix. A server
+  # timeout is exactly the kind of transient condition that should be
+  # retried, unlike the unit's other prevented codes (251 port-in-use, 253
+  # ini-parse-error, 254 fatal-error) which really do need a human to look
+  # at the config -- so this drop-in removes only 255 from the list rather
+  # than clearing it entirely. A drop-in (not editing the package's own
+  # unit file directly) survives a `stfu` package upgrade.
+  echo "== Installing stfu.service systemd drop-in (auto-restart on server timeout)"
+  mkdir -p /etc/systemd/system/stfu.service.d
+  cat > /etc/systemd/system/stfu.service.d/henwen-restart-on-timeout.conf <<'DROPIN'
+[Service]
+RestartPreventExitStatus=
+RestartPreventExitStatus=251 253 254
+DROPIN
+  systemctl daemon-reload
+
   echo "== Enabling analog_bridge.service + stfu.service (mmdvm_bridge.service not needed/used for BrandMeister)"
   systemctl enable --now analog_bridge.service
   systemctl enable --now stfu.service
