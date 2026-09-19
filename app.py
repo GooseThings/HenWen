@@ -5760,6 +5760,23 @@ def lookup_node(node: str) -> dict:
         # BrandMeister/STFU populates this).
         with _dvswitch_caller_lock:
             caller = dict(_dvswitch_caller_cache)
+        current_tg = _dvswitch_current_tg()
+        if current_tg:
+            # The actually-tuned TG always wins over the caller cache's own
+            # (traffic-driven, so potentially stale) tg -- see
+            # _dvswitch_current_tg()'s own docstring. Only attribute the
+            # displayed callsign to this node when the caller cache's tg
+            # still matches what's actually tuned right now; a leftover
+            # caller from a since-abandoned TG would otherwise read as
+            # "on" a talkgroup they were never heard on.
+            desc = "DMR · TG " + current_tg
+            if caller["callsign"] and caller["tg"] == current_tg:
+                return {
+                    "callsign": caller["callsign"],
+                    "desc": desc if caller["active"] else ("Last heard — " + desc),
+                    "location": "",
+                }
+            return {"callsign": _DVSWITCH_BRIDGE_NODE_INFO["callsign"], "desc": desc, "location": ""}
         if caller["callsign"]:
             desc = ("DMR · TG " + caller["tg"]) if caller["tg"] else "DMR"
             if not caller["active"]:
@@ -14479,6 +14496,28 @@ def _dvswitch_bridge_node_cached():
     Status Board), so this is cached rather than hitting the DB per call."""
     cfg = _get_dvswitch_config()
     return cfg["bridge_node"] if (cfg and cfg["enabled"] and cfg["bridge_node"]) else None
+
+
+@_ttl_cached(2)   # matches the board's 2s refresh cadence; avoids a JSON
+                  # file read on every lookup_node() call within one render
+                  # pass (recent connections, map, Connected Nodes can each
+                  # look this node up once per request)
+def _dvswitch_current_tg():
+    """The talkgroup Analog_Bridge is actually tuned to right now, read
+    straight from its own live status export -- independent of whether
+    anyone has talked on it yet. Distinct from _dvswitch_caller_cache's own
+    tg, which only updates on real DMR traffic: after switching to a quiet
+    talkgroup, the caller cache can sit on the *previous*, since-abandoned
+    TG indefinitely, which used to make lookup_node()'s bridge-node display
+    show a stale "last heard" TG that made a successful switch look like it
+    silently failed until someone happened to key up on the new one. See
+    lookup_node()'s own comment for how the two are reconciled."""
+    try:
+        with open(DVSWITCH_ABINFO_PATH) as f:
+            info = json.load(f)
+        return info.get("digital", {}).get("tg", "") or ""
+    except (OSError, ValueError):
+        return ""
 
 
 def _validate_talkgroup_presets(raw):

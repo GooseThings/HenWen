@@ -444,3 +444,87 @@ class TestDvswitchTuneRoute:
             resp = client.post("/api/dvswitch/tune", json={"tg": "9"})
         assert resp.status_code == 500
         assert "boom" in resp.get_json()["error"]
+
+
+class TestLookupNodeDvswitchBridge:
+    """lookup_node()'s special-case display for the DVSwitch bridge node.
+    Regression coverage for a real bug: after switching talkgroups, the
+    displayed TG used to come only from _dvswitch_caller_cache, which is
+    traffic-driven and can sit on the *previous* TG indefinitely if nobody
+    has keyed up on the new one yet -- a successful switch looked like it
+    had silently failed. current_tg (Analog_Bridge's own live-tuned value,
+    via _dvswitch_current_tg()) must now win over that stale caller tg."""
+
+    def _caller(self, active=False, callsign=None, tg=None):
+        return {"active": active, "id": "3218133" if callsign else None,
+                "callsign": callsign, "tg": tg, "ts": 0}
+
+    def test_shows_current_tg_even_with_no_caller_yet(self, monkeypatch):
+        monkeypatch.setattr(app, "_dvswitch_bridge_node_cached", lambda: "1999")
+        monkeypatch.setattr(app, "_dvswitch_current_tg", lambda: "91")
+        monkeypatch.setattr(app, "_dvswitch_caller_cache", self._caller())
+        d = app.lookup_node("1999")
+        assert d["desc"] == "DMR · TG 91"
+        assert d["callsign"] == app._DVSWITCH_BRIDGE_NODE_INFO["callsign"]
+
+    def test_stale_caller_tg_does_not_override_current_tg(self, monkeypatch):
+        # Caller cache still shows the *previous* talkgroup (3100) because
+        # nobody has talked on the newly-tuned one (91) yet -- this is the
+        # exact scenario that used to make a switch look like it failed.
+        monkeypatch.setattr(app, "_dvswitch_bridge_node_cached", lambda: "1999")
+        monkeypatch.setattr(app, "_dvswitch_current_tg", lambda: "91")
+        monkeypatch.setattr(app, "_dvswitch_caller_cache",
+                             self._caller(active=False, callsign="K9OSU", tg="3100"))
+        d = app.lookup_node("1999")
+        assert d["desc"] == "DMR · TG 91"
+        assert "3100" not in d["desc"]
+        assert d["callsign"] == app._DVSWITCH_BRIDGE_NODE_INFO["callsign"]
+
+    def test_active_caller_matching_current_tg_shown_live(self, monkeypatch):
+        monkeypatch.setattr(app, "_dvswitch_bridge_node_cached", lambda: "1999")
+        monkeypatch.setattr(app, "_dvswitch_current_tg", lambda: "91")
+        monkeypatch.setattr(app, "_dvswitch_caller_cache",
+                             self._caller(active=True, callsign="K9OSU", tg="91"))
+        d = app.lookup_node("1999")
+        assert d["callsign"] == "K9OSU"
+        assert d["desc"] == "DMR · TG 91"
+        assert "Last heard" not in d["desc"]
+
+    def test_inactive_caller_matching_current_tg_shown_as_last_heard(self, monkeypatch):
+        monkeypatch.setattr(app, "_dvswitch_bridge_node_cached", lambda: "1999")
+        monkeypatch.setattr(app, "_dvswitch_current_tg", lambda: "91")
+        monkeypatch.setattr(app, "_dvswitch_caller_cache",
+                             self._caller(active=False, callsign="K9OSU", tg="91"))
+        d = app.lookup_node("1999")
+        assert d["callsign"] == "K9OSU"
+        assert d["desc"] == "Last heard — DMR · TG 91"
+
+    def test_falls_back_to_caller_cache_when_current_tg_unavailable(self, monkeypatch):
+        # e.g. Analog_Bridge's ABInfo.json hasn't been written yet -- the
+        # pre-existing caller-only behavior is the best available fallback.
+        monkeypatch.setattr(app, "_dvswitch_bridge_node_cached", lambda: "1999")
+        monkeypatch.setattr(app, "_dvswitch_current_tg", lambda: "")
+        monkeypatch.setattr(app, "_dvswitch_caller_cache",
+                             self._caller(active=True, callsign="K9OSU", tg="3100"))
+        d = app.lookup_node("1999")
+        assert d["callsign"] == "K9OSU"
+        assert d["desc"] == "DMR · TG 3100"
+
+    def test_falls_back_to_generic_label_when_nothing_known(self, monkeypatch):
+        monkeypatch.setattr(app, "_dvswitch_bridge_node_cached", lambda: "1999")
+        monkeypatch.setattr(app, "_dvswitch_current_tg", lambda: "")
+        monkeypatch.setattr(app, "_dvswitch_caller_cache", self._caller())
+        d = app.lookup_node("1999")
+        assert d == app._DVSWITCH_BRIDGE_NODE_INFO
+
+
+class TestDvswitchCurrentTg:
+    def test_reads_digital_tg_from_abinfo(self, monkeypatch, tmp_path):
+        abinfo = tmp_path / "ABInfo.json"
+        abinfo.write_text(json.dumps({"digital": {"tg": "91"}}))
+        monkeypatch.setattr(app, "DVSWITCH_ABINFO_PATH", str(abinfo))
+        assert app._dvswitch_current_tg.__wrapped__() == "91"  # __wrapped__ bypasses the 2s TTL cache
+
+    def test_empty_string_when_file_missing(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(app, "DVSWITCH_ABINFO_PATH", str(tmp_path / "nonexistent.json"))
+        assert app._dvswitch_current_tg.__wrapped__() == ""
