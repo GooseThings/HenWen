@@ -1460,7 +1460,7 @@ def check_auth():
     _PUBLIC          = {'login', 'logout', 'static', None,
                         'status_board', 'status_board_redirect', 'status_board_accessible',
                         'api_status_board', 'api_status_weather', 'api_status_activity',
-                        'api_status_nws_alerts', 'api_dvswitch_status',
+                        'api_status_nws_alerts', 'api_dvswitch_status', 'api_dvswitch_talkgroups',
                         'api_aprs_stations', 'api_iss_tle', 'api_meshtastic_messages',
                         'api_login', 'api_session', 'api_csrf_token',
                         'api_favorites', 'api_favorites_status',
@@ -14387,6 +14387,82 @@ DVSWITCH_CHECK_SCRIPT_PATH = os.path.join(DVSWITCH_DIR, "check.sh")
 # the same sudo rule as every other apply.sh) avoids that.
 DVSWITCH_EXPORT_PATH = os.environ.get("DVSWITCH_EXPORT_PATH", "/etc/asterisk/henwen-dvswitch-config.json")
 
+# ── BrandMeister talkgroup directory (Browse Talkgroups popup) ──────────────
+# api.brandmeister.network/v2/talkgroup is BrandMeister's own public API
+# backing https://brandmeister.network/#/talkgroups -- a flat {"<tg>": "name"}
+# map, ~1800 entries, no auth required. It has no separate country field:
+# confirmed against that same web app's own admin "Edit Talkgroup" panel,
+# which labels the field "Country (MCC)" -- a Mobile Country Code the
+# talkgroup's creator typed in, not something this read endpoint returns.
+# Country is instead derived here from the same DMR-community/E.212
+# convention BrandMeister's own numbering already follows: a bare 3-digit
+# key in 200-999 IS itself a country's own top-level entry (e.g. "208":
+# "France"), so every longer talkgroup number sharing that leading 3-digit
+# prefix belongs to that country. Verified against a live fetch: ~90% of
+# entries resolve this way; codes under 100 (Local/Cluster/Regional/
+# Worldwide/Europe/Radio Test/etc.) aren't country-specific, and the
+# remainder (a talkgroup whose bare-MCC parent isn't itself present in the
+# feed) is left with an empty country rather than guessed.
+BM_TALKGROUPS_URL      = "https://api.brandmeister.network/v2/talkgroup"
+BM_TALKGROUPS_POLL_SEC = 86400.0   # once a day -- this list changes rarely
+BM_TALKGROUPS_RETRY_SEC = 3600.0   # retry sooner after a transient failure
+
+_bm_talkgroups_cache   = []    # [{"tg": int, "name": str, "country": str}, ...]
+_bm_talkgroups_updated = None  # ISO8601 UTC string of the last successful fetch, or None
+_bm_talkgroups_lock    = threading.Lock()
+
+
+def _derive_bm_talkgroup_countries(raw):
+    """Pure function: raw is the {"<tg>": "name"} dict as returned by
+    BM_TALKGROUPS_URL. Returns a list of {"tg", "name", "country"} dicts
+    sorted by tg. Split out from the fetch function so it's unit-testable
+    without a network call."""
+    countries = {k: v for k, v in raw.items()
+                 if k.isdigit() and len(k) == 3 and 200 <= int(k) <= 999}
+    out = []
+    for k, v in raw.items():
+        if not k.isdigit():
+            continue
+        tg = int(k)
+        country = countries.get(k[:3], "") if tg >= 100 else ""
+        out.append({"tg": tg, "name": v, "country": country})
+    out.sort(key=lambda r: r["tg"])
+    return out
+
+
+def _fetch_bm_talkgroups():
+    try:
+        req = urlreq.Request(BM_TALKGROUPS_URL, headers={"User-Agent": "HenWen/1.0"})
+        with urlreq.urlopen(req, timeout=15) as resp:
+            raw = json.loads(resp.read().decode())
+        if not isinstance(raw, dict) or not raw:
+            log("WARN", "[BM-TALKGROUPS] Unexpected response shape")
+            return None
+        return _derive_bm_talkgroup_countries(raw)
+    except Exception as e:
+        log("WARN", f"[BM-TALKGROUPS] fetch failed: {e}")
+        return None
+
+
+def _bm_talkgroups_poll_loop():
+    global _bm_talkgroups_updated
+    while True:
+        result = _fetch_bm_talkgroups()
+        if result:
+            with _bm_talkgroups_lock:
+                _bm_talkgroups_cache[:] = result
+                _bm_talkgroups_updated = datetime.utcnow().isoformat() + "Z"
+            log("INFO", f"[BM-TALKGROUPS] Updated ({len(result)} talkgroups)")
+            time.sleep(BM_TALKGROUPS_POLL_SEC)
+        else:
+            time.sleep(BM_TALKGROUPS_RETRY_SEC)
+
+
+def start_bm_talkgroups_poller():
+    t = threading.Thread(target=_bm_talkgroups_poll_loop, name="bm-talkgroups-poller", daemon=True)
+    t.start()
+    log("INFO", "[BM-TALKGROUPS] Poller thread launched")
+
 
 def _get_dvswitch_config():
     row = get_db().execute("SELECT * FROM dvswitch_config WHERE id=1").fetchone()
@@ -14591,6 +14667,20 @@ def api_dvswitch_status():
         "caller_callsign": caller["callsign"],
         "caller_tg":       caller["tg"],
     })
+
+
+@app.route("/api/dvswitch/talkgroups")
+def api_dvswitch_talkgroups():
+    """Public, like api_dvswitch_status -- a static reference directory
+    (BrandMeister's full talkgroup list), not board state or a control
+    surface, refreshed once a day by start_bm_talkgroups_poller(). Returns
+    the whole cached list in one shot (typically ~1800 rows, a couple
+    hundred KB of JSON); pagination/filtering is a client-side concern in
+    the kiosk's Browse Talkgroups popup, not this route's job."""
+    with _bm_talkgroups_lock:
+        rows = list(_bm_talkgroups_cache)
+        updated = _bm_talkgroups_updated
+    return jsonify({"talkgroups": rows, "updated": updated, "count": len(rows)})
 
 
 @app.route("/api/dvswitch/tune", methods=["POST"])
@@ -16919,6 +17009,7 @@ if not os.environ.get("HENWEN_SKIP_STARTUP"):
     start_irc_relay()
     start_dvswitch_status_poller()
     start_dvswitch_caller_poller()
+    start_bm_talkgroups_poller()
     start_audio_ws_relay()
 
 if __name__ == "__main__":

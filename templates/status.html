@@ -2162,9 +2162,40 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       <strong>DMR Bridge</strong>
       <span id="dvswitch-status-line" style="color:var(--text2)"></span>
+      <button onclick="openBmTalkgroupsModal()" title="Browse the full BrandMeister talkgroup directory"
+              style="padding:3px 10px;border-radius:5px;font-size:0.8rem;cursor:pointer;border:1px solid var(--border);background:var(--bg3);color:var(--text)">
+        <svg class="icon"><use href="#icon-book-open"></use></svg> Talkgroups
+      </button>
       <div id="dvswitch-tg-buttons" style="display:flex;gap:6px;flex-wrap:wrap;margin-left:auto"></div>
     </div>
     <div id="dvswitch-caller-line" style="display:none;margin-top:6px;color:var(--text2)"></div>
+  </div>
+
+  <!-- BrandMeister talkgroup directory popup -- reference-only browse/search
+       of the full ~1800-entry list (see /api/dvswitch/talkgroups), triggered
+       from the DMR Bridge panel above. Public, like the panel itself; not a
+       control surface -- picking a talkgroup here doesn't tune anything,
+       it's just a lookup ("what's TG 91 called again?"). -->
+  <div id="bmtg-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;align-items:center;justify-content:center">
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:22px 26px;width:640px;max-width:92vw;max-height:86vh;overflow-y:auto">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <div style="font-size:0.95rem;font-weight:700"><svg class="icon"><use href="#icon-book-open"></use></svg> BrandMeister Talkgroups</div>
+        <button onclick="closeBmTalkgroupsModal()" style="background:none;border:none;color:var(--text2);font-size:1.1rem;cursor:pointer;line-height:1;padding:2px 6px"><svg class="icon"><use href="#icon-x"></use></svg></button>
+      </div>
+      <div id="bmtg-updated" style="font-size:0.7rem;color:var(--text2);margin-bottom:10px"></div>
+      <input id="bmtg-filter" type="text" placeholder="Filter by country, number, or name&hellip;" maxlength="60"
+             oninput="_bmTgFilterChanged()" autocomplete="off"
+             style="width:100%;box-sizing:border-box;margin-bottom:10px;padding:6px 9px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-size:0.85rem">
+      <div style="display:flex;gap:8px;padding:4px 10px;font-size:0.7rem;letter-spacing:.04em;text-transform:uppercase;color:var(--text2)">
+        <div style="flex:1.1;min-width:0">Country</div>
+        <div style="width:64px;text-align:right">TG</div>
+        <div style="flex:1.6;min-width:0">Name</div>
+      </div>
+      <div id="bmtg-list" style="display:flex;flex-direction:column;gap:2px;min-height:120px">
+        <div class="empty-msg" style="font-size:0.8rem">Loading&hellip;</div>
+      </div>
+      <div id="bmtg-pager" style="display:flex;align-items:center;justify-content:center;gap:10px;margin-top:10px;font-size:0.82rem"></div>
+    </div>
   </div>
 
   </main>
@@ -5391,6 +5422,93 @@ async function tuneDvswitchTG(tg) {
   } catch (e) {
     sbToast('Could not switch talkgroup', false);
   }
+}
+
+/* BrandMeister talkgroup directory popup -- fetched once per page load
+   (the server-side cache itself only refreshes once a day, see
+   start_bm_talkgroups_poller() in app.py) and paginated/filtered entirely
+   client-side: ~1800 small rows is trivial to hold and slice in JS, so
+   there's no reason to round-trip the server for paging. */
+var BM_TG_PAGE_SIZE = 50;
+var _bmTg = {rows: [], filtered: [], page: 0, updated: null, loaded: false};
+
+function openBmTalkgroupsModal() {
+  document.getElementById('bmtg-modal-overlay').style.display = 'flex';
+  if (!_bmTg.loaded) {
+    _fetchBmTalkgroups();
+  } else {
+    _renderBmTgPage();
+  }
+}
+
+function closeBmTalkgroupsModal() {
+  document.getElementById('bmtg-modal-overlay').style.display = 'none';
+}
+
+async function _fetchBmTalkgroups() {
+  var list = document.getElementById('bmtg-list');
+  list.innerHTML = '<div class="empty-msg" style="font-size:0.8rem">Loading&hellip;</div>';
+  try {
+    var r = await apiFetch('/api/dvswitch/talkgroups', {cache: 'no-store'});
+    var d = await r.json();
+    if (!r.ok) throw new Error((d && d.error) || 'request failed');
+    _bmTg.rows = d.talkgroups || [];
+    _bmTg.updated = d.updated || null;
+    _bmTg.loaded = true;
+    _bmTgFilterChanged();
+  } catch (e) {
+    list.innerHTML = '<div class="empty-msg" style="font-size:0.8rem">Could not load the talkgroup directory — try again shortly.</div>';
+    document.getElementById('bmtg-pager').innerHTML = '';
+  }
+}
+
+function _bmTgFilterChanged() {
+  var q = document.getElementById('bmtg-filter').value.trim().toLowerCase();
+  _bmTg.filtered = !q ? _bmTg.rows : _bmTg.rows.filter(function(row) {
+    return String(row.tg).indexOf(q) !== -1
+      || (row.name || '').toLowerCase().indexOf(q) !== -1
+      || (row.country || '').toLowerCase().indexOf(q) !== -1;
+  });
+  _bmTg.page = 0;
+  _renderBmTgPage();
+}
+
+function _bmTgGoPage(delta) {
+  var maxPage = Math.max(0, Math.ceil(_bmTg.filtered.length / BM_TG_PAGE_SIZE) - 1);
+  _bmTg.page = Math.min(maxPage, Math.max(0, _bmTg.page + delta));
+  _renderBmTgPage();
+}
+
+function _renderBmTgPage() {
+  var list  = document.getElementById('bmtg-list');
+  var pager = document.getElementById('bmtg-pager');
+  var updEl = document.getElementById('bmtg-updated');
+  updEl.textContent = _bmTg.updated
+    ? ('Updated ' + new Date(_bmTg.updated).toLocaleString() + ' · ' + _bmTg.rows.length + ' talkgroups')
+    : '';
+
+  if (!_bmTg.filtered.length) {
+    list.innerHTML = '<div class="empty-msg" style="font-size:0.8rem">No talkgroups match that filter.</div>';
+    pager.innerHTML = '';
+    return;
+  }
+
+  var totalPages = Math.ceil(_bmTg.filtered.length / BM_TG_PAGE_SIZE);
+  var start = _bmTg.page * BM_TG_PAGE_SIZE;
+  var pageRows = _bmTg.filtered.slice(start, start + BM_TG_PAGE_SIZE);
+
+  list.innerHTML = pageRows.map(function(row) {
+    return '<div style="display:flex;gap:8px;padding:5px 10px;border-radius:5px;font-size:0.83rem" onmouseover="this.style.background=\'var(--bg3)\'" onmouseout="this.style.background=\'\'">'
+      + '<div style="flex:1.1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text2)">' + (row.country ? esc(row.country) : '&mdash;') + '</div>'
+      + '<div style="width:64px;text-align:right;font-variant-numeric:tabular-nums">' + esc(row.tg) + '</div>'
+      + '<div style="flex:1.6;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(row.name) + '</div>'
+      + '</div>';
+  }).join('');
+
+  pager.innerHTML =
+    '<button onclick="_bmTgGoPage(-1)"' + (_bmTg.page === 0 ? ' disabled' : '') + ' style="padding:4px 10px;border-radius:5px;border:1px solid var(--border);background:var(--bg3);color:var(--text);cursor:pointer">&larr; Prev</button>'
+    + '<span style="color:var(--text2)">Page ' + (_bmTg.page + 1) + ' of ' + totalPages + '</span>'
+    + '<button onclick="_bmTgGoPage(1)"' + (_bmTg.page >= totalPages - 1 ? ' disabled' : '') + ' style="padding:4px 10px;border-radius:5px;border:1px solid var(--border);background:var(--bg3);color:var(--text);cursor:pointer">Next &rarr;</button>';
 }
 
 async function refreshActivity() {
