@@ -721,6 +721,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     <button class="nav-item" onclick="showPage('recordings')">Recordings</button>
     <button class="nav-item" id="nav-recording-settings" onclick="showPage('recording-settings')">Recording Settings</button>
     <button class="nav-item" id="nav-stream-relay" onclick="showPage('stream-relay')">Stream Relay</button>
+    <button class="nav-item" id="nav-dvswitch" onclick="showPage('dvswitch')">DVSwitch</button>
 
     <div class="nav-section">Integrations</div>
     <button class="nav-item" id="nav-meshtastic" onclick="showPage('meshtastic')">Meshtastic</button>
@@ -1701,6 +1702,169 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
 
     <button class="btn btn-primary" onclick="relaySave()">Save</button>
     <div id="relay-status" style="margin-top:8px;font-size:0.82rem"></div>
+  </section>
+
+  <!-- DVSwitch (owner only) -->
+  <section class="page" id="page-dvswitch">
+    <div class="page-title">DVSwitch</div>
+    <div class="page-sub">Owner-only. Bridges one local AllStarLink node to a DMR network (BrandMeister, TGIF, or a custom master) via the DVSwitch suite. Off until you fill in the fields below and run guided setup — nothing is installed just by saving this page.</div>
+
+    <div class="card" style="max-width:620px">
+      <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+        <h2>Bridge</h2>
+        <label class="switch"><input type="checkbox" id="dvs-enabled"><span class="slider"></span></label>
+      </div>
+      <div class="card-body">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px 18px">
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">DMR ID</label>
+            <input type="text" id="dvs-dmr-id" class="val-input" placeholder="3123456" style="width:100%">
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Callsign</label>
+            <input type="text" id="dvs-callsign" class="val-input" placeholder="N8GMZ" style="width:100%">
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Bridge node</label>
+            <input type="text" id="dvs-bridge-node" class="val-input" placeholder="e.g. 1999" style="width:100%">
+            <div style="font-size:0.75rem;color:var(--text2);margin-top:3px">A private AllStar node number not already used in rpt.conf. Guided setup creates this node for you — you don't need to create it by hand first.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="max-width:620px">
+      <div class="card-header"><h2>DMR Network</h2></div>
+      <div class="card-body">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px 18px">
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Network</label>
+            <select id="dvs-network" class="val-input" style="width:100%">
+              <option value="brandmeister">BrandMeister</option>
+              <option value="tgif">TGIF</option>
+              <option value="custom">Custom</option>
+            </select>
+            <div style="font-size:0.75rem;color:var(--text2);margin-top:3px">BrandMeister connects via DVSwitch's dedicated STFU/ODMRT client rather than the generic DMR gateway — a known crash in the generic path when talking to a real BrandMeister master, not something to configure around. TGIF/Custom use the generic gateway as normal. See dvswitch/README.md.</div>
+          </div>
+          <div></div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Master host</label>
+            <input type="text" id="dvs-network-host" class="val-input" placeholder="e.g. your nearest BrandMeister master" style="width:100%">
+            <div style="font-size:0.75rem;color:var(--text2);margin-top:3px">Look up your nearest master's address on the network's own site (BrandMeister self-care, TGIF's master list) — HenWen doesn't hardcode one, since the right choice is regional.</div>
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Port</label>
+            <input type="number" id="dvs-network-port" class="val-input" min="1" max="65535" style="width:100%">
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Password</label>
+            <input type="password" id="dvs-network-password" class="val-input" style="width:100%">
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Static talkgroup(s)</label>
+            <input type="text" id="dvs-talkgroups" class="val-input" placeholder="e.g. 3123" style="width:100%">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="max-width:620px">
+      <div class="card-header"><h2>Audio Levels</h2></div>
+      <div class="card-body">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px 18px">
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">AllStar-side gain</label>
+            <input type="number" id="dvs-allstar-gain" class="val-input" min="0.1" max="10" step="0.1" style="width:100%">
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">DMR-side gain</label>
+            <input type="number" id="dvs-dmr-gain" class="val-input" min="0.1" max="10" step="0.1" style="width:100%">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="max-width:620px">
+      <div class="card-header"><h2>AMBE Vocoder (advanced)</h2></div>
+      <div class="card-body">
+        <div style="font-size:0.75rem;color:var(--text2);margin-bottom:10px">
+          DMR audio needs an AMBE vocoder. The default (software) needs no extra hardware — only change this if you have a ThumbDV/DVstick dongle or a network AMBEServer and want to use it instead.
+        </div>
+        <div style="border:1px solid var(--warn);border-radius:6px;padding:10px 12px;margin-bottom:14px;font-size:0.78rem;color:var(--warn)">
+          <strong>Hardware note:</strong> the software AMBE codec (used automatically unless you configure a hardware/network source below) runs continuously while the bridge is active. Its CPU cost on a Raspberry Pi Zero 2 W has <em>not</em> been benchmarked on real hardware — treat this as an unverified risk, not a confirmed-safe feature, especially if this node also runs other CPU-heavy features (Stream Relay, Recording). See dvswitch/README.md.
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px 18px">
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Source</label>
+            <select id="dvs-ambe-source" class="val-input" style="width:100%" onchange="dvswitchAmbeSourceChanged()">
+              <option value="software">Software (bundled, no hardware needed)</option>
+              <option value="hardware">Hardware dongle (serial)</option>
+              <option value="network">Network AMBEServer</option>
+            </select>
+          </div>
+          <div></div>
+          <div id="dvs-ambe-hardware-row" style="display:none">
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Serial device</label>
+            <input type="text" id="dvs-ambe-device" class="val-input" placeholder="/dev/ttyUSB0" style="width:100%">
+          </div>
+          <div id="dvs-ambe-network-row" style="display:none;grid-column:1 / -1">
+            <div style="display:grid;grid-template-columns:2fr 1fr;gap:14px 18px">
+              <div>
+                <label class="toggle-label" style="display:block;margin-bottom:3px">AMBEServer host</label>
+                <input type="text" id="dvs-ambe-host" class="val-input" style="width:100%">
+              </div>
+              <div>
+                <label class="toggle-label" style="display:block;margin-bottom:3px">Port</label>
+                <input type="number" id="dvs-ambe-port" class="val-input" min="1" max="65535" style="width:100%">
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="max-width:620px">
+      <div class="card-header"><h2>Talkgroup Presets</h2></div>
+      <div class="card-body">
+        <div style="font-size:0.75rem;color:var(--text2);margin-bottom:10px">
+          Shown as buttons on the Kiosk board and here, so anyone logged in can switch talkgroup without touching this page again. Switching is restricted to this list — there's no free-entry talkgroup field, so a mistyped number can't send you somewhere unintended.
+        </div>
+        <div id="dvs-tg-preset-rows"></div>
+        <button type="button" class="btn btn-sm" onclick="dvswitchAddPresetRow()">+ Add Talkgroup</button>
+      </div>
+    </div>
+
+    <button class="btn btn-primary" onclick="dvswitchSave()">Save</button>
+    <div id="dvs-status" style="margin-top:8px;font-size:0.82rem"></div>
+
+    <div class="card" style="max-width:620px;margin-top:24px" id="dvs-apply-card">
+      <div class="card-header"><h2>Guided Setup</h2></div>
+      <div class="card-body">
+        <p style="margin-bottom:10px;color:var(--text2);font-size:0.9rem">
+          Creates the bridge node in rpt.conf, installs the DVSwitch packages, configures them from the fields above, and enables the DMR bridge service. Safe to re-run.
+        </p>
+        <p style="margin-bottom:10px;color:var(--warn);font-size:0.85rem">
+          This does <strong>not</strong> link the bridge node to your real repeater node, and any existing link gets dropped by this running (it reloads rpt.conf). After it finishes, connect the bridge node to your node from the Status Board and check "Permanent" — every time you re-run this, not just the first time.
+        </p>
+        <p id="dvs-apply-status" style="margin-bottom:12px;color:var(--text2)">Save a complete configuration above to unlock this.</p>
+        <div class="btn-row" id="dvs-apply-btn-row" style="display:none">
+          <button class="btn btn-sm btn-primary" id="dvs-apply-btn" onclick="applyDvswitchSetup()">Run Guided Setup</button>
+        </div>
+        <pre id="dvs-apply-output" class="codeblock" style="display:none;margin-top:12px;white-space:pre-wrap;max-height:260px;overflow-y:auto"></pre>
+      </div>
+    </div>
+
+    <div class="card" style="max-width:620px;margin-top:16px">
+      <div class="card-header">
+        <h2>Diagnostics</h2>
+        <div class="btn-row">
+          <button class="btn btn-sm btn-primary" id="dvs-diag-btn" onclick="runDvswitchDiagnostics()">Run Diagnostics</button>
+        </div>
+      </div>
+      <div class="card-body">
+        <div id="dvs-diag-out"><span class="muted">Click Run Diagnostics to check install/runtime state.</span></div>
+      </div>
+    </div>
   </section>
 
   <!-- Meshtastic (owner only) -->
@@ -3604,6 +3768,7 @@ function showPage(id) {
   else if (id === 'recordings')         recordingsLoad();
   else if (id === 'recording-settings') recLoad();
   else if (id === 'stream-relay')       relayLoad();
+  else if (id === 'dvswitch')           { if (window._henwenRole === 'owner') { dvswitchLoad(); } }
   else if (id === 'meshtastic')         meshtasticLoad();
   else if (id === 'discord-relay')      discordRelayLoad();
   else if (id === 'irc-relay')          ircRelayLoad();
@@ -6758,6 +6923,192 @@ function stopRelayStatusPolling() {
   if (_relayStatusTimer) { clearTimeout(_relayStatusTimer); _relayStatusTimer = null; }
 }
 
+/* ── DVSwitch (owner only) ─────────────────────────────────────────────── */
+function dvswitchAmbeSourceChanged() {
+  var source = document.getElementById('dvs-ambe-source').value;
+  document.getElementById('dvs-ambe-hardware-row').style.display = (source === 'hardware') ? '' : 'none';
+  document.getElementById('dvs-ambe-network-row').style.display  = (source === 'network')  ? '' : 'none';
+}
+
+/* Curated talkgroup presets -- in-memory array kept in sync with the DOM
+   rows, collected into the save payload. See dvswitch_config.talkgroup_
+   presets' own comment in app.py for why this is curated-only, no free
+   TG-entry field. */
+var _dvsTalkgroupPresets = [];
+
+function dvswitchRenderPresetRows() {
+  var wrap = document.getElementById('dvs-tg-preset-rows');
+  wrap.innerHTML = _dvsTalkgroupPresets.map(function(p, i) {
+    return '<div style="display:flex;gap:8px;margin-bottom:6px;align-items:center">'
+      + '<input type="text" class="val-input" placeholder="Label (e.g. Local)" style="flex:2" value="' + esc(p.label)
+        + '" oninput="_dvsTalkgroupPresets[' + i + '].label = this.value">'
+      + '<input type="text" class="val-input" placeholder="TG" style="flex:1" value="' + esc(p.tg)
+        + '" oninput="_dvsTalkgroupPresets[' + i + '].tg = this.value">'
+      + '<button type="button" class="btn btn-sm" onclick="dvswitchRemovePresetRow(' + i + ')">&times;</button>'
+      + '</div>';
+  }).join('') || '<div class="muted" style="font-size:0.8rem">No presets yet -- add one below.</div>';
+}
+
+function dvswitchAddPresetRow() {
+  _dvsTalkgroupPresets.push({label: '', tg: ''});
+  dvswitchRenderPresetRows();
+}
+
+function dvswitchRemovePresetRow(i) {
+  _dvsTalkgroupPresets.splice(i, 1);
+  dvswitchRenderPresetRows();
+}
+
+async function dvswitchLoad() {
+  var r = await api('/api/dvswitch/config');
+  var d = r.ok ? r.data : {};
+  _dvsTalkgroupPresets = (d.talkgroup_presets || []).map(function(p) { return {label: p.label, tg: p.tg}; });
+  dvswitchRenderPresetRows();
+  document.getElementById('dvs-enabled').checked        = !!d.enabled;
+  document.getElementById('dvs-dmr-id').value            = d.dmr_id || '';
+  document.getElementById('dvs-callsign').value          = d.callsign || '';
+  document.getElementById('dvs-bridge-node').value       = d.bridge_node || '';
+  document.getElementById('dvs-network').value           = d.dmr_network || 'brandmeister';
+  document.getElementById('dvs-network-host').value      = d.network_host || '';
+  document.getElementById('dvs-network-port').value      = d.network_port || 62031;
+  document.getElementById('dvs-network-password').value  = d.network_password || '';
+  document.getElementById('dvs-talkgroups').value        = d.static_talkgroups || '';
+  document.getElementById('dvs-allstar-gain').value      = d.allstar_gain != null ? d.allstar_gain : 1.0;
+  document.getElementById('dvs-dmr-gain').value           = d.dmr_gain != null ? d.dmr_gain : 1.0;
+  document.getElementById('dvs-ambe-source').value        = d.ambe_source || 'software';
+  document.getElementById('dvs-ambe-device').value        = d.ambe_device || '';
+  document.getElementById('dvs-ambe-host').value          = d.ambe_host || '';
+  document.getElementById('dvs-ambe-port').value          = d.ambe_port || 2460;
+  dvswitchAmbeSourceChanged();
+  loadDvswitchApplyStatus();
+}
+
+async function dvswitchSave() {
+  var st = document.getElementById('dvs-status');
+  var payload = {
+    enabled:            document.getElementById('dvs-enabled').checked,
+    dmr_id:              document.getElementById('dvs-dmr-id').value.trim(),
+    callsign:            document.getElementById('dvs-callsign').value.trim(),
+    bridge_node:         document.getElementById('dvs-bridge-node').value.trim(),
+    dmr_network:         document.getElementById('dvs-network').value,
+    network_host:        document.getElementById('dvs-network-host').value.trim(),
+    network_port:        parseInt(document.getElementById('dvs-network-port').value, 10),
+    network_password:    document.getElementById('dvs-network-password').value,
+    static_talkgroups:   document.getElementById('dvs-talkgroups').value.trim(),
+    allstar_gain:        parseFloat(document.getElementById('dvs-allstar-gain').value),
+    dmr_gain:            parseFloat(document.getElementById('dvs-dmr-gain').value),
+    ambe_source:         document.getElementById('dvs-ambe-source').value,
+    ambe_device:         document.getElementById('dvs-ambe-device').value.trim(),
+    ambe_host:           document.getElementById('dvs-ambe-host').value.trim(),
+    ambe_port:           parseInt(document.getElementById('dvs-ambe-port').value, 10),
+    talkgroup_presets:   _dvsTalkgroupPresets.map(function(p) { return {label: p.label.trim(), tg: p.tg.trim()}; }),
+  };
+  var r = await api('/api/dvswitch/config', {
+    method:  'POST',
+    headers: {'Content-Type': 'application/json'},
+    body:    JSON.stringify(payload),
+  });
+  if (r.ok) { st.textContent = 'Saved.'; st.style.color = 'var(--success)'; }
+  else       { st.textContent = (r.data && r.data.error) || 'Error'; st.style.color = 'var(--danger)'; }
+  setTimeout(function(){ st.textContent = ''; }, 4000);
+  loadDvswitchApplyStatus();
+}
+
+async function loadDvswitchApplyStatus() {
+  var statusEl = document.getElementById('dvs-apply-status');
+  var btnRow   = document.getElementById('dvs-apply-btn-row');
+  if (!statusEl) return;
+  var r = await api('/api/dvswitch/apply-status');
+  if (!r.ok) { statusEl.textContent = (r.data && r.data.error) || 'Could not check status.'; btnRow.style.display = 'none'; return; }
+  if (!r.data.installed) {
+    statusEl.innerHTML = '<span style="color:var(--warn,#e0a030)">Not available on this install. Pull the latest HenWen code first.</span>';
+    btnRow.style.display = 'none';
+    return;
+  }
+  if (!r.data.ready) {
+    statusEl.textContent = 'Save a complete configuration above to unlock this.';
+    btnRow.style.display = 'none';
+    return;
+  }
+  statusEl.innerHTML = (r.data.applied
+    ? '<span style="color:var(--green,#3fb950)">Bridge services active.</span>'
+    : r.data.bridge_node_exists
+      ? 'Bridge node exists in rpt.conf — services not yet confirmed active.'
+      : 'Configuration ready.')
+    + ' Click below to (re-)run guided setup.';
+  var btn = document.getElementById('dvs-apply-btn');
+  if (btn) btn.textContent = r.data.bridge_node_exists ? 'Re-run Guided Setup' : 'Run Guided Setup';
+  btnRow.style.display = '';
+}
+
+async function applyDvswitchSetup() {
+  if (!confirm('Run DVSwitch guided setup now?\n\n'
+             + 'This creates a new node in rpt.conf, installs the dvswitch-server package '
+             + '(downloads from the internet), and enables its DMR bridge services. Safe to '
+             + 're-run, but not instant on first run.')) return;
+  var statusEl = document.getElementById('dvs-apply-status');
+  var outEl = document.getElementById('dvs-apply-output');
+  var btn = document.getElementById('dvs-apply-btn');
+  if (btn) btn.disabled = true;
+  if (statusEl) statusEl.innerHTML = '<span class="spinner"></span> Running guided setup (this can take a while on first run)&hellip;';
+  var r = await api('/api/dvswitch/apply', {method: 'POST'});
+  if (btn) btn.disabled = false;
+  if (outEl && ((r.data && r.data.output) || '').trim()) {
+    outEl.textContent = r.data.output;
+    outEl.style.display = '';
+  }
+  if (r.ok) {
+    log('DVSwitch guided setup applied', 'OK');
+  } else {
+    var err = (r.data && (r.data.error || r.data.hint)) || 'Failed to run DVSwitch guided setup.';
+    alert(err);
+    log('DVSwitch guided setup failed: ' + err, 'ERROR');
+  }
+  loadDvswitchApplyStatus();
+}
+
+async function runDvswitchDiagnostics() {
+  var btn = document.getElementById('dvs-diag-btn');
+  var el  = document.getElementById('dvs-diag-out');
+  btn.disabled = true;
+  el.innerHTML = '<span class="muted"><span class="spinner"></span> Running checks...</span>';
+  log('Running DVSwitch diagnostics...', 'INFO');
+
+  var r = await api('/api/dvswitch/diagnostics');
+  btn.disabled = false;
+
+  if (!r.ok) {
+    el.innerHTML = '<div class="alert alert-danger">' + esc(r.data.error || 'Diagnostics failed') + '</div>';
+    log('DVSwitch diagnostics failed: ' + (r.data.error || 'unknown'), 'ERROR');
+    return;
+  }
+
+  var d = r.data;
+  var s = d.summary || {pass: 0, fail: 0, warn: 0};
+  var badgeClass = {pass: 'badge-ok', fail: 'badge-err', warn: 'badge-warn'};
+  var badgeLabel = {pass: 'PASS', fail: 'FAIL', warn: 'WARN'};
+
+  var html = '<div style="margin-bottom:12px">'
+    + '<span class="badge badge-ok" style="margin-right:6px">' + s.pass + ' pass</span>'
+    + (s.fail ? '<span class="badge badge-err" style="margin-right:6px">' + s.fail + ' fail</span>' : '')
+    + (s.warn ? '<span class="badge badge-warn">' + s.warn + ' warn</span>' : '')
+    + '</div>';
+  html += '<table class="tbl"><tbody>';
+  (d.checks || []).forEach(function(c) {
+    html += '<tr><td>' + esc(c.label) + '</td><td style="text-align:right"><span class="badge '
+      + (badgeClass[c.status] || 'badge-unk') + '">' + (badgeLabel[c.status] || c.status) + '</span></td></tr>';
+    if (c.detail && c.detail !== c.label) {
+      html += '<tr><td colspan="2" class="muted" style="font-size:0.82rem;padding-top:0">' + esc(c.detail) + '</td></tr>';
+    }
+  });
+  html += '</tbody></table>';
+  el.innerHTML = html;
+
+  if (s.fail) log('DVSwitch diagnostics: ' + s.pass + ' pass, ' + s.fail + ' fail, ' + s.warn + ' warn.', 'ERROR');
+  else if (s.warn) log('DVSwitch diagnostics: ' + s.pass + ' pass, ' + s.warn + ' warn.', 'WARN');
+  else log('DVSwitch diagnostics: all ' + s.pass + ' checks passed.', 'OK');
+}
+
 /* ── Stress Test (owner-only) ──────────────────────────────────────────── */
 var _stressStatusTimer   = null;
 var _stressAudioStartedAt = null;
@@ -7144,6 +7495,10 @@ async function applyRoleNav() {
   if (discordRelayNavBtn) discordRelayNavBtn.style.display = isOwnerRole ? '' : 'none';
   var ircRelayNavBtn = document.getElementById('nav-irc-relay');
   if (ircRelayNavBtn) ircRelayNavBtn.style.display = isOwnerRole ? '' : 'none';
+  /* DVSwitch is owner-only too — matches the backend's explicit
+     role==='owner' check on every /api/dvswitch/* route. */
+  var dvswitchNavBtn = document.getElementById('nav-dvswitch');
+  if (dvswitchNavBtn) dvswitchNavBtn.style.display = isOwnerRole ? '' : 'none';
   /* Chat Log is owner-only too — matches the backend's explicit
      role==='owner' check on /api/chat/log and the DELETE route. */
   var chatLogNavBtn = document.getElementById('nav-chat-log');
