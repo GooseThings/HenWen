@@ -1121,9 +1121,9 @@ button.idle-badge.warn { border-color: rgba(255,179,0,.5); }
 .idle-badge.idle-pressing { background-color: rgba(224,68,68,.18); color: var(--danger); }
 button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
 /* min-width/min-height/padding for a ~24x24px touch target, same rationale
-   as .idle-restore-btn/.fav-del-btn above; opacity dims it to read as
-   secondary/reference info rather than a primary action next to the idle
-   badge and disconnect X. */
+   as .fav-del-btn above; opacity dims it to read as secondary/reference
+   info rather than a primary action next to the idle badge and disconnect
+   X. */
 .idle-info-btn { background: none; border: none; color: var(--text2); cursor: pointer;
   padding: 6px; min-width: 24px; min-height: 24px; box-sizing: border-box; opacity: 0.6;
   display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
@@ -1137,17 +1137,13 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
   border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
   min-width: 200px; max-width: 260px; box-shadow: 0 4px 16px rgba(0,0,0,.4);
   z-index: 2000; font-size: 0.75rem; color: var(--text); line-height: 1.4; }
-/* No-timeout state: same badge, faded, instead of disappearing entirely */
+/* No-timeout / untracked-connection state: same badge, faded, instead of
+   disappearing entirely — a single .idle-badge.off button/span (icon only,
+   no text), not a separate .idle-restore-btn element nested inside it (that
+   used to stack two elements' padding, making this bigger than the
+   disconnect X next to it and than the ticking "Idle: mm:ss" .idle-badge
+   button above — see refreshBoard()'s own comment on this). */
 .idle-badge.off { opacity: 0.45; }
-/* min-width/min-height/padding push the actual click target to ~24x24px
-   (was just the bare icon glyph at padding:0 — well under any reasonable
-   touch-target size) the same way .fav-del-btn's own comment describes;
-   inline-flex centering keeps the icon itself visually unchanged, the box
-   just grows around it. */
-.idle-restore-btn { background: none; border: none; color: inherit; cursor: pointer;
-  font-size: 0.8rem; padding: 6px; min-width: 24px; min-height: 24px; box-sizing: border-box;
-  line-height: 1; opacity: 0.75; display: inline-flex; align-items: center; justify-content: center; }
-.idle-restore-btn:hover { opacity: 1; }
 
 /* Browser-transmit PTT bar (inline in the Connected Nodes card while armed) */
 #tx-bar { padding: 8px 18px; border-bottom: 1px solid var(--border);
@@ -1173,6 +1169,15 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
    mode worth flagging (see refreshBoard()'s modeBadge). */
 .mode-badge { font-size: 0.65rem; padding: 1px 6px; border-radius: 3px; font-weight: 600; white-space: nowrap; }
 .mode-badge.mon { background: rgba(88,166,255,.1); color: var(--accent); }
+
+/* Current-TG readout next to the DVSwitch bridge row's Talkgroups button
+   (see refreshBoard()'s tgBtn block) — mobile-only (shown via the
+   @media (max-width: 860px) override below): the button itself already
+   makes the live TG one tap away via the browse popup, so this is just a
+   convenience for a phone-sized screen where nothing else on the row
+   surfaces it at a glance. */
+.tg-current-badge { display: none; font-size: 0.65rem; font-weight: 600; white-space: nowrap;
+  color: var(--green); }
 
 /* toast notification */
 #sb-toast { position: fixed; bottom: 64px; left: 50%; transform: translateX(-50%);
@@ -1502,6 +1507,19 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
      the X on mobile. */
   .idle-badge { font-size: 0.86rem; padding: 8px 12px; }
   .btn-icon { padding-top: 7px; padding-bottom: 7px; }
+
+  /* Talkgroups button (DVSwitch BrandMeister bridge row only) — bumped well
+     past the general ×1.1 "buttons 10% larger" pass above since the base
+     .mode-badge size (0.65rem / 1px 6px) it inherits was tuned for a small
+     inline status flag, not something meant to be tapped. .tg-current-badge
+     is display:none in the base rules above; shown here alongside it so a
+     phone-sized screen can see the live TG without opening the popup —
+     plain colored text, deliberately with none of the button's own
+     border/background/padding, so it doesn't read as a second tappable
+     control next to the real one. */
+  .tg-launch-btn { font-size: 0.9rem; padding: 8px 14px; }
+  .tg-launch-btn .icon { width: 1rem; height: 1rem; }
+  .tg-current-badge { display: inline-block; font-size: 0.86rem; }
   .conn-form-bar input { flex: 1 1 100px; font-size: 0.92rem; padding: 7px 10px; }
   #conn-form-msg { font-size: 0.85rem !important; }
 
@@ -1826,6 +1844,16 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
         <!-- Search stays hidden until login (it bridges RF, like every other
              connect path); the net-schedule calendar is always visible. -->
         <button class="btn-icon" id="node-search-btn" onclick="openSearchModal()" title="Search the AllStar and EchoLink directories for nodes to connect to" style="display:none"><svg class="icon"><use href="#icon-search"></use></svg><span class="header-menu-label">Search</span></button>
+        <!-- DVSwitch DMR bridge quick-connect: only shown once DVSwitch is
+             enabled/configured with a bridge node (see api_dvswitch_status())
+             AND the viewer is logged in -- same "bridges RF, hidden until
+             login" gate Search above already uses. Saves a user from having
+             to already know the bridge's internal AllStar node number in
+             order to link to it via the plain Node # form. Hidden by
+             default; _dvswitchBridgeBtnUpdate() (called from
+             loadDvswitchStatus(), which already re-runs on login/logout and
+             every 15s) shows it once both conditions are confirmed. -->
+        <button class="btn-icon" id="dvswitch-bridge-btn" onclick="connectDvswitchBridge()" title="Connect to the DVSwitch DMR bridge" style="display:none"><svg class="icon"><use href="#icon-radio-tower"></use></svg><span class="header-menu-label">DMR Bridge</span></button>
         <button class="btn-icon" id="net-cal-btn" onclick="openNetModal()" title="Net Schedule — scheduled net reminders"><svg class="icon"><use href="#icon-calendar-days"></use></svg><span class="header-menu-label">Net Schedule</span></button>
         <button class="btn-icon" id="myrec-btn" onclick="openMyRecordingsModal()" style="display:none" title="View, rename, download, or delete your saved recordings"><svg class="icon"><use href="#icon-folder-open"></use></svg><span class="header-menu-label">My Recordings</span></button>
         <div id="kiosk-user-bar" style="display:none;align-items:center;gap:6px;font-size:0.75rem;flex-shrink:0">
@@ -4977,7 +5005,15 @@ async function refreshBoard() {
       nl.innerHTML = allLinked.map(function(c) {
         var meta = [];
         var isConn = (c.connect_state || 'ESTABLISHED') === 'ESTABLISHED';
-        if (typeof c.connect_elapsed_sec === 'number') meta.push('Connected: <strong>' + _histDuration(c.connect_elapsed_sec) + '</strong>');
+        /* Shared by the meta line below and the Talkgroups button further
+           down (see the tgBtn block) -- both need to know whether this row
+           IS the DVSwitch bridge node, computed once here instead of twice. */
+        var dvs = window._dvswitchStatus;
+        var isDvswitchBridge = !!(dvs && dvs.available && dvs.network === 'brandmeister' &&
+          dvs.bridge_node && String(c.node) === String(dvs.bridge_node));
+        if (typeof c.connect_elapsed_sec === 'number') {
+          meta.push((isDvswitchBridge ? 'DMR Bridge Active' : 'Connected') + ': <strong>' + _histDuration(c.connect_elapsed_sec) + '</strong>');
+        }
         meta.push('Keyups: <strong>' + (c.keyups || 0) + '</strong>');
         /* TX is the default mode for a connected node, so it doesn't need a
            badge — only the exceptional case (monitor-only, no transmit) is
@@ -5031,13 +5067,22 @@ async function refreshBoard() {
         } else if (c.permanent === false && c.no_timeout === true) {
           var isAdmin2 = window._kioskRole === 'admin' || window._kioskRole === 'superuser' || window._kioskRole === 'owner';
           /* Faded instead of hidden — the clock re-enables the idle timer
-             (admin/superuser/owner only, same gate as squash/reset above). */
-          var clockBtn = isAdmin2
-            ? '<button class="idle-restore-btn" onclick="sbRestoreIdle(\'' +
+             (admin/superuser/owner only, same gate as squash/reset above).
+             A single <button class="idle-badge off"> (or <span> for a
+             non-admin viewer), not a nested <button class="idle-restore-btn">
+             inside a wrapping <span class="idle-badge">: that used to stack
+             .idle-restore-btn's own padding inside .idle-badge's padding,
+             making this bigger than the disconnect X next to it and, since
+             .idle-restore-btn is background:none/border:none, leaving only
+             the outer span looking like the real .sb-btn-style button —
+             .idle-badge's own padding/border already match .sb-btn's box
+             model exactly (see that comment above), same as the ticking
+             "Idle: mm:ss" button case just above this one. */
+          idleBadge = isAdmin2
+            ? '<button class="idle-badge off" onclick="sbRestoreIdle(\'' +
                 esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)" ' +
                 'title="Enable the idle-timeout auto-disconnect for this connection"><svg class="icon"><use href="#icon-clock"></use></svg></button>'
-            : '<span title="No timeout — idle-disconnect disabled"><svg class="icon"><use href="#icon-clock"></use></svg></span>';
-          idleBadge = '<span class="idle-badge off">' + clockBtn + '</span>';
+            : '<span class="idle-badge off" title="No timeout — idle-disconnect disabled"><svg class="icon"><use href="#icon-clock"></use></svg></span>';
         } else if (c.permanent === true) {
           idleBadge = '<span class="idle-badge">Permanent</span>';
         } else if (c.permanent == null && isConn) {
@@ -5053,29 +5098,38 @@ async function refreshBoard() {
              begins enforcing the idle timeout from now rather than
              "restoring" a state that never existed. */
           var isAdmin3 = window._kioskRole === 'admin' || window._kioskRole === 'superuser' || window._kioskRole === 'owner';
-          var trackBtn = isAdmin3
-            ? '<button class="idle-restore-btn" onclick="sbRestoreIdle(\'' +
+          /* Same single-element .idle-badge treatment as the "No Timeout"
+             branch above — see its comment for why this isn't a nested
+             .idle-restore-btn inside a wrapping span any more. */
+          idleBadge = isAdmin3
+            ? '<button class="idle-badge off" onclick="sbRestoreIdle(\'' +
                 esc(c.local_node) + '\',\'' + esc(c.node) + '\',this)" ' +
                 'title="Not tracked for idle timeout (connected outside the kiosk) — click to start enforcing the idle timeout on this connection"><svg class="icon"><use href="#icon-clock"></use></svg></button>'
-            : '<span title="Not tracked for idle timeout — connected outside the kiosk"><svg class="icon"><use href="#icon-clock"></use></svg></span>';
-          idleBadge = '<span class="idle-badge off">' + trackBtn + '</span>';
+            : '<span class="idle-badge off" title="Not tracked for idle timeout — connected outside the kiosk"><svg class="icon"><use href="#icon-clock"></use></svg></span>';
         }
         /* "Talkgroups" button -- only on the DVSwitch bridge node's own row,
            and only while it's actually up and on BrandMeister (TGIF/custom
            networks have no BrandMeister directory to browse). window.
            _dvswitchStatus is refreshed independently every 15s by
            loadDvswitchStatus() rather than fetched here on every 2s board
-           poll -- see that function's own comment. */
+           poll -- see that function's own comment. isDvswitchBridge itself
+           is computed once, up near the meta-line "DMR Bridge Active" label
+           at the top of this row builder. */
         var tgBtn = '';
-        var dvs = window._dvswitchStatus;
-        if (dvs && dvs.available && dvs.network === 'brandmeister' && dvs.bridge_node &&
-            String(c.node) === String(dvs.bridge_node)) {
-          tgBtn = '<button class="mode-badge" style="cursor:pointer;border:1px solid rgba(63,185,80,.35);' +
-            'background:rgba(63,185,80,.12);color:var(--green)" onclick="openBmTalkgroupsModal()" ' +
+        var tgCurrent = '';
+        if (isDvswitchBridge) {
+          tgBtn = '<button class="mode-badge tg-launch-btn" style="cursor:pointer;border:1px solid rgba(88,166,255,.35);' +
+            'background:rgba(88,166,255,.12);color:var(--accent)" onclick="openBmTalkgroupsModal()" ' +
             'title="Browse BrandMeister talkgroups"><svg class="icon" style="width:0.8em;height:0.8em;' +
             'vertical-align:-0.1em"><use href="#icon-book-open"></use></svg> Talkgroups</button>';
+          /* Mobile-only (see .tg-current-badge's own comment) — dvs.tg is ''
+             before Analog_Bridge has reported any digital status yet (fresh
+             boot), so this stays blank rather than rendering "TG " alone. */
+          if (dvs.tg) {
+            tgCurrent = '<span class="tg-current-badge">TG ' + esc(String(dvs.tg)) + '</span>';
+          }
         }
-        var badges = modeBadge + tgBtn;
+        var badges = modeBadge + tgBtn + tgCurrent;
         var dotClass = !isConn ? ' connecting' : (c.keyed ? ' keyed' : ' connected');
         var isAdminRole = window._kioskRole === 'admin' || window._kioskRole === 'superuser' || window._kioskRole === 'owner';
         var dcBtn = (c.connector_managed && !isAdminRole)
@@ -5375,6 +5429,40 @@ async function loadDvswitchStatus() {
     /* transient network hiccup — next poll retries; leave the last-known
        status in place rather than flickering the row button off. */
   }
+  _dvswitchBridgeBtnUpdate();
+}
+
+/* Header "DMR Bridge" quick-connect button -- see its own HTML comment for
+   why this exists. Re-run every time window._dvswitchStatus refreshes
+   (loadDvswitchStatus() already fires on page load, every 15s, and right
+   after login/logout), rather than wiring a separate auth-change hook: a
+   login/logout always calls loadDvswitchStatus() itself immediately after
+   updating window._kioskRole, so this always sees current state either way. */
+function _dvswitchBridgeBtnUpdate() {
+  var btn = document.getElementById('dvswitch-bridge-btn');
+  if (!btn) return;
+  var dvs = window._dvswitchStatus;
+  var show = !!(window._kioskRole && dvs && dvs.available && dvs.bridge_node);
+  btn.style.display = show ? '' : 'none';
+  if (show) btn.title = 'Connect to the DVSwitch DMR bridge (node ' + dvs.bridge_node + ')';
+}
+
+/* Reuses sbConnect() -- the same function every other Connect button on the
+   board (node card, Node Search, Favorites, map popups, net-schedule Join)
+   funnels through -- rather than hand-rolling another /api/status/connect
+   caller, so this automatically gets the same "already connected to
+   something else" bridging warning (issue #140), 401-login-retry, and
+   toast/refresh handling everything else already has. btn is passed as
+   null: sbConnect's optional disabled/'…' treatment assumes a plain text
+   button (it overwrites btn.textContent), which would blank out this
+   button's icon+label. window._lastBoardNodes[0] as the local node matches
+   statusConnectNew()'s own convention just above. */
+function connectDvswitchBridge() {
+  var dvs = window._dvswitchStatus;
+  if (!dvs || !dvs.available || !dvs.bridge_node) return;
+  var local = (window._lastBoardNodes && window._lastBoardNodes[0]) ? window._lastBoardNodes[0].node : '';
+  if (!local) { sbToast('No local node found', false); return; }
+  sbConnect(local, String(dvs.bridge_node), null, false, false);
 }
 
 async function tuneDvswitchTG(tg) {
