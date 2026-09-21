@@ -26,6 +26,12 @@ rm -f /etc/systemd/system/stfu.service.d/henwen-restart-on-timeout.conf
 rmdir --ignore-fail-on-non-empty /etc/systemd/system/stfu.service.d 2>/dev/null || true
 systemctl daemon-reload
 
+# NOT restoring /etc/logrotate.d/STFU to the package-shipped postrotate-reload
+# version -- that version is the actual bug apply.sh's copytruncate override
+# fixes (SIGINT from `systemctl reload stfu` kills STFU instead of reloading
+# it). Leaving copytruncate in place is harmless whether or not stfu.service
+# ends up re-enabled afterward.
+
 echo "== Restoring ini files from $BACKUP_DIR"
 [ -f "$BACKUP_DIR/$(basename "$ANALOG_BRIDGE_INI")" ] && \
   cp "$BACKUP_DIR/$(basename "$ANALOG_BRIDGE_INI")" "$ANALOG_BRIDGE_INI"

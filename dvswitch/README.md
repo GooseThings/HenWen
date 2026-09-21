@@ -95,6 +95,27 @@ removes only 255 from that list, leaving the other three untouched. A
 drop-in rather than editing the package's own unit file directly, so it
 survives a `stfu` package upgrade.
 
+### `stfu.service`'s reload signal actually kills it (logrotate)
+
+A second, separate way the bridge goes silently dead: `/etc/logrotate.d/
+STFU` (shipped by the `stfu` package) runs `systemctl reload stfu` in its
+postrotate stanza on every log rotation. `stfu.service`'s own shipped unit
+wires `ExecReload` to `kill -2` (SIGINT) — but STFU treats SIGINT as "exit
+now", not "reopen my log file" (confirmed live: `Signal 2 received, exiting
+STFU` / `exitApp with result code 0`). That's a clean exit(0), which
+`Restart=on-failure` correctly does **not** restart, since exit 0 isn't a
+failure — so a routine daily/100KB log rotation silently killed the bridge
+and it stayed dead until manually noticed, same failure mode as the
+exit-255 case above but a different trigger, and not fixed by that drop-in
+(this is an exit-0 problem, not an exit-255 one). `apply.sh` overwrites
+`/etc/logrotate.d/STFU` with a `copytruncate` version instead of guessing
+at some other signal STFU might handle correctly — `copytruncate` rotates
+the log without signaling the process at all, the standard remedy for a
+daemon that doesn't support live log reopening. Unlike the systemd
+drop-in, logrotate has no drop-in directory concept, so this overwrites the
+package-shipped file directly; a `stfu` package upgrade could revert it,
+but re-running `apply.sh` (idempotent) reinstates it.
+
 ## What `apply.sh` does
 
 - Adds the DVSwitch apt repository for this box's Debian codename

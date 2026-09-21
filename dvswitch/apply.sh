@@ -296,6 +296,37 @@ RestartPreventExitStatus=251 253 254
 DROPIN
   systemctl daemon-reload
 
+  # /etc/logrotate.d/STFU (shipped by the `stfu` package) runs `systemctl
+  # reload stfu` in its postrotate stanza -- but stfu.service's own shipped
+  # unit wires ExecReload to `kill -2` (SIGINT), and STFU treats SIGINT as
+  # "exit now", not "reopen my log file" (confirmed live: "Signal 2
+  # received, exiting STFU" / "exitApp with result code 0"). That's a
+  # clean exit(0), which Restart=on-failure correctly does NOT restart --
+  # so every routine log rotation silently killed the bridge and it stayed
+  # dead until manually noticed, same "no audio, no error anywhere" failure
+  # mode as the exit-255 case above, just via a different trigger and not
+  # fixed by that drop-in (this is an exit-0 problem, not an exit-255 one).
+  # Rather than guess whether STFU handles some other signal correctly for
+  # a live reload, this replaces the whole logrotate stanza with
+  # `copytruncate`, which rotates the file without signaling the process at
+  # all -- the standard remedy for a daemon that doesn't support log
+  # reopening, and it sidesteps the signal question entirely. Overwrites
+  # the package-shipped file directly (logrotate has no drop-in directory
+  # concept, unlike systemd), so a `stfu` package upgrade could revert
+  # this -- re-running apply.sh (idempotent) reinstates it.
+  echo "== Installing /etc/logrotate.d/STFU override (copytruncate -- SIGINT from the package's own postrotate reload kills STFU instead of reloading it)"
+  cat > /etc/logrotate.d/STFU <<'LOGROTATE'
+/var/log/dvswitch/STFU.log {
+	rotate 7
+	daily
+	compress
+	size 100k
+	nocreate
+	missingok
+	copytruncate
+}
+LOGROTATE
+
   echo "== Enabling analog_bridge.service + stfu.service (mmdvm_bridge.service not needed/used for BrandMeister)"
   systemctl enable --now analog_bridge.service
   systemctl enable --now stfu.service
