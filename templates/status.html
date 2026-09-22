@@ -1989,7 +1989,7 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
         <svg class="icon"><use href="#icon-triangle-alert"></use></svg> <span id="connector-warn-text"></span>
       </div>
       <div class="conn-form-bar" id="conn-form-bar">
-        <input id="conn-form-node" type="text" placeholder="Node #" maxlength="7"
+        <input id="conn-form-node" type="text" inputmode="numeric" placeholder="Node #" maxlength="7"
                onkeydown="if(event.key==='Enter')statusConnectNew()">
         <button class="sb-btn connect" onclick="statusConnectNew()">Connect</button>
         <button class="sb-btn monitor" onclick="statusMonitorNew()">Monitor</button>
@@ -5124,9 +5124,16 @@ async function refreshBoard() {
             'vertical-align:-0.1em"><use href="#icon-book-open"></use></svg> Talkgroups</button>';
           /* Mobile-only (see .tg-current-badge's own comment) — dvs.tg is ''
              before Analog_Bridge has reported any digital status yet (fresh
-             boot), so this stays blank rather than rendering "TG " alone. */
+             boot), so this stays blank rather than rendering "TG " alone.
+             _bmTgNameFor() (see loadDvswitchStatus()'s preload comment)
+             appends the BrandMeister directory's name for that TG when
+             known -- '' before the directory has loaded, or for a TG this
+             BrandMeister snapshot doesn't have a name for (e.g. TGIF-only
+             or a made-up number), leaving just the bare number either way. */
           if (dvs.tg) {
-            tgCurrent = '<span class="tg-current-badge">TG ' + esc(String(dvs.tg)) + '</span>';
+            var tgName = _bmTgNameFor(Number(dvs.tg));
+            tgCurrent = '<span class="tg-current-badge">TG ' + esc(String(dvs.tg)) +
+              (tgName ? ' &middot; ' + esc(tgName) : '') + '</span>';
           }
         }
         var badges = modeBadge + tgBtn + tgCurrent;
@@ -5430,6 +5437,15 @@ async function loadDvswitchStatus() {
        status in place rather than flickering the row button off. */
   }
   _dvswitchBridgeBtnUpdate();
+  /* Preload the BrandMeister talkgroup directory (the same fetch the
+     Browse Talkgroups popup uses -- see _fetchBmTalkgroups() further down)
+     so the Connected Nodes row's current-TG badge can show a name next to
+     the number without waiting for someone to actually open that popup
+     first. Public data, so this runs for any viewer once DVSwitch reports
+     available, not just a logged-in one; _fetchBmTalkgroups()'s own
+     loading/loaded flags keep this a one-time fetch per page load
+     regardless of how many 15s polls land before it resolves. */
+  if (window._dvswitchStatus.available && !_bmTg.loaded) _fetchBmTalkgroups();
 }
 
 /* Header "DMR Bridge" quick-connect button -- see its own HTML comment for
@@ -5494,7 +5510,7 @@ async function tuneDvswitchTG(tg) {
    client-side: ~1800 small rows is trivial to hold and slice in JS, so
    there's no reason to round-trip the server for paging. */
 var BM_TG_PAGE_SIZE = 50;
-var _bmTg = {rows: [], filtered: [], page: 0, updated: null, loaded: false};
+var _bmTg = {rows: [], filtered: [], page: 0, updated: null, loaded: false, loading: false, byTg: null};
 
 function openBmTalkgroupsModal() {
   document.getElementById('bmtg-modal-overlay').style.display = 'flex';
@@ -5521,6 +5537,13 @@ async function _bmTgClickRow(tg) {
 }
 
 async function _fetchBmTalkgroups() {
+  /* loading guard: this now also fires from loadDvswitchStatus() (see its
+     own comment) to preload the name lookup for the Connected Nodes
+     current-TG badge, independent of whether the popup itself is ever
+     opened -- without this, opening the popup during that preload's
+     in-flight window would kick off a second, redundant ~120KB fetch. */
+  if (_bmTg.loading) return;
+  _bmTg.loading = true;
   var list = document.getElementById('bmtg-list');
   list.innerHTML = '<div class="empty-msg" style="font-size:0.8rem">Loading&hellip;</div>';
   try {
@@ -5530,11 +5553,31 @@ async function _fetchBmTalkgroups() {
     _bmTg.rows = d.talkgroups || [];
     _bmTg.updated = d.updated || null;
     _bmTg.loaded = true;
+    _bmTg.byTg = null;   /* stale -- _bmTgNameFor() rebuilds it lazily from the fresh rows */
     _bmTgFilterChanged();
   } catch (e) {
     list.innerHTML = '<div class="empty-msg" style="font-size:0.8rem">Could not load the talkgroup directory — try again shortly.</div>';
     _bmTgSetPagerHTML('');
+  } finally {
+    _bmTg.loading = false;
   }
+}
+
+/* Name lookup for a bare TG number (e.g. the Connected Nodes row's
+   current-TG badge, see refreshBoard()'s tgCurrent block) -- built lazily
+   from _bmTg.rows the first time it's needed rather than up front, since
+   most page loads never need it before the directory itself has loaded
+   (or DVSwitch isn't even enabled). Returns '' before the directory has
+   loaded or for a TG this BrandMeister snapshot doesn't have a name for
+   (e.g. a TGIF-only or made-up number) -- callers already treat that as
+   "just show the number". */
+function _bmTgNameFor(tg) {
+  if (!_bmTg.rows.length) return '';
+  if (!_bmTg.byTg) {
+    _bmTg.byTg = {};
+    _bmTg.rows.forEach(function(r) { _bmTg.byTg[r.tg] = r.name; });
+  }
+  return _bmTg.byTg[tg] || '';
 }
 
 /* Top and bottom pagers (.bmtg-pager, one above the list one below -- a
