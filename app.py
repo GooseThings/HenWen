@@ -1130,10 +1130,13 @@ def get_db():
     _dvswitch_cfg_cols = {r[1] for r in conn.execute("PRAGMA table_info(dvswitch_config)").fetchall()}
     if 'talkgroup_presets' not in _dvswitch_cfg_cols:
         # Curated {"label","tg"} pairs the owner defines in Manager, shown as
-        # buttons on both Manager and the Kiosk (see /api/dvswitch/status,
-        # /api/dvswitch/tune) -- deliberately not a free-entry TG number
-        # field, so switching is a guardrailed pick from a known-good list
-        # rather than a typo-prone raw number any logged-in user could enter.
+        # one-tap buttons on both Manager and the Kiosk (see
+        # /api/dvswitch/status). Originally the *only* way to switch
+        # talkgroup at all (api_dvswitch_tune once rejected anything not in
+        # this list) -- since the Browse Talkgroups popup shipped, any
+        # logged-in user can tune to any numeric TG directly (see
+        # api_dvswitch_tune's own docstring for why), so this list is now
+        # just the owner's curated shortcuts, not a gate.
         conn.execute("ALTER TABLE dvswitch_config ADD COLUMN talkgroup_presets TEXT NOT NULL DEFAULT '[]'")
     conn.commit()
     # Per-node lockout: presence of a row means that node is locked by its
@@ -1460,7 +1463,7 @@ def check_auth():
     _PUBLIC          = {'login', 'logout', 'static', None,
                         'status_board', 'status_board_redirect', 'status_board_accessible',
                         'api_status_board', 'api_status_weather', 'api_status_activity',
-                        'api_status_nws_alerts', 'api_dvswitch_status',
+                        'api_status_nws_alerts', 'api_dvswitch_status', 'api_dvswitch_talkgroups',
                         'api_aprs_stations', 'api_iss_tle', 'api_meshtastic_messages',
                         'api_login', 'api_session', 'api_csrf_token',
                         'api_favorites', 'api_favorites_status',
@@ -5757,6 +5760,23 @@ def lookup_node(node: str) -> dict:
         # BrandMeister/STFU populates this).
         with _dvswitch_caller_lock:
             caller = dict(_dvswitch_caller_cache)
+        current_tg = _dvswitch_current_tg()
+        if current_tg:
+            # The actually-tuned TG always wins over the caller cache's own
+            # (traffic-driven, so potentially stale) tg -- see
+            # _dvswitch_current_tg()'s own docstring. Only attribute the
+            # displayed callsign to this node when the caller cache's tg
+            # still matches what's actually tuned right now; a leftover
+            # caller from a since-abandoned TG would otherwise read as
+            # "on" a talkgroup they were never heard on.
+            desc = "DMR · TG " + current_tg
+            if caller["callsign"] and caller["tg"] == current_tg:
+                return {
+                    "callsign": caller["callsign"],
+                    "desc": desc if caller["active"] else ("Last heard — " + desc),
+                    "location": "",
+                }
+            return {"callsign": _DVSWITCH_BRIDGE_NODE_INFO["callsign"], "desc": desc, "location": ""}
         if caller["callsign"]:
             desc = ("DMR · TG " + caller["tg"]) if caller["tg"] else "DMR"
             if not caller["active"]:
@@ -14387,6 +14407,82 @@ DVSWITCH_CHECK_SCRIPT_PATH = os.path.join(DVSWITCH_DIR, "check.sh")
 # the same sudo rule as every other apply.sh) avoids that.
 DVSWITCH_EXPORT_PATH = os.environ.get("DVSWITCH_EXPORT_PATH", "/etc/asterisk/henwen-dvswitch-config.json")
 
+# ── BrandMeister talkgroup directory (Browse Talkgroups popup) ──────────────
+# api.brandmeister.network/v2/talkgroup is BrandMeister's own public API
+# backing https://brandmeister.network/#/talkgroups -- a flat {"<tg>": "name"}
+# map, ~1800 entries, no auth required. It has no separate country field:
+# confirmed against that same web app's own admin "Edit Talkgroup" panel,
+# which labels the field "Country (MCC)" -- a Mobile Country Code the
+# talkgroup's creator typed in, not something this read endpoint returns.
+# Country is instead derived here from the same DMR-community/E.212
+# convention BrandMeister's own numbering already follows: a bare 3-digit
+# key in 200-999 IS itself a country's own top-level entry (e.g. "208":
+# "France"), so every longer talkgroup number sharing that leading 3-digit
+# prefix belongs to that country. Verified against a live fetch: ~90% of
+# entries resolve this way; codes under 100 (Local/Cluster/Regional/
+# Worldwide/Europe/Radio Test/etc.) aren't country-specific, and the
+# remainder (a talkgroup whose bare-MCC parent isn't itself present in the
+# feed) is left with an empty country rather than guessed.
+BM_TALKGROUPS_URL      = "https://api.brandmeister.network/v2/talkgroup"
+BM_TALKGROUPS_POLL_SEC = 86400.0   # once a day -- this list changes rarely
+BM_TALKGROUPS_RETRY_SEC = 3600.0   # retry sooner after a transient failure
+
+_bm_talkgroups_cache   = []    # [{"tg": int, "name": str, "country": str}, ...]
+_bm_talkgroups_updated = None  # ISO8601 UTC string of the last successful fetch, or None
+_bm_talkgroups_lock    = threading.Lock()
+
+
+def _derive_bm_talkgroup_countries(raw):
+    """Pure function: raw is the {"<tg>": "name"} dict as returned by
+    BM_TALKGROUPS_URL. Returns a list of {"tg", "name", "country"} dicts
+    sorted by tg. Split out from the fetch function so it's unit-testable
+    without a network call."""
+    countries = {k: v for k, v in raw.items()
+                 if k.isdigit() and len(k) == 3 and 200 <= int(k) <= 999}
+    out = []
+    for k, v in raw.items():
+        if not k.isdigit():
+            continue
+        tg = int(k)
+        country = countries.get(k[:3], "") if tg >= 100 else ""
+        out.append({"tg": tg, "name": v, "country": country})
+    out.sort(key=lambda r: r["tg"])
+    return out
+
+
+def _fetch_bm_talkgroups():
+    try:
+        req = urlreq.Request(BM_TALKGROUPS_URL, headers={"User-Agent": "HenWen/1.0"})
+        with urlreq.urlopen(req, timeout=15) as resp:
+            raw = json.loads(resp.read().decode())
+        if not isinstance(raw, dict) or not raw:
+            log("WARN", "[BM-TALKGROUPS] Unexpected response shape")
+            return None
+        return _derive_bm_talkgroup_countries(raw)
+    except Exception as e:
+        log("WARN", f"[BM-TALKGROUPS] fetch failed: {e}")
+        return None
+
+
+def _bm_talkgroups_poll_loop():
+    global _bm_talkgroups_updated
+    while True:
+        result = _fetch_bm_talkgroups()
+        if result:
+            with _bm_talkgroups_lock:
+                _bm_talkgroups_cache[:] = result
+                _bm_talkgroups_updated = datetime.utcnow().isoformat() + "Z"
+            log("INFO", f"[BM-TALKGROUPS] Updated ({len(result)} talkgroups)")
+            time.sleep(BM_TALKGROUPS_POLL_SEC)
+        else:
+            time.sleep(BM_TALKGROUPS_RETRY_SEC)
+
+
+def start_bm_talkgroups_poller():
+    t = threading.Thread(target=_bm_talkgroups_poll_loop, name="bm-talkgroups-poller", daemon=True)
+    t.start()
+    log("INFO", "[BM-TALKGROUPS] Poller thread launched")
+
 
 def _get_dvswitch_config():
     row = get_db().execute("SELECT * FROM dvswitch_config WHERE id=1").fetchone()
@@ -14400,6 +14496,28 @@ def _dvswitch_bridge_node_cached():
     Status Board), so this is cached rather than hitting the DB per call."""
     cfg = _get_dvswitch_config()
     return cfg["bridge_node"] if (cfg and cfg["enabled"] and cfg["bridge_node"]) else None
+
+
+@_ttl_cached(2)   # matches the board's 2s refresh cadence; avoids a JSON
+                  # file read on every lookup_node() call within one render
+                  # pass (recent connections, map, Connected Nodes can each
+                  # look this node up once per request)
+def _dvswitch_current_tg():
+    """The talkgroup Analog_Bridge is actually tuned to right now, read
+    straight from its own live status export -- independent of whether
+    anyone has talked on it yet. Distinct from _dvswitch_caller_cache's own
+    tg, which only updates on real DMR traffic: after switching to a quiet
+    talkgroup, the caller cache can sit on the *previous*, since-abandoned
+    TG indefinitely, which used to make lookup_node()'s bridge-node display
+    show a stale "last heard" TG that made a successful switch look like it
+    silently failed until someone happened to key up on the new one. See
+    lookup_node()'s own comment for how the two are reconciled."""
+    try:
+        with open(DVSWITCH_ABINFO_PATH) as f:
+            info = json.load(f)
+        return info.get("digital", {}).get("tg", "") or ""
+    except (OSError, ValueError):
+        return ""
 
 
 def _validate_talkgroup_presets(raw):
@@ -14579,6 +14697,7 @@ def api_dvswitch_status():
         "available":  True,
         "network":    cfg["dmr_network"],
         "network_host": cfg["network_host"],
+        "bridge_node": cfg["bridge_node"],
         "tg":         digital.get("tg", ""),
         "ts":         digital.get("ts", ""),
         "cc":         digital.get("cc", ""),
@@ -14593,28 +14712,46 @@ def api_dvswitch_status():
     })
 
 
+@app.route("/api/dvswitch/talkgroups")
+def api_dvswitch_talkgroups():
+    """Public, like api_dvswitch_status -- a static reference directory
+    (BrandMeister's full talkgroup list), not board state or a control
+    surface, refreshed once a day by start_bm_talkgroups_poller(). Returns
+    the whole cached list in one shot (typically ~1800 rows, a couple
+    hundred KB of JSON); pagination/filtering is a client-side concern in
+    the kiosk's Browse Talkgroups popup, not this route's job."""
+    with _bm_talkgroups_lock:
+        rows = list(_bm_talkgroups_cache)
+        updated = _bm_talkgroups_updated
+    return jsonify({"talkgroups": rows, "updated": updated, "count": len(rows)})
+
+
 @app.route("/api/dvswitch/tune", methods=["POST"])
 def api_dvswitch_tune():
     """Any logged-in role may switch talkgroup -- matches api_status_connect/
     disconnect's own gate (see _USER_OR_ABOVE in check_auth()), since this is
     the same kind of shared-board control action, not an owner-only setting
-    change. Deliberately restricted to the owner's curated preset list
-    (talkgroup_presets) rather than accepting an arbitrary TG number, so a
-    logged-in kiosk user can't fat-finger or deliberately dial into an
-    unrelated talkgroup -- see _validate_talkgroup_presets()'s own comment."""
+    change.
+
+    Originally restricted to the owner's curated preset list
+    (talkgroup_presets) so a logged-in kiosk user couldn't fat-finger or
+    deliberately dial into an unrelated talkgroup. Superseded once the
+    Browse Talkgroups popup shipped (see start_bm_talkgroups_poller() and
+    api_dvswitch_talkgroups()): any logged-in user can now tune to any
+    numeric talkgroup, matching the same trust level Connect/Disconnect
+    already has for AllStar nodes via Node Search (api_status_connect
+    already lets any logged-in role link to any node in the AllStar
+    directory, not just a curated list) -- there is no reason BrandMeister
+    TG selection should be more locked-down than that. talkgroup_presets
+    remains as the owner's curated quick-tune shortcuts on the panel
+    itself; it's no longer an allowlist gating this route."""
     cfg = _get_dvswitch_config()
     if not cfg or not cfg["enabled"]:
         return jsonify({"error": "DVSwitch is not enabled"}), 400
 
-    try:
-        presets = json.loads(cfg["talkgroup_presets"] or "[]")
-    except (TypeError, ValueError):
-        presets = []
-    allowed_tgs = {p["tg"] for p in presets}
-
     tg = str((request.json or {}).get("tg", "")).strip()
-    if tg not in allowed_tgs:
-        return jsonify({"error": "That talkgroup isn't in the configured preset list"}), 400
+    if not _DVSWITCH_TG_RE.match(tg):
+        return jsonify({"error": "tg must be a talkgroup number"}), 400
 
     if not os.path.isfile(DVSWITCH_TUNE_SCRIPT_PATH):
         return jsonify({"error": f"{DVSWITCH_TUNE_SCRIPT_PATH} not found -- is DVSwitch installed?"}), 404
@@ -16919,6 +17056,7 @@ if not os.environ.get("HENWEN_SKIP_STARTUP"):
     start_irc_relay()
     start_dvswitch_status_poller()
     start_dvswitch_caller_poller()
+    start_bm_talkgroups_poller()
     start_audio_ws_relay()
 
 if __name__ == "__main__":
