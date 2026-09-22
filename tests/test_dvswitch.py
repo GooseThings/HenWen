@@ -8,7 +8,9 @@ dvswitch/README.md).
 TestDvswitchStatusRoute/TestDvswitchTuneRoute cover the live-status and
 talkgroup-switch routes added after a real deploy surfaced two things: no
 Kiosk-facing way to see current TG, and dvswitch.sh needing to be invoked
-correctly and gated to the owner's curated preset list.
+correctly. Tuning was originally gated to the owner's curated preset list;
+since the Browse Talkgroups popup shipped it accepts any numeric TG from
+any logged-in role instead (see api_dvswitch_tune()'s own docstring).
 """
 import json
 from unittest.mock import MagicMock, patch
@@ -338,8 +340,8 @@ class TestDvswitchStatusRoute:
         create_user("owner1", role="owner")
         db = app.get_db()
         db.execute(
-            "INSERT OR REPLACE INTO dvswitch_config (id, enabled, dmr_network, network_host, talkgroup_presets) "
-            "VALUES (1, 1, 'brandmeister', 'master.example.org', ?)",
+            "INSERT OR REPLACE INTO dvswitch_config (id, enabled, dmr_network, network_host, bridge_node, talkgroup_presets) "
+            "VALUES (1, 1, 'brandmeister', 'master.example.org', '1999', ?)",
             (json.dumps([{"label": "Local", "tg": "9"}]),)
         )
         db.commit()
@@ -358,6 +360,7 @@ class TestDvswitchStatusRoute:
         assert d["tg"] == "9"
         assert d["mode"] == "DMR"
         assert d["network"] == "brandmeister"
+        assert d["bridge_node"] == "1999"
         assert d["presets"] == [{"label": "Local", "tg": "9"}]
 
     def test_public_no_login_required(self, client, create_user):
@@ -395,13 +398,26 @@ class TestDvswitchTuneRoute:
         assert resp.status_code == 200
         assert resp.get_json()["ok"] is True
 
-    def test_rejects_tg_not_in_preset_list(self, client, create_user):
+    def test_accepts_tg_not_in_preset_list(self, client, create_user):
+        # The Browse Talkgroups popup lets any logged-in role tune to any
+        # numeric TG from BrandMeister's full directory, not just the
+        # owner's curated presets -- see api_dvswitch_tune()'s docstring
+        # for why this was loosened from an earlier preset-only allowlist.
         create_user("owner1", role="owner")
         _login(client, "owner1")
         self._enable_with_preset(tg="9")
-        resp = client.post("/api/dvswitch/tune", json={"tg": "4000"})
+        with patch("app.os.path.isfile", return_value=True), \
+             patch("app.subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")):
+            resp = client.post("/api/dvswitch/tune", json={"tg": "4000"})
+        assert resp.status_code == 200
+        assert resp.get_json()["ok"] is True
+
+    def test_rejects_non_numeric_tg(self, client, create_user):
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        self._enable_with_preset(tg="9")
+        resp = client.post("/api/dvswitch/tune", json={"tg": "not-a-number"})
         assert resp.status_code == 400
-        assert "preset" in resp.get_json()["error"]
 
     def test_rejects_when_not_enabled(self, client, create_user):
         create_user("owner1", role="owner")
@@ -428,3 +444,87 @@ class TestDvswitchTuneRoute:
             resp = client.post("/api/dvswitch/tune", json={"tg": "9"})
         assert resp.status_code == 500
         assert "boom" in resp.get_json()["error"]
+
+
+class TestLookupNodeDvswitchBridge:
+    """lookup_node()'s special-case display for the DVSwitch bridge node.
+    Regression coverage for a real bug: after switching talkgroups, the
+    displayed TG used to come only from _dvswitch_caller_cache, which is
+    traffic-driven and can sit on the *previous* TG indefinitely if nobody
+    has keyed up on the new one yet -- a successful switch looked like it
+    had silently failed. current_tg (Analog_Bridge's own live-tuned value,
+    via _dvswitch_current_tg()) must now win over that stale caller tg."""
+
+    def _caller(self, active=False, callsign=None, tg=None):
+        return {"active": active, "id": "3218133" if callsign else None,
+                "callsign": callsign, "tg": tg, "ts": 0}
+
+    def test_shows_current_tg_even_with_no_caller_yet(self, monkeypatch):
+        monkeypatch.setattr(app, "_dvswitch_bridge_node_cached", lambda: "1999")
+        monkeypatch.setattr(app, "_dvswitch_current_tg", lambda: "91")
+        monkeypatch.setattr(app, "_dvswitch_caller_cache", self._caller())
+        d = app.lookup_node("1999")
+        assert d["desc"] == "DMR · TG 91"
+        assert d["callsign"] == app._DVSWITCH_BRIDGE_NODE_INFO["callsign"]
+
+    def test_stale_caller_tg_does_not_override_current_tg(self, monkeypatch):
+        # Caller cache still shows the *previous* talkgroup (3100) because
+        # nobody has talked on the newly-tuned one (91) yet -- this is the
+        # exact scenario that used to make a switch look like it failed.
+        monkeypatch.setattr(app, "_dvswitch_bridge_node_cached", lambda: "1999")
+        monkeypatch.setattr(app, "_dvswitch_current_tg", lambda: "91")
+        monkeypatch.setattr(app, "_dvswitch_caller_cache",
+                             self._caller(active=False, callsign="K9OSU", tg="3100"))
+        d = app.lookup_node("1999")
+        assert d["desc"] == "DMR · TG 91"
+        assert "3100" not in d["desc"]
+        assert d["callsign"] == app._DVSWITCH_BRIDGE_NODE_INFO["callsign"]
+
+    def test_active_caller_matching_current_tg_shown_live(self, monkeypatch):
+        monkeypatch.setattr(app, "_dvswitch_bridge_node_cached", lambda: "1999")
+        monkeypatch.setattr(app, "_dvswitch_current_tg", lambda: "91")
+        monkeypatch.setattr(app, "_dvswitch_caller_cache",
+                             self._caller(active=True, callsign="K9OSU", tg="91"))
+        d = app.lookup_node("1999")
+        assert d["callsign"] == "K9OSU"
+        assert d["desc"] == "DMR · TG 91"
+        assert "Last heard" not in d["desc"]
+
+    def test_inactive_caller_matching_current_tg_shown_as_last_heard(self, monkeypatch):
+        monkeypatch.setattr(app, "_dvswitch_bridge_node_cached", lambda: "1999")
+        monkeypatch.setattr(app, "_dvswitch_current_tg", lambda: "91")
+        monkeypatch.setattr(app, "_dvswitch_caller_cache",
+                             self._caller(active=False, callsign="K9OSU", tg="91"))
+        d = app.lookup_node("1999")
+        assert d["callsign"] == "K9OSU"
+        assert d["desc"] == "Last heard — DMR · TG 91"
+
+    def test_falls_back_to_caller_cache_when_current_tg_unavailable(self, monkeypatch):
+        # e.g. Analog_Bridge's ABInfo.json hasn't been written yet -- the
+        # pre-existing caller-only behavior is the best available fallback.
+        monkeypatch.setattr(app, "_dvswitch_bridge_node_cached", lambda: "1999")
+        monkeypatch.setattr(app, "_dvswitch_current_tg", lambda: "")
+        monkeypatch.setattr(app, "_dvswitch_caller_cache",
+                             self._caller(active=True, callsign="K9OSU", tg="3100"))
+        d = app.lookup_node("1999")
+        assert d["callsign"] == "K9OSU"
+        assert d["desc"] == "DMR · TG 3100"
+
+    def test_falls_back_to_generic_label_when_nothing_known(self, monkeypatch):
+        monkeypatch.setattr(app, "_dvswitch_bridge_node_cached", lambda: "1999")
+        monkeypatch.setattr(app, "_dvswitch_current_tg", lambda: "")
+        monkeypatch.setattr(app, "_dvswitch_caller_cache", self._caller())
+        d = app.lookup_node("1999")
+        assert d == app._DVSWITCH_BRIDGE_NODE_INFO
+
+
+class TestDvswitchCurrentTg:
+    def test_reads_digital_tg_from_abinfo(self, monkeypatch, tmp_path):
+        abinfo = tmp_path / "ABInfo.json"
+        abinfo.write_text(json.dumps({"digital": {"tg": "91"}}))
+        monkeypatch.setattr(app, "DVSWITCH_ABINFO_PATH", str(abinfo))
+        assert app._dvswitch_current_tg.__wrapped__() == "91"  # __wrapped__ bypasses the 2s TTL cache
+
+    def test_empty_string_when_file_missing(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(app, "DVSWITCH_ABINFO_PATH", str(tmp_path / "nonexistent.json"))
+        assert app._dvswitch_current_tg.__wrapped__() == ""
