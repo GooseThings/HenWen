@@ -1113,7 +1113,12 @@ svg.kiosk-login-icon { display: none; }
   border: 1px solid transparent; background: rgba(88,166,255,.1); color: var(--accent);
   white-space: nowrap; display: inline-flex; align-items: center;
   transition: background-color .15s, color .15s, border-color .15s; }
-button.idle-badge { font-family: inherit; cursor: pointer; border-color: rgba(88,166,255,.3); }
+/* user-select/-webkit-touch-callout: a long-press on touch otherwise
+   selects the label text and pops the OS copy/context menu over the
+   hold-to-disable gesture. */
+button.idle-badge { font-family: inherit; cursor: pointer; border-color: rgba(88,166,255,.3);
+  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
 .idle-badge.warn { background: rgba(255,179,0,.15); color: var(--warn); }
 button.idle-badge.warn { border-color: rgba(255,179,0,.5); }
 /* Long-press-to-squash progress feedback (sbIdleBadgeDown sets this
@@ -5066,7 +5071,7 @@ async function refreshBoard() {
           var ln = esc(c.local_node), rn = esc(c.node);
           if (loggedIn) {
             var pressAttrs = isAdmin
-              ? ' onpointerdown="sbIdleBadgeDown(event,\'' + ln + '\',\'' + rn + '\',this)" onpointerup="sbIdleBadgeUp(this)" onpointerleave="sbIdleBadgeCancel(this)" onpointercancel="sbIdleBadgeCancel(this)"'
+              ? ' onpointerdown="sbIdleBadgeDown(event,\'' + ln + '\',\'' + rn + '\',this)" onpointerup="sbIdleBadgeUp(this)" onpointerleave="sbIdleBadgeCancel(this)" onpointercancel="sbIdleBadgeCancel(this)" oncontextmenu="return false"'
               : '';
             idleBadge = '<button class="idle-badge' + (warn ? ' warn' : '') + '"' + pressAttrs +
               ' onclick="sbIdleBadgeClick(event,\'' + ln + '\',\'' + rn + '\',this)" ' +
