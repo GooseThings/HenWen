@@ -7844,8 +7844,28 @@ function _audioClientLog(node, type, detail) {
   } catch (e) {}
 }
 
+/* issue #179: TX armed with no RX monitoring means the operator can't hear
+   the node they're keying up, or whether it's already in use — arming
+   already force-starts Listen (see the TX 'confirmed' handler above) to
+   prevent that going in, so a genuine RX stop needs to disarm TX going the
+   other way for the same invariant to hold. Deliberately NOT wired into
+   _stopListen() itself: several of its callers stop-then-immediately-
+   restart Listen as an internal pipeline swap or transient-drop auto-
+   reconnect (WS->fallback, the 3s/30-min reconnects) — disarming TX on
+   every one of those would drop a live PTT call over a network blip the
+   reconnect logic is specifically designed to ride through unnoticed.
+   Only call this where RX has genuinely stopped with no retry scheduled:
+   the user's own manual toggle-off, and the startup watchdog's "never
+   connected at all" give-up. */
+function _txDisarmForRxStop(silent) {
+  if (window._tx && _tx.armed) {
+    disarmTx();
+    if (!silent) sbToast('TX disarmed — audio monitoring stopped', false);
+  }
+}
+
 function toggleListen() {
-  if (_listenActive) { _stopListen(); return; }
+  if (_listenActive) { _stopListen(); _txDisarmForRxStop(); return; }
   /* Fresh manual start: relearn the link's cushion from the baseline.
      (Auto-reconnects call _startListen directly and keep the learned value.) */
   _listenTargetS     = _LISTEN_TARGET_S;
@@ -7912,6 +7932,7 @@ function _startListen() {
     if (_listenActive) return;
     console.warn('[AUDIO] startup watchdog fired — no stream after ' + _LISTEN_START_MS + 'ms');
     _stopListen();
+    _txDisarmForRxStop(true);  // its own toast below already explains why
     _listenSetBtn('<svg class="icon"><use href="#icon-headphones"></use></svg> Listen', '', false);
     sbToast('Audio did not start — your network may be blocking the live stream. Try again, or use a different connection.', false);
   }, _LISTEN_START_MS);
