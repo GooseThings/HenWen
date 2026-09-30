@@ -1993,11 +1993,15 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
           <input type="range" id="tx-gain" min="0" max="200" value="100" title="Microphone gain">
           <span id="tx-gain-val" style="font-size:0.7rem;color:var(--text2);width:3em;flex-shrink:0">100%</span>
         </div>
-        <div style="display:flex">
+        <div style="display:flex;align-items:center;gap:10px">
           <button type="button" class="sb-btn btmic" id="tx-agc-btn"
                   title="Off (default): the manual gain slider above controls level, but Android's Bluetooth call-audio routing does not engage, so a paired Bluetooth/car mic and speaker are not used for TX — only the phone's own mic. On: lets Android route TX through a connected Bluetooth/car mic and speaker (useful for Android Auto), but Android's own automatic gain control takes over the mic instead, so the slider above no longer affects level and a hot mic can clip; if it does, lower your phone's Bluetooth mic volume rather than the slider. Takes effect next time you arm TX.">
             <svg class="icon"><use href="#icon-headphones"></use></svg> BT/Car Mic: <span id="tx-agc-btn-state">Off</span>
           </button>
+          <div id="tx-agc-msg" style="font-size:0.7rem;color:var(--text2);line-height:1.3;display:none">
+            <div>Bluetooth mic setting saved</div>
+            <div>Re-arm TX for it to take effect</div>
+          </div>
         </div>
         <div id="tx-status" style="font-size:0.75rem;color:var(--accent);min-height:1em"></div>
       </div>
@@ -7501,6 +7505,8 @@ async function armTx() {
      keyed, which the PTT button's own color change already covers). */
   _txSetBtn('<svg class="icon"><use href="#icon-mic"></use></svg> TX arming&hellip;', 'var(--text2)');
   _txStatus('');
+  var agcMsgEl = document.getElementById('tx-agc-msg');
+  if (agcMsgEl) agcMsgEl.style.display = 'none';
   try {
     var r = await apiFetch('/api/tx/config');
     if (r.status === 401) { disarmTx(); openKioskLogin(armTx, []); return; }
@@ -7703,6 +7709,7 @@ function _txUnkey() {
      mobile touch-target bump — see the .sb-btn.btmic rule near .sb-btn.fav. */
   var agcBtn   = document.getElementById('tx-agc-btn');
   var agcState = document.getElementById('tx-agc-btn-state');
+  var agcMsg   = document.getElementById('tx-agc-msg');
   function _txRenderAgcBtn(on) {
     agcBtn.classList.toggle('on', on);
     agcState.textContent = on ? 'On' : 'Off';
@@ -7712,9 +7719,12 @@ function _txUnkey() {
     var on = !agcBtn.classList.contains('on');
     _txRenderAgcBtn(on);
     localStorage.setItem('henwen-tx-agc', on ? '1' : '0');
-    if (_tx.armed && _tx.session) {
-      _txStatus('Bluetooth mic setting saved — re-arm TX for it to take effect', 'var(--text2)');
-    }
+    /* Next to the button itself, not the shared #tx-status line below —
+       this reminder is about the button right next to it, and #tx-status
+       already carries call state (registration/error) that would bump it
+       around or get overwritten by it. Cleared on the next arm (armTx())
+       once the setting has actually taken effect. */
+    if (agcMsg) agcMsg.style.display = (_tx.armed && _tx.session) ? '' : 'none';
   });
 
   var ptt = document.getElementById('tx-ptt');
