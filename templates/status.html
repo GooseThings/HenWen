@@ -7552,6 +7552,7 @@ async function armTx() {
         return;
       }
       if (!_tx.armed) { _txReleaseMic(); return; }  // disarmed while prompting
+      _listenRecoverAfterRouteChange();  // mic may have flipped Android to SCO audio
       var s = _tx.ua.call('sip:' + cfg.dial + '@' + domain, {
         mediaStream: micStream,  // pre-gained mic (see _txBuildMicChain)
         /* STUN is required for remote (non-LAN) operators: SIP signaling rides
@@ -7589,6 +7590,7 @@ async function armTx() {
         document.getElementById('tx-ptt').disabled = false;
         /* Listen is the monitor path — make sure it's running */
         if (!_listenActive) _startListen();
+        else _listenRecoverAfterRouteChange();
         _txDiag('armed', 'call confirmed');
         _txStatsSample('armed');
       });
@@ -7857,6 +7859,33 @@ function _audioClientLog(node, type, detail) {
    Only call this where RX has genuinely stopped with no retry scheduled:
    the user's own manual toggle-off, and the startup watchdog's "never
    connected at all" give-up. */
+/* Issue #177 follow-up: arming TX with the Bluetooth/car mic makes Android
+   flip the whole phone into communication (SCO/call) audio mode the moment
+   getUserMedia engages the headset. That is a system-wide audio route and
+   focus change, and Chromium answers it by pausing the <audio> element
+   and/or suspending the AudioContext — so Listen went silent while
+   _listenActive stayed true and nothing ever restarted it. Only nudge what
+   the browser itself stopped: anything HenWen stopped on purpose has
+   _listenActive false or no src by the time this runs. Re-checked over a few
+   seconds because the route change settles asynchronously after arm. */
+function _listenRecoverAfterRouteChange() {
+  [0, 400, 1200, 3000].forEach(function(ms) {
+    setTimeout(function() {
+      if (!_listenActive) return;
+      if (_listenAudioCtx && _listenAudioCtx.state === 'suspended') {
+        _listenAudioCtx.resume().catch(function() {});
+      }
+      var a = document.getElementById('node-audio');
+      if (a && a.paused && a.getAttribute('src')) {
+        a.play().catch(function() {});
+      }
+    }, ms);
+  });
+}
+if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+  navigator.mediaDevices.addEventListener('devicechange', _listenRecoverAfterRouteChange);
+}
+
 function _txDisarmForRxStop(silent) {
   if (window._tx && _tx.armed) {
     disarmTx();
