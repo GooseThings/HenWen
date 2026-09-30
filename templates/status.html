@@ -1075,6 +1075,16 @@ svg.kiosk-login-icon { display: none; }
 .sb-btn.neutral:hover { color: var(--text); }
 .sb-btn.fav        { background: rgba(232,113,10,.10); border-color: rgba(232,113,10,.35); color: #e8710a; }
 .sb-btn.fav:hover  { background: rgba(232,113,10,.22); }
+/* Off/on toggle (TX Bluetooth/car mic, #tx-agc-btn) — same color formula as
+   .neutral/.monitor above, kept under its own class rather than reusing
+   those so the mobile block's `.sb-btn.monitor { display:none }` (it hides
+   the literal Monitor connect-form button on phones) doesn't also hide
+   this unrelated toggle, which is mobile/Android-Auto-relevant precisely
+   where that rule applies. */
+.sb-btn.btmic       { background: var(--bg3); border-color: var(--border); color: var(--text2); }
+.sb-btn.btmic:hover { color: var(--text); }
+.sb-btn.btmic.on    { background: rgba(88,166,255,.08); border-color: rgba(88,166,255,.3); color: var(--accent); }
+.sb-btn.btmic.on:hover { background: rgba(88,166,255,.2); }
 
 /* always-visible connect bar */
 .conn-form-bar { padding: 7px 18px; border-bottom: 1px solid var(--border);
@@ -1982,6 +1992,16 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
           <div id="tx-meter"><div id="tx-meter-fill"></div></div>
           <input type="range" id="tx-gain" min="0" max="200" value="100" title="Microphone gain">
           <span id="tx-gain-val" style="font-size:0.7rem;color:var(--text2);width:3em;flex-shrink:0">100%</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <button type="button" class="sb-btn btmic" id="tx-agc-btn"
+                  title="Off (default): the manual gain slider above controls level, but Android's Bluetooth call-audio routing does not engage, so a paired Bluetooth/car mic and speaker are not used for TX — only the phone's own mic. On: lets Android route TX through a connected Bluetooth/car mic and speaker (useful for Android Auto), but Android's own automatic gain control takes over the mic instead, so the slider above no longer affects level and a hot mic can clip; if it does, lower your phone's Bluetooth mic volume rather than the slider. Takes effect next time you arm TX.">
+            <svg class="icon"><use href="#icon-headphones"></use></svg> BT/Car Mic: <span id="tx-agc-btn-state">Off</span>
+          </button>
+          <div id="tx-agc-msg" style="font-size:0.7rem;color:var(--text2);line-height:1.3;display:none">
+            <div>Bluetooth mic setting saved</div>
+            <div>Re-arm TX for it to take effect</div>
+          </div>
         </div>
         <div id="tx-status" style="font-size:0.75rem;color:var(--accent);min-height:1em"></div>
       </div>
@@ -6782,17 +6802,28 @@ function _txSavedGain() {
   return (v >= 0 && v <= 200) ? v : 100;
 }
 
-/* AGC stays off; the manual gain slider above is the level control. Worth
-   recording what turning it on costs and buys, since it was tried and
-   reverted: Chromium's Android backend only engages Bluetooth audio routing
-   when getUserMedia asks for the full default AEC+NS+AGC trio, so opting AGC
-   out means a paired headset's mic and speaker are not used for the call at
-   all. Turning it on restored that routing — and re-introduced the clipping
-   the slider exists to avoid (see _txSavedGain above). Off is the status quo
-   until someone wants headset routing badly enough to re-tune the level. */
+/* AGC defaults off; the manual gain slider above is the level control in
+   that mode. This is a user-facing toggle (#tx-agc-btn, "BT/Car Mic")
+   rather than a hardcoded constant because of a real Android platform
+   tradeoff, not a preference: Chromium's Android backend only engages
+   Bluetooth call-audio routing (SCO) when getUserMedia asks for the full
+   default AEC+NS+AGC trio, so leaving AGC off — the status quo, and still
+   the default here — means a paired Bluetooth/car mic and speaker (this
+   includes Android Auto, which rides the same Bluetooth HFP/SCO link as any
+   other paired headset; it has no separate "car audio" route of its own)
+   are never used for the call at all, only the phone's own mic. Turning AGC
+   on restores that routing but hands level control to Android's own AGC —
+   the slider above stops having any effect, and a hot mic can clip with no
+   in-page way to pull it back down (issue #177). There's no way to select
+   "phone mic" vs. "Bluetooth/car mic" as two independent devices here:
+   Android/Chromium don't expose SCO activation as a pickable deviceId, it's
+   an OS-level side effect of these constraints plus current system state. */
+function _txSavedAgc() {
+  return localStorage.getItem('henwen-tx-agc') === '1';
+}
 function _txBuildMicChain() {
   return navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false },
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: _txSavedAgc() },
     video: false,
   }).then(function(raw) {
     /* Which mic actually got picked, and which processing Chrome actually
@@ -7474,6 +7505,8 @@ async function armTx() {
      keyed, which the PTT button's own color change already covers). */
   _txSetBtn('<svg class="icon"><use href="#icon-mic"></use></svg> TX arming&hellip;', 'var(--text2)');
   _txStatus('');
+  var agcMsgEl = document.getElementById('tx-agc-msg');
+  if (agcMsgEl) agcMsgEl.style.display = 'none';
   try {
     var r = await apiFetch('/api/tx/config');
     if (r.status === 401) { disarmTx(); openKioskLogin(armTx, []); return; }
@@ -7666,6 +7699,39 @@ function _txUnkey() {
     gval.textContent = gain.value + '%';
     localStorage.setItem('henwen-tx-gain', gain.value);
     if (_tx.gainNode) _tx.gainNode.gain.value = gain.value / 100;
+  });
+
+  /* Only read at arm time (_txBuildMicChain), so this just persists the
+     preference and reminds the operator it isn't live on an already-armed
+     call — matching the tooltip on the button itself. A real .sb-btn
+     toggle (not a native checkbox) so it matches the size/layout/color
+     conventions of the Connect/Monitor/Fav buttons above it, including the
+     mobile touch-target bump — see the .sb-btn.btmic rule near .sb-btn.fav. */
+  var agcBtn   = document.getElementById('tx-agc-btn');
+  var agcState = document.getElementById('tx-agc-btn-state');
+  var agcMsg   = document.getElementById('tx-agc-msg');
+  function _txRenderAgcBtn(on) {
+    agcBtn.classList.toggle('on', on);
+    agcState.textContent = on ? 'On' : 'Off';
+  }
+  _txRenderAgcBtn(_txSavedAgc());
+  agcBtn.addEventListener('click', function() {
+    var on = !agcBtn.classList.contains('on');
+    _txRenderAgcBtn(on);
+    localStorage.setItem('henwen-tx-agc', on ? '1' : '0');
+    /* Next to the button itself, not the shared #tx-status line below —
+       this reminder is about the button right next to it, and #tx-status
+       already carries call state (registration/error) that would bump it
+       around or get overwritten by it. This button only exists in the DOM
+       while #tx-bar is visible (i.e. already armed — see armTx()), so no
+       extra armed/session gate is needed here: showing it unconditionally
+       on every toggle is what makes it reliably visible right after a
+       click, rather than silently doing nothing during the brief window
+       before _tx.session is set (the original gate's bug — a toggle in
+       that window looked like the reminder didn't work at all). Cleared
+       on the next arm (armTx()) once the setting has actually taken
+       effect. */
+    if (agcMsg) agcMsg.style.display = '';
   });
 
   var ptt = document.getElementById('tx-ptt');
