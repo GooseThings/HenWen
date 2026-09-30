@@ -1983,6 +1983,10 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
           <input type="range" id="tx-gain" min="0" max="200" value="100" title="Microphone gain">
           <span id="tx-gain-val" style="font-size:0.7rem;color:var(--text2);width:3em;flex-shrink:0">100%</span>
         </div>
+        <label class="perm-label" id="tx-agc-label"
+               title="Off (default): the manual gain slider above controls level, but Android's Bluetooth call-audio routing does not engage, so a paired Bluetooth/car mic and speaker are not used for TX — only the phone's own mic. On: lets Android route TX through a connected Bluetooth/car mic and speaker (useful for Android Auto), but Android's own automatic gain control takes over the mic instead, so the slider above no longer affects level and a hot mic can clip; if it does, lower your phone's Bluetooth mic volume rather than the slider. Takes effect next time you arm TX.">
+          <input type="checkbox" id="tx-agc-chk"> Use Bluetooth/car mic (Android Auto, etc.)
+        </label>
         <div id="tx-status" style="font-size:0.75rem;color:var(--accent);min-height:1em"></div>
       </div>
       <div class="connector-warn-bar" id="connector-warn-bar" style="display:none">
@@ -6782,17 +6786,28 @@ function _txSavedGain() {
   return (v >= 0 && v <= 200) ? v : 100;
 }
 
-/* AGC stays off; the manual gain slider above is the level control. Worth
-   recording what turning it on costs and buys, since it was tried and
-   reverted: Chromium's Android backend only engages Bluetooth audio routing
-   when getUserMedia asks for the full default AEC+NS+AGC trio, so opting AGC
-   out means a paired headset's mic and speaker are not used for the call at
-   all. Turning it on restored that routing — and re-introduced the clipping
-   the slider exists to avoid (see _txSavedGain above). Off is the status quo
-   until someone wants headset routing badly enough to re-tune the level. */
+/* AGC defaults off; the manual gain slider above is the level control in
+   that mode. This is a user-facing toggle (#tx-agc-chk, "Use Bluetooth/car
+   mic") rather than a hardcoded constant because of a real Android platform
+   tradeoff, not a preference: Chromium's Android backend only engages
+   Bluetooth call-audio routing (SCO) when getUserMedia asks for the full
+   default AEC+NS+AGC trio, so leaving AGC off — the status quo, and still
+   the default here — means a paired Bluetooth/car mic and speaker (this
+   includes Android Auto, which rides the same Bluetooth HFP/SCO link as any
+   other paired headset; it has no separate "car audio" route of its own)
+   are never used for the call at all, only the phone's own mic. Turning AGC
+   on restores that routing but hands level control to Android's own AGC —
+   the slider above stops having any effect, and a hot mic can clip with no
+   in-page way to pull it back down (issue #177). There's no way to select
+   "phone mic" vs. "Bluetooth/car mic" as two independent devices here:
+   Android/Chromium don't expose SCO activation as a pickable deviceId, it's
+   an OS-level side effect of these constraints plus current system state. */
+function _txSavedAgc() {
+  return localStorage.getItem('henwen-tx-agc') === '1';
+}
 function _txBuildMicChain() {
   return navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false },
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: _txSavedAgc() },
     video: false,
   }).then(function(raw) {
     /* Which mic actually got picked, and which processing Chrome actually
@@ -7666,6 +7681,18 @@ function _txUnkey() {
     gval.textContent = gain.value + '%';
     localStorage.setItem('henwen-tx-gain', gain.value);
     if (_tx.gainNode) _tx.gainNode.gain.value = gain.value / 100;
+  });
+
+  /* Only read at arm time (_txBuildMicChain), so this just persists the
+     preference and reminds the operator it isn't live on an already-armed
+     call — matching the tooltip on the checkbox's own label. */
+  var agcChk = document.getElementById('tx-agc-chk');
+  agcChk.checked = _txSavedAgc();
+  agcChk.addEventListener('change', function() {
+    localStorage.setItem('henwen-tx-agc', agcChk.checked ? '1' : '0');
+    if (_tx.armed && _tx.session) {
+      _txStatus('Bluetooth mic setting saved — re-arm TX for it to take effect', 'var(--text2)');
+    }
   });
 
   var ptt = document.getElementById('tx-ptt');
