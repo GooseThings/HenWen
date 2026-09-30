@@ -340,6 +340,73 @@ class TestRunConnectorsStaleAmiCacheForcesDisconnect:
         assert disconnect_calls == []
 
 
+class TestRunConnectorsSettleWindowNotCountedAsIdle:
+    """last_activity is never touched while a connector is still inside its
+    settle window (that branch just `continue`s), so it's left sitting at
+    connected_at the instant settling ends. If idle_sec were computed as a
+    raw `now - last_activity`, that would already read as ~settle_sec
+    seconds of "idle" time the moment settling completes -- for any
+    connector configured with settle_sec >= idle_limit_sec (confirmed live:
+    both real MSU Net connectors on this install were set up exactly this
+    way), that means an instant disconnect on the very first post-settle
+    tick, regardless of real activity, with zero actual grace period. The
+    fix floors last_activity at connected_at + settle_sec before comparing
+    against idle_limit_sec, so the idle clock only starts once settling is
+    actually done."""
+
+    def _setup_just_past_settle(self, db, **overrides):
+        # connected_at is exactly settle_sec (300s) before "now" (AT_1430) --
+        # i.e. this tick is the very first one after the settle window ends.
+        # last_activity left equal to connected_at, matching reality: it was
+        # never updated during settle.
+        return _insert_connector(
+            db,
+            state="connected",
+            connected_at="2024-01-01 14:25:00",
+            last_activity="2024-01-01 14:25:00",
+            settle_sec=300,
+            idle_limit_sec=240,       # settle_sec > idle_limit_sec, like the real MSU Net connectors
+            **overrides,
+        )
+
+    def test_does_not_disconnect_the_instant_settle_ends(self, fresh_db, monkeypatch):
+        cid = self._setup_just_past_settle(fresh_db)
+        _patch_now(monkeypatch, AT_1430)
+        monkeypatch.setitem(app._ami_cache, "643931", {"connected": ["546054"]})
+        monkeypatch.setitem(app._ami_cache_ts, "643931", time.time())
+        monkeypatch.setattr(app, "_node_active", lambda node: False)  # genuinely quiet net
+        disconnect_calls = []
+        monkeypatch.setattr(app, "_connector_do_disconnect",
+                             lambda *a, **k: (disconnect_calls.append(a), {"raw": ""})[1])
+
+        app._run_connectors()
+
+        row = fresh_db.execute("SELECT * FROM connectors WHERE id=?", (cid,)).fetchone()
+        assert row["state"] == "connected", (
+            "settling ending must not itself count as idle_limit_sec worth of "
+            "silence -- the connector needs a fresh idle_limit_sec window after "
+            "settle completes, not an instant timeout"
+        )
+        assert disconnect_calls == []
+
+    def test_still_disconnects_once_genuinely_idle_past_the_limit(self, fresh_db, monkeypatch):
+        cid = self._setup_just_past_settle(fresh_db)
+        # idle_limit_sec (240) after settle ends (14:30:00) -> 14:34:00
+        _patch_now(monkeypatch, datetime(2024, 1, 1, 14, 34, 1))
+        monkeypatch.setitem(app._ami_cache, "643931", {"connected": ["546054"]})
+        monkeypatch.setitem(app._ami_cache_ts, "643931", time.time())
+        monkeypatch.setattr(app, "_node_active", lambda node: False)
+        disconnect_calls = []
+        monkeypatch.setattr(app, "_connector_do_disconnect",
+                             lambda *a, **k: (disconnect_calls.append(a), {"raw": ""})[1])
+
+        app._run_connectors()
+
+        row = fresh_db.execute("SELECT * FROM connectors WHERE id=?", (cid,)).fetchone()
+        assert row["state"] == "idle", "must still time out once genuinely idle past idle_limit_sec"
+        assert len(disconnect_calls) == 1
+
+
 def _login(client, username):
     """Stamp the session directly rather than POSTing to /login -- see the
     identical helper's docstring in test_recording_config.py for why."""

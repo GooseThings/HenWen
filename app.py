@@ -16278,6 +16278,18 @@ def _run_connectors():
                 last_act_str = row["last_activity"] or row["connected_at"] or now_str
                 try:
                     last_act = datetime.strptime(last_act_str, "%Y-%m-%d %H:%M:%S")
+                    # last_activity is never touched while still in the settle
+                    # window above (that branch just `continue`s), so it's still
+                    # sitting at connected_at the instant settling ends. Floor it
+                    # at connected_at + settle_sec so the settle window itself
+                    # never gets counted against idle_limit_sec below — otherwise
+                    # any connector with settle_sec >= idle_limit_sec disconnects
+                    # on the very first post-settle check regardless of real
+                    # activity (confirmed live: both MSU Net connectors did this
+                    # exactly, tearing the link down ~5-6min after connecting).
+                    settle_end = connected_at + timedelta(seconds=row["settle_sec"])
+                    if settle_end > last_act:
+                        last_act = settle_end
                     idle_sec = (now - last_act).total_seconds()
                 except Exception:
                     idle_sec = row["idle_limit_sec"]  # safe: treat as timed-out
