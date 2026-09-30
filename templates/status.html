@@ -7722,9 +7722,16 @@ function _txUnkey() {
     /* Next to the button itself, not the shared #tx-status line below —
        this reminder is about the button right next to it, and #tx-status
        already carries call state (registration/error) that would bump it
-       around or get overwritten by it. Cleared on the next arm (armTx())
-       once the setting has actually taken effect. */
-    if (agcMsg) agcMsg.style.display = (_tx.armed && _tx.session) ? '' : 'none';
+       around or get overwritten by it. This button only exists in the DOM
+       while #tx-bar is visible (i.e. already armed — see armTx()), so no
+       extra armed/session gate is needed here: showing it unconditionally
+       on every toggle is what makes it reliably visible right after a
+       click, rather than silently doing nothing during the brief window
+       before _tx.session is set (the original gate's bug — a toggle in
+       that window looked like the reminder didn't work at all). Cleared
+       on the next arm (armTx()) once the setting has actually taken
+       effect. */
+    if (agcMsg) agcMsg.style.display = '';
   });
 
   var ptt = document.getElementById('tx-ptt');
