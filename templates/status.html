@@ -6865,6 +6865,23 @@ function _txBuildMicChain() {
     _tx.gainNode.connect(_tx.analyser);
     _tx.gainNode.connect(dest);
     _txStartMeter();
+    /* Issue #177: in Bluetooth/car mic mode Android flips to SCO call audio
+       and Chromium can suspend (or never start, since this runs after an
+       async getUserMedia) this context — a suspended context feeds the call
+       pure silence. Keep it running, and re-resume if the browser stops it. */
+    var ctx = _tx.audioCtx;
+    ctx.addEventListener('statechange', function() {
+      if (ctx.state === 'suspended' && _tx.audioCtx === ctx) ctx.resume().catch(function() {});
+    });
+    ctx.resume().catch(function() {});
+    /* With AGC on the slider has no effect (see _txSavedAgc), so the gain
+       stage buys nothing; hand the call the raw mic track directly rather
+       than depending on the WebAudio graph surviving the route change. The
+       meter still reads the raw signal via the analyser. */
+    if (_txSavedAgc()) {
+      src.connect(_tx.analyser);
+      return raw;
+    }
     return dest.stream;
   });
 }
@@ -7876,6 +7893,9 @@ function _audioClientLog(node, type, detail) {
 function _listenRecoverAfterRouteChange() {
   [0, 400, 1200, 3000].forEach(function(ms) {
     setTimeout(function() {
+      if (window._tx && _tx.audioCtx && _tx.audioCtx.state === 'suspended') {
+        _tx.audioCtx.resume().catch(function() {});
+      }
       if (!_listenActive) return;
       if (_listenAudioCtx && _listenAudioCtx.state === 'suspended') {
         _listenAudioCtx.resume().catch(function() {});
