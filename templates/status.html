@@ -1176,6 +1176,18 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
 #tx-meter-fill.hot  { background: var(--warn); }
 #tx-meter-fill.clip { background: var(--red); }
 #tx-gain { width: 110px; accent-color: var(--accent); flex-shrink: 0; }
+/* Experimental audio sources menu (#tx-exp-panel) */
+#tx-exp-panel { display: none; flex-direction: column; gap: 8px; padding: 10px;
+  background: var(--bg3); border: 1px solid var(--border); border-radius: 6px;
+  font-size: 0.75rem; color: var(--text2); }
+#tx-exp-panel.open { display: flex; }
+#tx-exp-panel .exp-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+#tx-exp-panel .exp-row > label { min-width: 7.5em; color: var(--text); }
+#tx-exp-panel select { flex: 1; min-width: 0; max-width: 100%; background: var(--bg2);
+  color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 4px; }
+#tx-exp-panel .exp-note { font-size: 0.68rem; line-height: 1.35; }
+#tx-exp-out { font-family: monospace; font-size: 0.68rem; white-space: pre-wrap;
+  color: var(--text); word-break: break-all; }
 #listen-volume { width: 70px; accent-color: var(--accent); flex-shrink: 0;
   opacity: 0.4; transition: opacity .15s; }
 #listen-volume:disabled { cursor: not-allowed; }
@@ -2007,6 +2019,43 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
             <div>Bluetooth mic setting saved</div>
             <div>Re-arm TX for it to take effect</div>
           </div>
+        </div>
+        <button type="button" class="sb-btn btmic" id="tx-exp-btn"
+                title="Experimental: pick the mic/speaker device and override each audio-processing flag independently, to see which combination makes Android route to a Bluetooth/Android Auto mic. Changes take effect next time you arm TX.">
+          <svg class="icon"><use href="#icon-headphones"></use></svg> Experimental Audio Sources
+        </button>
+        <div id="tx-exp-panel">
+          <div class="exp-row">
+            <label for="tx-exp-mic">Mic device</label>
+            <select id="tx-exp-mic"><option value="">System default</option></select>
+          </div>
+          <div class="exp-row">
+            <label for="tx-exp-spk">Speaker (Listen)</label>
+            <select id="tx-exp-spk"><option value="">System default</option></select>
+          </div>
+          <div class="exp-row">
+            <label for="tx-exp-aec">Echo cancel</label>
+            <select id="tx-exp-aec"><option value="default">Default (on)</option><option value="on">Force on</option><option value="off">Force off</option></select>
+          </div>
+          <div class="exp-row">
+            <label for="tx-exp-ns">Noise suppress</label>
+            <select id="tx-exp-ns"><option value="default">Default (on)</option><option value="on">Force on</option><option value="off">Force off</option></select>
+          </div>
+          <div class="exp-row">
+            <label for="tx-exp-agc">Auto gain</label>
+            <select id="tx-exp-agc"><option value="default">Follow BT/Car Mic button</option><option value="on">Force on</option><option value="off">Force off</option></select>
+          </div>
+          <div class="exp-row">
+            <label for="tx-exp-path">Mic path</label>
+            <select id="tx-exp-path"><option value="default">Default (raw track only if AGC on)</option><option value="raw">Always raw track (no gain slider)</option><option value="graph">Always WebAudio gain graph</option></select>
+          </div>
+          <div class="exp-row">
+            <button type="button" class="sb-btn" id="tx-exp-scan">Rescan devices</button>
+            <button type="button" class="sb-btn" id="tx-exp-probe">Probe mic (3s)</button>
+            <button type="button" class="sb-btn" id="tx-exp-reset">Reset</button>
+          </div>
+          <div class="exp-note">Mic settings apply next time you arm TX (re-arm after changing). Speaker applies to the Listen player only. On Android Chrome the device lists are often just &ldquo;default&rdquo;, and Bluetooth/car audio usually can&rsquo;t be picked directly &mdash; it engages as a side effect of echo cancellation. Use Probe to see what the phone actually gives you; results are also logged to the server journal.</div>
+          <div id="tx-exp-out"></div>
         </div>
         <div id="tx-status" style="font-size:0.75rem;color:var(--accent);min-height:1em"></div>
       </div>
@@ -6826,11 +6875,45 @@ function _txSavedGain() {
 function _txSavedAgc() {
   return localStorage.getItem('henwen-tx-agc') === '1';
 }
+/* Experimental audio sources menu (#tx-exp-panel). Every field defaults to
+   "do what the app already did", so an untouched menu changes nothing.
+   Tri-state flags override the matching getUserMedia constraint; deviceId
+   asks for a specific input (Android Chrome often lists only "default", so
+   this may be a no-op there — the Probe button exists to find out). */
+var _TX_EXP_DEFAULTS = { mic: '', spk: '', aec: 'default', ns: 'default', agc: 'default', path: 'default' };
+function _txExp() {
+  var o = {};
+  try { o = JSON.parse(localStorage.getItem('henwen-tx-exp') || '{}') || {}; } catch (e) {}
+  var r = {};
+  for (var k in _TX_EXP_DEFAULTS) r[k] = (typeof o[k] === 'string') ? o[k] : _TX_EXP_DEFAULTS[k];
+  return r;
+}
+function _txExpTri(v, dflt) { return v === 'on' ? true : (v === 'off' ? false : dflt); }
+/* Effective constraints, shared by arming and the probe so the probe tests
+   exactly what arming would ask for. */
+function _txExpConstraints(withDevice) {
+  var e = _txExp();
+  var c = {
+    echoCancellation: _txExpTri(e.aec, true),
+    noiseSuppression: _txExpTri(e.ns, true),
+    autoGainControl:  _txExpTri(e.agc, _txSavedAgc()),
+  };
+  if (withDevice && e.mic) c.deviceId = { exact: e.mic };
+  return c;
+}
+function _txEffectiveAgc() { return _txExpTri(_txExp().agc, _txSavedAgc()); }
+
 function _txBuildMicChain() {
-  return navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: _txSavedAgc() },
-    video: false,
-  }).then(function(raw) {
+  var expMic = _txExp().mic;
+  var gum = navigator.mediaDevices.getUserMedia({ audio: _txExpConstraints(true), video: false })
+    .catch(function(err) {
+      /* A saved deviceId can go stale (device unplugged, id rotated); fall
+         back to the default input rather than failing to arm at all. */
+      if (!expMic) throw err;
+      _txDiag('mic-exp-fallback', (err && err.name) + ' deviceId=' + expMic.slice(0, 8));
+      return navigator.mediaDevices.getUserMedia({ audio: _txExpConstraints(false), video: false });
+    });
+  return gum.then(function(raw) {
     /* Which mic actually got picked, and which processing Chrome actually
        applied, are the two facts that decide whether this sounds right —
        and both are decided by the browser, not by what we asked for. Log
@@ -6878,7 +6961,9 @@ function _txBuildMicChain() {
        stage buys nothing; hand the call the raw mic track directly rather
        than depending on the WebAudio graph surviving the route change. The
        meter still reads the raw signal via the analyser. */
-    if (_txSavedAgc()) {
+    var pathPref = _txExp().path;
+    var useRaw = pathPref === 'raw' || (pathPref !== 'graph' && _txEffectiveAgc());
+    if (useRaw) {
       src.connect(_tx.analyser);
       return raw;
     }
@@ -7757,6 +7842,128 @@ function _txUnkey() {
        effect. */
     if (agcMsg) agcMsg.style.display = '';
   });
+
+  /* ---- Experimental audio sources menu ---- */
+  var expBtn = document.getElementById('tx-exp-btn');
+  var expPanel = document.getElementById('tx-exp-panel');
+  var expOut = document.getElementById('tx-exp-out');
+  var fields = { mic: 'tx-exp-mic', spk: 'tx-exp-spk', aec: 'tx-exp-aec',
+                 ns: 'tx-exp-ns', agc: 'tx-exp-agc', path: 'tx-exp-path' };
+  function expSave() {
+    var o = {};
+    for (var k in fields) o[k] = document.getElementById(fields[k]).value;
+    try { localStorage.setItem('henwen-tx-exp', JSON.stringify(o)); } catch (e) {}
+  }
+  function expLog(msg) { expOut.textContent = msg; }
+  function fillSelect(sel, devs, saved, dfltLabel) {
+    sel.innerHTML = '';
+    var d0 = document.createElement('option');
+    d0.value = ''; d0.textContent = dfltLabel; sel.appendChild(d0);
+    devs.forEach(function(d) {
+      var o = document.createElement('option');
+      o.value = d.deviceId;
+      o.textContent = d.label || ('(unnamed) ' + d.deviceId.slice(0, 8));
+      sel.appendChild(o);
+    });
+    /* A saved id that no longer exists reverts to default in the UI. */
+    sel.value = devs.some(function(d) { return d.deviceId === saved; }) ? saved : '';
+  }
+  function applySink() {
+    var a = document.getElementById('node-audio');
+    var id = _txExp().spk;
+    if (!a || typeof a.setSinkId !== 'function') return Promise.resolve(false);
+    return a.setSinkId(id || '').then(function() { return true; });
+  }
+  function expScan() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+      expLog('enumerateDevices not available in this browser.'); return Promise.resolve();
+    }
+    return navigator.mediaDevices.enumerateDevices().then(function(ds) {
+      var ins  = ds.filter(function(d) { return d.kind === 'audioinput'; });
+      var outs = ds.filter(function(d) { return d.kind === 'audiooutput'; });
+      var e = _txExp();
+      fillSelect(document.getElementById('tx-exp-mic'), ins, e.mic, 'System default');
+      var spk = document.getElementById('tx-exp-spk');
+      var a = document.getElementById('node-audio');
+      if (!a || typeof a.setSinkId !== 'function') {
+        fillSelect(spk, [], '', 'Not supported by this browser');
+        spk.disabled = true;
+      } else {
+        spk.disabled = false;
+        fillSelect(spk, outs, e.spk, 'System default');
+      }
+      expLog('Found ' + ins.length + ' input(s), ' + outs.length + ' output(s).\n' +
+             'In: ' + (ins.map(function(d) { return d.label || '?'; }).join(' | ') || 'none') + '\n' +
+             'Out: ' + (outs.map(function(d) { return d.label || '?'; }).join(' | ') || 'none (normal on Android Chrome)'));
+      _txDiag('exp-devices', 'in=' + ins.length + ' out=' + outs.length + ' ' +
+              ins.map(function(d) { return d.label || '?'; }).join('|'));
+    }).catch(function(err) { expLog('Scan failed: ' + (err && err.name || err)); });
+  }
+  for (var fk in fields) {
+    (function(k) {
+      document.getElementById(fields[k]).addEventListener('change', function() {
+        expSave();
+        if (k === 'spk') {
+          applySink().then(function(ok) { expLog(ok ? 'Listen speaker set.' : 'setSinkId not supported here.'); })
+                     .catch(function(err) { expLog('setSinkId failed: ' + (err && err.name || err)); });
+        } else {
+          expLog('Saved. Re-arm TX for the change to take effect.');
+        }
+      });
+    })(fk);
+  }
+  var _expInit = _txExp();
+  for (var ik in fields) {
+    var el = document.getElementById(fields[ik]);
+    if (el.options.length && ik !== 'mic' && ik !== 'spk') el.value = _expInit[ik];
+  }
+  expBtn.addEventListener('click', function() {
+    var open = !expPanel.classList.contains('open');
+    expPanel.classList.toggle('open', open);
+    expBtn.classList.toggle('on', open);
+    if (open) expScan();
+  });
+  document.getElementById('tx-exp-scan').addEventListener('click', expScan);
+  document.getElementById('tx-exp-reset').addEventListener('click', function() {
+    try { localStorage.removeItem('henwen-tx-exp'); } catch (e) {}
+    for (var rk in fields) document.getElementById(fields[rk]).value = _TX_EXP_DEFAULTS[rk];
+    applySink().catch(function() {});
+    expLog('Reset to defaults. Re-arm TX for mic changes to take effect.');
+  });
+  document.getElementById('tx-exp-probe').addEventListener('click', function() {
+    var btn = this;
+    if (btn.disabled) return;
+    btn.disabled = true;
+    expLog('Probing for 3s — speak into the mic…');
+    var stream = null, ctx = null, timer = null;
+    function done(msg) {
+      clearInterval(timer);
+      try { if (stream) stream.getTracks().forEach(function(t) { t.stop(); }); } catch (e) {}
+      try { if (ctx) ctx.close(); } catch (e) {}
+      btn.disabled = false;
+      expLog(msg);
+      _txDiag('exp-probe', msg.replace(/\n/g, ' ').slice(0, 190));
+    }
+    navigator.mediaDevices.getUserMedia({ audio: _txExpConstraints(true), video: false }).then(function(s) {
+      stream = s;
+      var t = s.getAudioTracks()[0], st = (t.getSettings && t.getSettings()) || {};
+      var info = 'label=' + (t.label || '?') + '\nsettings: aec=' + st.echoCancellation +
+                 ' ns=' + st.noiseSuppression + ' agc=' + st.autoGainControl +
+                 ' rate=' + st.sampleRate + (st.echoCancellationType ? ' aecType=' + st.echoCancellationType : '');
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      var an = ctx.createAnalyser(); an.fftSize = 1024;
+      ctx.createMediaStreamSource(s).connect(an);
+      ctx.resume().catch(function() {});
+      var buf = new Float32Array(an.fftSize), peak = 0, n = 0;
+      timer = setInterval(function() {
+        an.getFloatTimeDomainData(buf);
+        for (var i = 0; i < buf.length; i++) { var v = Math.abs(buf[i]); if (v > peak) peak = v; }
+        if (++n >= 30) done(info + '\npeak level: ' + peak.toFixed(3) +
+                            (peak < 0.005 ? '  (silent — wrong route or suspended)' : ''));
+      }, 100);
+    }).catch(function(err) { done('getUserMedia failed: ' + (err && err.name || err)); });
+  });
+  applySink().catch(function() {});
 
   var ptt = document.getElementById('tx-ptt');
   ptt.addEventListener('pointerdown',   function(e) { e.preventDefault(); _txKey(); });
