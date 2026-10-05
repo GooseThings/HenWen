@@ -258,7 +258,7 @@ Sessions are plain signed cookies — there is no server-side session store. To 
 
 ### External dependencies
 
-- `https://stats.allstarlink.org/api/stats/{node}` — node keyed/connected counts, one request per favorite node (5s paced apart within a cycle), polled every 180s (`FAVORITES_POLL_INTERVAL`)
+- `https://stats.allstarlink.org/api/stats/{node}` — node keyed/connected counts, one request per favorite node (5s paced apart), polled every 180s (`FAVORITES_POLL_INTERVAL`), at most `FAVSTATS_SLICE_SIZE` (default 20) nodes per cycle — each cycle takes the nodes with the oldest cached sample, so a large favorites list rotates through instead of being polled all at once; a 429 aborts the cycle immediately (honoring `Retry-After`), and a failed fetch keeps the last good reading rather than overwriting it with an error entry
 - `https://stats.allstarlink.org/stats/keyed` — scraped (regex, no HTML parser dependency) for the global activity feed on the kiosk map; every node currently keyed network-wide, polled every 5 min (`GLOBAL_ACTIVITY_INTERVAL`)
 - `https://allmondb.allstarlink.org/allmondb.php` — node callsign/location database
 - `https://www.echolink.org/logins.jsp` — scraped (regex, no HTML parser dependency) every 5 min for the directory of currently-online EchoLink stations; no API key, and no API exists — see "EchoLink directory" above

@@ -106,3 +106,36 @@ class TestHistoryPruning:
             hist.popleft()
         data = app.get_cached_favstats("55553")
         assert data["keyed_pct"] == 0
+
+
+# --- rotating slice / 429 handling -----------------------------------------
+
+def test_slice_picks_never_polled_then_oldest():
+    ts = {"a": 100.0, "b": 50.0, "c": 200.0}
+    assert app._favstats_pick_slice(["a", "b", "c", "d"], ts, 2) == ["d", "b"]
+    assert app._favstats_pick_slice(["a", "b", "c"], ts, 0) == ["b", "a", "c"]
+
+
+def test_rotation_estimate():
+    assert app._favstats_rotation_estimate(0, 20, 180, 5) == 0.0
+    # 92 nodes @ 20/cycle = 5 cycles of (180 + 20*5)
+    assert app._favstats_rotation_estimate(92, 20, 180, 5) == 5 * 280
+    assert app._favstats_rotation_estimate(10, 20, 180, 5) == 180 + 10 * 5
+
+
+def test_stale_cutoff_widens_with_rotation(monkeypatch):
+    import time
+    monkeypatch.setattr(app, "_favstats_rotation_sec", 1400.0)
+    app._favstats_cache["n"] = {"keyed": False, "connected_count": 0, "error": None}
+    app._favstats_cache_ts["n"] = time.time() - 1500   # > 3*180 but < 2*1400
+    assert app.get_cached_favstats("n")["stale"] is False
+    app._favstats_cache_ts["n"] = time.time() - 3000
+    assert app.get_cached_favstats("n")["stale"] is True
+
+
+def test_retry_after_parsing():
+    class E:  # minimal HTTPError stand-in
+        def __init__(self, v): self.headers = {"Retry-After": v} if v else {}
+    assert app._retry_after_sec(E("120")) == 120.0
+    assert app._retry_after_sec(E(None)) is None
+    assert app._retry_after_sec(E("Wed, 21 Oct")) is None
