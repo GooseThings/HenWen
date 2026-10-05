@@ -291,6 +291,12 @@ CACHE_TTL       = float(os.environ.get("AMI_CACHE_TTL",     "10.0"))  # seconds 
 # API's own rate-limit window and drawing 429s while the rest of that same
 # cycle, a few seconds later, cleared it and succeeded.
 FAVORITES_POLL_INTERVAL = max(5.0, float(os.environ.get("FAVORITES_POLL_INTERVAL", "180.0")))
+# Max favorites polled per cycle (0 = all, the old behavior). Each cycle takes
+# the nodes with the oldest cached sample, so a large favorites list rotates
+# through in slices instead of hammering the ASL stats API with one request
+# per favorite every cycle -- with ~90 favorites that was a near-continuous
+# ~12 req/min and routine HTTP 429s.
+FAVSTATS_SLICE_SIZE = max(0, int(os.environ.get("FAVSTATS_SLICE_SIZE", "20")))
 
 # Log verbosity: DEBUG shows all messages; INFO (default) suppresses DEBUG noise.
 # Set LOG_LEVEL=DEBUG in the service file Environment= lines for full verbose output.
@@ -3199,14 +3205,43 @@ def _fetch_node_stats(node: str) -> dict:
 
 _favstats_backoff_level = 0  # consecutive bad cycles; resets to 0 on any clean success
 _FAVSTATS_MAX_SLEEP     = 600.0  # cap backoff at 10 minutes between cycles
+_FAVSTATS_NODE_GAP_SEC  = 5.0    # pacing between requests within a cycle
+_favstats_rotation_sec  = 0.0    # est. time to refresh every favorite once; widens the stale cutoff
+
+
+def _favstats_pick_slice(nodes, cache_ts, size):
+    """Nodes to poll this cycle: never-polled first, then oldest sample first.
+    Driven by cache timestamps rather than a cursor, so adding/removing
+    favorites or a 429-aborted cycle can't skip or double-poll anyone."""
+    ordered = sorted(nodes, key=lambda n: (cache_ts.get(n, 0.0), n))
+    return ordered if size <= 0 else ordered[:size]
+
+
+def _favstats_rotation_estimate(n_nodes, size, interval, gap):
+    """Seconds for a full pass over n_nodes favorites at `size` per cycle."""
+    if n_nodes <= 0:
+        return 0.0
+    per = n_nodes if size <= 0 else min(size, n_nodes)
+    cycles = -(-n_nodes // per)
+    return cycles * (interval + per * gap)
+
+
+def _retry_after_sec(exc):
+    """Seconds from an HTTPError's Retry-After header (delta-seconds form), else None."""
+    try:
+        v = float(exc.headers.get("Retry-After"))
+        return v if v > 0 else None
+    except Exception:
+        return None
 
 
 def _favstats_poll_loop():
-    global _favstats_backoff_level
+    global _favstats_backoff_level, _favstats_rotation_sec
     log("INFO", f"[FAVSTATS-POLL] Background poller started (interval={FAVORITES_POLL_INTERVAL}s)")
     while True:
         any_success = False
         any_429     = False
+        retry_after = 0.0
         nodes       = []   # must be bound before the try — it's referenced after
                            # the except below, so a DB error raised before the
                            # SELECT completes would otherwise turn into a
@@ -3217,39 +3252,54 @@ def _favstats_poll_loop():
             with _favstats_lock:
                 for gone in set(_favstats_history) - set(nodes):
                     del _favstats_history[gone]
-            for node in nodes:
+            _favstats_rotation_sec = _favstats_rotation_estimate(
+                len(nodes), FAVSTATS_SLICE_SIZE, FAVORITES_POLL_INTERVAL, _FAVSTATS_NODE_GAP_SEC)
+            with _favstats_lock:
+                ts_snapshot = dict(_favstats_cache_ts)
+            batch = _favstats_pick_slice(nodes, ts_snapshot, FAVSTATS_SLICE_SIZE)
+            for i, node in enumerate(batch):
                 try:
                     result = _fetch_node_stats(node)
                     any_success = True
                 except Exception as e:
                     err_str = str(e)
-                    if "429" in err_str:
-                        any_429 = True
                     log("WARN", f"[FAVSTATS-POLL] {node}: {e}")
                     result = {"keyed": False, "connected_count": 0, "error": err_str}
+                    if "429" in err_str:
+                        any_429 = True
+                        # Stop the cycle: pressing on while rate-limited only
+                        # extends the block (the API escalates to refusing
+                        # connections). Nodes not reached keep their old
+                        # timestamps, so they're first in line next cycle.
+                        ra = _retry_after_sec(e)
+                        if ra:
+                            retry_after = max(retry_after, ra)
+                        with _favstats_lock:
+                            _favstats_cache.setdefault(node, result)
+                        break
                 now = time.time()
                 with _favstats_lock:
-                    _favstats_cache[node]    = result
-                    _favstats_cache_ts[node] = now
+                    prev = _favstats_cache.get(node)
+                    if result["error"] is not None and prev is not None and prev.get("error") is None:
+                        # Transient failure: keep the last good reading (it
+                        # ages into "stale" on its own) instead of showing a
+                        # healthy node as unkeyed/0 links.
+                        pass
+                    else:
+                        _favstats_cache[node]    = result
+                        _favstats_cache_ts[node] = now
                     if result["error"] is None:
                         hist   = _favstats_history.setdefault(node, deque())
                         cutoff = now - FAVSTATS_PCT_WINDOW_SEC
                         hist.append((now, result["keyed"]))
                         while hist and hist[0][0] < cutoff:
                             hist.popleft()
-                # Pacing gap between nodes within a cycle, on top of the
-                # interval between whole cycles. Confirmed live that a tight
-                # burst (originally 0.3s apart) across just 6 nodes was
-                # enough to trigger 429s and then outright connection
-                # refusal, even though the aggregate rate (a handful of
-                # requests per 30s+) was low — an isolated single request
-                # succeeded immediately after a burst got blocked. The
-                # burst itself looks like abuse, not the average rate.
-                # Bumped 2.0s -> 5.0s (owner request, 2026-08-06): even at
-                # 2.0s, 10 favorites still spent 18s bursting every cycle and
-                # kept drawing 429s on whichever nodes queried first each
-                # cycle — the API's own rate-limit window outlasted that gap.
-                time.sleep(5.0)
+                # Pacing gap between nodes within a cycle (history: 0.3s ->
+                # 2.0s -> 5.0s; a tight burst, not the average rate, is what
+                # drew 429s and then outright connection refusal -- see the
+                # backoff comment below).
+                if i < len(batch) - 1:
+                    time.sleep(_FAVSTATS_NODE_GAP_SEC)
         except Exception as outer:
             log("ERROR", f"[FAVSTATS-POLL] Unexpected outer error: {outer}")
 
@@ -3264,6 +3314,8 @@ def _favstats_poll_loop():
             _favstats_backoff_level = 0
 
         sleep_time = min(FAVORITES_POLL_INTERVAL * (2 ** _favstats_backoff_level), _FAVSTATS_MAX_SLEEP)
+        if retry_after:
+            sleep_time = max(sleep_time, min(retry_after, _FAVSTATS_MAX_SLEEP))
         if _favstats_backoff_level:
             log("WARN", f"[FAVSTATS-POLL] backing off — next poll in {sleep_time:.0f}s (level {_favstats_backoff_level})")
         time.sleep(sleep_time)
@@ -4885,8 +4937,8 @@ def get_cached_favstats(node: str) -> dict:
     if entry is None:
         return {"node": node, "keyed": False, "connected_count": 0, "stale": True, "age": None,
                 "keyed_pct": keyed_pct, "keyups": keyups}
-    return {**entry, "node": node, "stale": age > FAVORITES_POLL_INTERVAL * 3, "age": round(age, 2),
-            "keyed_pct": keyed_pct, "keyups": keyups}
+    return {**entry, "node": node, "stale": age > max(FAVORITES_POLL_INTERVAL * 3, _favstats_rotation_sec * 2),
+            "age": round(age, 2), "keyed_pct": keyed_pct, "keyups": keyups}
 
 
 def ami_send_command(subcmd_fn) -> dict:
