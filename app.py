@@ -15578,12 +15578,45 @@ _dvswitch_caller_id_cache = {}
 DVSWITCH_CALLER_POLL_SEC = 3
 
 
+RADIOID_USER_API = "https://radioid.net/api/dmr/user/?id="
+RADIOID_RETRY_SEC = 600   # how long a failed API call falls back to the file's first name
+
+
+def _radioid_full_name(payload):
+    """Pure: 'First Last' from a RadioID /api/dmr/user response dict, or
+    None. surname is often blank (users choose whether to publish one)."""
+    try:
+        r = (payload.get("results") or [None])[0]
+        if not r:
+            return None
+        return " ".join(x.strip() for x in (r.get("fname") or "", r.get("surname") or "") if x and x.strip()) or None
+    except Exception:
+        return None
+
+
+def _radioid_fetch_name(dmr_id):
+    """(ok, name). One small public-API call per previously-unseen talker
+    (results are cached), because DMRIds.dat only carries a first name."""
+    try:
+        req = urlreq.Request(RADIOID_USER_API + urlparse.quote(str(dmr_id)),
+                                     headers={"User-Agent": "HenWen (N8GMZ)"})
+        with urlreq.urlopen(req, timeout=3) as resp:
+            return True, _radioid_full_name(json.loads(resp.read(65536).decode("utf-8", "replace")))
+    except Exception as e:
+        log("DEBUG", f"[DVSWITCH] RadioID name lookup failed for {dmr_id}: {e}")
+        return False, None
+
+
 def _dvswitch_lookup_dmr(dmr_id):
-    """(callsign, name) for a DMR ID from DMRIds.dat ("<id> <callsign>
-    <name...>"), either None when absent. Cached per ID, including misses."""
+    """(callsign, name) for a DMR ID. Callsign and first name come from
+    DMRIds.dat ("<id> <callsign> <first name>"); the full name (with
+    surname, when the user published one) is then fetched from RadioID and
+    wins when available. Cached per ID, including misses; an ID whose API
+    call failed keeps the file's name but is retried after RADIOID_RETRY_SEC."""
     with _dvswitch_caller_lock:
-        if dmr_id in _dvswitch_caller_id_cache:
-            return _dvswitch_caller_id_cache[dmr_id]
+        hit = _dvswitch_caller_id_cache.get(dmr_id)
+    if hit is not None and (len(hit) < 3 or time.time() < hit[2]):
+        return hit[0], hit[1]
     callsign = name = None
     try:
         r = subprocess.run(["grep", "-m1", f"^{dmr_id} ", DVSWITCH_DMRIDS_PATH],
@@ -15596,8 +15629,16 @@ def _dvswitch_lookup_dmr(dmr_id):
                 name = parts[2].strip() or None
     except Exception:
         pass
+    retry_at = float("inf")
+    if callsign:
+        ok, full = _radioid_fetch_name(dmr_id)
+        if ok:
+            if full:
+                name = full
+        else:
+            retry_at = time.time() + RADIOID_RETRY_SEC
     with _dvswitch_caller_lock:
-        _dvswitch_caller_id_cache[dmr_id] = (callsign, name)
+        _dvswitch_caller_id_cache[dmr_id] = (callsign, name, retry_at)
     return callsign, name
 
 
