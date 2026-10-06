@@ -5911,6 +5911,40 @@ def load_astdb():
     return False
 
 
+# DMR radio IDs lead with the caller's country as a 3-digit ITU E.212 MCC
+# (e.g. 310xxxx = United States), the same convention BrandMeister's own
+# talkgroup numbering follows (see _derive_bm_talkgroup_countries()). Only
+# 7+ digit IDs carry one -- legacy 6-digit IDs predate the scheme -- and a
+# prefix missing from this table just means no flag, never a guess.
+_DMR_MCC_TO_ISO = {
+    **dict.fromkeys(range(310, 317), "US"), 302: "CA", 334: "MX", 330: "PR",
+    234: "GB", 235: "GB", 262: "DE", 208: "FR", 222: "IT", 214: "ES",
+    268: "PT", 204: "NL", 206: "BE", 270: "LU", 228: "CH", 232: "AT",
+    238: "DK", 240: "SE", 242: "NO", 244: "FI", 246: "LT", 247: "LV",
+    248: "EE", 250: "RU", 255: "UA", 257: "BY", 259: "MD", 260: "PL",
+    230: "CZ", 231: "SK", 216: "HU", 226: "RO", 284: "BG", 219: "HR",
+    293: "SI", 220: "RS", 202: "GR", 286: "TR", 272: "IE", 274: "IS",
+    278: "MT", 280: "CY", 218: "BA", 294: "MK", 276: "AL",
+    724: "BR", 722: "AR", 730: "CL", 732: "CO", 734: "VE", 740: "EC",
+    716: "PE", 748: "UY", 744: "PY", 736: "BO", 712: "CR", 714: "PA",
+    704: "GT", 706: "SV", 708: "HN", 710: "NI", 338: "JM", 370: "DO",
+    372: "HT", 368: "CU", 374: "TT",
+    505: "AU", 530: "NZ", 440: "JP", 441: "JP", 450: "KR", 460: "CN",
+    454: "HK", 466: "TW", 515: "PH", 510: "ID", 502: "MY", 525: "SG",
+    520: "TH", 452: "VN", 404: "IN", 405: "IN", 410: "PK", 470: "BD",
+    413: "LK", 425: "IL", 424: "AE", 420: "SA", 432: "IR", 602: "EG",
+    655: "ZA", 604: "MA", 605: "TN", 603: "DZ", 639: "KE", 621: "NG",
+}
+
+
+def _dmr_id_country_iso(dmr_id):
+    """ISO 3166 alpha-2 for a DMR radio ID's MCC prefix, or "" if unknown."""
+    d = str(dmr_id or "")
+    if len(d) < 7 or not d.isdigit():
+        return ""
+    return _DMR_MCC_TO_ISO.get(int(d[:3]), "")
+
+
 _ALLMONDB_EMPTY = {"callsign": "", "desc": "", "location": ""}
 _DVSWITCH_BRIDGE_NODE_INFO = {"callsign": "DVSwitch Bridge", "desc": "Internal DMR bridge node", "location": ""}
 
@@ -6009,6 +6043,7 @@ def lookup_node(node: str) -> dict:
                 "callsign": caller["callsign"],
                 "desc": ("DMR · TG " + caller["tg"]) if caller["tg"] else "DMR",
                 "location": "",
+                "country": _dmr_id_country_iso(caller["id"]),
             }
         if current_tg:
             # The actually-tuned TG always wins over the caller cache's own
@@ -6024,13 +6059,15 @@ def lookup_node(node: str) -> dict:
                     "callsign": caller["callsign"],
                     "desc": desc if caller["active"] else ("Last heard — " + desc),
                     "location": "",
+                    "country": _dmr_id_country_iso(caller["id"]),
                 }
             return {"callsign": _DVSWITCH_BRIDGE_NODE_INFO["callsign"], "desc": desc, "location": ""}
         if caller["callsign"]:
             desc = ("DMR · TG " + caller["tg"]) if caller["tg"] else "DMR"
             if not caller["active"]:
                 desc = "Last heard — " + desc
-            return {"callsign": caller["callsign"], "desc": desc, "location": ""}
+            return {"callsign": caller["callsign"], "desc": desc, "location": "",
+                    "country": _dmr_id_country_iso(caller["id"])}
         return dict(_DVSWITCH_BRIDGE_NODE_INFO)
 
     el_id = _echolink_station_id(node)
@@ -8120,6 +8157,7 @@ def api_status_board():
                 "node":           cn,
                 "callsign":       cn_info.get("callsign", ""),
                 "desc":           cn_info.get("desc", ""),
+                "country":        cn_info.get("country", ""),   # ISO alpha-2; DMR bridge talker only
                 "location":       cn_loc,
                 "keyed":          link_info.get("keyed", False),
                 "mode":           link_info.get("mode", ""),  # 'T' = transmit/transceive, 'R' = monitor/receive-only

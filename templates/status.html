@@ -779,6 +779,7 @@ svg.kiosk-login-icon { display: none; }
 .nr-call { flex: 0 0 auto;
   font-size: 0.95rem; font-weight: 600; color: var(--text); letter-spacing: .03em; text-decoration: none; }
 .nr-call:hover { text-decoration: underline; }
+.nr-flag { flex: 0 0 auto; margin-left: -6px; font-size: 0.95rem; line-height: 1; }
 .nr-loc  { flex: 0 1 auto; min-width: 0; font-size: 0.82rem; color: var(--text2);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .nr-meta { min-width: 0; font-size: 0.72rem; color: var(--text2);
@@ -2581,6 +2582,16 @@ function callsignLink(callsign, cssClass, displayText) {
   var qrzCall = _qrzCallsign(callsign);
   return '<a class="' + cssClass + '" href="https://www.qrz.com/db/' +
     encodeURIComponent(qrzCall) + '" target="_blank" rel="noopener">' + esc(displayText || callsign) + '</a>';
+}
+
+/* ISO alpha-2 -> flag emoji (regional-indicator pair), in a span that sits
+   tight against the callsign before it. Empty for anything that isn't two
+   A-Z letters. Note: Windows browsers have no flag glyphs and show the two
+   letters instead. */
+function countryFlag(iso) {
+  if (!/^[A-Z]{2}$/.test(iso || '')) return '';
+  var f = String.fromCodePoint(0x1F1E6 + iso.charCodeAt(0) - 65, 0x1F1E6 + iso.charCodeAt(1) - 65);
+  return '<span class="nr-flag" title="' + esc(iso) + '">' + f + '</span>';
 }
 
 /* APRS station callsign rendered as a link to its aprs.fi tracking page —
@@ -5233,6 +5244,7 @@ async function refreshBoard() {
             '<div class="nr-line">' +
               nodeLink(c.node, 'nr-num') +
               (c.callsign ? callsignLink(c.callsign, 'nr-call') : '<div class="nr-call">—</div>') +
+              (isDvswitchBridge && c.callsign ? countryFlag(c.country) : '') +
               '<div class="nr-loc">' + esc(c.location||c.desc||'') + '</div>' +
             '</div>' +
             (meta.length ? '<div class="nr-meta"><span>' + meta.join('</span><span>') + '</span></div>' : '') +
