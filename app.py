@@ -15795,7 +15795,15 @@ def _dvswitch_process_caller_lines(lines, state, now=None, keyed_now=True):
 
 def start_dvswitch_caller_poller():
     def _loop():
-        offset = 0
+        # Start at the END of the log, not the top: STFU.log holds a full
+        # day of history (~3000 streams), and replaying it on every service
+        # restart promoted each one in turn as "the caller" -- a flood of
+        # unrelated callsigns across the kiosk (plus a DMRIds grep and a
+        # RadioID call apiece) after every deploy. Only new traffic counts.
+        try:
+            offset = os.path.getsize(DVSWITCH_STFU_LOG_PATH)
+        except OSError:
+            offset = 0
         state = {"pending": None}
         while True:
             try:
