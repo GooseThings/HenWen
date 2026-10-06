@@ -272,6 +272,7 @@ HENWEN_VERSION = _load_henwen_version()
 # costs nothing. 10s TTL still gives a generous buffer before flagging
 # cached data as stale.
 POLL_INTERVAL   = float(os.environ.get("AMI_POLL_INTERVAL", "1.0"))   # seconds between polls
+AMI_BACKOFF_MAX_SEC = 60.0   # ceiling on the poll delay while AMI keeps failing
 CACHE_TTL       = float(os.environ.get("AMI_CACHE_TTL",     "10.0"))  # seconds before cache is stale
 
 # Favorites keyed/connected-count polling hits the public AllStarLink stats
@@ -2788,7 +2789,17 @@ def _ami_ensure_connected() -> AMIClient:
     if not creds.get("user") or not creds.get("secret"):
         raise Exception("AMI credentials not configured")
     client = AMIClient(creds["host"], creds["port"], creds["user"], creds["secret"])
-    client.connect()
+    try:
+        client.connect()
+    except Exception:
+        # Don't leave a half-open socket for the GC to find: against a wedged
+        # Asterisk each one lingers as a CLOSE-WAIT entry on its side.
+        try:
+            if client._sock:
+                client._sock.close()
+        except Exception:
+            pass
+        raise
     _ami_client    = client
     _ami_connected = True
     _ami_last_error = None
@@ -2820,8 +2831,10 @@ def _poll_loop():
     """
     global _ami_last_error
     log("INFO", f"[AMI-POLL] Background poller started (interval={POLL_INTERVAL}s)")
+    _fail_streak = 0   # consecutive failed cycles; drives the backoff at the bottom
     while True:
         _cycle_start = time.time()
+        _cycle_failed = False
         try:
             content = read_conf_file(RPT_CONF_PATH)
             nodes   = get_node_numbers(content) if content else []
@@ -2995,6 +3008,7 @@ def _poll_loop():
 
                 except Exception as e:
                     _ami_last_error = str(e)
+                    _cycle_failed = True
                     log("ERROR", f"[AMI-POLL] Error during poll: {e}")
                     _ami_invalidate()
 
@@ -3070,7 +3084,22 @@ def _poll_loop():
             log("DEBUG", f"[AMI-POLL] Slow poll cycle: {_cycle_elapsed:.1f}s "
                          f"(interval={POLL_INTERVAL}s)")
 
-        time.sleep(POLL_INTERVAL)
+        # Back off while AMI keeps failing. A wedged Asterisk can accept the
+        # TCP connection yet never answer; retrying every ~1s then burns one
+        # socket per attempt on its side (each lingering as CLOSE-WAIT) until
+        # it runs out of file descriptors, which only makes it more wedged.
+        if _cycle_failed:
+            _fail_streak += 1
+            _delay = min(POLL_INTERVAL * (2 ** min(_fail_streak, 10)), AMI_BACKOFF_MAX_SEC)
+            if _fail_streak in (1, 3) or _fail_streak % 10 == 0:
+                log("WARN", f"[AMI-POLL] {_fail_streak} consecutive failed poll(s) — "
+                            f"next attempt in {_delay:.0f}s")
+        else:
+            if _fail_streak:
+                log("INFO", f"[AMI-POLL] Recovered after {_fail_streak} failed poll(s)")
+            _fail_streak = 0
+            _delay = POLL_INTERVAL
+        time.sleep(_delay)
 
 
 def start_poller():
