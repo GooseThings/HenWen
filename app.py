@@ -6014,6 +6014,24 @@ def fetch_allmondb_node(node: str) -> dict:
         return _astdb_cache.get(node, _ALLMONDB_EMPTY)
 
 
+def _dvswitch_bridge_keyed():
+    """True when app_rpt reports the DVSwitch bridge link as keyed on any
+    local node -- i.e. DMR audio is actually flowing into the node, not just
+    an STFU "Begin Tx" log line. Short DMR streams that never produce audio
+    appear in that log but never key the link, so the kiosk caller display
+    gates on this. Fails open (True) when no AMI data exists at all, so a
+    down AMI can't blank the caller display."""
+    bridge = _dvswitch_bridge_node_cached()
+    seen = False
+    for st in list(_ami_cache.values()):
+        link = (st.get("links") or {}).get(bridge)
+        if link is not None:
+            seen = True
+            if link.get("keyed"):
+                return True
+    return not seen
+
+
 def lookup_node(node: str) -> dict:
     node = str(node)
 
@@ -6037,7 +6055,7 @@ def lookup_node(node: str) -> dict:
         with _dvswitch_caller_lock:
             caller = dict(_dvswitch_caller_cache)
         current_tg = _dvswitch_current_tg()
-        if caller["active"] and caller["callsign"]:
+        if caller["active"] and caller["callsign"] and _dvswitch_bridge_keyed():
             # Someone is on the air right now: always show them, with the
             # TG their traffic actually arrived on. Static talkgroups
             # (e.g. 91) deliver audio regardless of which TG the bridge is

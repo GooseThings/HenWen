@@ -693,3 +693,23 @@ class TestCallerBlipFilter:
         cache, looked, st = self._setup(monkeypatch)
         app._dvswitch_process_caller_lines([self._begin("222"), self._begin("333"), self._end(3)], st, now=100)
         assert cache["id"] == "222"
+
+
+class TestBridgeKeyedGate:
+    """The kiosk only shows a DMR caller while the bridge link is keyed."""
+
+    def _with_cache(self, monkeypatch, cache):
+        monkeypatch.setattr(app, "_dvswitch_bridge_node_cached", lambda: "1999")
+        monkeypatch.setattr(app, "_ami_cache", cache)
+
+    def test_keyed_link_true(self, monkeypatch):
+        self._with_cache(monkeypatch, {"643930": {"links": {"1999": {"keyed": True}}}})
+        assert app._dvswitch_bridge_keyed() is True
+
+    def test_unkeyed_link_false(self, monkeypatch):
+        self._with_cache(monkeypatch, {"643930": {"links": {"1999": {"keyed": False}}}})
+        assert app._dvswitch_bridge_keyed() is False
+
+    def test_no_ami_data_fails_open(self, monkeypatch):
+        self._with_cache(monkeypatch, {})
+        assert app._dvswitch_bridge_keyed() is True
