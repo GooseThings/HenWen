@@ -5999,6 +5999,17 @@ def lookup_node(node: str) -> dict:
         with _dvswitch_caller_lock:
             caller = dict(_dvswitch_caller_cache)
         current_tg = _dvswitch_current_tg()
+        if caller["active"] and caller["callsign"]:
+            # Someone is on the air right now: always show them, with the
+            # TG their traffic actually arrived on. Static talkgroups
+            # (e.g. 91) deliver audio regardless of which TG the bridge is
+            # tuned to (e.g. 9), so requiring a match against the tuned TG
+            # hid every live talker on a static TG.
+            return {
+                "callsign": caller["callsign"],
+                "desc": ("DMR · TG " + caller["tg"]) if caller["tg"] else "DMR",
+                "location": "",
+            }
         if current_tg:
             # The actually-tuned TG always wins over the caller cache's own
             # (traffic-driven, so potentially stale) tg -- see
