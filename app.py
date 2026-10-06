@@ -1150,6 +1150,15 @@ def get_db():
         # api_dvswitch_tune's own docstring for why), so this list is now
         # just the owner's curated shortcuts, not a gate.
         conn.execute("ALTER TABLE dvswitch_config ADD COLUMN talkgroup_presets TEXT NOT NULL DEFAULT '[]'")
+    if 'latitude' not in _dvswitch_cfg_cols:
+        # The station's own coordinates, written into MMDVM_Bridge.ini's
+        # [Info] section by dvswitch/apply.sh -- that block is what the
+        # bridge reports to the DMR network when it logs in (TGIF/custom;
+        # MMDVM_Bridge isn't used for BrandMeister). NULL = not entered yet,
+        # which is distinct from a legitimate 0.0, so these are nullable
+        # with no default; apply refuses to run until both are set.
+        conn.execute("ALTER TABLE dvswitch_config ADD COLUMN latitude REAL")
+        conn.execute("ALTER TABLE dvswitch_config ADD COLUMN longitude REAL")
     conn.commit()
     # Per-node lockout: presence of a row means that node is locked by its
     # Owner. Only one lockout state per node, so `node` is the primary key
@@ -14668,7 +14677,7 @@ DVSWITCH_CONFIG_DEFAULTS = {
     "network_host": "", "network_port": 62031, "network_password": "",
     "static_talkgroups": "", "bridge_node": "", "allstar_gain": 1.0, "dmr_gain": 1.0,
     "ambe_source": "software", "ambe_device": "", "ambe_host": "", "ambe_port": 2460,
-    "talkgroup_presets": [],
+    "talkgroup_presets": [], "latitude": None, "longitude": None,
 }
 _DVSWITCH_DMR_ID_RE   = re.compile(r'^\d{6,7}$')
 _DVSWITCH_CALLSIGN_RE = re.compile(r'^[A-Z0-9]{3,7}$')
@@ -14862,6 +14871,25 @@ def _validate_talkgroup_presets(raw):
     return cleaned, None
 
 
+def _parse_coordinate(raw, label, lo, hi):
+    """(value_or_None, error_or_None). Blank means "not entered" (None), not
+    0 -- 0.0 is a real coordinate, so it must stay distinguishable."""
+    if raw is None or str(raw).strip() == "":
+        return None, None
+    try:
+        value = float(str(raw).strip())
+    except ValueError:
+        return None, f"{label} must be a number"
+    if not (lo <= value <= hi):      # also rejects nan/inf
+        return None, f"{label} must be between {lo:g} and {hi:g}"
+    return round(value, 6), None
+
+
+def _dvswitch_location_set(cfg):
+    """True once the owner has entered both coordinates (0.0 counts)."""
+    return bool(cfg) and cfg["latitude"] is not None and cfg["longitude"] is not None
+
+
 def _validate_dvswitch_config(data):
     """Returns (cleaned_dict, error_string_or_None). Pure validation, no DB/
     filesystem access, so it's directly unit-testable."""
@@ -14915,6 +14943,15 @@ def _validate_dvswitch_config(data):
         return None, ("DMR ID, callsign, network host/port, and a bridge node are all "
                        "required before enabling DVSwitch")
 
+    latitude,  lat_err = _parse_coordinate(data.get("latitude"),  "Latitude",  -90,  90)
+    longitude, lon_err = _parse_coordinate(data.get("longitude"), "Longitude", -180, 180)
+    if lat_err or lon_err:
+        return None, lat_err or lon_err
+    # Blank is allowed on save (so an unrelated edit isn't blocked), but a
+    # half-entered location is always a mistake.
+    if (latitude is None) != (longitude is None):
+        return None, "Enter both latitude and longitude, or leave both blank"
+
     talkgroup_presets, tg_err = _validate_talkgroup_presets(data.get("talkgroup_presets"))
     if tg_err:
         return None, tg_err
@@ -14928,6 +14965,7 @@ def _validate_dvswitch_config(data):
         "ambe_source": ambe_source, "ambe_device": ambe_device,
         "ambe_host": ambe_host, "ambe_port": ambe_port,
         "talkgroup_presets": talkgroup_presets,
+        "latitude": latitude, "longitude": longitude,
     }, None
 
 
@@ -14959,13 +14997,15 @@ def api_dvswitch_config_save():
         """INSERT OR REPLACE INTO dvswitch_config
            (id, enabled, dmr_id, callsign, dmr_network, network_host, network_port,
             network_password, static_talkgroups, bridge_node, allstar_gain, dmr_gain,
-            ambe_source, ambe_device, ambe_host, ambe_port, talkgroup_presets)
-           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ambe_source, ambe_device, ambe_host, ambe_port, talkgroup_presets,
+            latitude, longitude)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (int(cleaned["enabled"]), cleaned["dmr_id"], cleaned["callsign"], cleaned["dmr_network"],
          cleaned["network_host"], cleaned["network_port"], cleaned["network_password"],
          cleaned["static_talkgroups"], cleaned["bridge_node"], cleaned["allstar_gain"],
          cleaned["dmr_gain"], cleaned["ambe_source"], cleaned["ambe_device"],
-         cleaned["ambe_host"], cleaned["ambe_port"], json.dumps(cleaned["talkgroup_presets"]))
+         cleaned["ambe_host"], cleaned["ambe_port"], json.dumps(cleaned["talkgroup_presets"]),
+         cleaned["latitude"], cleaned["longitude"])
     )
     db.commit()
     log("INFO", f"[DVSWITCH] Config saved by {session.get('username', '')}")
@@ -15115,7 +15155,8 @@ def api_dvswitch_apply_status():
         return jsonify({"error": "Owner access required"}), 403
     cfg = _get_dvswitch_config()
     ready = bool(cfg and cfg["enabled"] and cfg["dmr_id"] and cfg["callsign"]
-                 and cfg["network_host"] and cfg["network_port"] and cfg["bridge_node"])
+                 and cfg["network_host"] and cfg["network_port"] and cfg["bridge_node"]
+                 and _dvswitch_location_set(cfg))
     content = read_conf_file(RPT_CONF_PATH) or ""
     bridge_node_exists = bool(cfg) and cfg["bridge_node"] in _collect_stanzas(content)
     # BrandMeister uses stfu.service instead of mmdvm_bridge.service (see
@@ -15148,9 +15189,10 @@ def api_dvswitch_apply():
 
     cfg = _get_dvswitch_config()
     if not cfg or not (cfg["enabled"] and cfg["dmr_id"] and cfg["callsign"]
-                        and cfg["network_host"] and cfg["network_port"] and cfg["bridge_node"]):
+                        and cfg["network_host"] and cfg["network_port"] and cfg["bridge_node"]
+                        and _dvswitch_location_set(cfg)):
         return jsonify({"error": "Save a complete DVSwitch configuration first "
-                                  "(DMR ID, callsign, network, bridge node)"}), 400
+                                  "(DMR ID, callsign, network, bridge node, latitude/longitude)"}), 400
 
     output_parts = []
 
@@ -15180,6 +15222,7 @@ def api_dvswitch_apply():
         "allstar_gain": cfg["allstar_gain"], "dmr_gain": cfg["dmr_gain"],
         "ambe_source": cfg["ambe_source"], "ambe_device": cfg["ambe_device"],
         "ambe_host": cfg["ambe_host"], "ambe_port": cfg["ambe_port"],
+        "latitude": cfg["latitude"], "longitude": cfg["longitude"],
         "usrp_asterisk_rxport": DVSWITCH_USRP_ASTERISK_RXPORT,
         "usrp_asterisk_txport": DVSWITCH_USRP_ASTERISK_TXPORT,
     }

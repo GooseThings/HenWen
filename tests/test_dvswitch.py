@@ -528,3 +528,114 @@ class TestDvswitchCurrentTg:
     def test_empty_string_when_file_missing(self, monkeypatch, tmp_path):
         monkeypatch.setattr(app, "DVSWITCH_ABINFO_PATH", str(tmp_path / "nonexistent.json"))
         assert app._dvswitch_current_tg.__wrapped__() == ""
+
+
+class TestValidateDvswitchLocation:
+    """latitude/longitude: written into MMDVM_Bridge.ini's [Info] by
+    dvswitch/apply.sh. Blank is legal on save (so an unrelated edit isn't
+    blocked); apply is what refuses to run without them."""
+
+    def _v(self, **kw):
+        return app._validate_dvswitch_config({**VALID_CONFIG, **kw})
+
+    def test_blank_is_none_not_zero(self):
+        cleaned, err = self._v()
+        assert err is None and cleaned["latitude"] is None and cleaned["longitude"] is None
+        cleaned, err = self._v(latitude="  ", longitude="")
+        assert err is None and cleaned["latitude"] is None and cleaned["longitude"] is None
+
+    def test_valid_coordinates_parsed_and_rounded(self):
+        cleaned, err = self._v(latitude=" 43.07312345 ", longitude="-86.2012")
+        assert err is None
+        assert cleaned["latitude"] == 43.073123 and cleaned["longitude"] == -86.2012
+
+    def test_numbers_accepted_as_well_as_strings(self):
+        cleaned, err = self._v(latitude=43.0731, longitude=-86.2012)
+        assert err is None and cleaned["latitude"] == 43.0731
+
+    def test_zero_zero_is_a_real_location(self):
+        cleaned, err = self._v(latitude="0", longitude="0")
+        assert err is None
+        assert cleaned["latitude"] == 0.0 and cleaned["latitude"] is not None
+
+    def test_half_entered_location_rejected(self):
+        assert "both" in self._v(latitude="43.0")[1].lower()
+        assert "both" in self._v(longitude="-86.0")[1].lower()
+
+    def test_out_of_range_rejected(self):
+        assert "Latitude" in self._v(latitude="91", longitude="0")[1]
+        assert "Latitude" in self._v(latitude="-90.5", longitude="0")[1]
+        assert "Longitude" in self._v(latitude="0", longitude="180.1")[1]
+
+    def test_non_numeric_and_non_finite_rejected(self):
+        assert "number" in self._v(latitude="north", longitude="0")[1]
+        assert self._v(latitude="nan", longitude="0")[1] is not None
+        assert self._v(latitude="0", longitude="inf")[1] is not None
+
+    def test_disabled_config_still_validates_coordinates(self):
+        assert app._validate_dvswitch_config({"enabled": False, "latitude": "200", "longitude": "0"})[1] is not None
+
+
+class TestDvswitchLocationRoutes:
+    def _owner(self, client, create_user):
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+
+    def test_defaults_report_no_location(self, client, create_user):
+        self._owner(client, create_user)
+        body = client.get("/api/dvswitch/config").get_json()
+        assert body["latitude"] is None and body["longitude"] is None
+
+    def test_config_round_trips_location(self, client, create_user):
+        self._owner(client, create_user)
+        r = client.post("/api/dvswitch/config", json={**VALID_CONFIG, "latitude": "43.0731", "longitude": "-86.2012"})
+        assert r.status_code == 200
+        body = client.get("/api/dvswitch/config").get_json()
+        assert body["latitude"] == 43.0731 and body["longitude"] == -86.2012
+
+    def test_save_without_location_still_allowed_and_stored_as_null(self, client, create_user):
+        self._owner(client, create_user)
+        assert client.post("/api/dvswitch/config", json=VALID_CONFIG).status_code == 200
+        body = client.get("/api/dvswitch/config").get_json()
+        assert body["latitude"] is None and body["longitude"] is None
+
+    def test_bad_location_rejected_with_message(self, client, create_user):
+        self._owner(client, create_user)
+        r = client.post("/api/dvswitch/config", json={**VALID_CONFIG, "latitude": "95", "longitude": "0"})
+        assert r.status_code == 400 and "Latitude" in r.get_json()["error"]
+
+    def _save(self, client, **kw):
+        assert client.post("/api/dvswitch/config", json={**VALID_CONFIG, **kw}).status_code == 200
+
+    def test_apply_refuses_until_location_entered(self, client, create_user):
+        self._owner(client, create_user)
+        self._save(client)
+        resp = client.post("/api/dvswitch/apply")
+        assert resp.status_code == 400
+        assert "latitude" in resp.get_json()["error"].lower()
+
+    def test_apply_status_not_ready_without_location(self, client, create_user):
+        self._owner(client, create_user)
+        self._save(client)
+        assert client.get("/api/dvswitch/apply-status").get_json()["ready"] is False
+        self._save(client, latitude="0", longitude="0")      # 0,0 counts as entered
+        assert client.get("/api/dvswitch/apply-status").get_json()["ready"] is True
+
+    def test_apply_exports_location_to_the_script(self, client, create_user, monkeypatch, tmp_path):
+        self._owner(client, create_user)
+        self._save(client, latitude="43.0731", longitude="-86.2012")
+        rpt = tmp_path / "rpt.conf"
+        rpt.write_text("[643930]\ncontext = radio-secure\n\n[1999]\nrxchannel = usrp/127.0.0.1:34001:32001\n")
+        export = tmp_path / "export.json"
+        monkeypatch.setattr(app, "RPT_CONF_PATH", str(rpt))
+        monkeypatch.setattr(app, "DVSWITCH_EXPORT_PATH", str(export))
+        calls = []
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return MagicMock(returncode=0, stdout="", stderr="")
+        monkeypatch.setattr(app.subprocess, "run", fake_run)
+        resp = client.post("/api/dvswitch/apply")
+        assert resp.status_code == 200
+        exported = json.loads(export.read_text())
+        assert exported["latitude"] == 43.0731 and exported["longitude"] == -86.2012
+        assert calls[0][-2:] == [app.DVSWITCH_APPLY_SCRIPT_PATH, str(export)]

@@ -1733,6 +1733,15 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
             <input type="text" id="dvs-bridge-node" class="val-input" placeholder="e.g. 1999" style="width:100%">
             <div style="font-size:0.75rem;color:var(--text2);margin-top:3px">A private AllStar node number not already used in rpt.conf. Guided setup creates this node for you — you don't need to create it by hand first.</div>
           </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Latitude</label>
+            <input type="text" inputmode="decimal" id="dvs-latitude" class="val-input" placeholder="e.g. 43.0731" style="width:100%">
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Longitude</label>
+            <input type="text" inputmode="decimal" id="dvs-longitude" class="val-input" placeholder="e.g. -86.2012" style="width:100%">
+          </div>
+          <div style="grid-column:1 / -1;font-size:0.75rem;color:var(--text2);margin-top:-6px">Your station's own coordinates in decimal degrees (south and west are negative). Required before guided setup can run — it's written into the bridge's config and reported to the DMR network when the bridge logs in, so enter your real location rather than a guess.</div>
         </div>
       </div>
     </div>
@@ -6974,6 +6983,8 @@ async function dvswitchLoad() {
   document.getElementById('dvs-dmr-id').value            = d.dmr_id || '';
   document.getElementById('dvs-callsign').value          = d.callsign || '';
   document.getElementById('dvs-bridge-node').value       = d.bridge_node || '';
+  document.getElementById('dvs-latitude').value          = d.latitude  != null ? d.latitude  : '';
+  document.getElementById('dvs-longitude').value         = d.longitude != null ? d.longitude : '';
   document.getElementById('dvs-network').value           = d.dmr_network || 'brandmeister';
   document.getElementById('dvs-network-host').value      = d.network_host || '';
   document.getElementById('dvs-network-port').value      = d.network_port || 62031;
@@ -6996,6 +7007,8 @@ async function dvswitchSave() {
     dmr_id:              document.getElementById('dvs-dmr-id').value.trim(),
     callsign:            document.getElementById('dvs-callsign').value.trim(),
     bridge_node:         document.getElementById('dvs-bridge-node').value.trim(),
+    latitude:            document.getElementById('dvs-latitude').value.trim(),
+    longitude:           document.getElementById('dvs-longitude').value.trim(),
     dmr_network:         document.getElementById('dvs-network').value,
     network_host:        document.getElementById('dvs-network-host').value.trim(),
     network_port:        parseInt(document.getElementById('dvs-network-port').value, 10),
@@ -7032,7 +7045,7 @@ async function loadDvswitchApplyStatus() {
     return;
   }
   if (!r.data.ready) {
-    statusEl.textContent = 'Save a complete configuration above to unlock this.';
+    statusEl.textContent = 'Save a complete configuration above (including your latitude and longitude) to unlock this.';
     btnRow.style.display = 'none';
     return;
   }
