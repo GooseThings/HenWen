@@ -1204,6 +1204,7 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
    makes the live TG one tap away via the browse popup, so this is just a
    convenience for a phone-sized screen where nothing else on the row
    surfaces it at a glance. */
+.tg-heard-badge { font-size: 0.65rem; white-space: nowrap; color: var(--text2); }
 .tg-current-badge { display: none; font-size: 0.65rem; font-weight: 600; white-space: nowrap;
   color: var(--green); }
 
@@ -5221,7 +5222,12 @@ async function refreshBoard() {
               (tgName ? ' &middot; ' + esc(tgName) : '') + '</span>';
           }
         }
-        var badges = modeBadge + tgBtn + tgCurrent;
+        /* The talker's "DMR · TG n" / "Last heard — ..." text used to fill the
+           .nr-loc slot (a bridge row has no location); now the talker's name
+           takes that slot and this sits next to the Talkgroups button. */
+        var tgHeard = (isDvswitchBridge && c.dmr_talker && c.desc)
+          ? '<span class="tg-heard-badge">' + esc(c.desc) + '</span>' : '';
+        var badges = modeBadge + tgBtn + tgHeard + tgCurrent;
         var dotClass = !isConn ? ' connecting' : (c.keyed ? ' keyed' : ' connected');
         var isAdminRole = window._kioskRole === 'admin' || window._kioskRole === 'superuser' || window._kioskRole === 'owner';
         var dcBtn = (c.connector_managed && !isAdminRole)
@@ -5245,7 +5251,7 @@ async function refreshBoard() {
               nodeLink(c.node, 'nr-num') +
               (c.callsign ? callsignLink(c.callsign, 'nr-call') : '<div class="nr-call">—</div>') +
               (isDvswitchBridge && c.callsign ? countryFlag(c.country) : '') +
-              '<div class="nr-loc">' + esc(c.location||c.desc||'') + '</div>' +
+              '<div class="nr-loc">' + esc(c.dmr_talker ? (c.dmr_name || '') : (c.location||c.desc||'')) + '</div>' +
             '</div>' +
             (meta.length ? '<div class="nr-meta"><span>' + meta.join('</span><span>') + '</span></div>' : '') +
             (badges ? '<div class="nr-meta nr-badges">' + badges + '</div>' : '') +

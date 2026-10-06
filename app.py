@@ -6044,6 +6044,7 @@ def lookup_node(node: str) -> dict:
                 "desc": ("DMR · TG " + caller["tg"]) if caller["tg"] else "DMR",
                 "location": "",
                 "country": _dmr_id_country_iso(caller["id"]),
+                "dmr_name": caller.get("name") or "", "dmr_talker": True,
             }
         if current_tg:
             # The actually-tuned TG always wins over the caller cache's own
@@ -6060,6 +6061,7 @@ def lookup_node(node: str) -> dict:
                     "desc": desc if caller["active"] else ("Last heard — " + desc),
                     "location": "",
                     "country": _dmr_id_country_iso(caller["id"]),
+                "dmr_name": caller.get("name") or "", "dmr_talker": True,
                 }
             return {"callsign": _DVSWITCH_BRIDGE_NODE_INFO["callsign"], "desc": desc, "location": ""}
         if caller["callsign"]:
@@ -6067,7 +6069,8 @@ def lookup_node(node: str) -> dict:
             if not caller["active"]:
                 desc = "Last heard — " + desc
             return {"callsign": caller["callsign"], "desc": desc, "location": "",
-                    "country": _dmr_id_country_iso(caller["id"])}
+                    "country": _dmr_id_country_iso(caller["id"]),
+                "dmr_name": caller.get("name") or "", "dmr_talker": True}
         return dict(_DVSWITCH_BRIDGE_NODE_INFO)
 
     el_id = _echolink_station_id(node)
@@ -8158,6 +8161,8 @@ def api_status_board():
                 "callsign":       cn_info.get("callsign", ""),
                 "desc":           cn_info.get("desc", ""),
                 "country":        cn_info.get("country", ""),   # ISO alpha-2; DMR bridge talker only
+                "dmr_name":       cn_info.get("dmr_name", ""),  # DMRIds.dat name; DMR bridge talker only
+                "dmr_talker":     bool(cn_info.get("dmr_talker")),
                 "location":       cn_loc,
                 "keyed":          link_info.get("keyed", False),
                 "mode":           link_info.get("mode", ""),  # 'T' = transmit/transceive, 'R' = monitor/receive-only
@@ -15558,7 +15563,7 @@ _DVSWITCH_BEGIN_TX_RE  = re.compile(r'ODMR Begin Tx: src = (\d+), dst = (\d+)')
 _DVSWITCH_END_TX_RE    = re.compile(r'ODMR End Tx')
 _DVSWITCH_TA_RE        = re.compile(r'^TA = (\S+)')
 
-_dvswitch_caller_cache = {"active": False, "id": None, "callsign": None, "tg": None, "ts": 0}
+_dvswitch_caller_cache = {"active": False, "id": None, "callsign": None, "name": None, "tg": None, "ts": 0}
 _dvswitch_caller_lock  = threading.Lock()
 # Small on-demand ID->callsign cache, NOT a bulk load of the whole 6.6MB/
 # ~313k-row DMRIds.dat into memory -- that file is sorted/greppable in
@@ -15569,11 +15574,13 @@ _dvswitch_caller_id_cache = {}
 DVSWITCH_CALLER_POLL_SEC = 3
 
 
-def _dvswitch_lookup_dmr_callsign(dmr_id):
+def _dvswitch_lookup_dmr(dmr_id):
+    """(callsign, name) for a DMR ID from DMRIds.dat ("<id> <callsign>
+    <name...>"), either None when absent. Cached per ID, including misses."""
     with _dvswitch_caller_lock:
         if dmr_id in _dvswitch_caller_id_cache:
             return _dvswitch_caller_id_cache[dmr_id]
-    callsign = None
+    callsign = name = None
     try:
         r = subprocess.run(["grep", "-m1", f"^{dmr_id} ", DVSWITCH_DMRIDS_PATH],
                             capture_output=True, text=True, timeout=3)
@@ -15581,11 +15588,17 @@ def _dvswitch_lookup_dmr_callsign(dmr_id):
             parts = r.stdout.split(None, 2)
             if len(parts) >= 2:
                 callsign = parts[1]
+            if len(parts) >= 3:
+                name = parts[2].strip() or None
     except Exception:
         pass
     with _dvswitch_caller_lock:
-        _dvswitch_caller_id_cache[dmr_id] = callsign
-    return callsign
+        _dvswitch_caller_id_cache[dmr_id] = (callsign, name)
+    return callsign, name
+
+
+def _dvswitch_lookup_dmr_callsign(dmr_id):
+    return _dvswitch_lookup_dmr(dmr_id)[0]
 
 
 def start_dvswitch_caller_poller():
@@ -15605,11 +15618,11 @@ def start_dvswitch_caller_poller():
                         m = _DVSWITCH_BEGIN_TX_RE.search(line)
                         if m:
                             dmr_id, tg = m.group(1), m.group(2)
-                            callsign = _dvswitch_lookup_dmr_callsign(dmr_id)
+                            callsign, dmr_name = _dvswitch_lookup_dmr(dmr_id)
                             with _dvswitch_caller_lock:
                                 _dvswitch_caller_cache.update({
                                     "active": True, "id": dmr_id,
-                                    "callsign": callsign, "tg": tg,
+                                    "callsign": callsign, "name": dmr_name, "tg": tg,
                                     "ts": time.time(),
                                 })
                             continue
