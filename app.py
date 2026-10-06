@@ -9343,14 +9343,7 @@ class _AudioBroadcast:
             # relay_proc/ffmpeg_proc above just did), this just fails
             # harmlessly ("No such channel").
             if self._tap_channel_id:
-                def _hangup_tap(ami):
-                    ami._send_action({'Action': 'Hangup', 'Channel': self._tap_channel_id})
-                    ami._recv_until('\r\n\r\n', timeout=ami.timeout)
-                    return {'ok': True}
-                try:
-                    ami_send_command(_hangup_tap)
-                except Exception:
-                    pass
+                _hangup_tap_channel(self._tap_channel_id, self.node, 'broadcast shutdown')
         else:
             def _stop_mm(ami):
                 params = {'Action': 'StopMixMonitor', 'Channel': self.channel}
@@ -9371,6 +9364,88 @@ class _AudioBroadcast:
                 pass
         log('INFO', f'[AUDIO] broadcast for node {self.node} shut down '
                     f'(tap_mode={self._tap_mode})')
+
+
+_TAP_CHANNEL_ID_PREFIX = 'henwen-tap-'
+
+
+def _parse_concise_channels(lines):
+    """Parse `core show channels concise` output (one '!'-separated row per
+    channel: name!context!exten!priority!state!app!data!callerid!accountcode!
+    peeraccount!amaflags!duration!bridgeid!uniqueid) into a list of
+    {'name', 'app', 'uniqueid'} dicts, skipping anything that doesn't have
+    the full 14 fields. A caller-assigned Originate ChannelId becomes the
+    uniqueid of the ;1 leg, and '<ChannelId>;2' for the other half of a
+    Local-channel pair -- confirmed live against Asterisk 22.
+    """
+    out = []
+    for line in lines:
+        parts = line.split('!')
+        if len(parts) < 14:
+            continue
+        out.append({'name': parts[0], 'app': parts[5], 'uniqueid': parts[-1].strip()})
+    return out
+
+
+def _classify_hangup_reply(pkt):
+    """Classify an AMI Hangup reply: 'ok' (Response: Success), 'gone'
+    (Error / "No such channel" -- already hung up, which is a fine outcome
+    for a teardown) or 'error' (anything else)."""
+    if (pkt or {}).get('Response') == 'Success':
+        return 'ok'
+    if 'no such channel' in str((pkt or {}).get('Message', '')).lower():
+        return 'gone'
+    return 'error'
+
+
+def _tap_legs_alive(channel_id):
+    """Whether any leg of the tap originated with this ChannelId still
+    exists. Returns True/False, or None if the listing itself failed
+    (unknown -- callers must not treat that as a leak)."""
+    try:
+        lines = ami_send_command(lambda ami: {'lines': ami.command('core show channels concise',
+                                                                    log_level='DEBUG')}).get('lines', [])
+    except Exception as e:
+        log('DEBUG', f'[AUDIO] tap liveness check for {channel_id} failed: {e}')
+        return None
+    return any(c['uniqueid'] == channel_id or c['uniqueid'].startswith(channel_id + ';')
+               for c in _parse_concise_channels(lines))
+
+
+def _hangup_tap_channel(channel_id, node, context):
+    """Hang up an AudioSocket tap by its caller-assigned ChannelId and
+    confirm it actually went away. Returns True once confirmed gone.
+
+    Previously every teardown path fired the Hangup, discarded the reply and
+    swallowed every exception, so a tap leg that ignored the Hangup (a stuck
+    ChanSpy leg -- see _try_audiosocket_tap()'s docstring) leaked with
+    nothing in the journal at all. Failures here are WARN-level; "no such
+    channel" is not a failure (it already hung up on its own, which is the
+    normal outcome once the relay's AudioSocket connection closes).
+    """
+    def _hangup(ami):
+        ami._send_action({'Action': 'Hangup', 'Channel': channel_id})
+        raw = ami._recv_until('\r\n\r\n', timeout=ami.timeout)
+        return ami._parse_packet(raw)
+    try:
+        pkt = ami_send_command(_hangup)
+    except Exception as e:
+        log('WARN', f'[AUDIO] tap Hangup for node {node} ({context}) raised: {e}; '
+                    f'channel {channel_id} may be leaked')
+        return False
+    if _classify_hangup_reply(pkt) == 'error':
+        log('WARN', f'[AUDIO] tap Hangup for node {node} ({context}) rejected: '
+                    f'{pkt.get("Message", pkt)}')
+    for _ in range(5):
+        alive = _tap_legs_alive(channel_id)
+        if alive is None:
+            return False
+        if not alive:
+            return True
+        time.sleep(0.3)
+    log('WARN', f'[AUDIO] tap channel {channel_id} for node {node} ({context}) is still '
+                f'present ~1.5s after Hangup -- likely leaked until Asterisk restarts')
+    return False
 
 
 def _try_audiosocket_tap(node, channel, fifo_out_path, gen, relay_env):
@@ -9507,14 +9582,7 @@ def _try_audiosocket_tap(node, channel, fifo_out_path, gen, relay_env):
     connected_line = _readline(10.0)
     if connected_line != 'CONNECTED':
         _abort(f'never connected (got {connected_line!r})')
-        try:
-            def _hangup(ami):
-                ami._send_action({'Action': 'Hangup', 'Channel': tap_channel_id})
-                ami._recv_until('\r\n\r\n', timeout=ami.timeout)
-                return {'ok': True}
-            ami_send_command(_hangup)
-        except Exception:
-            pass
+        _hangup_tap_channel(tap_channel_id, node, 'tap never connected')
         return None
 
     log('DEBUG', f'[AUDIO] AudioSocket tap connected for node {node} on 127.0.0.1:{port}')
@@ -9970,14 +10038,7 @@ class _CaptureOnlyRelay:
             # the ChanSpy leg by its known ChannelId tears down both halves
             # of the Local-channel bridge.
             if self.tap_channel_id:
-                def _hangup_tap(ami):
-                    ami._send_action({'Action': 'Hangup', 'Channel': self.tap_channel_id})
-                    ami._recv_until('\r\n\r\n', timeout=ami.timeout)
-                    return {'ok': True}
-                try:
-                    ami_send_command(_hangup_tap)
-                except Exception:
-                    pass
+                _hangup_tap_channel(self.tap_channel_id, self.node, 'capture-only teardown')
         else:
             def _stop_mm(ami):
                 params = {'Action': 'StopMixMonitor', 'Channel': self.channel}
