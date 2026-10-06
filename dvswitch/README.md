@@ -10,10 +10,17 @@ from Manager > DVSwitch (Owner role only).
 ## How it fits together
 
 1. Owner fills in DMR ID, callsign, DMR network host/port/password, a
-   bridge node number, and (optionally) AMBE gain/hardware settings in
-   Manager > DVSwitch. Saved to the `dvswitch_config` table via
-   `GET/POST /api/dvswitch/config`.
-2. Once the required fields are complete, a "Run Guided Setup" button
+   bridge node number, their station's latitude/longitude, and
+   (optionally) AMBE gain/hardware settings in Manager > DVSwitch. Saved
+   to the `dvswitch_config` table via `GET/POST /api/dvswitch/config`.
+   Latitude/longitude may be left blank on save (so an unrelated edit
+   isn't blocked) but **Guided Setup refuses to run without them**: they
+   are never defaulted or guessed, since `apply.sh` writes them into
+   `MMDVM_Bridge.ini`'s `[Info]` section, which the bridge reports to the
+   DMR network when it logs in (TGIF/custom — `MMDVM_Bridge` itself isn't
+   used for BrandMeister, but the ini is kept accurate either way). Enter
+   decimal degrees; south and west are negative.
+2. Once the required fields (including the location) are complete, a "Run Guided Setup" button
    appears. Clicking it hits `POST /api/dvswitch/apply`, which:
    - creates the bridge node's rpt.conf stanza in Python
      (`append_node_stanza()` in app.py) if it doesn't already exist —

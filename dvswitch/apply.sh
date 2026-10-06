@@ -59,11 +59,21 @@ with open(sys.argv[1]) as f:
 for k in ("dmr_id","callsign","dmr_network","network_host","network_port",
           "network_password","static_talkgroups","allstar_gain","dmr_gain",
           "ambe_source","ambe_device","ambe_host","ambe_port",
+          "latitude","longitude",
           "usrp_asterisk_rxport","usrp_asterisk_txport"):
     print(f"DVS_{k.upper()}={shlex.quote(str(c.get(k, '')))}")
 PYEOF
 )"
 echo "== Config: DMR ID $DVS_DMR_ID, callsign $DVS_CALLSIGN, network $DVS_DMR_NETWORK ($DVS_NETWORK_HOST:$DVS_NETWORK_PORT), AMBE source: $DVS_AMBE_SOURCE"
+
+# The station's own coordinates, entered by the owner in Manager > DVSwitch
+# (not defaulted or guessed here: a wrong location is reported to the DMR
+# network as if it were true). The route already refuses to run without
+# them; this is the same check for anyone running the script by hand.
+[ -n "$DVS_LATITUDE" ] && [ -n "$DVS_LONGITUDE" ] || {
+  echo "ERROR: latitude/longitude missing from $CONFIG_JSON -- set them in Manager > DVSwitch first"
+  exit 1
+}
 
 # BrandMeister only: derived from network_host's leading master-number
 # digits (e.g. "3104.master.brandmeister.network" or "3104.repeater.net"
@@ -186,6 +196,14 @@ with open(path, "w") as f:
     f.writelines(out)
 PYEOF
 }
+
+echo "== Patching $MMDVM_BRIDGE_INI [Info] location ($DVS_LATITUDE, $DVS_LONGITUDE)"
+# [Info] is repeater metadata the bridge reports to the DMR network at login.
+# Written regardless of network: MMDVM_Bridge itself only runs for
+# TGIF/custom, but keeping the ini accurate means switching networks later
+# can't surface a stale/default location.
+patch_ini "$MMDVM_BRIDGE_INI" "Info" "Latitude" "$DVS_LATITUDE"
+patch_ini "$MMDVM_BRIDGE_INI" "Info" "Longitude" "$DVS_LONGITUDE"
 
 echo "== Patching $ANALOG_BRIDGE_INI"
 patch_ini "$ANALOG_BRIDGE_INI" "USRP" "address" "127.0.0.1"
