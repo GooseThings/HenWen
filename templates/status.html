@@ -779,6 +779,7 @@ svg.kiosk-login-icon { display: none; }
 .nr-call { flex: 0 0 auto;
   font-size: 0.95rem; font-weight: 600; color: var(--text); letter-spacing: .03em; text-decoration: none; }
 .nr-call:hover { text-decoration: underline; }
+.nr-flag { flex: 0 0 auto; margin-left: calc(-10px + 0.3em); /* cancels .nr-line's 10px gap, leaving ~one space */  height: 0.8rem; width: auto; align-self: center; border-radius: 2px; box-shadow: 0 0 0 1px rgba(128,128,128,.35); }
 .nr-loc  { flex: 0 1 auto; min-width: 0; font-size: 0.82rem; color: var(--text2);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .nr-meta { min-width: 0; font-size: 0.72rem; color: var(--text2);
@@ -1203,6 +1204,7 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
    makes the live TG one tap away via the browse popup, so this is just a
    convenience for a phone-sized screen where nothing else on the row
    surfaces it at a glance. */
+.tg-heard-badge { font-size: 0.65rem; white-space: nowrap; color: var(--text2); }
 .tg-current-badge { display: none; font-size: 0.65rem; font-weight: 600; white-space: nowrap;
   color: var(--green); }
 
@@ -2581,6 +2583,16 @@ function callsignLink(callsign, cssClass, displayText) {
   var qrzCall = _qrzCallsign(callsign);
   return '<a class="' + cssClass + '" href="https://www.qrz.com/db/' +
     encodeURIComponent(qrzCall) + '" target="_blank" rel="noopener">' + esc(displayText || callsign) + '</a>';
+}
+
+/* ISO alpha-2 -> vendored flag SVG (static/vendor/flags/, flag-icons 7.5.0,
+   MIT), not an emoji: Windows browsers have no flag glyphs and would show
+   two letters instead. Empty for anything that isn't two A-Z letters; a
+   missing file just hides the image rather than leaving a broken icon. */
+function countryFlag(iso) {
+  if (!/^[A-Z]{2}$/.test(iso || '')) return '';
+  return '<img class="nr-flag" src="/static/vendor/flags/' + iso.toLowerCase() + '.svg" alt="' + esc(iso) +
+    '" title="' + esc(iso) + '" loading="lazy" onerror="this.style.display=\'none\'">';
 }
 
 /* APRS station callsign rendered as a link to its aprs.fi tracking page —
@@ -5210,7 +5222,12 @@ async function refreshBoard() {
               (tgName ? ' &middot; ' + esc(tgName) : '') + '</span>';
           }
         }
-        var badges = modeBadge + tgBtn + tgCurrent;
+        /* The talker's "DMR · TG n" / "Last heard — ..." text used to fill the
+           .nr-loc slot (a bridge row has no location); now the talker's name
+           takes that slot and this sits next to the Talkgroups button. */
+        var tgHeard = (isDvswitchBridge && c.dmr_talker && c.desc)
+          ? '<span class="tg-heard-badge">' + esc(c.desc) + '</span>' : '';
+        var badges = modeBadge + tgBtn + tgHeard + tgCurrent;
         var dotClass = !isConn ? ' connecting' : (c.keyed ? ' keyed' : ' connected');
         var isAdminRole = window._kioskRole === 'admin' || window._kioskRole === 'superuser' || window._kioskRole === 'owner';
         var dcBtn = (c.connector_managed && !isAdminRole)
@@ -5233,7 +5250,8 @@ async function refreshBoard() {
             '<div class="nr-line">' +
               nodeLink(c.node, 'nr-num') +
               (c.callsign ? callsignLink(c.callsign, 'nr-call') : '<div class="nr-call">—</div>') +
-              '<div class="nr-loc">' + esc(c.location||c.desc||'') + '</div>' +
+              (isDvswitchBridge && c.callsign ? countryFlag(c.country) : '') +
+              '<div class="nr-loc">' + esc(c.dmr_talker ? (c.dmr_name || '') : (c.location||c.desc||'')) + '</div>' +
             '</div>' +
             (meta.length ? '<div class="nr-meta"><span>' + meta.join('</span><span>') + '</span></div>' : '') +
             (badges ? '<div class="nr-meta nr-badges">' + badges + '</div>' : '') +

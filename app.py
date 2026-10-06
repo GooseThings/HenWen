@@ -5911,6 +5911,44 @@ def load_astdb():
     return False
 
 
+# DMR radio IDs lead with the caller's country as a 3-digit ITU E.212 MCC
+# (e.g. 310xxxx = United States), the same convention BrandMeister's own
+# talkgroup numbering follows (see _derive_bm_talkgroup_countries()). Only
+# 7+ digit IDs carry one -- legacy 6-digit IDs predate the scheme -- and a
+# prefix missing from this table just means no flag, never a guess. Checked
+# against DMRIds.dat's own callsigns (majority callsign-prefix country per
+# MCC): US IDs run 110-115 and 310-322, Germany 262-264, not just the first
+# block of each.
+_DMR_MCC_TO_ISO = {
+    **dict.fromkeys(range(110, 116), "US"), **dict.fromkeys(range(310, 323), "US"), 302: "CA", 334: "MX", 330: "PR",
+    234: "GB", 235: "GB", 262: "DE", 263: "DE", 264: "DE", 215: "ES", 223: "IT",
+    461: "CN", 401: "KZ", 422: "OM", 208: "FR", 222: "IT", 214: "ES",
+    268: "PT", 204: "NL", 206: "BE", 270: "LU", 228: "CH", 232: "AT",
+    238: "DK", 240: "SE", 242: "NO", 244: "FI", 246: "LT", 247: "LV",
+    248: "EE", 250: "RU", 255: "UA", 257: "BY", 259: "MD", 260: "PL",
+    230: "CZ", 231: "SK", 216: "HU", 226: "RO", 284: "BG", 219: "HR",
+    293: "SI", 220: "RS", 202: "GR", 286: "TR", 272: "IE", 274: "IS",
+    278: "MT", 280: "CY", 218: "BA", 294: "MK", 276: "AL",
+    724: "BR", 722: "AR", 730: "CL", 732: "CO", 734: "VE", 740: "EC",
+    716: "PE", 748: "UY", 744: "PY", 736: "BO", 712: "CR", 714: "PA",
+    704: "GT", 706: "SV", 708: "HN", 710: "NI", 338: "JM", 370: "DO",
+    372: "HT", 368: "CU", 374: "TT",
+    505: "AU", 530: "NZ", 440: "JP", 441: "JP", 450: "KR", 460: "CN",
+    454: "HK", 466: "TW", 515: "PH", 510: "ID", 502: "MY", 525: "SG",
+    520: "TH", 452: "VN", 404: "IN", 405: "IN", 410: "PK", 470: "BD",
+    413: "LK", 425: "IL", 424: "AE", 420: "SA", 432: "IR", 602: "EG",
+    655: "ZA", 604: "MA", 605: "TN", 603: "DZ", 639: "KE", 621: "NG",
+}
+
+
+def _dmr_id_country_iso(dmr_id):
+    """ISO 3166 alpha-2 for a DMR radio ID's MCC prefix, or "" if unknown."""
+    d = str(dmr_id or "")
+    if len(d) < 7 or not d.isdigit():
+        return ""
+    return _DMR_MCC_TO_ISO.get(int(d[:3]), "")
+
+
 _ALLMONDB_EMPTY = {"callsign": "", "desc": "", "location": ""}
 _DVSWITCH_BRIDGE_NODE_INFO = {"callsign": "DVSwitch Bridge", "desc": "Internal DMR bridge node", "location": ""}
 
@@ -6009,6 +6047,8 @@ def lookup_node(node: str) -> dict:
                 "callsign": caller["callsign"],
                 "desc": ("DMR · TG " + caller["tg"]) if caller["tg"] else "DMR",
                 "location": "",
+                "country": _dmr_id_country_iso(caller["id"]),
+                "dmr_name": caller.get("name") or "", "dmr_talker": True,
             }
         if current_tg:
             # The actually-tuned TG always wins over the caller cache's own
@@ -6024,13 +6064,17 @@ def lookup_node(node: str) -> dict:
                     "callsign": caller["callsign"],
                     "desc": desc if caller["active"] else ("Last heard — " + desc),
                     "location": "",
+                    "country": _dmr_id_country_iso(caller["id"]),
+                "dmr_name": caller.get("name") or "", "dmr_talker": True,
                 }
             return {"callsign": _DVSWITCH_BRIDGE_NODE_INFO["callsign"], "desc": desc, "location": ""}
         if caller["callsign"]:
             desc = ("DMR · TG " + caller["tg"]) if caller["tg"] else "DMR"
             if not caller["active"]:
                 desc = "Last heard — " + desc
-            return {"callsign": caller["callsign"], "desc": desc, "location": ""}
+            return {"callsign": caller["callsign"], "desc": desc, "location": "",
+                    "country": _dmr_id_country_iso(caller["id"]),
+                "dmr_name": caller.get("name") or "", "dmr_talker": True}
         return dict(_DVSWITCH_BRIDGE_NODE_INFO)
 
     el_id = _echolink_station_id(node)
@@ -8120,6 +8164,9 @@ def api_status_board():
                 "node":           cn,
                 "callsign":       cn_info.get("callsign", ""),
                 "desc":           cn_info.get("desc", ""),
+                "country":        cn_info.get("country", ""),   # ISO alpha-2; DMR bridge talker only
+                "dmr_name":       cn_info.get("dmr_name", ""),  # DMRIds.dat name; DMR bridge talker only
+                "dmr_talker":     bool(cn_info.get("dmr_talker")),
                 "location":       cn_loc,
                 "keyed":          link_info.get("keyed", False),
                 "mode":           link_info.get("mode", ""),  # 'T' = transmit/transceive, 'R' = monitor/receive-only
@@ -15520,7 +15567,7 @@ _DVSWITCH_BEGIN_TX_RE  = re.compile(r'ODMR Begin Tx: src = (\d+), dst = (\d+)')
 _DVSWITCH_END_TX_RE    = re.compile(r'ODMR End Tx')
 _DVSWITCH_TA_RE        = re.compile(r'^TA = (\S+)')
 
-_dvswitch_caller_cache = {"active": False, "id": None, "callsign": None, "tg": None, "ts": 0}
+_dvswitch_caller_cache = {"active": False, "id": None, "callsign": None, "name": None, "tg": None, "ts": 0}
 _dvswitch_caller_lock  = threading.Lock()
 # Small on-demand ID->callsign cache, NOT a bulk load of the whole 6.6MB/
 # ~313k-row DMRIds.dat into memory -- that file is sorted/greppable in
@@ -15531,11 +15578,46 @@ _dvswitch_caller_id_cache = {}
 DVSWITCH_CALLER_POLL_SEC = 3
 
 
-def _dvswitch_lookup_dmr_callsign(dmr_id):
+RADIOID_USER_API = "https://radioid.net/api/dmr/user/?id="
+RADIOID_RETRY_SEC = 600   # how long a failed API call falls back to the file's first name
+
+
+def _radioid_full_name(payload):
+    """Pure: 'First Last' from a RadioID /api/dmr/user response dict, or
+    None. surname is often blank (users choose whether to publish one)."""
+    try:
+        r = (payload.get("results") or [None])[0]
+        if not r:
+            return None
+        return " ".join(x.strip() for x in (r.get("fname") or "", r.get("surname") or "") if x and x.strip()) or None
+    except Exception:
+        return None
+
+
+def _radioid_fetch_name(dmr_id):
+    """(ok, name). One small public-API call per previously-unseen talker
+    (results are cached), because DMRIds.dat only carries a first name."""
+    try:
+        req = urlreq.Request(RADIOID_USER_API + urlparse.quote(str(dmr_id)),
+                                     headers={"User-Agent": "HenWen (N8GMZ)"})
+        with urlreq.urlopen(req, timeout=3) as resp:
+            return True, _radioid_full_name(json.loads(resp.read(65536).decode("utf-8", "replace")))
+    except Exception as e:
+        log("DEBUG", f"[DVSWITCH] RadioID name lookup failed for {dmr_id}: {e}")
+        return False, None
+
+
+def _dvswitch_lookup_dmr(dmr_id):
+    """(callsign, name) for a DMR ID. Callsign and first name come from
+    DMRIds.dat ("<id> <callsign> <first name>"); the full name (with
+    surname, when the user published one) is then fetched from RadioID and
+    wins when available. Cached per ID, including misses; an ID whose API
+    call failed keeps the file's name but is retried after RADIOID_RETRY_SEC."""
     with _dvswitch_caller_lock:
-        if dmr_id in _dvswitch_caller_id_cache:
-            return _dvswitch_caller_id_cache[dmr_id]
-    callsign = None
+        hit = _dvswitch_caller_id_cache.get(dmr_id)
+    if hit is not None and (len(hit) < 3 or time.time() < hit[2]):
+        return hit[0], hit[1]
+    callsign = name = None
     try:
         r = subprocess.run(["grep", "-m1", f"^{dmr_id} ", DVSWITCH_DMRIDS_PATH],
                             capture_output=True, text=True, timeout=3)
@@ -15543,18 +15625,95 @@ def _dvswitch_lookup_dmr_callsign(dmr_id):
             parts = r.stdout.split(None, 2)
             if len(parts) >= 2:
                 callsign = parts[1]
+            if len(parts) >= 3:
+                name = parts[2].strip() or None
     except Exception:
         pass
+    retry_at = float("inf")
+    if callsign:
+        ok, full = _radioid_fetch_name(dmr_id)
+        if ok:
+            if full:
+                name = full
+        else:
+            retry_at = time.time() + RADIOID_RETRY_SEC
     with _dvswitch_caller_lock:
-        _dvswitch_caller_id_cache[dmr_id] = callsign
-    return callsign
+        _dvswitch_caller_id_cache[dmr_id] = (callsign, name, retry_at)
+    return callsign, name
+
+
+def _dvswitch_lookup_dmr_callsign(dmr_id):
+    return _dvswitch_lookup_dmr(dmr_id)[0]
+
+
+# A third of the streams on a busy static TG (TG 91 measured: 970 of 2964)
+# are blips under a second -- 3-9 DMR frames at 60ms each -- from hotspot
+# kerchunks and contention. Showing each as "the caller" flickered a string
+# of unrelated callsigns across the kiosk. A stream is only promoted to the
+# displayed caller once it has lasted this long (End Tx frame count, or a
+# TA line, or wall-clock age if still running).
+DVSWITCH_MIN_CALLER_FRAMES = 15
+DVSWITCH_MIN_CALLER_SEC = 1.0
+_DVSWITCH_END_FRAMES_RE = re.compile(r'frame count was (\d+)')
+
+
+def _dvswitch_commit_caller(pending):
+    callsign, dmr_name = _dvswitch_lookup_dmr(pending["id"])
+    with _dvswitch_caller_lock:
+        _dvswitch_caller_cache.update({
+            "active": True, "id": pending["id"],
+            "callsign": callsign, "name": dmr_name, "tg": pending["tg"],
+            "ts": time.time(),
+        })
+    pending["committed"] = True
+
+
+def _dvswitch_process_caller_lines(lines, state, now=None):
+    """Feed new STFU log lines into the caller cache. `state` is
+    {"pending": None|{id, tg, since, committed}} carried between calls.
+    Streams shorter than DVSWITCH_MIN_CALLER_FRAMES never become the caller
+    (and never trigger the DMRIds grep/RadioID lookup)."""
+    now = time.time() if now is None else now
+    for line in lines:
+        m = _DVSWITCH_BEGIN_TX_RE.search(line)
+        if m:
+            p = state.get("pending")
+            if p and not p["committed"]:
+                _dvswitch_commit_caller(p)   # its End Tx was lost; don't drop a real talker
+            state["pending"] = {"id": m.group(1), "tg": m.group(2), "since": now, "committed": False}
+            continue
+        if _DVSWITCH_END_TX_RE.search(line):
+            p = state.get("pending")
+            fm = _DVSWITCH_END_FRAMES_RE.search(line)
+            frames = int(fm.group(1)) if fm else None
+            if p and not p["committed"] and (frames is None or frames >= DVSWITCH_MIN_CALLER_FRAMES):
+                _dvswitch_commit_caller(p)
+            with _dvswitch_caller_lock:
+                if p is None or p["committed"] or frames is None or frames >= DVSWITCH_MIN_CALLER_FRAMES:
+                    _dvswitch_caller_cache["active"] = False
+                # else: a blip that was never shown -- leave the previous caller's state alone
+            state["pending"] = None
+            continue
+        m = _DVSWITCH_TA_RE.match(line.strip())
+        if m:
+            p = state.get("pending")
+            if p and not p["committed"]:
+                _dvswitch_commit_caller(p)   # an alias means a real, sustained stream
+            with _dvswitch_caller_lock:
+                if _dvswitch_caller_cache["id"] is not None:
+                    _dvswitch_caller_cache["callsign"] = m.group(1)
+    p = state.get("pending")
+    if p and not p["committed"] and now - p["since"] >= DVSWITCH_MIN_CALLER_SEC:
+        _dvswitch_commit_caller(p)   # still running past the blip window
 
 
 def start_dvswitch_caller_poller():
     def _loop():
         offset = 0
+        state = {"pending": None}
         while True:
             try:
+                new_data = ""
                 if os.path.isfile(DVSWITCH_STFU_LOG_PATH):
                     size = os.path.getsize(DVSWITCH_STFU_LOG_PATH)
                     if size < offset:
@@ -15563,30 +15722,12 @@ def start_dvswitch_caller_poller():
                         f.seek(offset)
                         new_data = f.read()
                         offset = f.tell()
-                    for line in new_data.splitlines():
-                        m = _DVSWITCH_BEGIN_TX_RE.search(line)
-                        if m:
-                            dmr_id, tg = m.group(1), m.group(2)
-                            callsign = _dvswitch_lookup_dmr_callsign(dmr_id)
-                            with _dvswitch_caller_lock:
-                                _dvswitch_caller_cache.update({
-                                    "active": True, "id": dmr_id,
-                                    "callsign": callsign, "tg": tg,
-                                    "ts": time.time(),
-                                })
-                            continue
-                        if _DVSWITCH_END_TX_RE.search(line):
-                            with _dvswitch_caller_lock:
-                                _dvswitch_caller_cache["active"] = False
-                            continue
-                        m = _DVSWITCH_TA_RE.match(line.strip())
-                        if m:
-                            with _dvswitch_caller_lock:
-                                if _dvswitch_caller_cache["id"] is not None:
-                                    _dvswitch_caller_cache["callsign"] = m.group(1)
+                _dvswitch_process_caller_lines(new_data.splitlines(), state)
             except Exception as e:
                 log("DEBUG", f"[DVSWITCH] caller poll failed (likely STFU not in use): {e}")
-            time.sleep(DVSWITCH_CALLER_POLL_SEC)
+            p = state.get("pending")
+            # Poll fast while a stream is waiting out its blip window.
+            time.sleep(1.0 if p and not p["committed"] else DVSWITCH_CALLER_POLL_SEC)
     threading.Thread(target=_loop, daemon=True, name="dvswitch-caller-poller").start()
 
 
