@@ -6055,7 +6055,7 @@ def lookup_node(node: str) -> dict:
         with _dvswitch_caller_lock:
             caller = dict(_dvswitch_caller_cache)
         current_tg = _dvswitch_current_tg()
-        if caller["active"] and caller["callsign"] and _dvswitch_bridge_keyed():
+        if caller["active"] and caller["callsign"]:
             # Someone is on the air right now: always show them, with the
             # TG their traffic actually arrived on. Static talkgroups
             # (e.g. 91) deliver audio regardless of which TG the bridge is
@@ -15745,48 +15745,65 @@ def _dvswitch_commit_caller(pending):
     pending["committed"] = True
 
 
-def _dvswitch_process_caller_lines(lines, state, now=None):
+def _dvswitch_process_caller_lines(lines, state, now=None, keyed_now=True):
     """Feed new STFU log lines into the caller cache. `state` is
-    {"pending": None|{id, tg, since, committed}} carried between calls.
-    Streams shorter than DVSWITCH_MIN_CALLER_FRAMES never become the caller
-    (and never trigger the DMRIds grep/RadioID lookup)."""
+    {"pending": None|{id, tg, since, committed, keyed}} carried between
+    calls. A stream only becomes the caller if it (a) lasted at least
+    DVSWITCH_MIN_CALLER_FRAMES and (b) was seen with the bridge link keyed
+    (`keyed_now`, from _dvswitch_bridge_keyed()) -- STFU logs streams that
+    never produce audio, and those must not become the caller or the
+    "last heard" entry. Rejected streams never trigger the DMRIds grep/
+    RadioID lookup either."""
     now = time.time() if now is None else now
+    p = state.get("pending")
+    if p and keyed_now:
+        p["keyed"] = True
     for line in lines:
         m = _DVSWITCH_BEGIN_TX_RE.search(line)
         if m:
             p = state.get("pending")
-            if p and not p["committed"]:
+            if p and not p["committed"] and p["keyed"]:
                 _dvswitch_commit_caller(p)   # its End Tx was lost; don't drop a real talker
-            state["pending"] = {"id": m.group(1), "tg": m.group(2), "since": now, "committed": False}
+            state["pending"] = {"id": m.group(1), "tg": m.group(2), "since": now,
+                                "committed": False, "keyed": bool(keyed_now)}
             continue
         if _DVSWITCH_END_TX_RE.search(line):
             p = state.get("pending")
             fm = _DVSWITCH_END_FRAMES_RE.search(line)
             frames = int(fm.group(1)) if fm else None
-            if p and not p["committed"] and (frames is None or frames >= DVSWITCH_MIN_CALLER_FRAMES):
+            long_enough = frames is None or frames >= DVSWITCH_MIN_CALLER_FRAMES
+            if p and not p["committed"] and long_enough and p["keyed"]:
                 _dvswitch_commit_caller(p)
             with _dvswitch_caller_lock:
-                if p is None or p["committed"] or frames is None or frames >= DVSWITCH_MIN_CALLER_FRAMES:
+                if p is None or p["committed"] or (long_enough and p["keyed"]):
                     _dvswitch_caller_cache["active"] = False
-                # else: a blip that was never shown -- leave the previous caller's state alone
+                # else: a blip / audio-less stream that was never shown -- leave the previous caller's state alone
             state["pending"] = None
             continue
         m = _DVSWITCH_TA_RE.match(line.strip())
         if m:
             p = state.get("pending")
-            if p and not p["committed"]:
+            if p and not p["committed"] and p["keyed"]:
                 _dvswitch_commit_caller(p)   # an alias means a real, sustained stream
             with _dvswitch_caller_lock:
-                if _dvswitch_caller_cache["id"] is not None:
+                if _dvswitch_caller_cache["id"] is not None and (p is None or p["committed"]):
                     _dvswitch_caller_cache["callsign"] = m.group(1)
     p = state.get("pending")
-    if p and not p["committed"] and now - p["since"] >= DVSWITCH_MIN_CALLER_SEC:
+    if p and not p["committed"] and p["keyed"] and now - p["since"] >= DVSWITCH_MIN_CALLER_SEC:
         _dvswitch_commit_caller(p)   # still running past the blip window
 
 
 def start_dvswitch_caller_poller():
     def _loop():
-        offset = 0
+        # Start at the END of the log, not the top: STFU.log holds a full
+        # day of history (~3000 streams), and replaying it on every service
+        # restart promoted each one in turn as "the caller" -- a flood of
+        # unrelated callsigns across the kiosk (plus a DMRIds grep and a
+        # RadioID call apiece) after every deploy. Only new traffic counts.
+        try:
+            offset = os.path.getsize(DVSWITCH_STFU_LOG_PATH)
+        except OSError:
+            offset = 0
         state = {"pending": None}
         while True:
             try:
@@ -15799,7 +15816,8 @@ def start_dvswitch_caller_poller():
                         f.seek(offset)
                         new_data = f.read()
                         offset = f.tell()
-                _dvswitch_process_caller_lines(new_data.splitlines(), state)
+                _dvswitch_process_caller_lines(new_data.splitlines(), state,
+                                               keyed_now=_dvswitch_bridge_keyed())
             except Exception as e:
                 log("DEBUG", f"[DVSWITCH] caller poll failed (likely STFU not in use): {e}")
             p = state.get("pending")
