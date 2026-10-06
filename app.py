@@ -15646,11 +15646,74 @@ def _dvswitch_lookup_dmr_callsign(dmr_id):
     return _dvswitch_lookup_dmr(dmr_id)[0]
 
 
+# A third of the streams on a busy static TG (TG 91 measured: 970 of 2964)
+# are blips under a second -- 3-9 DMR frames at 60ms each -- from hotspot
+# kerchunks and contention. Showing each as "the caller" flickered a string
+# of unrelated callsigns across the kiosk. A stream is only promoted to the
+# displayed caller once it has lasted this long (End Tx frame count, or a
+# TA line, or wall-clock age if still running).
+DVSWITCH_MIN_CALLER_FRAMES = 15
+DVSWITCH_MIN_CALLER_SEC = 1.0
+_DVSWITCH_END_FRAMES_RE = re.compile(r'frame count was (\d+)')
+
+
+def _dvswitch_commit_caller(pending):
+    callsign, dmr_name = _dvswitch_lookup_dmr(pending["id"])
+    with _dvswitch_caller_lock:
+        _dvswitch_caller_cache.update({
+            "active": True, "id": pending["id"],
+            "callsign": callsign, "name": dmr_name, "tg": pending["tg"],
+            "ts": time.time(),
+        })
+    pending["committed"] = True
+
+
+def _dvswitch_process_caller_lines(lines, state, now=None):
+    """Feed new STFU log lines into the caller cache. `state` is
+    {"pending": None|{id, tg, since, committed}} carried between calls.
+    Streams shorter than DVSWITCH_MIN_CALLER_FRAMES never become the caller
+    (and never trigger the DMRIds grep/RadioID lookup)."""
+    now = time.time() if now is None else now
+    for line in lines:
+        m = _DVSWITCH_BEGIN_TX_RE.search(line)
+        if m:
+            p = state.get("pending")
+            if p and not p["committed"]:
+                _dvswitch_commit_caller(p)   # its End Tx was lost; don't drop a real talker
+            state["pending"] = {"id": m.group(1), "tg": m.group(2), "since": now, "committed": False}
+            continue
+        if _DVSWITCH_END_TX_RE.search(line):
+            p = state.get("pending")
+            fm = _DVSWITCH_END_FRAMES_RE.search(line)
+            frames = int(fm.group(1)) if fm else None
+            if p and not p["committed"] and (frames is None or frames >= DVSWITCH_MIN_CALLER_FRAMES):
+                _dvswitch_commit_caller(p)
+            with _dvswitch_caller_lock:
+                if p is None or p["committed"] or frames is None or frames >= DVSWITCH_MIN_CALLER_FRAMES:
+                    _dvswitch_caller_cache["active"] = False
+                # else: a blip that was never shown -- leave the previous caller's state alone
+            state["pending"] = None
+            continue
+        m = _DVSWITCH_TA_RE.match(line.strip())
+        if m:
+            p = state.get("pending")
+            if p and not p["committed"]:
+                _dvswitch_commit_caller(p)   # an alias means a real, sustained stream
+            with _dvswitch_caller_lock:
+                if _dvswitch_caller_cache["id"] is not None:
+                    _dvswitch_caller_cache["callsign"] = m.group(1)
+    p = state.get("pending")
+    if p and not p["committed"] and now - p["since"] >= DVSWITCH_MIN_CALLER_SEC:
+        _dvswitch_commit_caller(p)   # still running past the blip window
+
+
 def start_dvswitch_caller_poller():
     def _loop():
         offset = 0
+        state = {"pending": None}
         while True:
             try:
+                new_data = ""
                 if os.path.isfile(DVSWITCH_STFU_LOG_PATH):
                     size = os.path.getsize(DVSWITCH_STFU_LOG_PATH)
                     if size < offset:
@@ -15659,30 +15722,12 @@ def start_dvswitch_caller_poller():
                         f.seek(offset)
                         new_data = f.read()
                         offset = f.tell()
-                    for line in new_data.splitlines():
-                        m = _DVSWITCH_BEGIN_TX_RE.search(line)
-                        if m:
-                            dmr_id, tg = m.group(1), m.group(2)
-                            callsign, dmr_name = _dvswitch_lookup_dmr(dmr_id)
-                            with _dvswitch_caller_lock:
-                                _dvswitch_caller_cache.update({
-                                    "active": True, "id": dmr_id,
-                                    "callsign": callsign, "name": dmr_name, "tg": tg,
-                                    "ts": time.time(),
-                                })
-                            continue
-                        if _DVSWITCH_END_TX_RE.search(line):
-                            with _dvswitch_caller_lock:
-                                _dvswitch_caller_cache["active"] = False
-                            continue
-                        m = _DVSWITCH_TA_RE.match(line.strip())
-                        if m:
-                            with _dvswitch_caller_lock:
-                                if _dvswitch_caller_cache["id"] is not None:
-                                    _dvswitch_caller_cache["callsign"] = m.group(1)
+                _dvswitch_process_caller_lines(new_data.splitlines(), state)
             except Exception as e:
                 log("DEBUG", f"[DVSWITCH] caller poll failed (likely STFU not in use): {e}")
-            time.sleep(DVSWITCH_CALLER_POLL_SEC)
+            p = state.get("pending")
+            # Poll fast while a stream is waiting out its blip window.
+            time.sleep(1.0 if p and not p["committed"] else DVSWITCH_CALLER_POLL_SEC)
     threading.Thread(target=_loop, daemon=True, name="dvswitch-caller-poller").start()
 
 
