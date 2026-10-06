@@ -1482,6 +1482,9 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
      comment above) there's even less width left on .nr-line for it to
      truncate into gracefully than there already wasn't at the base sizes. */
   .nr-loc   { display: none !important; }
+  /* "Last heard — DMR · TG n" is redundant on a phone: the current-TG badge
+     next to it already shows the TG, and the row is cramped enough. */
+  .tg-heard-badge { display: none !important; }
   .nr-side-top .sb-btn.disconnect { padding-left: 7px; padding-right: 7px; }
   /* .nr-side shares .node-row with .nr-main again (not stacked onto its own
      line below — that was tried and rejected). What actually fixed the
