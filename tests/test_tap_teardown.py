@@ -5,7 +5,21 @@ Asterisk 22 with a live tap (Originate ChannelId=henwen-tap-lab-H1) rather
 than invented, since the uniqueid/';2' suffix convention is what the leak
 check keys on.
 """
+import pytest
+
 import app
+
+
+@pytest.fixture(autouse=True)
+def _clean_breaker(monkeypatch):
+    """_hangup_tap_channel() trips a per-node circuit breaker on a proven
+    leak; keep that state (and the Asterisk pid it records) out of the real
+    box and out of other tests."""
+    app._tap_breaker.clear()
+    monkeypatch.setattr(app, "_asterisk_pid", lambda: 4242)
+    yield
+    app._tap_breaker.clear()
+
 
 CONCISE_LIVE = [
     "Local/tap@henwen-audiosocket-tap-000000ce;2!henwen-audiosocket-tap!tap!2!Up!AudioSocket!"
@@ -112,10 +126,12 @@ class TestHangupTapChannel:
         app._hangup_tap_channel('henwen-tap-lab-H1', '643930', 't')
         assert any('rejected' in m and 'Permission denied' in m for m in _warns(logs))
 
-    def test_leg_that_ignores_hangup_is_reported_as_leaked(self, monkeypatch):
+    def test_leg_that_ignores_hangup_is_reported_as_leaked_and_trips_breaker(self, monkeypatch):
         logs = _patch(monkeypatch, FakeAMI(self.OK, [CONCISE_LIVE]))   # still listed every poll
         assert app._hangup_tap_channel('henwen-tap-lab-H1', '643930', 't') is False
         assert any('likely leaked' in m for m in _warns(logs))
+        assert app._tap_breaker_remaining('643930') > 0
+        assert any('tap disabled for node 643930' in m for m in _warns(logs))
 
     def test_leg_that_disappears_during_the_wait_is_fine(self, monkeypatch):
         logs = _patch(monkeypatch, FakeAMI(self.OK, [CONCISE_LIVE, CONCISE_LIVE, CONCISE_LIVE[2:]]))
@@ -127,10 +143,12 @@ class TestHangupTapChannel:
         monkeypatch.setattr(app, 'log', lambda lvl, msg, *a, **k: logs.append((lvl, msg)))
         def boom(fn): raise ConnectionError('AMI down')
         monkeypatch.setattr(app, 'ami_send_command', boom)
-        assert app._hangup_tap_channel('henwen-tap-lab-H1', '643930', 't') is False
+        assert app._hangup_tap_channel('henwen-tap-lab-H1', '643930', 't') is None
         assert any('AMI down' in m and 'may be leaked' in m for m in _warns(logs))
+        assert app._tap_breaker_remaining('643930') == 0      # unknown is not proof
 
     def test_unverifiable_listing_does_not_cry_leak(self, monkeypatch):
         logs = _patch(monkeypatch, FakeAMI(self.OK, [RuntimeError('listing failed')]))
-        assert app._hangup_tap_channel('henwen-tap-lab-H1', '643930', 't') is False
+        assert app._hangup_tap_channel('henwen-tap-lab-H1', '643930', 't') is None
         assert not any('leaked' in m for m in _warns(logs))
+        assert app._tap_breaker_remaining('643930') == 0
