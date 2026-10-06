@@ -137,14 +137,14 @@ class TestWebmAfFilter:
         assert af == "alimiter=limit=0.85:attack=5:release=50:level=false"
         assert "dynaudnorm" not in af
 
-    def test_agc_enabled_prepends_dynaudnorm(self):
+    def test_agc_enabled_uses_zero_lookahead_chain(self):
         af = app._webm_af_filter(True)
-        assert af == ("dynaudnorm=f=50:g=5:p=0.95:m=4:r=0.2,"
-                       "alimiter=limit=0.85:attack=5:release=50:level=false")
+        assert af == app.RX_AGC_FILTER
+        assert "dynaudnorm" not in af
 
     def test_alimiter_always_present_either_way(self):
         assert "alimiter=limit=0.85:attack=5:release=50:level=false" in app._webm_af_filter(False)
-        assert "alimiter=limit=0.85:attack=5:release=50:level=false" in app._webm_af_filter(True)
+        assert "alimiter=" in app._webm_af_filter(True)
 
 
 class TestAgcEnabledConfig:

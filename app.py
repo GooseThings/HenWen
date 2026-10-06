@@ -10022,6 +10022,8 @@ def _start_broadcast(node):
     # -probesize 32 / -analyzeduration 0: skip format probing so encoding
     # starts immediately (avoids several-hundred-ms startup silence).
     #
+    # NOTE: the AGC chain below was superseded by RX_AGC_FILTER (no lookahead);
+    # the dynaudnorm history is kept for context.
     # -af AGC chain: hot nodes (loud mic/RX audio) were clipping on speech
     # peaks. dynaudnorm rides the gain to keep the signal near its target
     # peak (quiet stretches brought up, loud stretches brought down);
@@ -14551,6 +14553,24 @@ def _validate_rx_audio_path(value):
     return v
 
 
+# Zero-lookahead leveler (feed-forward two-stage compressor + 1ms limiter),
+# ~1ms of total filter delay. Replaces dynaudnorm, whose f*g lookahead cost
+# ~0.4s. Measured on a synthetic loud/quiet/mid/loud speech-like signal
+# (~24dB spread): output spread 3.6dB vs dynaudnorm's 9.0dB. Stage 1 lifts
+# quiet stations (+6dB makeup, gentle 3:1), stage 2 catches hot peaks, the
+# limiter is the brick wall. Tradeoff: no lookahead means the first few ms
+# of a sudden loud onset after a quiet stretch pass before the compressor
+# reacts (~1.16x steady peak measured); the 1ms limiter catches the worst.
+# Makeup gain also lifts noise floor -- raise stage-1 threshold if static
+# pumps on real traffic. Kept identical to audio_ws_relay.RX_AGC_FILTER
+# (a test asserts they match); that module can't import app.py.
+RX_AGC_FILTER = (
+    'acompressor=threshold=0.02:ratio=3:attack=3:release=250:makeup=6:knee=4,'
+    'acompressor=threshold=0.15:ratio=6:attack=1:release=100:makeup=1,'
+    'alimiter=limit=0.85:attack=1:release=40:level=false'
+)
+
+
 def _webm_af_filter(agc_enabled):
     """The -af filter chain for the legacy WebM broadcast ffmpeg
     (_start_broadcast()) -- shared by Listen (legacy mode), recording.py,
@@ -14559,18 +14579,14 @@ def _webm_af_filter(agc_enabled):
     no subprocess) so it's unit-testable in isolation, the same reasoning
     as _validate_rx_audio_path() above and audio_relay.py's _fade_frame().
 
-    alimiter alone (level=false, a true-peak brick wall) is always present
-    for clip safety regardless of the AGC setting -- see _start_broadcast()'s
-    own extensive comment block for why level=false specifically matters and
-    how these parameter values were tuned. dynaudnorm (the actual "AGC" a
-    user is toggling) is prepended only when enabled; its f=50:g=5 lookahead
-    is the ~0.4s cost of turning this on, identical tuning reused verbatim
-    by the low-latency path's own _opus_ffmpeg_cmd() when AGC is enabled
-    there too -- one proven tuning, not two to maintain."""
-    af = 'alimiter=limit=0.85:attack=5:release=50:level=false'
+    alimiter alone (level=false, a true-peak brick wall) is the chain when
+    AGC is off. When on, RX_AGC_FILTER (zero-lookahead compressors + limiter,
+    ~1ms delay) is used, identical to the low-latency path's own
+    _opus_ffmpeg_cmd(). The dynaudnorm tuning history in
+    _start_broadcast()'s comment block is retained for context only."""
     if agc_enabled:
-        af = 'dynaudnorm=f=50:g=5:p=0.95:m=4:r=0.2,' + af
-    return af
+        return RX_AGC_FILTER
+    return 'alimiter=limit=0.85:attack=5:release=50:level=false'
 
 
 def _get_rx_audio_config():
