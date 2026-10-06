@@ -639,3 +639,57 @@ class TestDvswitchLocationRoutes:
         exported = json.loads(export.read_text())
         assert exported["latitude"] == 43.0731 and exported["longitude"] == -86.2012
         assert calls[0][-2:] == [app.DVSWITCH_APPLY_SCRIPT_PATH, str(export)]
+
+
+class TestCallerBlipFilter:
+    """Sub-second streams on a busy static TG must not flicker through the
+    displayed caller (see DVSWITCH_MIN_CALLER_FRAMES)."""
+
+    def _setup(self, monkeypatch):
+        cache = {"active": False, "id": None, "callsign": None, "name": None, "tg": None, "ts": 0}
+        monkeypatch.setattr(app, "_dvswitch_caller_cache", cache)
+        looked = []
+        monkeypatch.setattr(app, "_dvswitch_lookup_dmr",
+                            lambda i: (looked.append(i) or ("CALL" + i, "Name")))
+        return cache, looked, {"pending": None}
+
+    @staticmethod
+    def _begin(i, tg="91"):
+        return f"I: 2026-10-06 20:15:35.749 DMR, ODMR Begin Tx: src = {i}, dst = {tg} (GROUP)"
+
+    @staticmethod
+    def _end(n):
+        return f"I: 2026-10-06 20:15:35.924 DMR, ODMR End Tx:DMR frame count was {n} frames"
+
+    def test_blip_never_becomes_caller_or_triggers_lookup(self, monkeypatch):
+        cache, looked, st = self._setup(monkeypatch)
+        app._dvswitch_process_caller_lines([self._begin("111"), self._end(3)], st, now=100)
+        assert cache["id"] is None and looked == []
+
+    def test_blip_after_real_talker_leaves_them_as_last_heard(self, monkeypatch):
+        cache, looked, st = self._setup(monkeypatch)
+        app._dvswitch_process_caller_lines([self._begin("222"), self._end(117)], st, now=100)
+        app._dvswitch_process_caller_lines([self._begin("333"), self._end(3)], st, now=110)
+        assert cache["id"] == "222" and cache["active"] is False
+
+    def test_long_stream_commits_on_end(self, monkeypatch):
+        cache, looked, st = self._setup(monkeypatch)
+        app._dvswitch_process_caller_lines([self._begin("222"), self._end(117)], st, now=100)
+        assert cache["id"] == "222" and cache["callsign"] == "CALL222" and cache["active"] is False
+
+    def test_running_stream_waits_out_blip_window(self, monkeypatch):
+        cache, looked, st = self._setup(monkeypatch)
+        app._dvswitch_process_caller_lines([self._begin("222")], st, now=100)
+        assert cache["id"] is None
+        app._dvswitch_process_caller_lines([], st, now=101.2)
+        assert cache["id"] == "222" and cache["active"] is True
+
+    def test_ta_line_commits_and_sets_alias(self, monkeypatch):
+        cache, looked, st = self._setup(monkeypatch)
+        app._dvswitch_process_caller_lines([self._begin("222"), "TA = YT7VNV"], st, now=100)
+        assert cache["id"] == "222" and cache["callsign"] == "YT7VNV"
+
+    def test_lost_end_tx_does_not_drop_real_talker(self, monkeypatch):
+        cache, looked, st = self._setup(monkeypatch)
+        app._dvswitch_process_caller_lines([self._begin("222"), self._begin("333"), self._end(3)], st, now=100)
+        assert cache["id"] == "222"
