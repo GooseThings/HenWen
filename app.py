@@ -8666,6 +8666,13 @@ def api_tx_config():
     install with no TX secret."""
     if not session.get('logged_in'):
         return jsonify({"error": "Authentication required"}), 401
+    # Node lockout: check_auth()'s lockout gate only stops non-GET requests,
+    # but this GET mints the credential that keys the transmitter, so it has
+    # to honor the lock itself. 423 (not the 404 "not configured" shape) so
+    # the kiosk can tell "locked" from "feature absent"; probe gets it too,
+    # which hides the TX button for locked-out roles.
+    if session.get('role') != 'owner' and is_any_node_locked():
+        return jsonify({"error": "Locked by the node owner", "locked": True}), 423
     if session.get('role') == 'user':
         urow = get_db().execute("SELECT listen_only FROM users WHERE id=?",
                                 (session.get('user_id'),)).fetchone()
