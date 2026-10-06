@@ -21,7 +21,7 @@ There is no build step. The app runs directly via gunicorn.
 
 **Deploy changes to the live service:**
 ```bash
-sudo cp -r app.py audio_relay.py recording.py stream_relay.py templates static /opt/HenWen/
+sudo cp -r app.py audio_relay.py leak_monitor.py recording.py stream_relay.py templates static /opt/HenWen/
 sudo systemctl restart HenWen
 ```
 
@@ -328,6 +328,14 @@ Outbound (kiosk chat → IRC): `api_chat_messages_post()` enqueues `(username, m
 Inbound (IRC → kiosk chat): `_irc_relay_on_message()` is handed to `IRCClient.read_loop()` as its callback and inserts straight into `chat_messages` with `role='irc'` and the same `user_id=0` sentinel the NWS/system alert path uses — deliberately bypassing `api_chat_messages_post()`, the same way system alerts do, so an inbound IRC message can never get re-enqueued onto `_irc_relay_queue` and echoed straight back out. The kiosk Chat panel (`status.html`) gives `role==='irc'` rows their own distinct left-border/username color (green, reusing the `--green` theme token already present in every palette) — a parallel treatment to, but visually distinct from, `role==='system'`'s existing warning-colored alert styling, since an inbound IRC message is a different kind of "not authored via the login-gated compose box" than a system alert.
 
 A persistent raw-socket IRC connection is trivially fine on the Pi Zero 2 W floor (see "Hardware target" above): it's two mostly-idle threads (one blocked in `recv()` waiting for lines, one blocked on `queue.Queue.get()` pacing outbound sends at a flat 1 line/sec — a conservative rate, not tuned against any specific network's actual flood-control policy) with no subprocess and no audio/ffmpeg involvement — lighter than the AMI poller already running continuously on every install. TLS adds one-time handshake cost at connect/reconnect only, not sustained cost.
+
+### Resource-leak monitor
+
+`_check_leaks()` (called from the AMI poll loop every cycle, self-throttled to `LEAK_CHECK_INTERVAL`, 60s — same shape as `_check_asterisk_dns_health()`, no extra thread) watches for the failure chain behind the 2026-10 incident: Asterisk's soft fd limit was 1024, 456 of those fds were AMI sockets stuck in CLOSE_WAIT, and `messages.log` grew 171 GB in two days before anything alerted. It alerts through the normal Manager > Alerts providers via a single `on_leak_detected` toggle (default on). The pure logic lives in `leak_monitor.py` (no Flask/DB/AMI, same independence story as `recording.py`); `app.py` owns the schedule, the per-condition state and the alert plumbing.
+
+Conditions (each has its own on/off state, thresholds are `LEAK_*` env-overridable constants in `LEAK_THRESHOLDS`, not UI settings): Asterisk or HenWen at ≥80% of its fd limit; either one gaining ≥300 fds over a trailing hour (`growth_over_window()` — latest minus the window's minimum, so a spike that decays isn't growth, and it can't call a trend until history spans half the window); ≥50 sockets in CLOSE_WAIT on the AMI port; AudioSocket tap channels (`henwen-tap-*`) up >2 min that no live `_audio_active`/`_capture_only_active` entry owns; `messages.log` ≥2 GB. New trips in one cycle go out as **one** batched notification, with one "cleared" notice once the last outstanding condition resolves. A reading that's unavailable (AMI down, process not found) contributes no key at all, so it leaves that condition's state alone instead of falsely clearing it — the orphan-tap check in particular only runs while `_ami_connected`, so a wedged Asterisk is never hit with an extra AMI command.
+
+**Asterisk runs with a Linux capability (`CapEff 0x1000`), which makes its `/proc/<pid>/fd` links unreadable to HenWen even though both run as the `asterisk` user** — found by running the monitor's readers as that user rather than root. The fd *count* and limit are still readable, but the per-fd breakdown is not, so the CLOSE_WAIT check falls back to counting sockets by local AMI port straight from `/proc/net/tcp` (`port_state_counts()`) rather than mapping the process's socket inodes. Don't "simplify" that back to the inode mapping: it works as root and silently reports nothing in production. `GET /api/leak-monitor` (admin+) exposes the latest readings, thresholds and which conditions are tripped.
 
 ### Service identity
 
