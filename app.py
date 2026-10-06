@@ -5915,10 +5915,14 @@ def load_astdb():
 # (e.g. 310xxxx = United States), the same convention BrandMeister's own
 # talkgroup numbering follows (see _derive_bm_talkgroup_countries()). Only
 # 7+ digit IDs carry one -- legacy 6-digit IDs predate the scheme -- and a
-# prefix missing from this table just means no flag, never a guess.
+# prefix missing from this table just means no flag, never a guess. Checked
+# against DMRIds.dat's own callsigns (majority callsign-prefix country per
+# MCC): US IDs run 110-115 and 310-322, Germany 262-264, not just the first
+# block of each.
 _DMR_MCC_TO_ISO = {
-    **dict.fromkeys(range(310, 317), "US"), 302: "CA", 334: "MX", 330: "PR",
-    234: "GB", 235: "GB", 262: "DE", 208: "FR", 222: "IT", 214: "ES",
+    **dict.fromkeys(range(110, 116), "US"), **dict.fromkeys(range(310, 323), "US"), 302: "CA", 334: "MX", 330: "PR",
+    234: "GB", 235: "GB", 262: "DE", 263: "DE", 264: "DE", 215: "ES", 223: "IT",
+    461: "CN", 401: "KZ", 422: "OM", 208: "FR", 222: "IT", 214: "ES",
     268: "PT", 204: "NL", 206: "BE", 270: "LU", 228: "CH", 232: "AT",
     238: "DK", 240: "SE", 242: "NO", 244: "FI", 246: "LT", 247: "LV",
     248: "EE", 250: "RU", 255: "UA", 257: "BY", 259: "MD", 260: "PL",
