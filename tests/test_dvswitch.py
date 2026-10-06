@@ -713,3 +713,35 @@ class TestBridgeKeyedGate:
     def test_no_ami_data_fails_open(self, monkeypatch):
         self._with_cache(monkeypatch, {})
         assert app._dvswitch_bridge_keyed() is True
+
+
+class TestCallerKeyedPromotion:
+    """A long-enough stream is only promoted to caller if the bridge link was keyed."""
+
+    BEGIN = "I: 2026-10-06 20:00:00.000 DMR, ODMR Begin Tx: src = 3333, dst = 91 (GROUP)"
+    END = "I: 2026-10-06 20:00:03.000 DMR, ODMR End Tx:DMR frame count was 50 frames"
+
+    def _run(self, monkeypatch, keyed):
+        monkeypatch.setattr(app, "_dvswitch_lookup_dmr", lambda i: ("W1AW", "Test"))
+        monkeypatch.setitem(app._dvswitch_caller_cache, "id", None)
+        monkeypatch.setitem(app._dvswitch_caller_cache, "active", False)
+        state = {"pending": None}
+        app._dvswitch_process_caller_lines([self.BEGIN, self.END], state, keyed_now=keyed)
+        return dict(app._dvswitch_caller_cache)
+
+    def test_unkeyed_long_stream_never_becomes_caller(self, monkeypatch):
+        c = self._run(monkeypatch, keyed=False)
+        assert c["id"] is None and c["active"] is False
+
+    def test_keyed_long_stream_commits(self, monkeypatch):
+        c = self._run(monkeypatch, keyed=True)
+        assert c["id"] == "3333"
+
+    def test_keyed_seen_mid_stream_counts(self, monkeypatch):
+        monkeypatch.setattr(app, "_dvswitch_lookup_dmr", lambda i: ("W1AW", "Test"))
+        monkeypatch.setitem(app._dvswitch_caller_cache, "id", None)
+        state = {"pending": None}
+        app._dvswitch_process_caller_lines([self.BEGIN], state, keyed_now=False)
+        app._dvswitch_process_caller_lines([], state, keyed_now=True)
+        app._dvswitch_process_caller_lines([self.END], state, keyed_now=False)
+        assert app._dvswitch_caller_cache["id"] == "3333"
