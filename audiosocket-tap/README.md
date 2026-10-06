@@ -72,3 +72,14 @@ needed there either.
 - `extensions-custom.snippet` — the `henwen-audiosocket-tap` dialplan
   context appended to `/etc/asterisk/custom/extensions.conf`.
 - `apply.sh` / `rollback.sh` — see above.
+
+## Which channels get tapped
+
+Only channel technologies in `TAP_CHANNEL_TECHS` (default: `simpleusb`) use the
+AudioSocket tap; everything else, and any node whose tap circuit breaker is
+open, uses MixMonitor instead. Reason: a ChanSpy leg can't be hung up while the
+channel it spies on is silent (Asterisk closes the AudioSocket half after ~2.5s
+and nothing short of an Asterisk restart removes the ChanSpy half), so the tap
+is only used on channels known to emit audio frames continuously. To add a type
+you've verified, set e.g. `TAP_CHANNEL_TECHS=simpleusb,usbradio` in
+`HenWen.service`. See CLAUDE.md ("Audio streaming") for the full finding.

@@ -6950,6 +6950,7 @@ def api_leak_monitor():
         "interval_sec": LEAK_CHECK_INTERVAL,
         "thresholds": LEAK_THRESHOLDS,
         "readings": _leak_latest["readings"],
+        "tap_breaker": {n: r for n in list(_tap_breaker) if (r := _tap_breaker_remaining(n))},
         "findings": {k: {"active": a, "message": m}
                      for k, (a, m) in _leak_latest["findings"].items()},
     })
@@ -9571,6 +9572,79 @@ class _AudioBroadcast:
 
 _TAP_CHANNEL_ID_PREFIX = 'henwen-tap-'
 
+# Which channel technologies the AudioSocket tap is allowed to ChanSpy.
+# Reproduced against a throwaway Asterisk: a ChanSpy leg can only be hung up
+# while the channel it is spying on is delivering frames. On a channel that
+# goes quiet, Asterisk closes the AudioSocket half after ~2.5s and the
+# ChanSpy half is stranded -- every Hangup variant (ChannelId, name, cause,
+# CLI, Redirect, DTMF) is ignored, and only the spied channel ending or an
+# Asterisk restart clears it. SimpleUSB emits a frame every 20ms regardless
+# of traffic, so it's safe; anything else (USRP, Local/pseudo, a peer's
+# channel, hardware that hasn't been verified) falls back to MixMonitor,
+# which stops reliably. Override with TAP_CHANNEL_TECHS=simpleusb,usbradio
+# once another type has been verified to emit continuously.
+TAP_CHANNEL_TECHS = {t.strip().lower() for t in
+                     os.environ.get("TAP_CHANNEL_TECHS", "simpleusb").split(",") if t.strip()}
+# After a tap leg is proven stranded, stop tapping that node for this long
+# (or until Asterisk restarts, which clears the stranded leg) so each later
+# Listen doesn't strand another one.
+TAP_BREAKER_COOLDOWN_SEC = int(os.environ.get("TAP_BREAKER_COOLDOWN_SEC", "1800"))
+_tap_breaker      = {}    # node -> (blocked_until_ts, asterisk_pid_at_trip)
+_tap_breaker_lock = threading.Lock()
+_tap_skip_logged  = set()  # (node, tech) already told about, to keep the log quiet
+
+
+def _tap_channel_tech(channel):
+    """'SimpleUSB/643930' -> 'simpleusb'; 'Local/pseudo@default-0;1' -> 'local'."""
+    return str(channel or "").split("/", 1)[0].strip().lower()
+
+
+def _asterisk_pid():
+    return leak_monitor.find_pid("asterisk", ASTERISK_PIDFILE)
+
+
+def _tap_breaker_trip(node, reason):
+    now = time.time()
+    with _tap_breaker_lock:
+        _tap_breaker[node] = (now + TAP_BREAKER_COOLDOWN_SEC, _asterisk_pid())
+    log("WARN", f"[AUDIO] AudioSocket tap disabled for node {node} for "
+                f"{TAP_BREAKER_COOLDOWN_SEC // 60} min (or until Asterisk restarts): {reason}. "
+                f"Listen falls back to MixMonitor meanwhile.")
+
+
+def _tap_breaker_remaining(node):
+    """Seconds left on this node's breaker, 0 if it's closed. A breaker also
+    clears when Asterisk's pid has changed since it tripped: a restart is
+    exactly what clears the stranded leg that tripped it."""
+    with _tap_breaker_lock:
+        entry = _tap_breaker.get(node)
+        if not entry:
+            return 0
+        until, pid_at_trip = entry
+        now_pid = _asterisk_pid()
+        if (pid_at_trip and now_pid and now_pid != pid_at_trip) or time.time() >= until:
+            del _tap_breaker[node]
+            return 0
+        return int(until - time.time())
+
+
+class AudioNodeBlocked(RuntimeError):
+    """This node's audio isn't something HenWen will capture (see
+    _audio_node_block_reason())."""
+
+
+def _audio_node_block_reason(node):
+    """Why audio capture (Listen/record/relay) is refused for this node, or
+    None. The DVSwitch bridge node is the one case: it's a private USRP link
+    the Status Board already hides as internal plumbing, but the audio routes
+    only check that a node is 4-7 digits, so a direct request could still
+    reach it."""
+    bridge = _dvswitch_bridge_node_cached()
+    if bridge and str(node) == str(bridge):
+        return ("That node is the DVSwitch bridge's internal link, not a repeater "
+                "with audio to listen to.")
+    return None
+
 
 def _parse_concise_channels(lines):
     """Parse `core show channels concise` output (one '!'-separated row per
@@ -9622,7 +9696,10 @@ def _tap_legs_alive(channel_id):
 
 def _hangup_tap_channel(channel_id, node, context):
     """Hang up an AudioSocket tap by its caller-assigned ChannelId and
-    confirm it actually went away. Returns True once confirmed gone.
+    confirm it actually went away. Returns True once confirmed gone, False
+    when a leg is proven to have survived (which also trips the node's tap
+    circuit breaker), and None when it can't be determined (the AMI call or
+    the verification listing failed -- not evidence of a leak).
 
     Previously every teardown path fired the Hangup, discarded the reply and
     swallowed every exception, so a tap leg that ignored the Hangup (a stuck
@@ -9640,19 +9717,20 @@ def _hangup_tap_channel(channel_id, node, context):
     except Exception as e:
         log('WARN', f'[AUDIO] tap Hangup for node {node} ({context}) raised: {e}; '
                     f'channel {channel_id} may be leaked')
-        return False
+        return None
     if _classify_hangup_reply(pkt) == 'error':
         log('WARN', f'[AUDIO] tap Hangup for node {node} ({context}) rejected: '
                     f'{pkt.get("Message", pkt)}')
     for _ in range(5):
         alive = _tap_legs_alive(channel_id)
         if alive is None:
-            return False
+            return None
         if not alive:
             return True
         time.sleep(0.3)
     log('WARN', f'[AUDIO] tap channel {channel_id} for node {node} ({context}) is still '
                 f'present ~1.5s after Hangup -- likely leaked until Asterisk restarts')
+    _tap_breaker_trip(node, f'channel {channel_id} survived Hangup')
     return False
 
 
@@ -9711,6 +9789,20 @@ def _try_audiosocket_tap(node, channel, fifo_out_path, gen, relay_env):
     the automatic apply didn't run or hasn't happened yet.
     Returns (relay_proc, tap_channel_id) on success.
     """
+    tech = _tap_channel_tech(channel)
+    if tech not in TAP_CHANNEL_TECHS:
+        if (node, tech) not in _tap_skip_logged:
+            _tap_skip_logged.add((node, tech))
+            log('INFO', f'[AUDIO] AudioSocket tap not used for node {node}: {tech or "unknown"} '
+                        f'channels aren\'t on the continuous-audio allowlist '
+                        f'({", ".join(sorted(TAP_CHANNEL_TECHS))}), using MixMonitor')
+        return None
+    remaining = _tap_breaker_remaining(node)
+    if remaining:
+        log('INFO', f'[AUDIO] AudioSocket tap skipped for node {node}: breaker open for '
+                    f'another {remaining // 60 + 1} min, using MixMonitor')
+        return None
+
     try:
         def _check_modules(ami):
             as_lines = ami.command('module show like audiosocket')
@@ -9814,6 +9906,9 @@ def _start_broadcast(node):
     """
     _t0 = time.monotonic()
     node = str(int(node))
+    blocked = _audio_node_block_reason(node)
+    if blocked:
+        raise AudioNodeBlocked(blocked)
     channel = _find_node_channel(node)
     if not channel:
         raise RuntimeError(
@@ -10274,6 +10369,9 @@ def _start_capture_only(node):
     error, exactly like _start_broadcast()."""
     _t0 = time.monotonic()
     node = str(int(node))   # see _start_broadcast()'s same guard for why
+    blocked = _audio_node_block_reason(node)
+    if blocked:
+        raise AudioNodeBlocked(blocked)
     channel = _find_node_channel(node)
     if not channel:
         raise RuntimeError(
@@ -10476,6 +10574,9 @@ def api_internal_audio_ensure_capture():
     node = str((request.json or {}).get('node', '')).strip()
     if not re.match(r'^\d{4,7}$', node):
         return jsonify({'error': 'invalid node'}), 400
+    blocked = _audio_node_block_reason(node)
+    if blocked:
+        return jsonify({'error': blocked}), 403
     try:
         _ensure_capture_only(node)
     except Exception as e:
@@ -10636,6 +10737,9 @@ def start_audio_ws_relay():
 def api_audio_stream(node):
     if not re.match(r'^\d{4,7}$', node):
         return jsonify({'error': 'invalid node'}), 400
+    blocked = _audio_node_block_reason(node)
+    if blocked:
+        return jsonify({'error': blocked}), 403
 
     remote = request.remote_addr or '?'
     ua     = request.headers.get('User-Agent', '?')
@@ -11137,6 +11241,9 @@ def api_recording_start():
     node = str(data.get('node', '')).strip()
     if not re.match(r'^\d{4,7}$', node):
         return jsonify({'error': 'invalid node'}), 400
+    blocked = _audio_node_block_reason(node)
+    if blocked:
+        return jsonify({'error': blocked}), 403
 
     username = session.get('username', '')
     db = get_db()
@@ -14632,6 +14739,8 @@ def api_stream_relay_config_save():
 
     if (broadcastify_enabled or youtube_enabled) and not re.match(r'^\d{4,7}$', target_node):
         return jsonify({"error": "A valid target node number is required to enable relay"}), 400
+    if (broadcastify_enabled or youtube_enabled) and _audio_node_block_reason(target_node):
+        return jsonify({"error": _audio_node_block_reason(target_node)}), 400
 
     # Shown as a static line on the YouTube video overlay -- see
     # build_youtube_output_args(). Free text, not validated as a URL:
