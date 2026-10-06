@@ -381,20 +381,23 @@ _NODE_RE = re.compile(r'^\d{4,7}$')
 
 # ffmpeg encodes this path's own Opus, deliberately lighter than the WebM
 # path's by default: no resample (input is already the rate we encode at),
-# and dynaudnorm is opt-in rather than always-on -- its lookahead is
-# exactly the latency this whole path exists to avoid, so AGC costs ~0.4s
-# here when a user explicitly turns it on (rx_audio_config.agc_enabled,
+# and AGC is opt-in rather than always-on; it is now a zero-lookahead
+# compressor chain (~1ms), so it no longer costs ~0.4s (rx_audio_config.agc_enabled,
 # unified with the legacy path's own AGC toggle -- see app.py's
 # _webm_af_filter() and the "Unified AGC Toggle" plan). alimiter alone is
-# always present for peak/clip protection regardless. Reuses the legacy
-# path's exact dynaudnorm tuning verbatim when enabled (f=50:g=5:p=0.95:
-# m=4:r=0.2) rather than re-deriving new parameters -- see app.py's
-# _start_broadcast() comment block for that tuning's own (much longer)
-# history.
+# always present for peak/clip protection regardless. Shares the legacy
+# path's RX_AGC_FILTER when enabled -- see app.py for its tuning notes.
+# Zero-lookahead AGC (~1ms delay); must stay identical to app.RX_AGC_FILTER,
+# which documents the tuning (a test asserts they match).
+RX_AGC_FILTER = (
+    'acompressor=threshold=0.02:ratio=3:attack=3:release=250:makeup=6:knee=4,'
+    'acompressor=threshold=0.15:ratio=6:attack=1:release=100:makeup=1,'
+    'alimiter=limit=0.85:attack=1:release=40:level=false'
+)
+
+
 def _opus_ffmpeg_cmd(udp_port, agc_enabled=False):
-    af = 'alimiter=limit=0.85:attack=5:release=50:level=false'
-    if agc_enabled:
-        af = 'dynaudnorm=f=50:g=5:p=0.95:m=4:r=0.2,' + af
+    af = RX_AGC_FILTER if agc_enabled else 'alimiter=limit=0.85:attack=5:release=50:level=false'
     return [
         'ffmpeg', '-loglevel', 'warning',
         '-fflags', '+nobuffer',

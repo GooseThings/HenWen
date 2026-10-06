@@ -412,10 +412,10 @@ class TestOpusFfmpegCmdAgc:
         af = self._af_arg(wsrelay._opus_ffmpeg_cmd(12345, agc_enabled=False))
         assert "dynaudnorm" not in af
 
-    def test_agc_enabled_prepends_dynaudnorm(self):
+    def test_agc_enabled_uses_zero_lookahead_chain(self):
         af = self._af_arg(wsrelay._opus_ffmpeg_cmd(12345, agc_enabled=True))
-        assert af == ("dynaudnorm=f=50:g=5:p=0.95:m=4:r=0.2,"
-                       "alimiter=limit=0.85:attack=5:release=50:level=false")
+        assert af == app.RX_AGC_FILTER
+        assert "dynaudnorm" not in af
 
     def test_agc_enabled_uses_same_tuning_as_legacy_webm_path(self):
         # Reuses app._webm_af_filter()'s exact dynaudnorm parameters --
@@ -423,6 +423,9 @@ class TestOpusFfmpegCmdAgc:
         af_lowlatency = self._af_arg(wsrelay._opus_ffmpeg_cmd(12345, agc_enabled=True))
         af_legacy = app._webm_af_filter(True)
         assert af_lowlatency == af_legacy
+
+    def test_agc_filter_constants_match(self):
+        assert wsrelay.RX_AGC_FILTER == app.RX_AGC_FILTER
 
     def test_udp_port_still_correct_regardless_of_agc(self):
         cmd = wsrelay._opus_ffmpeg_cmd(54321, agc_enabled=True)
