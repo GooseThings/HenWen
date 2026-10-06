@@ -779,7 +779,7 @@ svg.kiosk-login-icon { display: none; }
 .nr-call { flex: 0 0 auto;
   font-size: 0.95rem; font-weight: 600; color: var(--text); letter-spacing: .03em; text-decoration: none; }
 .nr-call:hover { text-decoration: underline; }
-.nr-flag { flex: 0 0 auto; margin-left: -6px; font-size: 0.95rem; line-height: 1; }
+.nr-flag { flex: 0 0 auto; margin-left: -6px; height: 0.8rem; width: auto; align-self: center; border-radius: 2px; box-shadow: 0 0 0 1px rgba(128,128,128,.35); }
 .nr-loc  { flex: 0 1 auto; min-width: 0; font-size: 0.82rem; color: var(--text2);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .nr-meta { min-width: 0; font-size: 0.72rem; color: var(--text2);
@@ -2584,14 +2584,14 @@ function callsignLink(callsign, cssClass, displayText) {
     encodeURIComponent(qrzCall) + '" target="_blank" rel="noopener">' + esc(displayText || callsign) + '</a>';
 }
 
-/* ISO alpha-2 -> flag emoji (regional-indicator pair), in a span that sits
-   tight against the callsign before it. Empty for anything that isn't two
-   A-Z letters. Note: Windows browsers have no flag glyphs and show the two
-   letters instead. */
+/* ISO alpha-2 -> vendored flag SVG (static/vendor/flags/, flag-icons 7.5.0,
+   MIT), not an emoji: Windows browsers have no flag glyphs and would show
+   two letters instead. Empty for anything that isn't two A-Z letters; a
+   missing file just hides the image rather than leaving a broken icon. */
 function countryFlag(iso) {
   if (!/^[A-Z]{2}$/.test(iso || '')) return '';
-  var f = String.fromCodePoint(0x1F1E6 + iso.charCodeAt(0) - 65, 0x1F1E6 + iso.charCodeAt(1) - 65);
-  return '<span class="nr-flag" title="' + esc(iso) + '">' + f + '</span>';
+  return '<img class="nr-flag" src="/static/vendor/flags/' + iso.toLowerCase() + '.svg" alt="' + esc(iso) +
+    '" title="' + esc(iso) + '" loading="lazy" onerror="this.style.display=\'none\'">';
 }
 
 /* APRS station callsign rendered as a link to its aprs.fi tracking page —
