@@ -2299,6 +2299,9 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
       <span id="kiosk-username" style="display:none;color:var(--text2)"></span>
       <div id="f-active-users-panel" style="display:none;position:absolute;bottom:100%;left:0;margin-bottom:6px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;min-width:170px;max-width:260px;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:2000;font-size:0.78rem;line-height:1.6"></div>
     </span>
+    <span id="f-sysstats" style="display:none" title="Host resource usage">
+      CPU <strong id="f-cpu">—</strong> · RAM <strong id="f-mem">—</strong> · Disk <strong id="f-disk">—</strong><span id="f-temp-wrap"> · <strong id="f-temp">—</strong></span>
+    </span>
     <span><a href="https://github.com/GooseThings/HenWen" target="_blank" rel="noopener"
              style="color:var(--text2);text-decoration:none" title="HenWen on GitHub">HenWen{% if henwen_version and henwen_version != 'unknown' %} {{ henwen_version }}{% endif %}</a></span>
   </footer>
@@ -5273,6 +5276,25 @@ async function refreshBoard() {
     var elActiveUsers = document.getElementById('f-active-users');
     if (elActiveUsers) elActiveUsers.textContent = (data.active_users != null) ? data.active_users : '—';
     if (_activeUsersPanelOpen) refreshActiveUsersPanel();
+
+    /* Footer resource stats (server caches these; values just ride the board payload) */
+    var elSys = document.getElementById('f-sysstats');
+    if (elSys) {
+      var sy = data.sys || {}, dk = data.disk || {};
+      var pctTxt = function (v) { return v != null ? v + '%' : '—'; };
+      var warnCls = function (el, v, w) { el.className = (v != null && v >= w) ? 'f-stale' : ''; };
+      var diskPct = dk.pct ? parseInt(dk.pct, 10) : null;
+      document.getElementById('f-cpu').textContent  = pctTxt(sy.cpu_pct);
+      document.getElementById('f-mem').textContent  = pctTxt(sy.mem_pct);
+      document.getElementById('f-disk').textContent = pctTxt(diskPct);
+      warnCls(document.getElementById('f-cpu'),  sy.cpu_pct, 90);
+      warnCls(document.getElementById('f-mem'),  sy.mem_pct, 90);
+      warnCls(document.getElementById('f-disk'), diskPct, 90);
+      var elT = document.getElementById('f-temp');
+      document.getElementById('f-temp-wrap').style.display = data.cpu_temp != null ? '' : 'none';
+      if (data.cpu_temp != null) { elT.textContent = Math.round(data.cpu_temp) + '\u00b0C'; warnCls(elT, data.cpu_temp, 75); }
+      elSys.style.display = '';
+    }
 
     /* Re-render map whenever board data changes */
     updateMap();
