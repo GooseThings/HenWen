@@ -6184,6 +6184,48 @@ def get_disk_usage():
     return {}
 
 
+_cpu_prev = {"busy": None, "total": None}
+
+
+@_ttl_cached(5)
+def get_system_stats():
+    """CPU %, RAM %, and load average for the kiosk footer. Pure /proc reads
+    (no subprocess, no psutil) behind a 5s cache, so cost is a few small file
+    reads per 5s no matter how many viewers poll the board. CPU % is the delta
+    of /proc/stat counters since the previous call (None on the first call)."""
+    out = {"cpu_pct": None, "mem_pct": None, "load1": None}
+    try:
+        with open("/proc/stat") as f:
+            v = [int(x) for x in f.readline().split()[1:]]
+        idle = v[3] + (v[4] if len(v) > 4 else 0)   # idle + iowait
+        total = sum(v[:8])
+        busy = total - idle
+        pb, pt = _cpu_prev["busy"], _cpu_prev["total"]
+        if pt is not None and total > pt:
+            out["cpu_pct"] = round(100.0 * (busy - pb) / (total - pt))
+        _cpu_prev["busy"], _cpu_prev["total"] = busy, total
+    except Exception:
+        pass
+    try:
+        mi = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                k, _, rest = line.partition(":")
+                if k in ("MemTotal", "MemAvailable"):
+                    mi[k] = int(rest.split()[0])
+                if len(mi) == 2:
+                    break
+        if mi.get("MemTotal"):
+            out["mem_pct"] = round(100.0 * (1 - mi["MemAvailable"] / mi["MemTotal"]))
+    except Exception:
+        pass
+    try:
+        out["load1"] = float(open("/proc/loadavg").read().split()[0])
+    except Exception:
+        pass
+    return out
+
+
 def get_uptime():
     try:
         with open("/proc/uptime") as f:
@@ -8241,6 +8283,7 @@ def api_status_board():
         "uptime":           get_uptime(),
         "cpu_temp":         get_cpu_temp(),
         "disk":             get_disk_usage(),
+        "sys":              get_system_stats(),
         "ami_connected":    _ami_connected,
         "active_users":     get_active_user_count(),
         "connector_warning": _connector_upcoming_disconnect_all(),
