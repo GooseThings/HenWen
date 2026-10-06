@@ -56,7 +56,8 @@ class TestParseConcise:
     def test_extracts_name_app_uniqueid(self):
         rows = app._parse_concise_channels(CONCISE_LIVE)
         assert rows[0] == {'name': 'Local/tap@henwen-audiosocket-tap-000000ce;2',
-                           'app': 'AudioSocket', 'uniqueid': 'henwen-tap-lab-H1;2'}
+                           'app': 'AudioSocket', 'uniqueid': 'henwen-tap-lab-H1;2',
+                           'duration': 2}
         assert rows[1]['uniqueid'] == 'henwen-tap-lab-H1' and rows[1]['app'] == 'ChanSpy'
 
     def test_skips_short_or_blank_rows(self):

@@ -85,6 +85,7 @@ import stream_relay
 # (stdlib socket/ssl only), so unlike aprslib/paho-mqtt this import needs
 # no try/except guard.
 import irc_relay
+import leak_monitor
 
 # aprslib is optional — shelled-out-style guard so a checkout that hasn't
 # picked up the dependency yet (or an admin who edited requirements.txt)
@@ -898,6 +899,10 @@ def get_db():
         # feed is the kind of thing an owner would want to know about rather
         # than discover by noticing missing pins.
         conn.execute("ALTER TABLE alert_config ADD COLUMN on_geocode_down INTEGER NOT NULL DEFAULT 1")
+    if 'on_leak_detected' not in _alert_cols:
+        # Resource-leak monitor -- see _check_leaks(). Defaults on, like the
+        # other health alerts: a leak is silent until it takes Asterisk down.
+        conn.execute("ALTER TABLE alert_config ADD COLUMN on_leak_detected INTEGER NOT NULL DEFAULT 1")
     conn.commit()
     # Singleton config for the NWS severe weather auto-announcement poller —
     # separate from alert_config (that's push notifications; this is
@@ -3061,6 +3066,7 @@ def _poll_loop():
             _check_alerts(_ami_connected, get_cpu_temp(), get_disk_usage())
             _check_asterisk_dns_health()
             _check_geocode_health()
+            _check_leaks()
 
         except Exception as outer:
             log("ERROR", f"[AMI-POLL] Unexpected outer error: {outer}")
@@ -3905,6 +3911,148 @@ def _check_asterisk_dns_health():
                         "Asterisk is resolving AllStarLink hostnames again.", "default")
     except Exception as e:
         log("ERROR", f"[ALERTS] _check_asterisk_dns_health error: {e}")
+
+
+# ── Resource-leak monitor ─────────────────────────────────────────────────────
+# Watches for the failure chain behind the 2026-10 incident (Asterisk out of
+# file descriptors from AMI sockets stuck in CLOSE_WAIT, then a 171 GB
+# "Too many open files" log) and alerts through the normal Manager > Alerts
+# providers when something looks like it's leaking. Same self-throttled,
+# called-every-poll-cycle shape as _check_asterisk_dns_health(); the readings
+# are /proc and stat() calls (no subprocess), plus -- only while AMI is up --
+# one `core show channels concise` per interval to spot orphaned taps.
+LEAK_CHECK_INTERVAL     = int(os.environ.get("LEAK_CHECK_INTERVAL", "60"))
+LEAK_HISTORY_SEC        = 7200      # fd-count history kept per process
+LEAK_TAP_MIN_AGE_SEC    = 120       # grace before an unowned tap counts as orphaned
+LEAK_THRESHOLDS = {
+    "fd_pct":           int(os.environ.get("LEAK_FD_PCT", "80")),
+    "fd_growth":        int(os.environ.get("LEAK_FD_GROWTH", "300")),
+    "fd_growth_window": int(os.environ.get("LEAK_FD_GROWTH_WINDOW", "3600")),
+    "closewait":        int(os.environ.get("LEAK_CLOSEWAIT", "50")),
+    "log_bytes":        int(os.environ.get("LEAK_LOG_BYTES", str(2 * 1024 ** 3))),
+}
+ASTERISK_PIDFILE = os.environ.get("ASTERISK_PIDFILE", "/run/asterisk/asterisk.pid")
+
+_leak_last_check = [0.0]
+_leak_fd_history = {"asterisk": [], "henwen": []}   # name -> [(ts, fd_count), ...]
+_leak_active     = {}      # finding key -> True while its alert is outstanding
+_leak_latest     = {"checked_at": None, "readings": {}, "findings": {}}
+
+
+def _leak_note_fds(name, snap, now):
+    """Append this sample to the process's history; return its growth over the window."""
+    if not snap:
+        return 0
+    hist = _leak_fd_history[name]
+    hist.append((now, snap["count"]))
+    cutoff = now - LEAK_HISTORY_SEC
+    while hist and hist[0][0] < cutoff:
+        hist.pop(0)
+    return leak_monitor.growth_over_window(hist, LEAK_THRESHOLDS["fd_growth_window"], now)
+
+
+def _leak_find_orphan_taps():
+    """Channel ids of AudioSocket tap legs that no live broadcast/capture owns
+    and that have been up longer than LEAK_TAP_MIN_AGE_SEC. None when it
+    can't tell (AMI down or the listing failed) -- never "no orphans"."""
+    if not _ami_connected:
+        return None
+    try:
+        lines = ami_send_command(lambda ami: {"lines": ami.command(
+            "core show channels concise", log_level="DEBUG")}).get("lines", [])
+    except Exception as e:
+        log("DEBUG", f"[LEAK] tap listing failed: {e}")
+        return None
+    with _audio_lock:
+        owned = {b._tap_channel_id for b in _audio_active.values() if b._tap_channel_id}
+    owned |= {r.tap_channel_id for r in list(_capture_only_active.values()) if r.tap_channel_id}
+    orphans = set()
+    for c in _parse_concise_channels(lines):
+        base = c["uniqueid"].split(";")[0]
+        if base.startswith(_TAP_CHANNEL_ID_PREFIX) and base not in owned \
+                and c["duration"] >= LEAK_TAP_MIN_AGE_SEC:
+            orphans.add(base)
+    return sorted(orphans)
+
+
+def _leak_collect_readings(now):
+    readings = {}
+    ast_pid = leak_monitor.find_pid("asterisk", ASTERISK_PIDFILE)
+    snap = leak_monitor.snapshot_fds(ast_pid) if ast_pid else None
+    if snap:
+        readings["asterisk"] = snap
+        readings["asterisk_growth"] = _leak_note_fds("asterisk", snap, now)
+        tcp = leak_monitor.read_tcp_table()
+        # Per-process socket mapping when /proc/<pid>/fd is readable;
+        # otherwise (the real situation -- Asterisk runs with a capability,
+        # which makes its fd links unreadable to us) fall back to counting
+        # the AMI listener's own stale connections by local port.
+        readings["asterisk_sockets"] = (
+            leak_monitor.socket_state_counts(snap["socket_inodes"], tcp)
+            if snap["kinds"].get("socket")
+            else leak_monitor.port_state_counts(tcp, AMI_PORT))
+    own = leak_monitor.snapshot_fds(os.getpid())
+    if own:
+        readings["henwen"] = own
+        readings["henwen_growth"] = _leak_note_fds("henwen", own, now)
+    orphans = _leak_find_orphan_taps()
+    if orphans is not None:
+        readings["orphan_taps"] = orphans
+    try:
+        readings["log_bytes"] = os.path.getsize(ASTERISK_LOG_PATH)
+    except OSError:
+        pass
+    return readings
+
+
+def _check_leaks():
+    """Sample resource readings once per LEAK_CHECK_INTERVAL and alert when a
+    condition newly trips. New trips in the same cycle are batched into ONE
+    notification (a descriptor leak usually trips several conditions at once),
+    and one "cleared" notice goes out when the last outstanding one resolves.
+    Readings are gathered even with alerts off so Manager's status route has
+    data and the fd trend history is warm if alerts get enabled later."""
+    now = time.time()
+    if now - _leak_last_check[0] < LEAK_CHECK_INTERVAL:
+        return
+    _leak_last_check[0] = now
+    try:
+        readings = _leak_collect_readings(now)
+        findings = leak_monitor.evaluate(readings, LEAK_THRESHOLDS)
+    except Exception as e:
+        log("ERROR", f"[LEAK] check failed: {e}")
+        return
+    _leak_latest.update(checked_at=now, findings=findings, readings={
+        "asterisk_fds":      (readings.get("asterisk") or {}).get("count"),
+        "asterisk_fd_limit": (readings.get("asterisk") or {}).get("limit"),
+        "asterisk_close_wait": leak_monitor.count_state(
+            readings.get("asterisk_sockets") or {}, "CLOSE_WAIT"),
+        "henwen_fds":        (readings.get("henwen") or {}).get("count"),
+        "henwen_fd_limit":   (readings.get("henwen") or {}).get("limit"),
+        "orphan_taps":       readings.get("orphan_taps"),
+        "asterisk_log_bytes": readings.get("log_bytes"),
+    })
+
+    cfg = _get_alert_config()
+    alerting = bool(cfg and cfg["enabled"] and cfg["on_leak_detected"])
+    new_msgs, cleared = [], []
+    for key, (active, msg) in findings.items():
+        was = _leak_active.get(key, False)
+        if active and not was:
+            _leak_active[key] = True
+            new_msgs.append(msg)
+            log("WARN", f"[LEAK] {key}: {msg}")
+        elif was and not active:
+            _leak_active[key] = False
+            cleared.append(key)
+            log("INFO", f"[LEAK] {key} cleared")
+    if not alerting:
+        return
+    if new_msgs:
+        _send_alert("HenWen: Resource Leak Suspected", "\n".join(new_msgs), "high")
+    elif cleared and not any(_leak_active.values()):
+        _send_alert("HenWen: Resource Leak Cleared",
+                    "Previously flagged resource usage is back to normal.", "default")
 
 
 # ── Nominatim geocoding cache ─────────────────────────────────────────────────
@@ -6736,6 +6884,7 @@ def api_alerts_get_config():
             "on_disk_high": 1, "disk_pct_threshold": 90,
             "on_password_reset_request": 1,
             "on_geocode_down": 1,
+            "on_leak_detected": 1,
         })
     return jsonify(dict(cfg))
 
@@ -6750,8 +6899,9 @@ def api_alerts_save_config():
             ntfy_topic, pushover_token, pushover_user,
             on_ami_disconnect, on_ami_reconnect, on_cpu_temp_high, cpu_temp_threshold,
             on_node_connect, on_node_disconnect, watch_nodes, on_dns_stuck,
-            on_disk_high, disk_pct_threshold, on_password_reset_request, on_geocode_down)
-           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            on_disk_high, disk_pct_threshold, on_password_reset_request, on_geocode_down,
+            on_leak_detected)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             1 if data.get("enabled")           else 0,
             1 if data.get("ntfy_enabled")       else 0,
@@ -6774,11 +6924,26 @@ def api_alerts_save_config():
             int(data.get("disk_pct_threshold", 90)),
             1 if data.get("on_password_reset_request") else 0,
             1 if data.get("on_geocode_down")   else 0,
+            1 if data.get("on_leak_detected", 1) else 0,
         )
     )
     db.commit()
     log("INFO", "[API] Alert config saved")
     return jsonify({"ok": True})
+
+
+@app.route("/api/leak-monitor")
+def api_leak_monitor():
+    """Latest leak-monitor readings and which conditions are currently
+    tripped (admin+, the default for any route in no check_auth() set)."""
+    return jsonify({
+        "checked_at": _leak_latest["checked_at"],
+        "interval_sec": LEAK_CHECK_INTERVAL,
+        "thresholds": LEAK_THRESHOLDS,
+        "readings": _leak_latest["readings"],
+        "findings": {k: {"active": a, "message": m}
+                     for k, (a, m) in _leak_latest["findings"].items()},
+    })
 
 
 @app.route("/api/alerts/test", methods=["POST"])
@@ -9402,7 +9567,7 @@ def _parse_concise_channels(lines):
     """Parse `core show channels concise` output (one '!'-separated row per
     channel: name!context!exten!priority!state!app!data!callerid!accountcode!
     peeraccount!amaflags!duration!bridgeid!uniqueid) into a list of
-    {'name', 'app', 'uniqueid'} dicts, skipping anything that doesn't have
+    {'name', 'app', 'uniqueid', 'duration' (seconds)} dicts, skipping anything that doesn't have
     the full 14 fields. A caller-assigned Originate ChannelId becomes the
     uniqueid of the ;1 leg, and '<ChannelId>;2' for the other half of a
     Local-channel pair -- confirmed live against Asterisk 22.
@@ -9412,7 +9577,12 @@ def _parse_concise_channels(lines):
         parts = line.split('!')
         if len(parts) < 14:
             continue
-        out.append({'name': parts[0], 'app': parts[5], 'uniqueid': parts[-1].strip()})
+        try:
+            duration = int(parts[11])
+        except ValueError:
+            duration = 0
+        out.append({'name': parts[0], 'app': parts[5], 'uniqueid': parts[-1].strip(),
+                    'duration': duration})
     return out
 
 
