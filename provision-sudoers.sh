@@ -36,13 +36,16 @@ cat > "${SUDOERS_FILE}.tmp" <<EOF
 # Installed by HenWen's install.sh / update.sh. Lets the unprivileged
 # service account restart the units it manages, reload systemd unit
 # definitions, rotate SECRET_KEY/PORT/AMI_PORT in its own unit file, and
-# launch the self-updater as its own transient unit.
+# launch the self-updater as its own transient unit, and refresh/install
+# asl3-asterisk package updates from Manager > Asterisk Updates.
 asterisk ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} daemon-reload
 asterisk ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} restart asterisk
 asterisk ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} restart ${SERVICE_NAME}
 asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/rotate_secret_key.sh
 asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/update_service_ports.sh
 asterisk ALL=(root) NOPASSWD: ${SYSTEMD_RUN_BIN} --unit=henwen-updater --collect ${INSTALL_DIR}/update.sh
+asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/asl-asterisk-update.sh check
+asterisk ALL=(root) NOPASSWD: ${SYSTEMD_RUN_BIN} --unit=henwen-asl-upgrade --collect ${INSTALL_DIR}/asl-asterisk-update.sh install
 asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/audiosocket-tap/apply.sh
 asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/ws-audio/apply.sh
 asterisk ALL=(root) NOPASSWD: ${INSTALL_DIR}/tx-spike/apply.sh
