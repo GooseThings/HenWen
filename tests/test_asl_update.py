@@ -76,8 +76,9 @@ class TestLineClassification:
             "Unpacking asl3-asterisk (2:22.10.1) over (2:22.9.0) ...",
             "E: Sub-process /usr/bin/dpkg returned an error code (1)",
             "W: some apt warning",
+            " ==> Keeping old config file as default.",
             "dpkg: error processing package asl3-asterisk (--configure):",
-        ]) == ["info", "error", "warn", "error"]
+        ]) == ["info", "error", "warn", "warn", "error"]
 
     def test_indented_continuations_inherit_previous_warn_or_error(self):
         lv = self.levels([

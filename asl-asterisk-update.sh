@@ -49,10 +49,11 @@ do_check() {
 }
 
 do_install() {
-    local start_marker start_ts rc pkgs sim n before after
+    local start_marker start_ts rc pkgs sim n before after aptout
     start_ts=$(date '+%Y-%m-%d %H:%M:%S')
     start_marker=$(mktemp) || start_marker=""
-    [ -n "$start_marker" ] && trap 'rm -f "$start_marker"' RETURN
+    aptout=$(mktemp) || aptout=""
+    trap 'rm -f "$start_marker" "$aptout"' RETURN
 
     say INFO "Asterisk package update started (run as $(id -un))"
 
@@ -115,7 +116,7 @@ do_install() {
         -o DPkg::Lock::Timeout=120 \
         -o Dpkg::Options::=--force-confold \
         -o Dpkg::Options::=--force-confdef \
-        $pkgs 2>&1
+        $pkgs 2>&1 | tee "${aptout:-/dev/null}"
     rc=${PIPESTATUS[0]}
     if [ "$rc" -ne 0 ]; then
         say ERROR "apt-get exited with status $rc."
@@ -147,14 +148,17 @@ do_install() {
     say INFO "Installed after:"
     echo "$after" | sed 's/^/        /'
 
-    # New package defaults that dpkg parked next to a kept config file.
-    local dist
-    if [ -n "$start_marker" ]; then
-        dist=$(find "$CONF_DIR" -name '*.dpkg-dist' -newer "$start_marker" 2>/dev/null)
-        if [ -n "$dist" ]; then
+    # Config files dpkg kept because they were customised. Taken from apt's own
+    # output rather than by file mtime: dpkg keeps the package's build date on
+    # the .dpkg-dist copy, which is older than this run's start.
+    local kept
+    if [ -n "$aptout" ]; then
+        kept=$(sed -n "s/^Configuration file '\(.*\)'\$/\1/p" "$aptout" | sort -u)
+        if [ -n "$kept" ]; then
             say WARN "The package shipped new defaults for config files you have customised."
-            say WARN "Your files were kept as-is. Review these when convenient:"
-            echo "$dist" | sed 's/^/        /'
+            say WARN "Your files were kept as-is; the new default sits beside each as <file>.dpkg-dist."
+            say WARN "Review when convenient:"
+            echo "$kept" | sed 's/^/        /'
         fi
     fi
 

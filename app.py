@@ -12443,7 +12443,7 @@ _ASL_LOG_ERROR_RE = re.compile(
     r"unmet dependencies|could not get lock|broken packages", re.I)
 _ASL_LOG_WARN_RE = re.compile(
     r"^W: |^dpkg: warning|\bwarning\b|\.dpkg-(dist|new|old|bak)\b|"
-    r"configuration file .* (kept|modified)|obsolete", re.I)
+    r"keeping old config file|configuration file .* (kept|modified)|obsolete", re.I)
 
 
 def classify_asl_update_lines(raw_lines):
