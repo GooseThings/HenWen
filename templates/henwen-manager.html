@@ -610,6 +610,15 @@ input:checked + .slider::before  { transform: translateX(16px); background: var(
 }
 #update-bar.show { display: flex; }
 
+.asl-log { background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; padding: 10px 12px; font-family: var(--mono); font-size: 0.8rem; line-height: 1.45; height: 380px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
+.asl-log div { padding: 0 2px; }
+.asl-log .asl-l-warn  { color: var(--warn);   background: rgba(210,153,34,0.08); }
+.asl-log .asl-l-error { color: var(--danger); background: rgba(248,81,73,0.09); font-weight: 600; }
+.asl-log .asl-l-ok    { color: var(--green);  font-weight: 600; }
+.asl-log.asl-only-issues .asl-l-info { display: none; }
+.asl-mon { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 4px 0 14px; align-items: center; }
+.asl-mon span.k { color: var(--text2); font-size: 0.78rem; margin-right: 5px; }
+.nav-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--warn); margin-left: 6px; vertical-align: middle; }
 pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-size: 0.84rem; overflow-x: auto; font-family: var(--mono); white-space: pre; margin-bottom: 12px; }
 
 .help-icon {
@@ -735,6 +744,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
 
     <div class="nav-section">Administration</div>
     <button class="nav-item" onclick="showPage('user-mgmt')">User Management</button>
+    <button class="nav-item" id="nav-asl-update" onclick="showPage('asl-update')">Asterisk Updates<span class="nav-dot" id="asl-update-dot" style="display:none" title="An Asterisk update is available"></span></button>
     <button class="nav-item" onclick="showPage('settings')">System Settings</button>
   </nav>
   <div class="sidebar-footer">
@@ -2806,6 +2816,61 @@ sudo bash /opt/HenWen/tx-spike/setup-https.sh --http-only              # frontin
     </div>
   </section>
 
+  <!-- Asterisk Updates (owner only) -->
+  <section class="page" id="page-asl-update">
+    <div class="page-title">Asterisk Updates</div>
+    <div class="page-sub">Checks once a week for newer AllStarLink Asterisk packages and installs them when you say so.</div>
+
+    <div class="card">
+      <div class="card-header">
+        <h2>Package Status</h2>
+        <div class="btn-row">
+          <button class="btn btn-sm" id="asl-check-btn" onclick="aslUpdateCheck()">Check Now</button>
+          <button class="btn btn-sm btn-primary" id="asl-install-btn" onclick="aslUpdateInstall()" disabled>Install Update</button>
+        </div>
+      </div>
+      <div class="card-body">
+        <p id="asl-summary" style="margin-bottom:10px;color:var(--text2)">Loading&hellip;</p>
+        <div id="asl-refresh-warn" class="muted" style="display:none;margin-bottom:10px;color:var(--warn)"></div>
+        <table class="data-table" id="asl-pkg-table" style="display:none">
+          <thead><tr><th>Package</th><th>Installed</th><th>Available</th></tr></thead>
+          <tbody id="asl-pkg-body"></tbody>
+        </table>
+        <p class="muted" style="margin-top:10px">
+          Installing restarts Asterisk: every link drops and any transmission in progress ends,
+          usually for under a minute. Your config files are kept as they are, and
+          <code>/etc/asterisk</code> is backed up first. HenWen itself is not restarted.
+        </p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <h2>Live Log</h2>
+        <div class="btn-row">
+          <label class="muted" style="display:flex;align-items:center;gap:6px">
+            <input type="checkbox" id="asl-only-issues" onchange="aslToggleIssuesOnly()"> Warnings &amp; errors only
+          </label>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="asl-mon" id="asl-mon">
+          <span><span class="k">Run</span><span class="badge badge-unk" id="asl-mon-run">idle</span></span>
+          <span><span class="k">Asterisk</span><span class="badge badge-unk" id="asl-mon-ast">&hellip;</span></span>
+          <span><span class="k">AMI</span><span class="badge badge-unk" id="asl-mon-ami">&hellip;</span></span>
+          <span><span class="k">Links</span><span id="asl-mon-links">&hellip;</span></span>
+          <span><span class="k">Warnings</span><span class="badge badge-unk" id="asl-mon-warns">0</span></span>
+          <span><span class="k">Errors</span><span class="badge badge-unk" id="asl-mon-errs">0</span></span>
+        </div>
+        <div class="asl-log" id="asl-log"><div class="muted">No update has been run yet.</div></div>
+        <p class="muted" style="margin-top:8px">
+          The log follows the installer while it runs, including apt's own output. It is kept in
+          <code>/var/log/henwen-asl-update.log</code> (the previous run as <code>.1</code>).
+        </p>
+      </div>
+    </div>
+  </section>
+
   <!-- Settings -->
   <section class="page" id="page-settings">
     <div class="page-title">System Settings</div>
@@ -3760,6 +3825,7 @@ function showPage(id) {
   stopRelayStatusPolling();
   stopIrcRelayStatusPolling();
   stopStressTestPolling();
+  stopAslUpdatePolling();
 
   var page = document.getElementById('page-' + id);
   if (page) page.classList.add('active');
@@ -3784,6 +3850,7 @@ function showPage(id) {
   else if (id === 'tx-diag')         { if (window._henwenRole === 'owner') { loadTxApplyStatus(); } }
   else if (id === 'rx-diag')         { if (window._henwenRole === 'owner') { loadAudioSocketTapStatus(); loadRxAudioPathStatus(); } }
   else if (id === 'stress-test')     { if (window._henwenRole === 'owner') { populateStressTestNodeSelect(); stressTestLoadStatus(); } }
+  else if (id === 'asl-update')     { if (window._henwenRole === 'owner') { aslUpdateLoad(); } }
   else if (id === 'user-mgmt')      { loadUsers(); pwResetLoad(); invitesLoad(); }
   else if (id === 'recordings')         recordingsLoad();
   else if (id === 'recording-settings') recLoad();
@@ -7332,6 +7399,176 @@ async function stressTestLoadStatus() {
   }
 }
 
+/* ── Asterisk Updates ────────────────────────────────────────────────────── */
+var _aslTimer = null, _aslOffset = 0, _aslFastUntil = 0, _aslWarns = 0, _aslErrs = 0;
+var _aslWasBusy = false;
+
+function stopAslUpdatePolling() {
+  if (_aslTimer) { clearTimeout(_aslTimer); _aslTimer = null; }
+}
+
+async function aslUpdateBadge() {
+  /* Owner-only dot on the nav item; one cheap status read per page load. */
+  if (window._henwenRole !== 'owner') return;
+  var r = await api('/api/asl-update/status');
+  var dot = document.getElementById('asl-update-dot');
+  if (r.ok && dot) dot.style.display = (r.data.state && r.data.state.available) ? '' : 'none';
+}
+
+function aslFmtTime(epoch) {
+  return epoch ? new Date(epoch * 1000).toLocaleString() : 'never';
+}
+
+function aslSetBadge(id, text, cls) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'badge ' + cls;
+}
+
+function aslRenderStatus(d) {
+  var st = d.state || {};
+  var busy = d.running || d.checking;
+  var summary = document.getElementById('asl-summary');
+  var pkgs = st.packages || [];
+  if (!st.checked_at) {
+    summary.textContent = d.checking ? 'Checking for updates\u2026' : 'Not checked yet. The first automatic check runs shortly after HenWen starts.';
+  } else if (st.error) {
+    summary.textContent = 'Could not read package information: ' + st.error;
+  } else if (st.available) {
+    summary.innerHTML = '<span class="badge badge-warn">Update available</span> '
+      + esc(String((st.will_upgrade || []).length)) + ' package(s) can be upgraded. Last checked '
+      + esc(aslFmtTime(st.checked_at)) + '.';
+  } else {
+    summary.innerHTML = '<span class="badge badge-ok">Up to date</span> Last checked '
+      + esc(aslFmtTime(st.checked_at)) + '. Next automatic check ' + esc(aslFmtTime(d.next_check)) + '.';
+  }
+  var warn = document.getElementById('asl-refresh-warn');
+  if (st.refresh_ok === false) {
+    warn.style.display = '';
+    warn.textContent = 'apt could not refresh its package lists (' + (st.refresh_error || 'unknown error')
+      + '). The result above comes from the lists already on this machine and may be out of date.';
+  } else {
+    warn.style.display = 'none';
+  }
+  var tbl = document.getElementById('asl-pkg-table');
+  var body = document.getElementById('asl-pkg-body');
+  body.innerHTML = '';
+  tbl.style.display = pkgs.length ? '' : 'none';
+  pkgs.forEach(function(p) {
+    var tr = document.createElement('tr');
+    var cand = p.newer ? '<span class="badge badge-warn">' + esc(p.candidate) + '</span>' : '<span class="muted">current</span>';
+    tr.innerHTML = '<td>' + esc(p.name) + '</td><td>' + esc(p.installed) + '</td><td>' + cand + '</td>';
+    body.appendChild(tr);
+  });
+  var extra = (st.will_upgrade || []).filter(function(u) { return !pkgs.some(function(p) { return p.name === u.name; }); });
+  if (extra.length) {
+    var tr = document.createElement('tr');
+    tr.innerHTML = '<td colspan="3" class="muted">Also pulled in: ' + extra.map(function(u) { return esc(u.name + ' ' + u.new); }).join(', ') + '</td>';
+    body.appendChild(tr);
+  }
+  document.getElementById('asl-check-btn').disabled = busy;
+  document.getElementById('asl-install-btn').disabled = busy || !st.available || !d.script_installed;
+  document.getElementById('asl-check-btn').textContent = d.checking ? 'Checking\u2026' : 'Check Now';
+
+  var dot = document.getElementById('asl-update-dot');
+  if (dot) dot.style.display = st.available ? '' : 'none';
+
+  /* monitor strip */
+  if (d.running) aslSetBadge('asl-mon-run', 'running', 'badge-warn');
+  else if (d.checking) aslSetBadge('asl-mon-run', 'checking', 'badge-warn');
+  else if (d.last_result === 'SUCCESS') aslSetBadge('asl-mon-run', 'last run: success', 'badge-ok');
+  else if (d.last_result === 'FAILED') aslSetBadge('asl-mon-run', 'last run: FAILED', 'badge-err');
+  else aslSetBadge('asl-mon-run', 'idle', 'badge-unk');
+  aslSetBadge('asl-mon-ast', d.asterisk_active ? 'active' : 'DOWN', d.asterisk_active ? 'badge-ok' : 'badge-err');
+  aslSetBadge('asl-mon-ami', d.ami_connected ? 'connected' : 'disconnected', d.ami_connected ? 'badge-ok' : 'badge-err');
+  var act = d.activity || {};
+  document.getElementById('asl-mon-links').textContent = (act.links || 0) + (act.keyed ? ' (keyed now)' : '');
+  _aslWasBusy = !!busy;
+}
+
+function aslUpdateCounters() {
+  aslSetBadge('asl-mon-warns', String(_aslWarns), _aslWarns ? 'badge-warn' : 'badge-unk');
+  aslSetBadge('asl-mon-errs', String(_aslErrs), _aslErrs ? 'badge-err' : 'badge-unk');
+}
+
+function aslAppendLog(lines, reset) {
+  var box = document.getElementById('asl-log');
+  if (reset) { box.innerHTML = ''; _aslWarns = 0; _aslErrs = 0; }
+  if (!lines.length) return;
+  var atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  var first = box.firstElementChild;
+  if (first && first.classList.contains('muted')) box.innerHTML = '';
+  lines.forEach(function(l) {
+    var div = document.createElement('div');
+    div.className = 'asl-l-' + l.level;
+    div.textContent = l.text;
+    box.appendChild(div);
+    if (l.level === 'warn') _aslWarns++;
+    if (l.level === 'error') _aslErrs++;
+  });
+  aslUpdateCounters();
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+function aslToggleIssuesOnly() {
+  document.getElementById('asl-log').classList.toggle('asl-only-issues', document.getElementById('asl-only-issues').checked);
+}
+
+async function aslUpdateTick() {
+  _aslTimer = null;
+  if (currentPage !== 'asl-update') return;
+  var lr = await api('/api/asl-update/log?offset=' + _aslOffset);
+  if (lr.ok && lr.data.exists) {
+    aslAppendLog(lr.data.lines, lr.data.reset);
+    _aslOffset = lr.data.offset;
+  } else if (lr.ok && !lr.data.exists && _aslOffset) {
+    _aslOffset = 0;
+  }
+  var sr = await api('/api/asl-update/status');
+  if (sr.ok) aslRenderStatus(sr.data);
+  if (currentPage !== 'asl-update') return;
+  var fast = _aslWasBusy || Date.now() < _aslFastUntil;
+  _aslTimer = setTimeout(aslUpdateTick, fast ? 1500 : 10000);
+}
+
+async function aslUpdateLoad() {
+  stopAslUpdatePolling();
+  _aslOffset = 0;
+  document.getElementById('asl-log').innerHTML = '<div class="muted">No update has been run yet.</div>';
+  _aslWarns = 0; _aslErrs = 0; aslUpdateCounters();
+  aslUpdateTick();
+}
+
+async function aslUpdateCheck() {
+  var r = await api('/api/asl-update/check', {method: 'POST'});
+  if (!r.ok) { alert(r.data.error || 'Could not start the check.'); return; }
+  _aslFastUntil = Date.now() + 5000;
+  stopAslUpdatePolling();
+  aslUpdateTick();
+}
+
+async function aslUpdateInstall() {
+  var sr = await api('/api/asl-update/status');
+  var act = (sr.ok && sr.data.activity) || {};
+  var msg = 'Install the Asterisk update now?\n\nAsterisk will restart: all links drop and any transmission ends.';
+  if (act.keyed) msg += '\n\nA node is KEYED right now.';
+  if (act.links) msg += '\n\n' + act.links + ' link(s) are currently connected.';
+  msg += '\n\nA live log will follow the install on this page.';
+  if (!confirm(msg)) return;
+  var r = await api('/api/asl-update/install', {method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify({confirm: true})});
+  if (!r.ok) {
+    alert((r.data.error || 'Could not start the update.') + (r.data.hint ? '\n\n' + r.data.hint : ''));
+    return;
+  }
+  _aslOffset = 0;
+  _aslFastUntil = Date.now() + 20000;
+  document.getElementById('asl-log').innerHTML = '<div class="muted">Starting\u2026</div>';
+  stopAslUpdatePolling();
+  aslUpdateTick();
+}
+
 function stopStressTestPolling() {
   if (_stressStatusTimer) { clearTimeout(_stressStatusTimer); _stressStatusTimer = null; }
 }
@@ -7600,6 +7837,10 @@ async function applyRoleNav() {
   if (chatLogNavBtn) chatLogNavBtn.style.display = isOwnerRole ? '' : 'none';
   /* AudioSocket tap apply.sh needs root — owner-only, matches the backend's
      explicit role==='owner' check on /api/audiosocket-tap/apply. */
+  /* Asterisk package updates install as root and restart Asterisk — owner-only,
+     matches the backend's explicit role==='owner' check on /api/asl-update/*. */
+  var aslUpdateNavBtn = document.getElementById('nav-asl-update');
+  if (aslUpdateNavBtn) aslUpdateNavBtn.style.display = isOwnerRole ? '' : 'none';
   var audiosocketTapCard = document.getElementById('audiosocket-tap-settings-card');
   if (audiosocketTapCard) audiosocketTapCard.style.display = isOwnerRole ? '' : 'none';
   /* Browser TX apply.sh needs root too — owner-only, matches the backend's
@@ -7646,6 +7887,7 @@ window.addEventListener('DOMContentLoaded', async function() {
   startDiagPolling();   // Dashboard is the initial page; showPage() isn't called on first load
   checkNodeDB();
   checkForUpdate();
+  aslUpdateBadge();
 });
 
 async function checkForUpdate(live) {

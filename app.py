@@ -336,6 +336,12 @@ SYSTEMD_RUN_PATH = "/usr/bin/systemd-run"
 if not os.path.exists(SYSTEMD_RUN_PATH):
     SYSTEMD_RUN_PATH = "/bin/systemd-run"
 UPDATE_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "update.sh")
+ASL_UPDATE_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "asl-asterisk-update.sh")
+# Where asl-asterisk-update.sh writes its run log. The script (run as root,
+# through sudo) reads the same variable name, but a sudoers-launched run never
+# inherits this service's environment, so in production both sides just use
+# the default; the override exists for tests and hand-run dev setups.
+ASL_UPDATE_LOG_PATH = os.environ.get("HENWEN_ASL_UPDATE_LOG", "/var/log/henwen-asl-update.log")
 ROTATE_SECRET_KEY_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rotate_secret_key.sh")
 UPDATE_SERVICE_PORTS_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "update_service_ports.sh")
 AUDIOSOCKET_TAP_APPLY_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audiosocket-tap", "apply.sh")
@@ -12377,6 +12383,363 @@ def api_update_launch():
     })
 
 
+# ── Asterisk package updates (Owner only) ──────────────────────────────────
+#
+# A weekly background check for newer asl3-asterisk* packages in the apt repo
+# AllStarLink already configured on this box, plus a Manager page that lets the
+# Owner install them and watch the run live. The privileged half is
+# asl-asterisk-update.sh, reached through two narrowly-scoped NOPASSWD sudoers
+# rules (provision-sudoers.sh): `check` (apt-get update) and `install`, which is
+# launched via systemd-run as its own transient unit so it keeps logging while
+# Asterisk restarts underneath it. Everything unprivileged here reads apt's own
+# state (apt-cache policy / apt-get -s), which needs no root.
+#
+# Installing restarts Asterisk, which drops every link and ends any
+# transmission, so it only ever happens on an explicit click -- the weekly
+# poller just records what's available.
+
+ASL_UPDATE_POLL_INTERVAL  = 7 * 86400.0   # one successful check a week
+ASL_UPDATE_RETRY_INTERVAL = 6 * 3600.0    # after a failed apt-get update
+ASL_UPDATE_STATE_KEY      = "asl_update_state"
+ASL_UPDATE_UNIT           = "henwen-asl-upgrade"
+ASL_UPDATE_PKG_GLOB       = "asl3-asterisk*"
+ASL_UPDATE_LOG_CHUNK      = 65536
+
+_asl_check_lock = threading.Lock()   # held for the whole of a check
+_asl_checking   = False              # True while one is in flight (for the UI)
+
+
+def parse_apt_policy(text):
+    """{package: (installed, candidate)} from `apt-cache policy` output.
+    "(none)" is normalised to None on either side."""
+    out, cur = {}, None
+    for line in text.splitlines():
+        if line and not line[0].isspace() and line.rstrip().endswith(":"):
+            cur = line.strip()[:-1]
+            out[cur] = [None, None]
+            continue
+        m = re.match(r"\s+(Installed|Candidate):\s*(\S+)", line)
+        if m and cur:
+            val = None if m.group(2) == "(none)" else m.group(2)
+            out[cur][0 if m.group(1) == "Installed" else 1] = val
+    return {k: tuple(v) for k, v in out.items()}
+
+
+def parse_apt_simulation(text):
+    """[{name, old, new}] for each `Inst` line of `apt-get -s` output:
+    "Inst pkg [old] (new Repo [arch])"; a package being newly pulled in
+    as a dependency has no [old]."""
+    out = []
+    for line in text.splitlines():
+        m = re.match(r"Inst (\S+)(?: \[([^\]]+)\])? \((\S+)", line)
+        if m:
+            out.append({"name": m.group(1), "old": m.group(2) or "", "new": m.group(3)})
+    return out
+
+
+_ASL_LOG_PREFIX_RE = re.compile(r"^\[\d\d:\d\d:\d\d\] \[(INFO|WARN|ERROR)\]")
+_ASL_LOG_ERROR_RE = re.compile(
+    r"^E: |^dpkg: error|error processing|\bfailed\b|segmentation fault|traceback|"
+    r"unmet dependencies|could not get lock|broken packages", re.I)
+_ASL_LOG_WARN_RE = re.compile(
+    r"^W: |^dpkg: warning|\bwarning\b|\.dpkg-(dist|new|old|bak)\b|"
+    r"keeping old config file|configuration file .* (kept|modified)|obsolete", re.I)
+
+
+def classify_asl_update_lines(raw_lines):
+    """[(level, text)] where level is info|warn|error|ok. The script's own
+    lines carry an explicit [LEVEL]; apt/dpkg's pass-through output is
+    matched by pattern, and the indented continuation lines the script prints
+    under a WARN/ERROR line inherit that line's level."""
+    out, prev = [], "info"
+    for text in raw_lines:
+        text = text.rstrip("\r")
+        m = _ASL_LOG_PREFIX_RE.match(text)
+        if text.startswith("=== RESULT: SUCCESS"):
+            level = "ok"
+        elif text.startswith("=== RESULT:"):
+            level = "error"
+        elif m:
+            level = {"INFO": "info", "WARN": "warn", "ERROR": "error"}[m.group(1)]
+        elif text.startswith("        ") and prev in ("warn", "error"):
+            level = prev
+        elif _ASL_LOG_ERROR_RE.search(text):
+            level = "error"
+        elif _ASL_LOG_WARN_RE.search(text):
+            level = "warn"
+        else:
+            level = "info"
+        prev = level
+        out.append((level, text))
+    return out
+
+
+def _asl_run(cmd, timeout):
+    env = dict(os.environ, LC_ALL="C")
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+
+
+def _asl_installed_packages():
+    """[(name, version)] of installed asl3-asterisk* packages."""
+    r = _asl_run(["dpkg-query", "-W", "-f", "${db:Status-Abbrev}\t${Package}\t${Version}\n",
+                  ASL_UPDATE_PKG_GLOB], 15)
+    pkgs = []
+    for line in r.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) == 3 and parts[0].strip() == "ii":
+            pkgs.append((parts[1], parts[2]))
+    return pkgs
+
+
+def _asl_collect_update_info():
+    """What's installed vs. what apt currently offers, from the lists apt
+    already has (no refresh, no root). Raises on dpkg/apt failure."""
+    installed = _asl_installed_packages()
+    if not installed:
+        return {"packages": [], "will_upgrade": [], "available": False,
+                "error": f"No {ASL_UPDATE_PKG_GLOB} packages are installed"}
+    names = [n for n, _ in installed]
+    policy = parse_apt_policy(_asl_run(["apt-cache", "policy"] + names, 20).stdout)
+    pkgs = []
+    for name, ver in installed:
+        inst, cand = policy.get(name, (ver, None))
+        pkgs.append({"name": name, "installed": inst or ver, "candidate": cand or "",
+                     "newer": bool(cand and cand != (inst or ver))})
+    will_upgrade = []
+    if any(p["newer"] for p in pkgs):
+        # Same command the script runs, simulated: also surfaces any extra
+        # package the upgrade would pull in, which the Owner should see first.
+        sim = _asl_run(["apt-get", "-s", "install", "--only-upgrade"] + names, 30)
+        will_upgrade = parse_apt_simulation(sim.stdout)
+    return {"packages": pkgs, "will_upgrade": will_upgrade,
+            "available": bool(will_upgrade), "error": ""}
+
+
+def _asl_load_state():
+    try:
+        return json.loads(get_setting(ASL_UPDATE_STATE_KEY, "") or "{}")
+    except (ValueError, TypeError):
+        return {}
+
+
+def _asl_check_for_updates(refresh=True):
+    """Run one check and persist the result. refresh=True first asks the
+    root helper to `apt-get update`; if that fails the answer is still worked
+    out from whatever lists apt already has (the OS's own daily apt timer
+    keeps those fairly fresh), and the failure is recorded rather than
+    hidden. Returns the saved state, or None if another check was already
+    running."""
+    global _asl_checking
+    if not _asl_check_lock.acquire(blocking=False):
+        return None
+    _asl_checking = True
+    try:
+        state = {"checked_at": time.time(), "refresh_ok": None, "refresh_error": ""}
+        if refresh:
+            try:
+                r = _asl_run([SUDO_PATH, "-n", ASL_UPDATE_SCRIPT_PATH, "check"], 240)
+                state["refresh_ok"] = r.returncode == 0
+                if r.returncode != 0:
+                    msg = (r.stderr or r.stdout).strip()
+                    state["refresh_error"] = msg[-400:] or f"exit status {r.returncode}"
+            except Exception as e:
+                state["refresh_ok"] = False
+                state["refresh_error"] = str(e)
+            if not state["refresh_ok"]:
+                log("WARN", f"[ASL-UPDATE] apt-get update failed: {state['refresh_error']}")
+        try:
+            state.update(_asl_collect_update_info())
+        except Exception as e:
+            log("WARN", f"[ASL-UPDATE] couldn't read package state: {e}")
+            state.update({"packages": [], "will_upgrade": [], "available": False,
+                          "error": str(e)})
+        prev = _asl_load_state()
+        set_setting(ASL_UPDATE_STATE_KEY, json.dumps(state))
+        if state["available"]:
+            newest = ", ".join(f"{u['name']} {u['new']}" for u in state["will_upgrade"])
+            was = {u["name"] + u["new"] for u in prev.get("will_upgrade", [])}
+            now = {u["name"] + u["new"] for u in state["will_upgrade"]}
+            log("INFO", f"[ASL-UPDATE] Update available: {newest}"
+                        + ("" if now != was else " (unchanged since last check)"))
+        else:
+            log("INFO", "[ASL-UPDATE] Asterisk packages are up to date")
+        return state
+    finally:
+        _asl_checking = False
+        _asl_check_lock.release()
+
+
+def _asl_update_poll_loop():
+    log("INFO", "[ASL-UPDATE] Weekly Asterisk package check started")
+    time.sleep(90)
+    while True:
+        last = _asl_load_state().get("checked_at") or 0
+        wait = last + ASL_UPDATE_POLL_INTERVAL - time.time()
+        if last and wait > 0:
+            time.sleep(min(wait, 86400))   # re-evaluate daily so a clock jump can't strand us
+            continue
+        try:
+            state = _asl_check_for_updates(refresh=True)
+        except Exception as e:
+            log("WARN", f"[ASL-UPDATE] weekly check failed: {e}")
+            state = None
+        if state is None or state.get("refresh_ok") is False:
+            time.sleep(ASL_UPDATE_RETRY_INTERVAL)
+
+
+def start_asl_update_poller():
+    t = threading.Thread(target=_asl_update_poll_loop, name="asl-update-poller", daemon=True)
+    t.start()
+    log("INFO", "[ASL-UPDATE] Weekly Asterisk package check thread launched")
+
+
+def _asl_upgrade_running():
+    try:
+        r = subprocess.run([SYSTEMCTL_PATH, "is-active", ASL_UPDATE_UNIT],
+                           capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() in ("active", "activating", "deactivating")
+    except Exception:
+        return False
+
+
+def _asl_node_activity():
+    """Link/keyed picture from the AMI cache, so the Owner sees what an
+    Asterisk restart is about to interrupt."""
+    links, keyed = 0, False
+    for st in list(_ami_cache.values()):
+        links += len(st.get("connected") or [])
+        keyed = keyed or bool(st.get("keyed")) or any(
+            l.get("keyed") for l in (st.get("links") or {}).values())
+    return {"links": links, "keyed": keyed}
+
+
+def _asl_last_result():
+    """SUCCESS / FAILED / None from the tail of the last run's log."""
+    try:
+        with open(ASL_UPDATE_LOG_PATH, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 2048))
+            tail = f.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    m = re.findall(r"^=== RESULT: (SUCCESS|FAILED) ===", tail, re.M)
+    return m[-1] if m else None
+
+
+@app.route("/api/asl-update/status")
+def api_asl_update_status():
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Owner access required"}), 403
+    state = _asl_load_state()
+    return jsonify({
+        "state": state,
+        "checking": _asl_checking,
+        "running": _asl_upgrade_running(),
+        "last_result": _asl_last_result(),
+        "next_check": (state.get("checked_at") or 0) + ASL_UPDATE_POLL_INTERVAL
+                      if state.get("checked_at") else None,
+        "script_installed": os.path.exists(ASL_UPDATE_SCRIPT_PATH),
+        "asterisk_active": get_asterisk_status().get("active"),
+        "ami_connected": bool(_ami_connected),
+        "activity": _asl_node_activity(),
+    })
+
+
+@app.route("/api/asl-update/check", methods=["POST"])
+def api_asl_update_check():
+    """Check now, in the background (apt-get update can take a while); the
+    page polls /status until `checking` clears."""
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Owner access required"}), 403
+    if _asl_checking:
+        return jsonify({"success": True, "message": "A check is already running."}), 202
+    if _asl_upgrade_running():
+        return jsonify({"error": "An update is installing right now."}), 409
+    threading.Thread(target=lambda: _asl_check_for_updates(refresh=True),
+                     name="asl-update-check", daemon=True).start()
+    log("INFO", f"[ASL-UPDATE] Manual check requested by '{session.get('username')}'")
+    return jsonify({"success": True}), 202
+
+
+@app.route("/api/asl-update/install", methods=["POST"])
+def api_asl_update_install():
+    """Install the pending asl3-asterisk* upgrade, as its own transient systemd
+    unit (see the section comment). Requires {"confirm": true} in the body:
+    the request restarts Asterisk, so the page must have shown that warning."""
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Owner access required"}), 403
+    if not (request.get_json(silent=True) or {}).get("confirm"):
+        return jsonify({"error": "Confirmation required."}), 400
+    if not os.path.exists(ASL_UPDATE_SCRIPT_PATH):
+        return jsonify({"error": f"Updater script not found: {ASL_UPDATE_SCRIPT_PATH}"}), 404
+    if _asl_upgrade_running():
+        return jsonify({"error": "An update is already running."}), 409
+    if _asl_checking:
+        return jsonify({"error": "A check is still running - try again in a moment."}), 409
+    try:
+        info = _asl_collect_update_info()
+    except Exception as e:
+        return jsonify({"error": f"Couldn't read package state: {e}"}), 500
+    if not info["available"]:
+        return jsonify({"error": "Asterisk is already up to date."}), 409
+
+    cmd = [SUDO_PATH, "-n", SYSTEMD_RUN_PATH, f"--unit={ASL_UPDATE_UNIT}", "--collect",
+           ASL_UPDATE_SCRIPT_PATH, "install"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except Exception as e:
+        log("ERROR", f"[ASL-UPDATE] launch exception: {e}")
+        return jsonify({"error": str(e)}), 500
+    if r.returncode != 0:
+        stderr = r.stderr.strip()
+        hint = ("Service account lacks sudo rights for the updater - run update.sh "
+                "(Launch Updater) or re-run install.sh to refresh the henwen-systemctl sudoers rule."
+                if "password" in stderr.lower() or "not allowed" in stderr.lower()
+                or "authoriz" in stderr.lower()
+                else f"Check: journalctl -u {ASL_UPDATE_UNIT} -n 50")
+        log("ERROR", f"[ASL-UPDATE] launch failed: {stderr}")
+        return jsonify({"error": stderr or f"systemd-run returned code {r.returncode}",
+                        "hint": hint}), 500
+    names = ", ".join(f"{u['name']} {u['old'] or '-'} -> {u['new']}" for u in info["will_upgrade"])
+    log("INFO", f"[ASL-UPDATE] Install launched by '{session.get('username')}': {names}")
+    return jsonify({"success": True})
+
+
+@app.route("/api/asl-update/log")
+def api_asl_update_log():
+    """Incremental tail of the run log: ?offset=<bytes already received>.
+    Only whole lines are returned until the run finishes, so a line the
+    script is mid-way through writing is never split across two polls. A
+    new run replaces the file, so an offset past the end means "start over"
+    and is flagged as `reset`."""
+    if session.get('role') != 'owner':
+        return jsonify({"error": "Owner access required"}), 403
+    try:
+        offset = max(0, int(request.args.get("offset", 0)))
+    except ValueError:
+        offset = 0
+    running = _asl_upgrade_running()
+    try:
+        size = os.path.getsize(ASL_UPDATE_LOG_PATH)
+    except OSError:
+        return jsonify({"exists": False, "lines": [], "offset": 0, "running": running,
+                        "result": None, "reset": False})
+    reset = offset > size
+    if reset:
+        offset = 0
+    with open(ASL_UPDATE_LOG_PATH, "rb") as f:
+        f.seek(offset)
+        chunk = f.read(ASL_UPDATE_LOG_CHUNK)
+    if not (running is False and offset + len(chunk) >= size):
+        cut = chunk.rfind(b"\n")
+        chunk = chunk[:cut + 1] if cut >= 0 else b""
+    text = chunk.decode("utf-8", "replace")
+    lines = classify_asl_update_lines(text.splitlines())
+    return jsonify({"exists": True, "reset": reset, "offset": offset + len(chunk),
+                    "size": size, "running": running, "result": _asl_last_result(),
+                    "lines": [{"level": lv, "text": tx} for lv, tx in lines]})
+
+
 # ── AudioSocket tap (low-latency Listen audio) ───────────────────────────────
 #
 # Swaps the Status Board's Listen capture path from AMI MixMonitor (buffered,
@@ -17794,6 +18157,7 @@ if not os.environ.get("HENWEN_SKIP_STARTUP"):
     start_id_monitor()
     start_nws_alert_poller()
     start_release_poller()
+    start_asl_update_poller()
     start_aprs_poller()
     start_iss_poller()
     start_meshtastic_poller()
