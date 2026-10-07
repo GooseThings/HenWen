@@ -12679,7 +12679,8 @@ def api_asl_update_install():
     try:
         info = _asl_collect_update_info()
     except Exception as e:
-        return jsonify({"error": f"Couldn't read package state: {e}"}), 500
+        log("ERROR", f"[ASL-UPDATE] couldn't read package state: {e}")
+        return jsonify({"error": "Couldn't read package state - see the HenWen log for details."}), 500
     if not info["available"]:
         return jsonify({"error": "Asterisk is already up to date."}), 409
 
@@ -12689,7 +12690,7 @@ def api_asl_update_install():
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
     except Exception as e:
         log("ERROR", f"[ASL-UPDATE] launch exception: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Couldn't launch the Asterisk update - see the HenWen log for details."}), 500
     if r.returncode != 0:
         stderr = r.stderr.strip()
         hint = ("Service account lacks sudo rights for the updater - run update.sh "
@@ -12864,7 +12865,7 @@ def api_ws_audio_apply():
                                   "journalctl / apache2ctl configtest by hand"}), 500
     except Exception as e:
         log("ERROR", f"[API] /api/ws-audio/apply exception: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "ws-audio apply failed - see the HenWen log for details."}), 500
 
     output = (r.stdout or "") + (r.stderr or "")
     if r.returncode != 0:
@@ -15728,7 +15729,8 @@ def api_dvswitch_tune():
     except subprocess.TimeoutExpired:
         return jsonify({"error": "dvswitch.sh timed out"}), 500
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        log("ERROR", f"[API] /api/dvswitch/tune exception: {e}")
+        return jsonify({"error": "DVSwitch tune failed - see the HenWen log for details."}), 500
 
     if r.returncode != 0:
         detail = (r.stdout or "").strip() or (r.stderr or "").strip()
@@ -15845,7 +15847,8 @@ def api_dvswitch_apply():
         with os.fdopen(fd, "w") as f:
             json.dump(export, f)
     except OSError as e:
-        return jsonify({"error": f"Could not write {DVSWITCH_EXPORT_PATH}: {e}"}), 500
+        log("ERROR", f"[API] Could not write {DVSWITCH_EXPORT_PATH}: {e}")
+        return jsonify({"error": "Could not write the DVSwitch export file - see the HenWen log for details."}), 500
 
     cmd = [SUDO_PATH, "-n", DVSWITCH_APPLY_SCRIPT_PATH, DVSWITCH_EXPORT_PATH]
     try:
@@ -15856,7 +15859,7 @@ def api_dvswitch_apply():
                          "output": "\n".join(output_parts)}), 500
     except Exception as e:
         log("ERROR", f"[API] /api/dvswitch/apply exception: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "DVSwitch apply failed - see the HenWen log for details."}), 500
 
     output_parts.append((r.stdout or "") + (r.stderr or ""))
     if r.returncode != 0:
