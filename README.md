@@ -5,7 +5,7 @@
 
 A browser-based web interface for managing and using your AllStarLink 3 node, with a public kiosk display for shared spaces. Runs as a systemd service on the same machine as Asterisk — no separate server required.
 
-![Kiosk](images/HenWen-v2026.09.08-beta.jpg)
+![Kiosk](images/Screenshot 2026-10-07 142154.jpg)
 
 ![Manager](images/HenWen-manager-v2026.08.06.jpg)
 
