@@ -8053,6 +8053,7 @@ var _listenAudioCtx     = null;   // AudioContext
 var _listenDecoder      = null;   // WebCodecs AudioDecoder
 var _listenWorkletNode  = null;   // AudioWorkletNode running the jitter-buffer processor
 var _listenWSTelemetryTimer = null;
+var _listenWSJankTimer = null;   // main-thread jank sampler for the low-latency path telemetry
 var _listenVolumeChangeHandler = null;  // removed on stop, added fresh on start
 
 /* MSE live-edge tuning.
@@ -8496,8 +8497,29 @@ function _doStartListenWS(audio, node) {
        [AUDIO-CLIENT] log line family server-side) so both paths' health is
        directly comparable in the server log — maxArrGap is the WS-frame
        analog of that path's own chunk-arrival-gap metric, and
-       bufferedMs/underruns/overflows are the AudioWorklet jitter buffer's
-       own health, which the MSE path has no equivalent of. */
+       bufferedMs/cushionMs/underruns/resyncs/rate are the AudioWorklet
+       jitter buffer's own health, which the MSE path has no equivalent of.
+       cushionMs is that buffer's adaptive cushion (its analog of this
+       page's own _listenTargetS) and rate its catch-up playback rate, so
+       how the buffer is actually responding to a given link is legible
+       from the log rather than having to be inferred; resyncs counts the
+       last-resort splices that are the only remaining case where this path
+       discards audio. */
+    /* jank mirrors the MSE path's own metric, which this path previously
+       lacked: both maxArrGap (above) and the decode->worklet handoff run on
+       the main thread, which this board shares with the map rebuild and
+       every poller. So a main thread blocked for longer than the worklet's
+       cushion is indistinguishable in maxArrGap alone from a genuinely
+       bursty network, and the two want completely different fixes. Measured
+       the same way the MSE path measures it -- a fixed-interval timer
+       reporting its own lateness. */
+    var _tmJankMax  = 0;
+    var _tmJankLast = _now();
+    _listenWSJankTimer = setInterval(function() {
+      var n = _now();
+      _tmJankMax  = Math.max(_tmJankMax, n - _tmJankLast - 250);
+      _tmJankLast = n;
+    }, 250);
     workletNode.port.onmessage = function(e) {
       if (e.data.type !== 'stats') return;
       var bufferedMs = e.data.bufferedSamples / audioCtx.sampleRate * 1000;
@@ -8505,10 +8527,14 @@ function _doStartListenWS(audio, node) {
         'chunks=' + _tm.chunks +
         ' kB=' + (_tm.bytes / 1024).toFixed(1) +
         ' maxArrGap=' + _tm.maxGapMs.toFixed(0) + 'ms' +
+        ' jank=' + _tmJankMax.toFixed(0) + 'ms' +
         ' bufferedMs=' + bufferedMs.toFixed(0) +
+        ' cushionMs=' + (e.data.targetMs || 0).toFixed(0) +
+        ' rate=' + (e.data.rate || 1).toFixed(2) +
         ' underruns=' + e.data.underruns +
+        ' resyncs=' + (e.data.resyncs || 0) +
         ' overflows=' + e.data.overflows);
-      _tm.chunks = 0; _tm.bytes = 0; _tm.maxGapMs = 0;
+      _tm.chunks = 0; _tm.bytes = 0; _tm.maxGapMs = 0; _tmJankMax = 0;
     };
     _listenWSTelemetryTimer = setInterval(function() {
       if (ctrl.signal.aborted) { clearInterval(_listenWSTelemetryTimer); return; }
@@ -8928,6 +8954,7 @@ function _stopListen() {
   if (_listenRenewTimer) { clearTimeout(_listenRenewTimer);  _listenRenewTimer = null; }
   if (_listenRateTimer)  { clearInterval(_listenRateTimer);  _listenRateTimer  = null; }
   if (_listenWSTelemetryTimer) { clearInterval(_listenWSTelemetryTimer); _listenWSTelemetryTimer = null; }
+  if (_listenWSJankTimer) { clearInterval(_listenWSJankTimer); _listenWSJankTimer = null; }
   if (_listenCtrl) { _listenCtrl.abort(); _listenCtrl = null; }
   if (_listenObjURL) { URL.revokeObjectURL(_listenObjURL); _listenObjURL = null; }
 
