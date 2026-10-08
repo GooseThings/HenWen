@@ -8378,7 +8378,14 @@ function _doStartListenWS(audio, node) {
 
   var _tm = { chunks: 0, bytes: 0, lastArr: 0, maxGapMs: 0 };
 
-  audioCtx.audioWorklet.addModule('/static/audio-worklet-lowlatency.js').then(function() {
+  /* ?v=<mtime> so a deployed worklet change actually reaches an already-open
+     board. Flask serves /static with Cache-Control: no-cache, which mandates
+     revalidation, but Chrome's in-memory cache can still satisfy a
+     same-session reuse without any network request -- see
+     _static_asset_ver() in app.py for the live case that showed this. */
+  var _workletUrl = '/static/audio-worklet-lowlatency.js?v=' +
+                    encodeURIComponent('{{ rx_worklet_ver }}');
+  audioCtx.audioWorklet.addModule(_workletUrl).then(function() {
     if (ctrl.signal.aborted) return;
 
     var workletNode = new AudioWorkletNode(audioCtx, 'henwen-lowlatency-playback');
