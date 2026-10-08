@@ -116,19 +116,33 @@
 // playback here allocates nothing.
 
 const TARGET_MIN_MS    = 200;   // the latency budget; playback rides here
-/* Equal to the floor, which disables upward adaptation: the requirement for
-   this path is a latency budget near 200ms, and adapting the cushion upward
-   is precisely a trade of latency for continuity. Raising this re-enables
-   it, and the curve was measured against this install's real arrival-gap
-   distribution (600s x 3 seeds, speech-gap per 10min of a repeater feed):
-       ceiling 200ms -> 260ms mean latency, 5682ms speech-gap   <-- shipped
-       ceiling 250ms -> 295ms,              5263ms
-       ceiling 300ms -> 324ms,              5016ms
-       ceiling 400ms -> 354ms,              4804ms
-       ceiling 600ms -> 407ms,              4614ms
-   Discards stay at ~3 per 10min across that whole range, so this is a
-   latency-vs-gaps dial only; it does not trade away audio. */
-const TARGET_MAX_MS    = 200;
+/* Bounded adaptation, enabled 2026-10-07 after characterising this install's
+   actual link rather than its average. The uplink's latency is *intermittent*
+   on a timescale of minutes, not steadily bad: gateway RTT (one hop) was
+   measured swinging between ~10ms average and ~150ms average with
+   multi-hundred-ms spikes, with `pipe 3`/`pipe 4` on every sample -- i.e.
+   requests queueing. Audio tracked it exactly: arrival gaps averaged 1052ms
+   and underruns 37.6/min during a bad patch, then 318ms and 9.2/min twenty
+   minutes later with no code change.
+   A *fixed* budget is the wrong shape for that. It is excellent while the
+   link is healthy (87ms on a clean link) and collapses during the bad
+   patches. So the cushion now rides at TARGET_MIN while the link behaves and
+   expands only once underruns prove it is not behaving, with SOLA snapping it
+   back afterwards -- the bad patches cost latency instead of dropouts, and
+   the good stretches (most of the time) still sit at the 200ms budget.
+   Measured curve for this ceiling, against the real arrival-gap distribution
+   (600s x 3 seeds, speech-gap per 10min of a repeater feed):
+       200ms (fixed)  -> 260ms mean latency, 5682ms speech-gap
+       250ms          -> 295ms,              5263ms
+       300ms          -> 324ms,              5016ms
+       400ms          -> 354ms,              4804ms   <-- shipped
+       600ms          -> 407ms,              4614ms
+   Those means are over a synthetic distribution with a stall every 10s, so
+   they describe a *bad* link; on a healthy one the cushion decays to the
+   200ms floor and stays there. Discards hold at ~3 per 10min across the
+   whole range, so this dial trades latency against gaps only -- it never
+   trades away audio. */
+const TARGET_MAX_MS    = 400;
 const TARGET_STEP_MS   = 150;   // cushion added per underrun, when enabled
 const RESUME_FRAC      = 0.5;   // refill this fraction of target before resuming
 const DECAY_AFTER_MS   = 20000; // underrun-free time before shaving the cushion
