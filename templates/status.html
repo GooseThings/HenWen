@@ -2303,7 +2303,7 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
       <div id="f-active-users-panel" style="display:none;position:absolute;bottom:100%;left:0;margin-bottom:6px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;min-width:170px;max-width:260px;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:2000;font-size:0.78rem;line-height:1.6"></div>
     </span>
     <span id="f-sysstats" style="display:none" title="Host resource usage">
-      CPU <strong id="f-cpu">—</strong> · RAM <strong id="f-mem">—</strong> · Disk <strong id="f-disk">—</strong><span id="f-temp-wrap"> · <strong id="f-temp">—</strong></span>
+      CPU <strong id="f-cpu">—</strong> · RAM <strong id="f-mem">—</strong> · Disk <strong id="f-disk">—</strong><span id="f-temp-wrap"> · <strong id="f-temp">—</strong></span><span id="f-jitter-wrap" title="Network jitter on the node's remote links"> · Jitter <strong id="f-jitter">—</strong></span>
     </span>
     <span><a href="https://github.com/GooseThings/HenWen" target="_blank" rel="noopener"
              style="color:var(--text2);text-decoration:none" title="HenWen on GitHub">HenWen{% if henwen_version and henwen_version != 'unknown' %} {{ henwen_version }}{% endif %}</a></span>
@@ -5293,6 +5293,30 @@ async function refreshBoard() {
       warnCls(document.getElementById('f-cpu'),  sy.cpu_pct, 90);
       warnCls(document.getElementById('f-mem'),  sy.mem_pct, 90);
       warnCls(document.getElementById('f-disk'), diskPct, 90);
+      /* Network jitter — worst of the node's remote IAX2 links, straight
+         from Asterisk's own per-peer counters (see get_network_jitter()).
+         Unlike CPU/RAM/Disk this measures the *links* rather than the host,
+         so "nothing is linked" and "couldn't get a reading" are genuinely
+         different states and each gets its own tooltip — rendering both as a
+         bare dash would hide a broken monitor behind a quiet node. */
+      var nt = data.net || {};
+      var elJ = document.getElementById('f-jitter'), elJW = document.getElementById('f-jitter-wrap');
+      if (nt.links == null) {
+        elJ.textContent = '\u2014'; elJ.className = '';
+        elJW.title = 'Network jitter: unavailable (Asterisk/AMI not reachable)';
+      } else if (!nt.links) {
+        elJ.textContent = '\u2014'; elJ.className = '';
+        elJW.title = 'Network jitter: no remote nodes linked';
+      } else {
+        elJ.textContent = nt.jitter_ms + 'ms';
+        /* 30ms is roughly where IAX2 jitter starts being audible as choppy
+           link audio; inline like CPU/RAM/Disk's 90% and temp's 75C. */
+        warnCls(elJ, nt.jitter_ms, 30);
+        elJW.title = 'Worst of ' + nt.links + ' remote link' + (nt.links > 1 ? 's' : '') +
+                     ': jitter ' + nt.jitter_ms + 'ms' +
+                     (nt.rtt_ms   != null ? ', round-trip ' + nt.rtt_ms + 'ms' : '') +
+                     (nt.loss_pct != null ? ', loss ' + nt.loss_pct + '%'     : '');
+      }
       var elT = document.getElementById('f-temp');
       document.getElementById('f-temp-wrap').style.display = data.cpu_temp != null ? '' : 'none';
       if (data.cpu_temp != null) { elT.textContent = Math.round(data.cpu_temp) + '\u00b0C'; warnCls(elT, data.cpu_temp, 75); }
