@@ -6,141 +6,116 @@
 // entire reason this path exists: an <audio> element's/MediaSource's
 // playback pipeline has more inherent latency than this lower-level API).
 //
-// Originally adapted from the jitter-buffer design in a different local
-// project (rigcontrolweb's public/audio-processor.js, studied as a reference
-// for a low-latency RX architecture). Its drop-oldest-on-overflow philosophy
-// is no longer followed literally -- see "Catching up" below.
-//
 // Fed by status.html's _doStartListenWS(): each WebCodecs AudioDecoder
 // output callback posts one decoded Float32Array of PCM here via
 // port.postMessage({type: 'pcm', pcm: <Float32Array>}, [<transferred
 // buffer>]). This processor also answers {type: 'stats-request'} with a
-// {type: 'stats', bufferedSamples, underruns, overflows, resyncs, rate,
-// targetMs} reply, polled every 10s by the main thread for the
-// [AUDIO-CLIENT] telemetry report (mirrors the MSE path's own periodic
-// report, so both paths' health is comparable side by side in the server
-// log).
+// {type: 'stats', bufferedSamples, underruns, resyncs, silenceSkipMs,
+// rate, targetMs} reply, polled every 10s by the main thread for the
+// [AUDIO-CLIENT] telemetry report.
 //
 // ---------------------------------------------------------------------------
-// Why this buffer is adaptive (2026-10-07)
+// Latency budget: a fixed ~200ms, not an adaptive cushion
 // ---------------------------------------------------------------------------
-// This buffer originally ran a *fixed* 120ms pre-roll / 350ms hard cap, and
-// shed latency by clamping occupancy to that cap on the spot. That is
-// smaller than the delivery jitter this install actually sees, which made
-// Listen audibly gap, drop, and pick back up again. Measured from a week of
-// this path's own [AUDIO-CLIENT] telemetry-ws lines (per-10s-window maximum
-// WS frame arrival gap, two independent remote client networks, 1350
-// samples): median 300ms, p90 723ms, p99 1908ms, max 9136ms -- against a
-// 350ms cap. So roughly half of all windows contained a gap at or over the
-// cap, and the floor (120ms) was itself well under the median gap. The
-// failure loop that produces:
+// TARGET_MS is a hard product requirement, not a tuning preference: this
+// path exists to be low-latency and the budget is ~200ms. It deliberately
+// does NOT grow the cushion to ride out a bad link, which is what the
+// legacy WebM/MSE path does (baseline 750ms, adapting to a 4000ms ceiling).
+// A listener on a link too jittery for this budget should use that path
+// instead -- that trade is what it is for, and it is one Manager setting
+// away (Manager > Audio, rx_audio_config.path). Trying to serve both goals
+// from one buffer just produces a path that is neither low-latency nor
+// smooth.
 //
-//   * a gap longer than the cushion drains the buffer -> underrun -> the
-//     processor stops and waits for a full pre-roll to refill, so every
-//     underrun costs at least a pre-roll of hard silence   ("gap")
-//   * the catch-up burst that follows immediately exceeds the cap, so the
-//     oldest samples are discarded -- with a 350ms cap a 1900ms burst threw
-//     away ~1500ms of speech in one splice                 ("drop")
-//   * it refills and resumes                               ("picks up again")
-//
-// Server-side was ruled out before changing anything here: the relay sends
-// one WS frame per 20ms with TCP_NODELAY set on every client socket
-// (audio_ws_relay.py), the box was at load 0.36 across 6 cores, and the
-// arrival rate measured at the client was a correct ~50 frames/sec with no
-// shortfall -- the frames all arrive, just bunched rather than paced.
-//
-// The legacy WebM/MSE path had this same bug and already fixed it the same
-// way; its comment in status.html describes this path's symptom exactly:
-// "some remote networks (traffic shapers, TLS-inspecting middleboxes)
-// deliver the stream in multi-second bursts rather than the steady 200 ms
-// cadence the server emits. A fixed 0.5 s cushion underruns on every burst
-// gap -- audibly choppy. So the cushion grows each time playback actually
-// stalls and decays back toward the baseline only after a sustained
-// stall-free stretch." That path grows its cushion to a 4.0s ceiling
-// (_LISTEN_TARGET_MAX_S); this one keeps a much lower ceiling, since trading
-// away latency is the one thing this path exists not to do -- a listener who
-// wants an unconditionally smooth stream over a badly-shaped link is better
-// served by the legacy path.
-//
-// So the cushion is adaptive, on the same grow-on-stall / decay-when-clean
-// shape as that path:
-//   * TARGET_MIN_MS is the floor, and what a clean link settles back to.
-//   * each underrun adds TARGET_STEP_MS, up to TARGET_MAX_MS.
-//   * after DECAY_AFTER_MS with no underrun, shave DECAY_STEP_MS, at most
-//     once per DECAY_TICK_MS. The tick rate-limit is load-bearing: decaying
-//     once per process() call instead would shave the cushion 375 times a
-//     second and collapse it to the floor within ~60ms of becoming
-//     eligible, which is indistinguishable from never having adapted.
+// The consequence has to be stated plainly, because it is unavoidable
+// rather than a tuning artifact: **a delivery stall longer than the budget
+// must produce either a gap or discarded audio.** Audio that has not
+// arrived cannot be played, and audio that arrives late can only be played
+// late (latency) or skipped (loss). With a fixed ~200ms budget and
+// measured arrival stalls whose median was ~300ms, gaps are expected. What
+// this file can control is *what* gets sacrificed, and that is what the
+// shedding policy below is about.
 //
 // ---------------------------------------------------------------------------
-// Catching up: play slightly fast, don't throw audio away
+// Shedding policy: spend silence, then pitch, then (last) speech
 // ---------------------------------------------------------------------------
-// Once a burst has inflated the buffer, that latency has to come back off
-// somehow, and the choice of mechanism is the difference between an
-// inaudible adjustment and a lost word. Discarding samples -- what the
-// original hard clamp did, and what a fixed-size periodic trim would also do
-// -- loses speech, and a big burst loses a lot of it at once.
+// When a burst leaves the buffer longer than the budget, the excess is shed
+// in a strict order of increasing audible cost:
 //
-// Instead the read pointer advances at a slightly faster-than-real-time rate
-// while the buffer is long, resampling on the way out (linear interpolation
-// over the ring). No audio is discarded at all; it is played marginally
-// early until the backlog is gone. This mirrors the MSE path's own
-// playbackRate controller, including its banded shape and wide dead-band,
-// with one difference worth stating plainly: that path gets the browser's
-// pitch-preserving WSOLA for free, whereas resampling here does shift pitch
-// by the rate factor. That caps the usable rates much lower -- RATE_MAX is
-// 1.08 (an ~8% shift, slight and brief on voice) where the MSE path happily
-// uses 1.25.
+//   1. **Skip dead air.** A repeater feed is mostly silence -- and
+//      audio_relay.py explicitly injects silence whenever the node is
+//      quiet, so the backlog accumulated during a stall is very often dead
+//      air rather than speech. Discarding that is free: nobody can hear a
+//      shortened pause. The silence test reuses this project's own
+//      established threshold, `recording_config.silence_rms_thresh`
+//      (default 300 on the int16 scale, i.e. ~0.0092 of full scale) from
+//      recording.py's SilenceGate, rather than inventing a second notion
+//      of "quiet" for the same audio. It is applied as a *peak* bound
+//      rather than an RMS average, which is both cheaper (early exit on
+//      the first loud sample) and more conservative -- it errs toward
+//      keeping audio.
+//   2. **Play slightly fast.** Whatever excess remains is absorbed by
+//      advancing the read pointer faster than real time and resampling on
+//      the way out. No audio is lost; it is played marginally early. Rates
+//      are capped low (1.08) because resampling shifts pitch, where the
+//      MSE path gets the browser's pitch-preserving WSOLA for free.
+//   3. **Discard, last.** Only past LATENCY_MAX_MS -- a stall so large
+//      that neither of the above can hold the budget -- is audio dropped
+//      outright, declicked, down to the target. This is the only step that
+//      can cut speech, and `resyncs` counts it.
 //
-// Because the rates are capped low, catch-up is bounded at ~80ms of latency
-// shed per second, which is not enough for a pathological multi-second
-// burst (the measured max gap was 9136ms -- nearly two minutes of catch-up
-// at that rate, by which time more bursts have landed). So the third tier
-// mirrors the MSE path's last resort too: past RESYNC_MS of excess, give up
-// on catching up gracefully and discard down to the target in one declicked
-// splice, cooldown-gated so a buffer hovering near the threshold can't
-// cause repeated splices. That is the only path that still loses audio, it
-// is what `resyncs` counts, and on the measured distribution it is rare
-// rather than routine.
+// After an underrun, playback resumes at RESUME_MS rather than refilling
+// the full budget, so a gap costs about the stall itself instead of the
+// stall plus a full pre-roll.
 //
-// Splices -- resuming after an underrun, and a resync discard -- are sample
-// discontinuities, audible as a click/pop independently of the dropout
-// itself. Each gets a short linear ramp, the same declick treatment and for
-// the same reason as audio_relay.py's own _fade_frame() on its
-// real<->silence and overflow-drop splices.
+// ---------------------------------------------------------------------------
+// Note on what this cannot fix
+// ---------------------------------------------------------------------------
+// This buffer is the last stage in the chain and can only choose how to
+// spend jitter that already happened. It is not the right place to *reduce*
+// that jitter. The arrival stalls measured on this install traced to the
+// box's own uplink -- it was serving over Wi-Fi (5GHz, -68dBm) with power
+// save enabled, which parks the radio between beacons and delivers in
+// bursts; both independent client networks saw the same stall-then-burst
+// signature, which a per-client problem would not explain. Wired Ethernet,
+// or at minimum `iw dev <iface> set power_save off`, buys more here than any
+// amount of tuning in this file, because it makes the 200ms budget
+// achievable without spending anything at all.
+//
+// Also worth knowing before reaching for a per-packet fix: this path is
+// Opus over a WebSocket, i.e. TCP. Delivery is in-order and lossless by
+// construction -- there are no late or out-of-order packets to discard. A
+// stall is TCP head-of-line blocking, after which the whole backlog
+// arrives at once.
 //
 // ---------------------------------------------------------------------------
 // Backing store
 // ---------------------------------------------------------------------------
-// A fixed-size ring buffer, replacing the original allocate-and-concatenate-
-// per-message. That pattern rebuilt the entire buffer on every inbound 20ms
-// frame -- at 48kHz a full buffer is ~67KB, so 50 frames/sec meant several
-// MB/s of allocation and copying *on the real-time audio rendering thread*,
+// A fixed-size ring buffer. The original implementation allocated and
+// concatenated a whole new Float32Array per inbound 20ms frame -- at 48kHz
+// that is ~67KB rebuilt 50 times a second *on the real-time audio thread*,
 // whose GC pauses show up as exactly the underruns this file exists to
-// avoid. The ring is sized once for the worst case the adaptation can reach
-// and steady-state playback allocates nothing at all.
+// avoid. Steady-state playback here allocates nothing.
 
-const TARGET_MIN_MS      = 200;   // floor / clean-link cushion
-const TARGET_MAX_MS      = 1500;  // adaptive ceiling (cf. MSE path's 4000ms)
-const TARGET_STEP_MS     = 400;   // cushion added per underrun
-const DECAY_AFTER_MS     = 60000; // underrun-free time before shaving the cushion
-const DECAY_STEP_MS      = 50;    // shaved per decay step
-const DECAY_TICK_MS      = 2000;  // minimum interval between decay steps
+const TARGET_MS        = 200;   // the latency budget; playback rides at this occupancy
+const RESUME_MS        = 100;   // pre-roll after an underrun (shorter gap than a full refill)
+const LATENCY_MAX_MS   = 320;   // past this, discard regardless of content
 
-/* Catch-up rate bands, keyed on how far above target the buffer is sitting.
-   Rates stay low because resampling shifts pitch (see note above); the
-   dead-band is wide so ordinary jitter never engages catch-up at all. */
-const RATE_DEADBAND_MS   = 150;   // excess below this plays at exactly 1.0
+const SHED_SLACK_MS    = 40;    // dead-band: don't shed for trivial excess
+const SKIP_CHUNK_MS    = 3.3;   // granularity of the dead-air scan
+const SKIP_MAX_MS      = 10;    // most dead air discardable per render block
+/* recording.py's SilenceGate default, 300 on the int16 scale, expressed for
+   the float samples WebCodecs hands us. Same audio, same notion of quiet. */
+const SILENCE_PEAK     = 300 / 32768;
+
 const RATE_BANDS = [
-  { overMs: 150,  rate: 1.02 },
-  { overMs: 500,  rate: 1.04 },
-  { overMs: 1000, rate: 1.08 },
+  { overMs: 60,  rate: 1.02 },
+  { overMs: 120, rate: 1.04 },
+  { overMs: 200, rate: 1.08 },
 ];
-const RESYNC_MS          = 2500;  // excess past this discards down to target
-const RESYNC_COOLDOWN_MS = 5000;  // minimum interval between resync splices
 
-const HARD_CAP_EXTRA_MS  = 4000;  // ring headroom above the cushion ceiling
-const DECLICK_MS         = 5;     // linear ramp over a splice (matches audio_relay.py)
+const RING_EXTRA_MS    = 2000;  // ring headroom so a burst lands rather than wrapping
+const DECLICK_MS       = 5;     // linear ramp over a splice (matches audio_relay.py)
 
 class LowLatencyPlaybackProcessor extends AudioWorkletProcessor {
   constructor() {
@@ -149,54 +124,38 @@ class LowLatencyPlaybackProcessor extends AudioWorkletProcessor {
     // sampleRate here is a global AudioWorkletGlobalScope binding equal to
     // the owning AudioContext's rate -- _doStartListenWS() constructs that
     // context with sampleRate: 48000 to match WebCodecs' Opus decoder
-    // output exactly, so these both work out to the same 48000 in
-    // practice; computed from `sampleRate` rather than hardcoded so this
-    // stays correct if that ever changes on either side.
+    // output exactly, so these work out to 48000 in practice; computed
+    // from `sampleRate` rather than hardcoded so this stays correct if that
+    // ever changes on either side.
     const toSamples = (ms) => Math.max(1, Math.round(sampleRate * ms / 1000));
-    this._toSamples = toSamples;
 
-    this.TARGET_MIN  = toSamples(TARGET_MIN_MS);
-    this.TARGET_MAX  = toSamples(TARGET_MAX_MS);
-    this.TARGET_STEP = toSamples(TARGET_STEP_MS);
-    this.DECAY_STEP  = toSamples(DECAY_STEP_MS);
-    this.DEADBAND    = toSamples(RATE_DEADBAND_MS);
-    this.RESYNC      = toSamples(RESYNC_MS);
+    this.TARGET      = toSamples(TARGET_MS);
+    this.RESUME      = toSamples(RESUME_MS);
+    this.LATENCY_MAX = toSamples(LATENCY_MAX_MS);
+    this.SHED_SLACK  = toSamples(SHED_SLACK_MS);
+    this.SKIP_CHUNK  = toSamples(SKIP_CHUNK_MS);
+    this.SKIP_MAX    = toSamples(SKIP_MAX_MS);
     this.DECLICK     = toSamples(DECLICK_MS);
-    this._rateBands  = RATE_BANDS.map((b) => ({
-      over: toSamples(b.overMs), rate: b.rate,
-    })).sort((a, b) => b.over - a.over);   // highest threshold first
+    this._rateBands  = RATE_BANDS
+      .map((b) => ({ over: toSamples(b.overMs), rate: b.rate }))
+      .sort((a, b) => b.over - a.over);   // highest threshold first
 
-    // Current adaptive cushion: both the pre-roll before playback starts or
-    // resumes, and the occupancy playback tries to ride at.
-    this.target = this.TARGET_MIN;
-
-    // Ring sized for the worst case the adaptation can reach, so the
-    // backing store is allocated exactly once.
-    this.capacity = this.TARGET_MAX + toSamples(HARD_CAP_EXTRA_MS) + toSamples(100);
+    this.capacity = this.LATENCY_MAX + toSamples(RING_EXTRA_MS);
     this.ring = new Float32Array(this.capacity);
 
     // readPos is fractional because the catch-up read resamples; writeIdx is
     // a plain integer since writes are always whole frames. `available` is
-    // the buffered sample count and tracks both (fractional for the same
-    // reason readPos is).
+    // the buffered sample count, fractional for the same reason readPos is.
     this.readPos = 0;
     this.writeIdx = 0;
     this.available = 0;
 
     this.isPlaying = false;
     this._underruns = 0;
-    this._overflows = 0;
     this._resyncs = 0;
+    this._silenceSkipped = 0;
     this._rate = 1.0;
 
-    // currentTime is an AudioWorkletGlobalScope global (seconds, on the
-    // audio clock) -- used rather than Date.now() so these timers run on
-    // the same clock as playback itself.
-    this._lastUnderrunAt = currentTime;
-    this._lastDecayAt = currentTime;
-    this._lastResyncAt = -Infinity;
-
-    // Samples of declick ramp still owed on the output, set at a splice.
     this._rampRemaining = 0;
     this._rampTotal = this.DECLICK;
 
@@ -209,10 +168,10 @@ class LowLatencyPlaybackProcessor extends AudioWorkletProcessor {
           type: 'stats',
           bufferedSamples: Math.round(this.available),
           underruns: this._underruns,
-          overflows: this._overflows,
           resyncs: this._resyncs,
+          silenceSkipMs: Math.round(this._silenceSkipped / sampleRate * 1000),
           rate: this._rate,
-          targetMs: this.target / sampleRate * 1000,
+          targetMs: TARGET_MS,
         });
       }
     };
@@ -227,27 +186,20 @@ class LowLatencyPlaybackProcessor extends AudioWorkletProcessor {
     this._armDeclick();
   }
 
-  /** Appends decoded PCM, enforcing only the ring's physical ceiling. */
   _write(data) {
     const cap = this.capacity;
     let n = data.length;
     if (n <= 0) return;
 
-    // A single posted frame larger than the whole ring can only mean a
-    // pathological decoder output; keep its newest tail rather than
-    // overrunning the write.
     if (n > cap) {
       data = data.subarray(n - cap);
       n = cap;
     }
-
-    // Physical ceiling only. Routine burst absorption is the whole point of
-    // the headroom above the cushion, and shedding it is process()'s job
-    // (rate catch-up, or a resync past RESYNC_MS) -- so reaching this means
-    // the ring itself filled, which the sizing is meant to make unreachable.
     if (this.available + n > cap) {
+      // The ring itself is full -- sized so this needs a stall far beyond
+      // LATENCY_MAX, which process() would already have resynced away.
       this._dropOldest(this.available + n - cap);
-      this._overflows++;
+      this._resyncs++;
     }
 
     const w = this.writeIdx;
@@ -257,13 +209,59 @@ class LowLatencyPlaybackProcessor extends AudioWorkletProcessor {
     this.writeIdx = (w + n) % cap;
     this.available += n;
 
-    if (!this.isPlaying && this.available >= this.target) {
+    if (!this.isPlaying && this.available >= this.RESUME) {
       this.isPlaying = true;
       this._armDeclick();
     }
   }
 
-  /** Reads `need` output samples, advancing the read pointer by `rate` per sample. */
+  /**
+   * Shedding step 1: advance the read pointer past leading dead air, up to
+   * `maxSkip` samples. Returns how much was skipped.
+   *
+   * Scans in SKIP_CHUNK blocks and stops at the first chunk containing any
+   * sample above SILENCE_PEAK, so speech is never skipped -- only a run of
+   * quiet immediately at the playback point. Costs nothing audible: a
+   * shortened pause between transmissions is not perceptible, which is what
+   * makes this the cheapest latency available on a repeater feed.
+   */
+  _skipDeadAir(maxSkip) {
+    const cap = this.capacity;
+    const ring = this.ring;
+    const chunk = this.SKIP_CHUNK;
+    let pos = Math.floor(this.readPos);
+    let skipped = 0;
+
+    while (skipped + chunk <= maxSkip) {
+      let loud = false;
+      for (let i = 0; i < chunk; i++) {
+        const v = ring[(pos + i) % cap];
+        if (v > SILENCE_PEAK || v < -SILENCE_PEAK) { loud = true; break; }
+      }
+      if (loud) break;
+      pos = (pos + chunk) % cap;
+      skipped += chunk;
+    }
+
+    if (skipped > 0) {
+      // Silence spliced to silence -- the step across the join is bounded by
+      // SILENCE_PEAK on both sides, so no declick ramp is warranted here.
+      this.readPos = pos;
+      this.available -= skipped;
+      this._silenceSkipped += skipped;
+    }
+    return skipped;
+  }
+
+  /** Shedding step 2: playback rate for this block, from the remaining excess. */
+  _chooseRate(excess) {
+    if (excess <= this.SHED_SLACK) return 1.0;
+    for (const band of this._rateBands) {
+      if (excess > band.over) return band.rate;
+    }
+    return 1.0;
+  }
+
   _readResampled(out, need, rate) {
     const cap = this.capacity;
     const ring = this.ring;
@@ -282,60 +280,30 @@ class LowLatencyPlaybackProcessor extends AudioWorkletProcessor {
     if (this.available < 0) this.available = 0;
   }
 
-  /** Schedules a short linear fade-in over an upcoming sample discontinuity. */
   _armDeclick() {
     this._rampRemaining = this.DECLICK;
     this._rampTotal = this.DECLICK;
-  }
-
-  /** Grows the cushion after a stall. */
-  _adaptAfterUnderrun() {
-    this._underruns++;
-    this.target = Math.min(this.TARGET_MAX, this.target + this.TARGET_STEP);
-    this._lastUnderrunAt = currentTime;
-    this._lastDecayAt = currentTime;
-  }
-
-  /** Shaves the cushion back toward the floor after a sustained clean stretch. */
-  _maybeDecay() {
-    if (this.target <= this.TARGET_MIN) return;
-    const now = currentTime;
-    if ((now - this._lastUnderrunAt) * 1000 < DECAY_AFTER_MS) return;
-    if ((now - this._lastDecayAt) * 1000 < DECAY_TICK_MS) return;
-    this.target = Math.max(this.TARGET_MIN, this.target - this.DECAY_STEP);
-    this._lastDecayAt = now;
-  }
-
-  /** Picks this block's playback rate from how far above target the buffer is. */
-  _chooseRate() {
-    const excess = this.available - this.target;
-    if (excess <= this.DEADBAND) return 1.0;
-    for (const band of this._rateBands) {
-      if (excess > band.over) return band.rate;
-    }
-    return 1.0;
-  }
-
-  /** Last resort for an excess too large to play off at the capped rates. */
-  _maybeResync() {
-    if (this.available - this.target <= this.RESYNC) return;
-    const now = currentTime;
-    if ((now - this._lastResyncAt) * 1000 < RESYNC_COOLDOWN_MS) return;
-    this._dropOldest(this.available - this.target);
-    this._lastResyncAt = now;
-    this._resyncs++;
   }
 
   process(inputs, outputs) {
     const output = outputs[0];
     const channel = output && output[0];
     if (!channel) return true;
-
     const need = channel.length;
 
-    this._maybeResync();
+    // Shed in order of increasing audible cost: dead air, then pitch, then
+    // (only past the ceiling) real audio.
+    let excess = this.available - this.TARGET;
+    if (excess > this.SHED_SLACK) {
+      excess -= this._skipDeadAir(Math.min(this.SKIP_MAX, excess));
+    }
+    if (this.available > this.LATENCY_MAX) {
+      this._dropOldest(this.available - this.TARGET);
+      this._resyncs++;
+      excess = this.available - this.TARGET;
+    }
 
-    const rate = this._chooseRate();
+    const rate = this._chooseRate(excess);
     // Interpolation reads one sample past the final position, so require a
     // little more than the nominal consumption before committing to a read.
     const required = need * rate + 2;
@@ -344,21 +312,16 @@ class LowLatencyPlaybackProcessor extends AudioWorkletProcessor {
       this._rate = rate;
       this._readResampled(channel, need, rate);
       if (this._rampRemaining > 0) {
-        // Linear fade-in across the splice, carried over successive blocks
-        // if the ramp is longer than one render quantum.
         const total = this._rampTotal;
         for (let i = 0; i < need && this._rampRemaining > 0; i++, this._rampRemaining--) {
           channel[i] *= (total - this._rampRemaining) / total;
         }
       }
-      this._maybeDecay();
     } else {
-      // Underflow: pause and wait for a full cushion to refill rather than
-      // playing back whatever partial data exists -- a hard silence gap
-      // here is preferable to a discontinuity mid-buffer. Only counts as an
-      // underrun (and only grows the cushion) on the transition out of
-      // playing, not for every silent block while it waits to refill.
-      if (this.isPlaying) this._adaptAfterUnderrun();
+      // Underflow: wait for RESUME_MS rather than playing a partial block --
+      // a clean silence gap beats a discontinuity mid-buffer. Counted only
+      // on the transition out of playing, not per silent block.
+      if (this.isPlaying) this._underruns++;
       this.isPlaying = false;
       this._rate = 1.0;
       channel.fill(0);
