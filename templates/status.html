@@ -8540,6 +8540,11 @@ function _doStartListenWS(audio, node) {
         ' bufferedMs=' + bufferedMs.toFixed(0) +
         ' cushionMs=' + (e.data.targetMs || 0).toFixed(0) +
         ' rate=' + (e.data.rate || 1).toFixed(2) +
+        /* solaHops counts the time-compression hops used to play a burst off
+           instead of discarding it, so "catch-up happened" is visible
+           separately from rate (which is only a momentary sample at poll
+           time and so usually reads 1.00 even on a link catching up often). */
+        ' solaHops=' + (e.data.solaHops || 0) +
         ' underruns=' + e.data.underruns +
         ' resyncs=' + (e.data.resyncs || 0) +
         /* deadAirMs is the cumulative dead air the worklet shed to hold the
