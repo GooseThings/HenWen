@@ -6183,6 +6183,15 @@ def _ttl_cached(ttl):
                 state["v"]  = v
                 state["ts"] = time.time()
             return v
+
+        def cache_clear():
+            """Drop the memo so the next call recomputes. Exists for tests:
+            the memo is otherwise closure-private, so one test's cached value
+            would leak into the next one's reading."""
+            with lock:
+                state["v"], state["ts"] = None, 0.0
+
+        wrapper.cache_clear = cache_clear
         return wrapper
     return deco
 
@@ -6258,6 +6267,123 @@ def get_system_stats():
     except Exception:
         pass
     return out
+
+
+# ---------------------------------------------------------------------------
+# Network jitter
+#
+# Read from Asterisk's own IAX2 counters rather than measured by pinging
+# anything: an AllStarLink link *is* an IAX2 channel, so app_rpt's peers
+# already carry continuously-updated RTT/jitter/loss figures for the exact
+# path the audio takes. A synthetic ping to some third-party host would
+# measure a different route to a different machine, generate traffic of its
+# own, and need a target configured per install. This costs one AMI command
+# per NET_JITTER_TTL over the already-open socket plus a few-line string
+# parse -- cheaper than get_disk_usage()'s `df` subprocess, so comfortably
+# inside the Pi Zero 2 W floor (see "Hardware target" in CLAUDE.md).
+# ---------------------------------------------------------------------------
+NET_JITTER_TTL  = 10   # bounds this to one AMI command per 10s no matter how
+                       # many kiosk tabs are polling the board
+_IAX_LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
+
+
+def _iax_channel_host(channel):
+    """Peer host out of an `iax2 show netstats` channel name:
+    IAX2/<host>:<port>-<callno> -> <host>. Returns whatever is left of the
+    last colon when the name doesn't carry a port."""
+    return channel.split("/", 1)[-1].rsplit(":", 1)[0].strip("[]")
+
+
+def _parse_iax_netstats(lines):
+    """Parse `iax2 show netstats` into one dict per IAX2 channel.
+
+    Column layout (verified against this box's live Asterisk):
+        Channel  RTT | LOCAL: Jit Del Lost % Drop OOO Kpkts
+                     | REMOTE: Jit Del Lost % Drop OOO Kpkts | FirstMsg LastMsg
+
+    Only the LOCAL figures are returned. Those are what *this* node
+    experiences receiving the peer's audio -- i.e. what someone listening
+    here actually hears. The REMOTE columns are the mirror image (what the
+    peer hears of us), which is neither this node's problem to fix nor what
+    a kiosk viewer is listening to.
+
+    Anything not matching that shape -- the two header lines, the trailing
+    "N active IAX channels" summary, a truncated or reformatted row -- is
+    skipped rather than guessed at, so a future Asterisk that changes the
+    table degrades to "no reading" instead of to wrong numbers.
+    """
+    out = []
+    for line in lines:
+        parts = line.split()
+        # Channel + RTT + 7 LOCAL + 7 REMOTE = 16 fields minimum. The two
+        # trailing FirstMsg/LastMsg columns are text, not required, and not
+        # included in the numeric conversion below.
+        if len(parts) < 16 or not parts[0].startswith("IAX2/"):
+            continue
+        try:
+            nums = [int(p) for p in parts[1:16]]
+        except ValueError:
+            continue
+        out.append({
+            "channel":   parts[0],
+            "rtt_ms":    nums[0],
+            "jitter_ms": nums[1],
+            "lost":      nums[3],
+            "loss_pct":  nums[4],
+        })
+    return out
+
+
+def _iax_netstats_remote_links(rows):
+    """The subset of _parse_iax_netstats() rows that represent a real remote
+    peer with a usable jitter reading.
+
+    Loopback channels are dropped: a DVSwitch/Analog_Bridge bridge shows up
+    as IAX2/127.0.0.1:4569-<callno> and always reports 0ms, so counting it
+    would drag the worst-link figure toward 0 and show a reassuring
+    "0ms" on a node whose only real network link is in trouble. A negative
+    jitter is app_rpt/IAX2 saying it has no measurement yet, not a 0ms one.
+    """
+    return [r for r in rows
+            if _iax_channel_host(r["channel"]) not in _IAX_LOOPBACK_HOSTS
+            and r["jitter_ms"] >= 0]
+
+
+@_ttl_cached(NET_JITTER_TTL)
+def get_network_jitter():
+    """Worst-case jitter across the node's remote IAX2 links, for the kiosk
+    footer's network monitor.
+
+    Returns {} when the reading is unavailable (AMI down, IAX2 not
+    answering) -- deliberately distinct from a *successful* read that found
+    no remote links, which returns links=0 with a null jitter. The footer
+    tells those two apart ("unavailable" vs. "nothing linked"); collapsing
+    both to a bare dash would hide a broken monitor behind a quiet node.
+
+    The worst link's identity is deliberately *not* included: that is a peer
+    IP address, and /api/status/board is public (the kiosk is readable
+    without login), which would newly publish the home IP of every ham
+    linked to this node. The aggregate link count is enough to read the
+    number, and the connected-node list already names who is linked.
+    """
+    if not _ami_connected:
+        return {}
+    try:
+        lines = ami_send_command(lambda ami: {"lines": ami.command(
+            "iax2 show netstats", log_level="DEBUG")}).get("lines", [])
+    except Exception as e:
+        log("DEBUG", f"[NETJIT] iax2 netstats read failed: {e}")
+        return {}
+    links = _iax_netstats_remote_links(_parse_iax_netstats(lines))
+    if not links:
+        return {"jitter_ms": None, "links": 0, "rtt_ms": None, "loss_pct": None}
+    worst = max(links, key=lambda r: r["jitter_ms"])
+    return {
+        "jitter_ms": worst["jitter_ms"],
+        "links":     len(links),
+        "rtt_ms":    worst["rtt_ms"],
+        "loss_pct":  worst["loss_pct"],
+    }
 
 
 def get_uptime():
@@ -8318,6 +8444,7 @@ def api_status_board():
         "cpu_temp":         get_cpu_temp(),
         "disk":             get_disk_usage(),
         "sys":              get_system_stats(),
+        "net":              get_network_jitter(),
         "ami_connected":    _ami_connected,
         "active_users":     get_active_user_count(),
         "connector_warning": _connector_upcoming_disconnect_all(),
