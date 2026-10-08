@@ -265,6 +265,34 @@ def _load_henwen_version():
 
 HENWEN_VERSION = _load_henwen_version()
 
+
+def _static_asset_ver(relpath):
+    """Cache-bust token for a static asset, from its own mtime.
+
+    The low-latency RX worklet is loaded by URL at runtime
+    (audioWorklet.addModule('/static/audio-worklet-lowlatency.js')) rather
+    than as a <script> tag, and Flask serves /static with
+    `Cache-Control: no-cache` — which mandates revalidation, but Chrome's
+    in-memory cache can still hand a same-session reuse the old body
+    without going to the network at all. Confirmed live: after deploying a
+    rewritten worklet and restarting, an already-open board reconnected its
+    audio WebSocket and started a fresh encoder with no request for the
+    worklet appearing in Apache's access log, leaving it ambiguous whether
+    that listener was running the new buffer or the old one.
+
+    Keyed on mtime rather than HENWEN_VERSION so an in-place deploy between
+    releases (the normal way a fix like that reaches this box) busts it too,
+    which a version string by definition cannot.
+    """
+    try:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', relpath)
+        return str(int(os.path.getmtime(path)))
+    except Exception:
+        # A missing/unreadable asset is not worth failing a page render over
+        # -- fall back to the release string, which at least changes on an
+        # upgrade.
+        return HENWEN_VERSION
+
 # Persistent AMI poller settings (tunable via service file env vars)
 # 1s poll for near-real-time keyed-status updates in the UI. This used to
 # be 3s, tuned around AMIClient.command()'s old 12s-per-call bug (waiting
@@ -12085,6 +12113,7 @@ def api_audio_client_log():
 @app.route("/")
 def status_board():
     return render_template("status.html", henwen_version=HENWEN_VERSION,
+                            rx_worklet_ver=_static_asset_ver('audio-worklet-lowlatency.js'),
                             app_logo_classic=app_logo_classic())
 
 
