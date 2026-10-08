@@ -8506,12 +8506,14 @@ function _doStartListenWS(audio, node) {
        analog of that path's own chunk-arrival-gap metric, and
        bufferedMs/cushionMs/underruns/resyncs/rate are the AudioWorklet
        jitter buffer's own health, which the MSE path has no equivalent of.
-       cushionMs is that buffer's adaptive cushion (its analog of this
-       page's own _listenTargetS) and rate its catch-up playback rate, so
-       how the buffer is actually responding to a given link is legible
-       from the log rather than having to be inferred; resyncs counts the
-       last-resort splices that are the only remaining case where this path
-       discards audio. */
+       cushionMs is that buffer's latency budget (fixed, unlike this page's
+       own adaptive _listenTargetS -- the low-latency path holds a hard
+       budget rather than growing to ride out a bad link) and rate its
+       catch-up playback rate, so how the buffer is responding to a given
+       link is legible from the log rather than having to be inferred.
+       resyncs counts the last-resort splices that are the only case where
+       this path discards real audio; deadAirMs is the silence it shed
+       instead, which is free. */
     /* jank mirrors the MSE path's own metric, which this path previously
        lacked: both maxArrGap (above) and the decode->worklet handoff run on
        the main thread, which this board shares with the map rebuild and
@@ -8540,7 +8542,12 @@ function _doStartListenWS(audio, node) {
         ' rate=' + (e.data.rate || 1).toFixed(2) +
         ' underruns=' + e.data.underruns +
         ' resyncs=' + (e.data.resyncs || 0) +
-        ' overflows=' + e.data.overflows);
+        /* deadAirMs is the cumulative dead air the worklet shed to hold the
+           latency budget -- free, by design, so it's reported separately
+           from resyncs (which is the one counter that means real audio was
+           discarded). Replaced an 'overflows' field that logged literally
+           "undefined" once the worklet stopped reporting it. */
+        ' deadAirMs=' + (e.data.silenceSkipMs || 0));
       _tm.chunks = 0; _tm.bytes = 0; _tm.maxGapMs = 0; _tmJankMax = 0;
     };
     _listenWSTelemetryTimer = setInterval(function() {
