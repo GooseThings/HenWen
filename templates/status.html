@@ -8506,14 +8506,12 @@ function _doStartListenWS(audio, node) {
        analog of that path's own chunk-arrival-gap metric, and
        bufferedMs/cushionMs/underruns/resyncs/rate are the AudioWorklet
        jitter buffer's own health, which the MSE path has no equivalent of.
-       cushionMs is that buffer's latency budget (fixed, unlike this page's
-       own adaptive _listenTargetS -- the low-latency path holds a hard
-       budget rather than growing to ride out a bad link) and rate its
-       catch-up playback rate, so how the buffer is responding to a given
-       link is legible from the log rather than having to be inferred.
-       resyncs counts the last-resort splices that are the only case where
-       this path discards real audio; deadAirMs is the silence it shed
-       instead, which is free. */
+       cushionMs is that buffer's adaptive cushion -- its analog of this
+       page's own _listenTargetS, and the thing to watch to see how a given
+       link is being coped with. resyncs counts the last-resort splices that
+       are the only case where this path discards real audio; deadAirMs is
+       the silence it shed instead, which is free and is the only way it
+       recovers latency. */
     /* jank mirrors the MSE path's own metric, which this path previously
        lacked: both maxArrGap (above) and the decode->worklet handoff run on
        the main thread, which this board shares with the map rebuild and
@@ -8539,12 +8537,14 @@ function _doStartListenWS(audio, node) {
         ' jank=' + _tmJankMax.toFixed(0) + 'ms' +
         ' bufferedMs=' + bufferedMs.toFixed(0) +
         ' cushionMs=' + (e.data.targetMs || 0).toFixed(0) +
+        /* rate is always exactly 1.00 by design -- the worklet never alters
+           playback speed (see its header for the resample/frame-drop/SOLA
+           mechanisms that were measured and rejected). Logged anyway so a
+           future change that reintroduced rate alteration shows up here
+           rather than silently. */
         ' rate=' + (e.data.rate || 1).toFixed(2) +
-        /* solaHops counts the time-compression hops used to play a burst off
-           instead of discarding it, so "catch-up happened" is visible
-           separately from rate (which is only a momentary sample at poll
-           time and so usually reads 1.00 even on a link catching up often). */
-        ' solaHops=' + (e.data.solaHops || 0) +
+        ' slowest=' + _slowTask.name + ':' + _slowTask.ms + 'ms' +
+        ' longtask=' + _longTasks.n + 'x' + _longTasks.maxMs.toFixed(0) + 'ms' +
         ' underruns=' + e.data.underruns +
         ' resyncs=' + (e.data.resyncs || 0) +
         /* deadAirMs is the cumulative dead air the worklet shed to hold the
@@ -8554,6 +8554,8 @@ function _doStartListenWS(audio, node) {
            "undefined" once the worklet stopped reporting it. */
         ' deadAirMs=' + (e.data.silenceSkipMs || 0));
       _tm.chunks = 0; _tm.bytes = 0; _tm.maxGapMs = 0; _tmJankMax = 0;
+      _slowTask = {name: '-', ms: 0};
+      _longTasks = {n: 0, maxMs: 0};
     };
     _listenWSTelemetryTimer = setInterval(function() {
       if (ctrl.signal.aborted) { clearInterval(_listenWSTelemetryTimer); return; }
@@ -8740,6 +8742,8 @@ function _doStartListenMSE(audio, node) {
       _tmLastCT   = audio.currentTime;
       _tmLastWall = n;
       _tm.chunks = 0; _tm.bytes = 0; _tm.maxGapMs = 0; _tmJankMax = 0;
+      _slowTask = {name: '-', ms: 0};
+      _longTasks = {n: 0, maxMs: 0};
     }, 10000);
 
     /* Fetch the stream and pump chunks into the SourceBuffer */
@@ -9924,25 +9928,76 @@ loadFavStatus();
 checkKioskSession();
 fetchNets();
 
-setInterval(refreshBoard,    2000);    /* node status every 2s — board endpoint is
+/* Long-task attribution for the low-latency audio path (2026-10-07).
+   The jank metric in _doStartListenWS() showed this board's main thread
+   blocking for 55-96ms steadily (and once for 10s), which at a 200ms audio
+   budget eats half the cushion -- and because both the WS arrival timestamp
+   and the WebCodecs decode->worklet handoff run on this same thread, a block
+   here is indistinguishable in maxArrGap from a genuinely bursty network. So
+   before optimising anything, attribute it: _timed() wraps each periodic
+   handler and records the slowest one per telemetry window, which the audio
+   telemetry line then reports as slowest=<name>:<ms>. Cheap enough to leave
+   in -- one Date.now() pair per handler invocation.
+
+   Caveat worth knowing when reading slowest=: these handlers are async, so
+   _timed() only covers the synchronous part (the fetch kickoff), not the
+   DOM/map rebuild that happens later in the promise callback. So a small
+   slowest= does NOT mean the handler is cheap. The longtask= counter below
+   is the authoritative figure -- PerformanceObserver's longtask entries
+   cover any main-thread task over 50ms wherever it originates, including
+   those promise callbacks. Use slowest= only as a hint about which timer
+   fired nearby. */
+var _slowTask = {name: '-', ms: 0};
+function _timed(name, fn) {
+  return function() {
+    var t0 = Date.now();
+    try { return fn.apply(this, arguments); }
+    finally {
+      var dt = Date.now() - t0;
+      if (dt > _slowTask.ms) { _slowTask = {name: name, ms: dt}; }
+    }
+  };
+}
+
+
+/* Authoritative main-thread blocking measurement, independent of which
+   function caused it -- see the caveat on _timed() above. Guarded because
+   'longtask' is not observable in every browser (Safari in particular), and
+   an unsupported entryType makes observe() throw. */
+var _longTasks = {n: 0, maxMs: 0};
+try {
+  if (typeof PerformanceObserver !== 'undefined' &&
+      PerformanceObserver.supportedEntryTypes &&
+      PerformanceObserver.supportedEntryTypes.indexOf('longtask') !== -1) {
+    new PerformanceObserver(function(list) {
+      var es = list.getEntries();
+      for (var i = 0; i < es.length; i++) {
+        _longTasks.n++;
+        if (es[i].duration > _longTasks.maxMs) _longTasks.maxMs = es[i].duration;
+      }
+    }).observe({entryTypes: ['longtask']});
+  }
+} catch (e) { /* non-fatal: telemetry just reports 0 */ }
+
+setInterval(_timed('refreshBoard', refreshBoard),    2000);    /* node status every 2s — board endpoint is
                                           cheap (system-info calls are TTL-cached,
                                           geocoding is non-blocking), so this snappier
                                           keyed/connected refresh adds negligible load */
-setInterval(boardWatchdog,   2000);    /* catches a refreshBoard() request that hangs
+setInterval(_timed('boardWatchdog', boardWatchdog),   2000);    /* catches a refreshBoard() request that hangs
                                           instead of erroring out promptly — see the
                                           comment above markServerUnreachable() */
-setInterval(refreshActivity, 15000);   /* activity every 15s */
-setInterval(loadMeshtasticMessages, 20000);   /* meshtastic panel every 20s */
-setInterval(loadDvswitchStatus, 15000);       /* DVSwitch TG/status panel every 15s */
-setInterval(refreshWeather,  600000);  /* weather every 10min */
-setInterval(refreshNwsAlerts, 60000);  /* NWS alert ticker every 60s — well under the
+setInterval(_timed('refreshActivity', refreshActivity), 15000);   /* activity every 15s */
+setInterval(_timed('loadMeshtasticMessages', loadMeshtasticMessages), 20000);   /* meshtastic panel every 20s */
+setInterval(_timed('loadDvswitchStatus', loadDvswitchStatus), 15000);       /* DVSwitch TG/status panel every 15s */
+setInterval(_timed('refreshWeather', refreshWeather),  600000);  /* weather every 10min */
+setInterval(_timed('refreshNwsAlerts', refreshNwsAlerts), 60000);  /* NWS alert ticker every 60s — well under the
                                           poller's own 120s cadence, just catches up
                                           promptly after a config change */
-setInterval(loadFavStatus,  10000);    /* Favorites Rx%/LCnt cells every 10s — reads
+setInterval(_timed('loadFavStatus', loadFavStatus),  10000);    /* Favorites Rx%/LCnt cells every 10s — reads
                                           only the already-throttled server-side favstats
                                           cache (see FAVORITES_POLL_INTERVAL in app.py),
                                           so this cadence adds no external load */
-setInterval(fetchNets,       60000);   /* net schedule list every 60s — the weather-bar
+setInterval(_timed('fetchNets', fetchNets),       60000);   /* net schedule list every 60s — the weather-bar
                                           badge/highlight itself re-derives every second
                                           from tickSecond(), this just catches edits made
                                           from another browser/tab */
