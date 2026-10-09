@@ -44,6 +44,14 @@ class TestValidateDvswitchConfig:
         assert cleaned["dmr_id"] == "3123456"
         assert cleaned["callsign"] == "N8GMZ"
 
+    def test_dmr_id_must_be_6_or_7_digits(self):
+        # STFU itself rejects anything but 7 digits ("UserID must be 7 digits"),
+        # so a 9-digit ID with SSID would crash it at parse time.
+        for bad in ("12345", "31234567", "320601201", "31234x6"):
+            cfg = dict(VALID_CONFIG); cfg["dmr_id"] = bad
+            cleaned, err = app._validate_dvswitch_config(cfg)
+            assert err is not None, bad
+
     def test_disabled_config_needs_nothing(self):
         cleaned, err = app._validate_dvswitch_config({"enabled": False})
         assert err is None

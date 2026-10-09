@@ -146,6 +146,18 @@ echo "== Installing analog-bridge + mmdvm-bridge + stfu (this can take a while o
 # apt-get line simple and idempotent regardless of which network is chosen.
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends analog-bridge mmdvm-bridge stfu
 
+# ASL3 ships /etc/asterisk/modules.conf with "noload = chan_usrp.so". Without
+# it app_rpt logs "Channel tech 'usrp' is not currently loaded, not adding
+# node <N>" and the bridge node never exists, no matter how right the
+# rpt.conf stanza and ports are. HenWen runs "rpt restart" afterward, which
+# restarts Asterisk, so the edit takes effect without anything else here.
+MODULES_CONF=/etc/asterisk/modules.conf
+if [ -f "$MODULES_CONF" ] && grep -qE '^noload[[:space:]]*=[[:space:]]*chan_usrp\.so' "$MODULES_CONF"; then
+  echo "== Enabling chan_usrp.so in modules.conf (backup: modules.conf.bak-henwen-usrp)"
+  [ -f "$MODULES_CONF.bak-henwen-usrp" ] || cp -a "$MODULES_CONF" "$MODULES_CONF.bak-henwen-usrp"
+  sed -i -E 's/^noload([[:space:]]*)=([[:space:]]*)chan_usrp\.so/load   \1=\2chan_usrp.so/' "$MODULES_CONF"
+fi
+
 echo "== Verifying expected ini paths"
 for f in "$ANALOG_BRIDGE_INI" "$MMDVM_BRIDGE_INI" "$DVSWITCH_INI"; do
   [ -f "$f" ] || {
@@ -233,6 +245,26 @@ patch_ini "$ANALOG_BRIDGE_INI" "USRP" "tlvGain" "$DVS_DMR_GAIN"
 # already "DMR", but set it explicitly rather than relying on that default
 # holding across package versions, since this feature is DMR-only.
 patch_ini "$ANALOG_BRIDGE_INI" "AMBE_AUDIO" "ambeMode" "DMR"
+# "dvswitch.sh mode STFU" (run at the end of this script) only repoints
+# Analog_Bridge's TLV ports in memory, so any restart of analog_bridge --
+# including a reboot -- silently reverted to the DMR ports (31100/31103) and
+# DMR audio stopped reaching Asterisk, with STFU still logging traffic.
+# Persist the STFU ports (DVSwitch.ini [STFU]: partner rxPort -> our txPort,
+# partner txPort -> our rxPort) so the mode survives.
+if [ "$DVS_DMR_NETWORK" = "brandmeister" ]; then
+  patch_ini "$ANALOG_BRIDGE_INI" "AMBE_AUDIO" "txPort" "36103"
+  patch_ini "$ANALOG_BRIDGE_INI" "AMBE_AUDIO" "rxPort" "36100"
+fi
+# Identity and transmit talkgroup for audio going ASL -> DMR. Left at the
+# package defaults (gateway 1234567, repeater 123456789, txTg 9) every
+# transmission from this node goes out as that fake ID on TG 9, whatever
+# STFU's StartTG (receive side only) says. repeaterID is the 7-digit ID plus
+# a 2-digit SSID.
+patch_ini "$ANALOG_BRIDGE_INI" "AMBE_AUDIO" "gatewayDmrId" "$DVS_DMR_ID"
+patch_ini "$ANALOG_BRIDGE_INI" "AMBE_AUDIO" "repeaterID" "${DVS_DMR_ID}01"
+if [ -n "$DVS_STFU_STARTTG" ]; then
+  patch_ini "$ANALOG_BRIDGE_INI" "AMBE_AUDIO" "txTg" "$DVS_STFU_STARTTG"
+fi
 # decoderFallBack=true is Analog_Bridge's own shipped default (software AMBE
 # codec, no hardware needed) — only overridden here when the owner picked a
 # real device. See app.py's dvswitch_config table comment for why software

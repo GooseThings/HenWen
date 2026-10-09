@@ -3,6 +3,8 @@
 These are pure string-in/dict-out functions with no DB or Flask app context,
 so they're tested directly against small hand-built rpt.conf fragments.
 """
+import pytest
+
 import app
 
 
@@ -266,3 +268,29 @@ class TestValidateMacroAndSchedule:
     def test_schedule_field_only_number_or_star(self):
         assert app.validate_schedule_entry("2", "0-30 00 * * *") is not None
         assert app.validate_schedule_entry("2", "30 00 * * *") is None
+
+
+def test_commented_sample_stanza_is_not_an_active_node():
+    """Regression: ";[1998](node-main)" in the stock rpt.conf made guided
+    DVSwitch setup refuse node 1998 as 'already exists'."""
+    content = "[general]\nx=1\n;[1998](node-main)\n;morse = foo\n"
+    assert "1998" in app._collect_stanzas(content)
+    assert "1998" not in app._active_stanza_names(content)
+    out = app.append_node_stanza(content, "1998", {"duplex": "0"})
+    assert "\n[1998]\nduplex = 0\n" in out
+    with pytest.raises(ValueError):
+        app.append_node_stanza(out, "1998", {})
+
+
+def test_ensure_loopback_nodes_entry_copies_local_iax_port():
+    content = ("[nodes]\n\n643931 = radio@127.0.0.1:4570/643931,NONE\n"
+               "643930 = radio@192.168.0.168:4569/643930,NONE\n;1998 = sample\n\n[node-main](!)\nx=1\n")
+    out = app.ensure_loopback_nodes_entry(content, "1998", local_node="643931")
+    assert "1998 = radio@127.0.0.1:4570/1998,NONE" in out
+    assert out.index("1998 = radio") < out.index("[node-main]")
+    # idempotent, and a commented sample doesn't count as present
+    assert app.ensure_loopback_nodes_entry(out, "1998") == out
+
+
+def test_ensure_loopback_nodes_entry_no_nodes_stanza_is_noop():
+    assert app.ensure_loopback_nodes_entry("[general]\nx=1\n", "1998") == "[general]\nx=1\n"
