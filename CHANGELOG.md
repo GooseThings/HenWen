@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **Fixed: guided DVSwitch setup (BrandMeister via STFU) now produces a bridge node that can actually be linked, heard and transmitted from** — confirmed end to end on a live box. Several independent gaps were each enough to break it on their own:
+  - A commented-out sample stanza such as `;[1998](node-main)` was counted as a real stanza, so setup refused node 1998 as "already exists" while the node didn't exist at all. Commented stanzas now carry a flag and the existence checks (setup, status, diagnostics, `append_node_stanza()`) ignore them.
+  - ASL3 ships `chan_usrp.so` as `noload`, so app_rpt logged "Channel tech 'usrp' is not currently loaded" and never added the node. `apply.sh` now enables it (backing up `modules.conf` first).
+  - Setup now adds the bridge node's loopback entry to rpt.conf's `[nodes]` stanza. Without it the node was up but a link to it was accepted and never established. The IAX port is copied from the local node's own entry, since it isn't always 4569.
+  - `Analog_Bridge.ini` was left at package defaults for `gatewayDmrId`, `repeaterID` and `txTg`, so transmissions went out as a placeholder ID on TG 9 regardless of the talkgroup STFU was subscribed to (and the Status Board correctly showed TG 9). `apply.sh` now sets all three.
+  - `dvswitch.sh mode STFU` only repoints Analog_Bridge's TLV ports in memory, so any restart of `analog_bridge` silently stopped DMR audio reaching Asterisk while STFU kept logging traffic. For BrandMeister, `apply.sh` now writes the STFU ports into the ini.
+- **Fixed: Listen, recordings and the stream relay went silent after Asterisk restarted** (including the `rpt restart` the guided setup itself triggers). Every capture path is bound to a channel that dies with the Asterisk process, but HenWen's side kept running and looked healthy. The poll loop now watches Asterisk's pid (every 5s) and tears down live audio sessions when it changes, so consumers take their normal reconnect/finalize path. Not exercised against a real Asterisk restart yet.
+- **Note: the DVSwitch DMR ID stays 6-7 digits.** STFU itself rejects any `UserID` that isn't 7 digits, so a 9-digit ID with an SSID can't be used with BrandMeister here. BrandMeister allows one connection per ID, so two nodes can't share an ID; the second needs its own.
+- **Operator note for existing installs:** `/etc/sudoers.d/henwen-systemctl` is only rewritten by `install.sh`/`update.sh`. A box whose rule file predates the `dvswitch/apply.sh` line fails the guided setup with a sudo error until `provision-sudoers.sh` is re-run.
+
 ## v2026.10.08
 
 - **Added: a footer network jitter monitor**, alongside the existing CPU/RAM/Disk figures — reads the worst local jitter across the node's remote IAX2 links straight from Asterisk's own `iax2 show netstats` counters rather than pinging anything, so it reflects the actual path the audio takes. Also added the CPU/RAM/disk/temp footer stats themselves.
