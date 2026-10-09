@@ -3110,6 +3110,7 @@ def _poll_loop():
             _check_asterisk_dns_health()
             _check_geocode_health()
             _check_leaks()
+            _check_asterisk_restart()
 
         except Exception as outer:
             log("ERROR", f"[AMI-POLL] Unexpected outer error: {outer}")
@@ -5368,7 +5369,8 @@ def _collect_stanzas(content):
         # [meter-faces]/[alarms] example blocks were bleeding their example
         # keys into [macro]'s entries, since none of those headers were
         # recognized as boundaries.
-        header_candidate = s[1:].strip() if s.startswith(";") else s
+        is_commented = s.startswith(";")
+        header_candidate = s[1:].strip() if is_commented else s
         hdr = re.match(r'^\[([^\]]+)\](?:\(([^)]+)\))?', header_candidate)
         if hdr:
             raw_name = hdr.group(1).strip()
@@ -5376,14 +5378,27 @@ def _collect_stanzas(content):
             is_template_def = raw_tmpl == "!"
             template_ref    = None if (not raw_tmpl or raw_tmpl == "!") else raw_tmpl
             current = raw_name
+            # A real header of the same name elsewhere wins over a commented
+            # sample, so ";[1998](node-main)" can't mask or shadow [1998].
+            if is_commented and current in stanzas and not stanzas[current].get("commented"):
+                current = None
+                continue
             stanzas[current] = {
                 "is_template": is_template_def,
                 "template":    template_ref,
+                "commented":   is_commented,
                 "lines":       [],
             }
         elif current is not None:
             stanzas[current]["lines"].append(line)
     return stanzas
+
+
+def _active_stanza_names(content):
+    """Names of stanzas that really exist in rpt.conf, i.e. excluding
+    commented-out samples like ";[1998](node-main)" that _collect_stanzas()
+    deliberately still tracks as boundaries."""
+    return {n for n, st in _collect_stanzas(content).items() if not st.get("commented")}
 
 
 def _parse_kv_lines(lines_list):
@@ -5593,6 +5608,42 @@ def update_setting_in_content(content, section, key, value, enable=True):
     return "".join(result)
 
 
+def ensure_loopback_nodes_entry(content, node_number, local_node=None):
+    """Make sure rpt.conf's [nodes] stanza can resolve node_number to this
+    same box. app_rpt looks a link target up there, so a bridge node that
+    only has its own [node] stanza is "up" but can't be linked to: the
+    connect command is accepted and nothing ever establishes. The IAX port
+    is copied from an existing 127.0.0.1 entry (this box's real IAX port
+    isn't always 4569), falling back to 4569. Returns content unchanged if
+    an active entry for node_number already exists or there's no [nodes]."""
+    lines = content.split("\n")
+    start = next((i for i, l in enumerate(lines) if l.strip() == "[nodes]"), None)
+    if start is None:
+        return content
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        if lines[i].lstrip().startswith("["):
+            end = i
+            break
+    port = "4569"
+    last_entry = start
+    for i in range(start + 1, end):
+        l = lines[i].strip()
+        if not l or l.startswith(";"):
+            continue
+        last_entry = i
+        m = re.match(r'^(\d+)\s*=\s*radio@127\.0\.0\.1(?::(\d+))?/', l)
+        if m:
+            if m.group(1) == str(node_number):
+                return content
+            if m.group(2) and (local_node is None or m.group(1) == str(local_node)):
+                port = m.group(2)
+        elif re.match(rf'^{re.escape(str(node_number))}\s*=', l):
+            return content
+    lines.insert(last_entry + 1, f"{node_number} = radio@127.0.0.1:{port}/{node_number},NONE")
+    return "\n".join(lines)
+
+
 def append_node_stanza(content, node_number, settings, template=None):
     """
     Append a brand-new [node_number] stanza to the end of rpt.conf.
@@ -5614,7 +5665,7 @@ def append_node_stanza(content, node_number, settings, template=None):
     Raises ValueError if node_number already names a stanza (real node or
     template) rather than silently overwriting or duplicating it.
     """
-    if node_number in _collect_stanzas(content):
+    if node_number in _active_stanza_names(content):
         raise ValueError(f"[{node_number}] already exists in rpt.conf")
 
     header = f"[{node_number}]" if not template else f"[{node_number}]({template})"
@@ -9392,6 +9443,52 @@ def _force_teardown_all_broadcasts():
     for broadcast in broadcasts:
         broadcast.shutdown()
     return len(broadcasts)
+
+
+ASTERISK_RESTART_CHECK_INTERVAL = 5   # seconds between pid samples
+_asterisk_restart_state = {"pid": None, "checked": 0.0}
+
+
+def _asterisk_restarted(last_pid, now_pid):
+    """True when Asterisk is running under a different pid than the last one
+    we saw. now_pid None (down, or not found) is never a restart by itself,
+    and last_pid None means nothing to compare against yet; the caller keeps
+    the last known pid across a down period so down-then-up is still caught."""
+    return last_pid is not None and now_pid is not None and now_pid != last_pid
+
+
+def _check_asterisk_restart():
+    """Tear down live audio sessions when Asterisk restarts under them.
+
+    Every capture path (MixMonitor, the AudioSocket tap's ChanSpy, a
+    capture-only relay) is bound to an Asterisk channel that dies with the
+    process. HenWen's side stays up and looks healthy -- ffmpeg keeps
+    encoding, the browser's playedRatio stays 1.00 -- but it's recording a
+    channel that no longer exists, so Listen, recordings and the stream relay
+    go silent until someone happens to stop and restart them. Confirmed live
+    after a `rpt restart` from DVSwitch guided setup. Tearing the sessions
+    down makes every consumer take its normal reconnect path (the stream
+    relay reconnects, recordings finalize, a browser's next Listen starts a
+    fresh capture). Self-throttled like the other poll-loop checks."""
+    now = time.time()
+    if now - _asterisk_restart_state["checked"] < ASTERISK_RESTART_CHECK_INTERVAL:
+        return
+    _asterisk_restart_state["checked"] = now
+    now_pid = _asterisk_pid()
+    last_pid = _asterisk_restart_state["pid"]
+    if now_pid is not None:
+        _asterisk_restart_state["pid"] = now_pid
+    if not _asterisk_restarted(last_pid, now_pid):
+        return
+    with _capture_only_lock:
+        captures = list(_capture_only_active.values())
+    torn = _force_teardown_all_broadcasts()
+    for capture in captures:
+        capture.shutdown()
+    if torn or captures:
+        log("WARN", f"[AUDIO] Asterisk restarted (pid {last_pid} -> {now_pid}); tore down "
+                    f"{torn} listen/record/relay session(s) and {len(captures)} low-latency "
+                    f"capture(s) that were bound to channels that no longer exist")
 
 
 _AUDIO_RELAY_SCRIPT    = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'audio_relay.py')
@@ -15928,7 +16025,7 @@ def api_dvswitch_apply_status():
                  and cfg["network_host"] and cfg["network_port"] and cfg["bridge_node"]
                  and _dvswitch_location_set(cfg))
     content = read_conf_file(RPT_CONF_PATH) or ""
-    bridge_node_exists = bool(cfg) and cfg["bridge_node"] in _collect_stanzas(content)
+    bridge_node_exists = bool(cfg) and cfg["bridge_node"] in _active_stanza_names(content)
     # BrandMeister uses stfu.service instead of mmdvm_bridge.service (see
     # dvswitch/apply.sh's "BrandMeister via STFU, not MMDVM_Bridge" comment
     # for why) -- check whichever one that config actually needs.
@@ -15969,7 +16066,7 @@ def api_dvswitch_apply():
     content = read_conf_file(RPT_CONF_PATH)
     if content is None:
         return jsonify({"error": f"Cannot read rpt.conf at {RPT_CONF_PATH}"}), 500
-    if cfg["bridge_node"] not in _collect_stanzas(content):
+    if cfg["bridge_node"] not in _active_stanza_names(content):
         settings = _dvswitch_bridge_node_settings(_dvswitch_default_context(content))
         try:
             new_content = append_node_stanza(content, cfg["bridge_node"], settings)
@@ -15984,6 +16081,17 @@ def api_dvswitch_apply():
             return jsonify({"error": str(e)}), 403
     else:
         output_parts.append(f"rpt.conf node [{cfg['bridge_node']}] already exists — left unchanged.")
+
+    # Independent of the stanza above: an install whose stanza already exists
+    # (e.g. from an earlier run) still needs the [nodes] entry to be linkable.
+    content = read_conf_file(RPT_CONF_PATH) or ""
+    with_entry = ensure_loopback_nodes_entry(content, cfg["bridge_node"])
+    if with_entry != content:
+        try:
+            write_conf_file(RPT_CONF_PATH, with_entry)
+            output_parts.append(f"Added [nodes] entry for {cfg['bridge_node']} so it can be linked to.")
+        except PermissionError as e:
+            return jsonify({"error": str(e)}), 403
 
     export = {
         "dmr_id": cfg["dmr_id"], "callsign": cfg["callsign"], "dmr_network": cfg["dmr_network"],
