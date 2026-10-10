@@ -56,9 +56,27 @@ An LXC container only sees devices the host passes through, and this one is
 parts: expose the device nodes, then make them usable by the container's
 `asterisk` user.
 
-What the node needs, checked against the installed modules: `chan_simpleusb`
-links **ALSA** (`/dev/snd`) for audio and **libusb-0.1** (`/dev/bus/usb`) for
-the dongle's PTT/COS lines -- it does *not* use `/dev/hidraw*`. The rig
+**Blocker found in practice: OSS sound emulation.** `chan_simpleusb` as shipped
+in ASL3 opens its sound card through OSS (`/dev/dsp<N>`), not ALSA -- ASL3
+ships `/etc/modules-load.d/asl3-oss.conf` to load the `snd_pcm_oss` kernel
+module on a normal install. A container cannot load kernel modules, so the
+**host kernel must provide `snd_pcm_oss`** and the `/dev/dsp*` nodes must then
+be passed through. Tested on Proxmox VE with kernel `7.0.14-5-pve`: it is built
+with `CONFIG_SND_PCM_OSS` not set, so `/dev/dsp*` cannot exist at all, and
+`chan_simpleusb` logs `Unable to open DSP device 1: No such file or directory`
+every 20 ms (a log flood -- roll back the `rxchannel` change if you see it).
+USB (libusb, for the PTT/COS lines) and ALSA both worked through the
+passthrough; the missing OSS emulation is the only failure.
+
+So with a stock PVE kernel, **`SimpleUSB` cannot run inside an LXC container**.
+Options: run the node in a **VM** (own kernel; USB passthrough is native in
+Proxmox -- Debian's stock kernel ships `snd_pcm_oss`), use a host kernel that
+has it, or put the radio on a separate machine. Everything below that applies
+to the device nodes is still correct, but it is not sufficient on its own.
+
+What else the node needs, checked against the installed modules:
+`chan_simpleusb` uses **libusb-0.1** (`/dev/bus/usb`) for the dongle's PTT/COS
+lines; `res_usbradio` uses **ALSA** only for the mixer controls. The rig
 control serial adapter needs `/dev/ttyUSB*` or `/dev/ttyACM*` (use a
 `/dev/serial/by-id/...` path).
 
