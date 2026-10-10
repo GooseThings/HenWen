@@ -16871,6 +16871,8 @@ def api_rig_tune():
     if not cfg or not cfg["enabled"]:
         return jsonify({"error": "Rig control is not enabled"}), 503
     data = request.json or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid request"}), 400
     role = session.get("role", "")
     bands = rig_control.parse_band_limits(cfg["tx_bands"])
     with _rig_lock:
@@ -16882,7 +16884,10 @@ def api_rig_tune():
     try:
         if data.get("memory") is not None:
             mems = _rig_memories(cfg)
-            idx = int(data["memory"])
+            raw_idx = str(data["memory"]).strip()
+            if not raw_idx.isdigit():          # not int(): its ValueError text is Python's, not ours
+                return jsonify({"error": "Invalid memory channel"}), 400
+            idx = int(raw_idx)
             if not (0 <= idx < len(mems)):
                 return jsonify({"error": "No such memory channel"}), 404
             m = mems[idx]
@@ -16901,7 +16906,9 @@ def api_rig_tune():
                       if data.get("offset") not in (None, "") else None)
             if shift not in (None, "None") and not (offset or cur.get("offset_hz")):
                 return jsonify({"error": "A +/- shift needs an offset"}), 400
-    except (ValueError, TypeError) as e:
+    except ValueError as e:
+        # Only rig_control's own validators raise here, each with a fixed
+        # message of ours (e.g. "Invalid frequency") -- never Python's text.
         return jsonify({"error": str(e)}), 400
     # The band limits guard what the radio will actually TRANSMIT on, which
     # with a repeater shift is the dial frequency moved by the offset -- so
@@ -16933,7 +16940,11 @@ def api_rig_tune():
         st = client.read_state()
     except rig_control.RigError as e:
         log("WARN", f"[RIG] Tune to {hz} Hz by {session.get('username', '')} failed: {e}")
-        return jsonify({"error": str(e)}), 502
+        # RigError text can name the rigctld host:port / OS error, so only
+        # the owner sees it (same rule as /api/rig/status's error_detail).
+        msg = (f"The radio did not accept the change ({e})" if role == "owner"
+               else "The radio did not accept the change")
+        return jsonify({"error": msg}), 502
     with _rig_lock:
         _rig_state.update(state=st, error=None, ts=time.time())
     log("INFO", f"[RIG] {session.get('username', '')} tuned to {rig_control.format_mhz(hz)} MHz"
@@ -16954,6 +16965,8 @@ def api_rig_memory_save():
     if not cfg or not cfg["enabled"]:
         return jsonify({"error": "Rig control is not enabled"}), 503
     data = request.json or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid request"}), 400
     label = str(data.get("label", "")).strip()[:24]
     if not label:
         return jsonify({"error": "A name is required"}), 400
@@ -17012,6 +17025,8 @@ def api_rig_config_save():
     if session.get("role") != "owner":
         return jsonify({"error": "Only the owner can change rig control settings"}), 403
     data = request.json or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid request"}), 400
     enabled  = bool(data.get("enabled"))
     backend  = str(data.get("backend", "rigctld")).strip()
     host     = str(data.get("host", "127.0.0.1")).strip()

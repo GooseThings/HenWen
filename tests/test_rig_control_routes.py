@@ -31,6 +31,7 @@ GOOD = {"enabled": True, "backend": "sim", "host": "127.0.0.1", "port": 4532,
 @pytest.fixture
 def rig(client, create_user, monkeypatch):
     """Owner logged in, rig enabled against a SimRig installed as the live client."""
+    app.limiter.reset()          # tune is limited to 30/min; this file makes more than that
     create_user("owner1", role="owner")
     create_user("admin1", role="admin")
     create_user("user1", role="user")
@@ -332,6 +333,34 @@ class TestRfBadge:
         assert html.count('id="rig-btn"') == 1
 
 
+class TestErrorMessagesDontLeak:
+    """Code-scanning findings on the PR: error text reaching a response must be
+    ours, not Python's or rigctld's."""
+
+    def test_bad_memory_index_gets_a_fixed_message(self, client, rig):
+        _login(client, "admin1")
+        for bad in ("abc", "-1", "1.5", "", [1], {"a": 1}):
+            r = client.post("/api/rig/tune", json={"memory": bad})
+            assert r.status_code in (400, 404), bad
+            assert "literal" not in r.get_data(as_text=True)
+
+    def test_non_object_json_is_a_400_not_a_500(self, client, rig):
+        _login(client, "owner1")
+        for path in ("/api/rig/tune", "/api/rig/memories", "/api/rig/config"):
+            assert client.post(path, json=[1, 2]).status_code == 400, path
+
+    def test_radio_failure_detail_is_owner_only(self, client, rig, monkeypatch):
+        def boom(hz):
+            raise rig_control.RigError("Cannot reach rigctld at 10.9.8.7:4532 (refused)")
+        monkeypatch.setattr(rig, "set_freq", boom)
+        _login(client, "admin1")
+        r = client.post("/api/rig/tune", json={"freq": "146.94"})
+        assert r.status_code == 502 and "10.9.8.7" not in r.get_data(as_text=True)
+        _login(client, "owner1")
+        r = client.post("/api/rig/tune", json={"freq": "146.94"})
+        assert r.status_code == 502 and "10.9.8.7" in r.get_json()["error"]
+
+
 class TestTemplates:
     """The kiosk/Manager pages render with the new VFO bits, and every inline
     script in the *rendered* pages still parses (the raw templates contain
@@ -358,7 +387,7 @@ class TestTemplates:
         if not node:
             pytest.skip("node not installed")
         html = re.sub(r"<!--.*?-->", "", self._render(client, path), flags=re.S)
-        for i, body in enumerate(re.findall(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", html, re.S)):
+        for i, body in enumerate(re.findall(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", html, re.S | re.I)):
             if len(body) < 500:
                 continue
             f = tmp_path / f"s{i}.js"
