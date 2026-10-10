@@ -86,6 +86,9 @@ import stream_relay
 # no try/except guard.
 import irc_relay
 import leak_monitor
+# Standalone Hamlib/rigctld client + validators for the kiosk VFO (see
+# rig_control.py). stdlib only, so no import guard needed.
+import rig_control
 
 # aprslib is optional — shelled-out-style guard so a checkout that hasn't
 # picked up the dependency yet (or an admin who edited requirements.txt)
@@ -1137,6 +1140,23 @@ def get_db():
         nickserv_password TEXT    NOT NULL DEFAULT ''
     )""")
     conn.commit()
+    # Singleton config for the kiosk VFO / frequency-agile radio control --
+    # see rig_control.py and the "Rig control" section near the IRC routes.
+    # memories is a JSON list of {label, freq_hz, mode, ctcss_tenths}.
+    conn.execute("""CREATE TABLE IF NOT EXISTS rig_control_config (
+        id                 INTEGER PRIMARY KEY CHECK (id = 1),
+        enabled            INTEGER NOT NULL DEFAULT 0,
+        backend            TEXT    NOT NULL DEFAULT 'rigctld',
+        host               TEXT    NOT NULL DEFAULT '127.0.0.1',
+        port               INTEGER NOT NULL DEFAULT 4532,
+        node               TEXT    NOT NULL DEFAULT '',
+        tx_bands           TEXT    NOT NULL DEFAULT '144.0-148.0, 420.0-450.0',
+        block_when_keyed   INTEGER NOT NULL DEFAULT 1,
+        block_when_linked  INTEGER NOT NULL DEFAULT 0,
+        step_khz           REAL    NOT NULL DEFAULT 5,
+        memories           TEXT    NOT NULL DEFAULT '[]'
+    )""")
+    conn.commit()
     # Owner-only, opt-in DMR<->AllStar bridge via the DVSwitch suite
     # (dvswitch-server: Analog_Bridge + MMDVM_Bridge). Off by default on
     # every install, including this table only ever being consulted once
@@ -1520,6 +1540,7 @@ def check_auth():
                         'api_status_board', 'api_status_weather', 'api_status_activity',
                         'api_status_nws_alerts', 'api_dvswitch_status', 'api_dvswitch_talkgroups',
                         'api_aprs_stations', 'api_iss_tle', 'api_meshtastic_messages',
+                        'api_rig_status',
                         'api_login', 'api_session', 'api_csrf_token',
                         'api_favorites', 'api_favorites_status',
                         'api_kiosk_settings_get', 'api_kiosk_logo_file',
@@ -1547,6 +1568,7 @@ def check_auth():
     # session (previously public, letting anyone on the network listen and
     # spawn server-side encoder/relay processes with no authentication).
     _USER_OR_ABOVE = {'api_status_connect', 'api_status_disconnect', 'api_dvswitch_tune',
+                      'api_rig_tune',
                       'api_fav_add', 'api_fav_delete', 'api_fav_label',
                       'api_audio_stream', 'api_audio_check', 'api_audio_stop',
                       'api_audio_client_log',
@@ -16639,6 +16661,418 @@ def api_irc_relay_status():
 
 
 # ---------------------------------------------------------------------------
+# Rig control (rig_control.py) -- kiosk VFO for a frequency-agile node.
+#
+# HenWen only TUNES (frequency / mode / CTCSS) through Hamlib's rigctld; it
+# never keys the transmitter -- PTT stays with the Asterisk node. One
+# poller thread owns the rigctld connection and caches the radio's state
+# in-process for any number of kiosk viewers (same "one shared cache, many
+# cheap reads" shape as the AMI/APRS pollers), re-reading rig_control_config
+# at the top of every cycle so a saved change applies without a restart.
+# rigctld itself is run by the operator (see docs/rig-control.md); this
+# feature no-ops until the owner enables it.
+# ---------------------------------------------------------------------------
+RIG_CONTROL_CONFIG_DEFAULTS = {
+    "enabled": 0, "backend": "rigctld", "host": "127.0.0.1", "port": 4532,
+    "node": "", "tx_bands": "144.0-148.0, 420.0-450.0",
+    "block_when_keyed": 1, "block_when_linked": 0, "step_khz": 5,
+    "memories": "[]",
+}
+RIG_BACKENDS         = ("rigctld", "sim")
+RIG_MAX_MEMORIES     = 50
+RIG_POLL_SEC         = 2
+RIG_HOST_RE          = re.compile(r"^[A-Za-z0-9.\-]{1,253}$")
+RIG_STEPS_KHZ        = (0.5, 1, 2.5, 5, 6.25, 10, 12.5, 15, 20, 25, 50, 100)
+
+_rig_lock   = threading.Lock()
+_rig_client = {"client": None, "key": None}
+_rig_state  = {"state": None, "error": None, "ts": 0}
+
+
+def _get_rig_control_config():
+    row = get_db().execute("SELECT * FROM rig_control_config WHERE id=1").fetchone()
+    return dict(row) if row else None
+
+
+def _rig_memories(cfg):
+    try:
+        mems = json.loads((cfg or {}).get("memories") or "[]")
+        return mems if isinstance(mems, list) else []
+    except (TypeError, ValueError):
+        return []
+
+
+def _sanitize_rig_memories(raw):
+    """Validate the Manager's memory-channel list. Raises ValueError naming
+    the bad row; a returned list is safe to store and later tune from."""
+    if not isinstance(raw, list):
+        raise ValueError("Memories must be a list")
+    if len(raw) > RIG_MAX_MEMORIES:
+        raise ValueError(f"At most {RIG_MAX_MEMORIES} memory channels")
+    out = []
+    for i, m in enumerate(raw, 1):
+        if not isinstance(m, dict):
+            raise ValueError(f"Memory {i}: invalid entry")
+        label = str(m.get("label", "")).strip()[:24]
+        if not label:
+            raise ValueError(f"Memory {i}: a label is required")
+        try:
+            hz = rig_control.parse_freq_hz(m.get("freq"))
+            mode = rig_control.validate_mode(m.get("mode") or "FM")
+            tone = rig_control.validate_ctcss_tenths(m.get("ctcss") or 0)
+            shift = rig_control.validate_shift(m.get("shift"))
+            offset = rig_control.parse_offset_hz(m.get("offset") or 0)
+        except ValueError as e:
+            raise ValueError(f"Memory {i} ({label}): {e}")
+        if shift != "None" and not offset:
+            raise ValueError(f"Memory {i} ({label}): a +/- shift needs an offset")
+        out.append({"label": label, "freq_hz": hz, "mode": mode, "ctcss_tenths": tone,
+                    "shift": shift, "offset_hz": offset if shift != "None" else 0})
+    return out
+
+
+def _rig_make_client(cfg):
+    if cfg["backend"] == "sim":
+        return rig_control.SimRig()
+    return rig_control.RigctldClient(
+        cfg["host"], cfg["port"],
+        log_fn=lambda msg: log("DEBUG", f"[RIG] {msg}"))
+
+
+def _rig_poll_loop():
+    backoff = 0
+    while True:
+        try:
+            cfg = _get_rig_control_config() or RIG_CONTROL_CONFIG_DEFAULTS
+        except Exception as e:
+            log("WARN", f"[RIG] Could not read config ({e})")
+            time.sleep(30)
+            continue
+        if not cfg.get("enabled"):
+            with _rig_lock:
+                old = _rig_client["client"]
+                _rig_client.update(client=None, key=None)
+                _rig_state.update(state=None, error=None, ts=0)
+            if old is not None:
+                old.close()
+            time.sleep(15)
+            continue
+        key = (cfg["backend"], cfg["host"], cfg["port"])
+        with _rig_lock:
+            client = _rig_client["client"]
+            if client is None or _rig_client["key"] != key:
+                if client is not None:
+                    client.close()
+                client = _rig_make_client(cfg)
+                _rig_client.update(client=client, key=key)
+        try:
+            st = client.read_state()
+            with _rig_lock:
+                _rig_state.update(state=st, error=None, ts=time.time())
+            if backoff:
+                log("INFO", "[RIG] Radio connection restored")
+            backoff = 0
+            time.sleep(RIG_POLL_SEC)
+        except rig_control.RigError as e:
+            if backoff == 0:
+                log("WARN", f"[RIG] {e}")
+            with _rig_lock:
+                _rig_state.update(error=str(e), ts=time.time())
+            backoff = min(backoff + 1, 5)
+            time.sleep(min(5 * (2 ** backoff), 60))
+
+
+def start_rig_control():
+    threading.Thread(target=_rig_poll_loop, name="rig-control", daemon=True).start()
+
+
+def _rig_matching_memory(st, mems):
+    """Label of the saved memory channel the radio is currently set to, or
+    None. Compares the whole setup (frequency, mode, PL, shift, and offset
+    when shifted) so a retuned or hand-edited radio doesn't keep claiming a
+    channel it has left."""
+    shift, offs = st.get("shift", "None"), st.get("offset_hz", 0)
+    for m in mems:
+        m_shift = m.get("shift", "None")
+        if (m["freq_hz"] == st["freq_hz"] and m["mode"] == st.get("mode")
+                and m["ctcss_tenths"] == st.get("ctcss_tenths", 0)
+                and m_shift == shift
+                and (shift == "None" or m.get("offset_hz", 0) == offs)):
+            return m["label"]
+    return None
+
+
+def _rig_public_state(cfg, include_detail=False):
+    """What /api/rig/status serves. No host/port/serial details -- the board
+    is public; the frequency itself is what a repeater publishes anyway. The
+    raw error text (which names the rigctld host:port) is therefore replaced
+    with a generic one unless the caller is the owner."""
+    with _rig_lock:
+        st, err = _rig_state["state"], _rig_state["error"]
+    out = {
+        "enabled": bool(cfg and cfg.get("enabled")),
+        "connected": bool(st) and not err,
+        "error": ("Radio not responding" if err else None),
+        "step_khz": (cfg or {}).get("step_khz", 5),
+        "memories": [{"label": m["label"], "freq_hz": m["freq_hz"],
+                      "mode": m["mode"], "ctcss_tenths": m["ctcss_tenths"],
+                      "shift": m.get("shift", "None"),
+                      "offset_hz": m.get("offset_hz", 0)}
+                     for m in _rig_memories(cfg)] if cfg else [],
+    }
+    if include_detail and err:
+        out["error_detail"] = err
+    if st and not err:
+        shift, offs = st.get("shift", "None"), st.get("offset_hz", 0)
+        out.update(freq_hz=st["freq_hz"], mode=st["mode"],
+                   ctcss_tenths=st["ctcss_tenths"], ptt=st["ptt"],
+                   shift=shift, offset_hz=offs,
+                   tx_freq_hz=rig_control.tx_frequency_hz(st["freq_hz"], shift, offs),
+                   memory=_rig_matching_memory(st, _rig_memories(cfg)))
+    return out
+
+
+@app.route("/api/rig/status")
+def api_rig_status():
+    cfg = _get_rig_control_config()
+    resp = jsonify(_rig_public_state(cfg, include_detail=session.get("role") == "owner"))
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+def _rig_tune_block_reason(cfg):
+    """Why a QSY must be refused right now, or None. Fails open on missing
+    data (a stale AMI cache must not be able to wedge tuning forever) but
+    the radio's own PTT state, read from the rig, always counts."""
+    with _rig_lock:
+        st = _rig_state["state"]
+    if st and st.get("ptt"):
+        return "The radio is transmitting"
+    node = (cfg.get("node") or "").strip()
+    if node and (cfg.get("block_when_keyed") or cfg.get("block_when_linked")):
+        status = get_cached_status(node)
+        if cfg.get("block_when_keyed") and (
+                status.get("keyed") or any(
+                    l.get("keyed") for l in (status.get("links") or {}).values())):
+            return "The node is keyed; try again when it is idle"
+        if cfg.get("block_when_linked") and status.get("connected"):
+            return "Other nodes are linked; disconnect them before changing frequency"
+    return None
+
+
+@app.route("/api/rig/tune", methods=["POST"])
+@limiter.limit("30 per minute")
+def api_rig_tune():
+    """Any logged-in user may recall a saved memory channel; a free-form
+    frequency/mode/tone needs admin+. Either way the target must land inside
+    the owner's TX band limits, and is refused while keyed/linked per the
+    owner's settings."""
+    cfg = _get_rig_control_config()
+    if not cfg or not cfg["enabled"]:
+        return jsonify({"error": "Rig control is not enabled"}), 503
+    data = request.json or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid request"}), 400
+    role = session.get("role", "")
+    bands = rig_control.parse_band_limits(cfg["tx_bands"])
+    with _rig_lock:
+        cur = dict(_rig_state["state"] or {})
+    if not cur:
+        # Omitted shift/offset mean "leave as the radio has them", which
+        # can't be band-checked without knowing what that is.
+        return jsonify({"error": "Radio state not read yet; try again in a moment"}), 503
+    try:
+        if data.get("memory") is not None:
+            mems = _rig_memories(cfg)
+            raw_idx = str(data["memory"]).strip()
+            if not raw_idx.isdigit():          # not int(): its ValueError text is Python's, not ours
+                return jsonify({"error": "Invalid memory channel"}), 400
+            idx = int(raw_idx)
+            if not (0 <= idx < len(mems)):
+                return jsonify({"error": "No such memory channel"}), 404
+            m = mems[idx]
+            hz, mode, tone = m["freq_hz"], m["mode"], m["ctcss_tenths"]
+            shift, offset = m.get("shift", "None"), m.get("offset_hz", 0)
+        else:
+            if ROLE_RANK.get(role, 0) < ROLE_RANK["admin"]:
+                return jsonify({"error": "Only admins can enter a free-form frequency"}), 403
+            hz = rig_control.parse_freq_hz(data.get("freq"))
+            mode = rig_control.validate_mode(data["mode"]) if data.get("mode") else None
+            tone = (rig_control.validate_ctcss_tenths(data["ctcss"])
+                    if data.get("ctcss") not in (None, "") else None)
+            shift = (rig_control.validate_shift(data["shift"])
+                     if data.get("shift") is not None else None)
+            offset = (rig_control.parse_offset_hz(data["offset"])
+                      if data.get("offset") not in (None, "") else None)
+            if shift not in (None, "None") and not (offset or cur.get("offset_hz")):
+                return jsonify({"error": "A +/- shift needs an offset"}), 400
+    except ValueError as e:
+        # Only rig_control's own validators raise here, each with a fixed
+        # message of ours (e.g. "Invalid frequency") -- never Python's text.
+        return jsonify({"error": str(e)}), 400
+    # The band limits guard what the radio will actually TRANSMIT on, which
+    # with a repeater shift is the dial frequency moved by the offset -- so
+    # check both. Fields the request omits keep the radio's current values.
+    eff_shift  = shift  if shift  is not None else cur.get("shift", "None")
+    eff_offset = offset if offset is not None else cur.get("offset_hz", 0)
+    tx_hz = rig_control.tx_frequency_hz(hz, eff_shift, eff_offset)
+    for label, f in (("Dial", hz), ("Transmit", tx_hz)):
+        if not rig_control.allow_frequency(f, bands):
+            return jsonify({"error": f"{label} frequency {rig_control.format_mhz(f)} MHz "
+                                     f"is outside the allowed TX bands"}), 403
+    reason = _rig_tune_block_reason(cfg)
+    if reason:
+        return jsonify({"error": reason}), 409
+    with _rig_lock:
+        client = _rig_client["client"]
+    if client is None:
+        return jsonify({"error": "Radio is not connected"}), 503
+    try:
+        client.set_freq(hz)
+        if mode:
+            client.set_mode(mode)
+        if tone is not None:
+            client.set_pl(tone)
+        if offset is not None:
+            client.set_rptr_offs(offset)
+        if shift is not None:
+            client.set_rptr_shift(shift)
+        st = client.read_state()
+    except rig_control.RigError as e:
+        log("WARN", f"[RIG] Tune to {hz} Hz by {session.get('username', '')} failed: {e}")
+        # RigError text can name the rigctld host:port / OS error, so it stays
+        # in the journal above (and, for the owner, on Manager > Rig Control's
+        # live status line) -- never in this response.
+        return jsonify({"error": "The radio did not accept the change"}), 502
+    with _rig_lock:
+        _rig_state.update(state=st, error=None, ts=time.time())
+    log("INFO", f"[RIG] {session.get('username', '')} tuned to {rig_control.format_mhz(hz)} MHz"
+                f"{' ' + mode if mode else ''}")
+    return jsonify({"ok": True, **_rig_public_state(cfg)})
+
+
+@app.route("/api/rig/memories", methods=["POST"])
+@limiter.limit("20 per minute")
+def api_rig_memory_save():
+    """Admin+ (the default for a route in no check_auth() set): save the
+    radio's CURRENT frequency/mode/PL/shift/offset as a named memory channel.
+    Deliberately reads the values from the cached radio state rather than
+    trusting any the browser sends, so a saved channel is exactly what the
+    radio is set to. An existing label is only replaced when the request says
+    overwrite=true; otherwise 409 so the kiosk can ask first."""
+    cfg = _get_rig_control_config()
+    if not cfg or not cfg["enabled"]:
+        return jsonify({"error": "Rig control is not enabled"}), 503
+    data = request.json or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid request"}), 400
+    label = str(data.get("label", "")).strip()[:24]
+    if not label:
+        return jsonify({"error": "A name is required"}), 400
+    with _rig_lock:
+        st, err = _rig_state["state"], _rig_state["error"]
+    if not st or err:
+        return jsonify({"error": "Radio state not available"}), 503
+    shift, offs = st.get("shift", "None"), st.get("offset_hz", 0)
+    mem = {"label": label, "freq_hz": st["freq_hz"], "mode": st.get("mode") or "FM",
+           "ctcss_tenths": st.get("ctcss_tenths", 0), "shift": shift,
+           "offset_hz": offs if shift != "None" else 0}
+    if mem["mode"] not in rig_control.ALLOWED_MODES:
+        return jsonify({"error": f"Radio mode '{mem['mode']}' can't be saved to a memory"}), 400
+    bands = rig_control.parse_band_limits(cfg["tx_bands"])
+    tx = rig_control.tx_frequency_hz(mem["freq_hz"], shift, mem["offset_hz"])
+    if not (rig_control.allow_frequency(mem["freq_hz"], bands)
+            and rig_control.allow_frequency(tx, bands)):
+        return jsonify({"error": "The radio's current frequency is outside the allowed TX bands"}), 400
+    mems = _rig_memories(cfg)
+    same = [i for i, m in enumerate(mems) if m.get("label", "").lower() == label.lower()]
+    if same and not data.get("overwrite"):
+        return jsonify({"error": f"A memory named '{mems[same[0]]['label']}' already exists",
+                        "exists": True}), 409
+    if same:
+        mems[same[0]] = mem
+    elif len(mems) >= RIG_MAX_MEMORIES:
+        return jsonify({"error": f"At most {RIG_MAX_MEMORIES} memory channels"}), 400
+    else:
+        mems.append(mem)
+    db = get_db()
+    db.execute("UPDATE rig_control_config SET memories=? WHERE id=1", (json.dumps(mems),))
+    db.commit()
+    log("INFO", f"[RIG] {session.get('username', '')} saved memory '{label}' "
+                f"({rig_control.format_mhz(mem['freq_hz'])} MHz)")
+    return jsonify({"ok": True, "replaced": bool(same), **_rig_public_state(_get_rig_control_config())})
+
+
+@app.route("/api/rig/config")
+def api_rig_config_get():
+    if session.get("role") != "owner":
+        return jsonify({"error": "Only the owner can view rig control settings"}), 403
+    cfg = dict(_get_rig_control_config() or RIG_CONTROL_CONFIG_DEFAULTS)
+    cfg["memories"] = [
+        {"label": m["label"], "freq": rig_control.format_mhz(m["freq_hz"]),
+         "mode": m["mode"], "ctcss": m["ctcss_tenths"] / 10 if m["ctcss_tenths"] else 0,
+         "shift": m.get("shift", "None"),
+         "offset": (m.get("offset_hz", 0) / 1_000_000) if m.get("offset_hz") else 0}
+        for m in _rig_memories(cfg)]
+    cfg["steps_khz"] = list(RIG_STEPS_KHZ)
+    cfg["ctcss_tones"] = [t / 10 for t in rig_control.CTCSS_TONES_TENTHS]
+    return jsonify(cfg)
+
+
+@app.route("/api/rig/config", methods=["POST", "PUT"])
+def api_rig_config_save():
+    if session.get("role") != "owner":
+        return jsonify({"error": "Only the owner can change rig control settings"}), 403
+    data = request.json or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid request"}), 400
+    enabled  = bool(data.get("enabled"))
+    backend  = str(data.get("backend", "rigctld")).strip()
+    host     = str(data.get("host", "127.0.0.1")).strip()
+    node     = str(data.get("node", "")).strip()
+    tx_bands = str(data.get("tx_bands", "")).strip()
+    try:
+        port = int(data.get("port", 4532))
+        step = float(data.get("step_khz", 5))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Port and step must be numbers"}), 400
+    if backend not in RIG_BACKENDS:
+        return jsonify({"error": "Unknown backend"}), 400
+    if not RIG_HOST_RE.match(host) or not (1 <= port <= 65535):
+        return jsonify({"error": "Invalid rigctld host or port"}), 400
+    if step not in RIG_STEPS_KHZ:
+        return jsonify({"error": "Unsupported step size"}), 400
+    if node and not re.fullmatch(r"\d{4,7}", node):
+        return jsonify({"error": "Node must be 4-7 digits"}), 400
+    try:
+        bands = rig_control.parse_band_limits(tx_bands)
+        memories = _sanitize_rig_memories(data.get("memories", []))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if enabled and not bands:
+        return jsonify({"error": "At least one TX band is required to enable rig control"}), 400
+    for m in memories:
+        tx = rig_control.tx_frequency_hz(m["freq_hz"], m["shift"], m["offset_hz"])
+        if not (rig_control.allow_frequency(m["freq_hz"], bands)
+                and rig_control.allow_frequency(tx, bands)):
+            return jsonify({"error": f"Memory '{m['label']}' (dial or transmit frequency) "
+                                     f"is outside the TX bands"}), 400
+    db = get_db()
+    db.execute(
+        """INSERT OR REPLACE INTO rig_control_config
+           (id, enabled, backend, host, port, node, tx_bands,
+            block_when_keyed, block_when_linked, step_khz, memories)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (int(enabled), backend, host, port, node, tx_bands,
+         int(bool(data.get("block_when_keyed", True))),
+         int(bool(data.get("block_when_linked", False))),
+         step, json.dumps(memories)))
+    db.commit()
+    log("INFO", f"[RIG] Config saved by {session.get('username', '')}")
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
 # Stream relay poller (stream_relay.py) — persistent, config-driven,
 # self-reconnecting, mirroring start_aprs_poller()'s shape: re-reads
 # stream_relay_config at the top of every reconnect cycle so a saved
@@ -18431,6 +18865,7 @@ if not os.environ.get("HENWEN_SKIP_STARTUP"):
     start_meshtastic_discord_relay_worker()
     start_stream_relay()
     start_irc_relay()
+    start_rig_control()
     start_dvswitch_status_poller()
     start_dvswitch_caller_poller()
     start_bm_talkgroups_poller()
