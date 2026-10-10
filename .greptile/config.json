@@ -1,0 +1,6 @@
+{
+  "strictness": 2,
+  "commentTypes": ["logic", "syntax"],
+  "instructions": "HenWen is a Flask app (single-file backend, app.py) run by gunicorn with --workers 1 --threads 8, so all threads share one process and its in-process caches. Minimum hardware is a Raspberry Pi Zero 2 W: flag anything with real CPU cost (ffmpeg pipelines, background threads, per-request work) that may not run acceptably there. The YouTube stream relay's video encode is the one documented exception. Check that every mutating route is covered by CSRF and by the correct role gate in check_auth(), that user-supplied values are validated server-side before reaching rpt.conf, AMI commands, subprocess argv or raw protocol lines, and that background-thread code fails cleanly (log and continue) instead of crashing the poller. HenWen must never key the transmitter from rig control. Do not suggest splitting app.py into modules or adding a linter; both are deliberate.",
+  "ignorePatterns": "static/vendor/**\nmeshtastic_proto/*_pb2.py\nimages/**\nCHANGELOG.md\ndocs/**"
+}
