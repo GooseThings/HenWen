@@ -351,7 +351,7 @@ A frequency-agile node: the Status Board's VFO popup (Node card button, shown on
 
 Why a button + modal rather than a dash-card: the dash layout is a split tree keyed by hard-coded card ids (`DASH_CARD_IDS`, divider count, saved-layout version key, mobile ordering), so a new card means touching all of that; the net-schedule/Account popups are the established lighter pattern.
 
-**Not verified against real hardware** as of the commit that added it -- written from `rigctld`'s documented protocol and tested against a fake `rigctld`. Target radio is a Kenwood TM-D710G (Hamlib 2034, PC port). The Yaesu FTM-300 was investigated and has no known live-control protocol (memory-programming only), so it is unsupported. Setup notes, Proxmox-LXC device passthrough and the unverified cable/jumper caveats are in `docs/rig-control.md`.
+**Not verified against real hardware** as of the commit that added it -- written from `rigctld`'s documented protocol and tested against a fake `rigctld`. Target radio is a Kenwood TM-D710G (Hamlib 2034, PC port). The Yaesu FTM-300 was investigated and has no known live-control protocol (memory-programming only), so it is unsupported. Setup notes, Proxmox-LXC device passthrough and the unverified cable/jumper caveats are in `docs/rig-control.md`. **Resuming this work: read `docs/rig-control.md` -> "Status and how to resume" first** (what is built, what the live node is currently doing, next steps).
 
 ### Resource-leak monitor
 

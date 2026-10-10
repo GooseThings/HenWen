@@ -229,3 +229,49 @@ says how the D710 backend itself behaves.
 3. Start `rigctld`, then watch **Manager > Rig Control**: the status line shows
    the connection state and, for the owner, the exact error.
 4. Try a tune with the transmitter disconnected or on a dummy load first.
+
+## Status and how to resume (written 2026-10-10)
+
+A snapshot for whoever picks this up next -- possibly a fresh session on another machine. Contains no credentials;
+infrastructure specifics live in a private note on the Proxmox host (see "Where the details live").
+
+### What is done (PR #214, still a draft)
+- Rig control feature complete and tested: `rig_control.py` (rigctld client + simulator), `app.py` routes/poller,
+  Manager > Rig Control, the kiosk Node-card RF ENABLED badge + VFO popup (frequency/mode/PL/shift/offset, memory
+  channels, save-to-memory). Full suite last run: 1107 passed, 1 skipped (the skip is the optional real-rigctld test).
+- Code scanning: 0 open alerts on the PR. Two `py/stack-trace-exposure` alerts were dismissed as false positives with
+  a written reason (validators raise fixed messages of ours; no Python/rigctld text reaches a response).
+- Client was exercised against a real `rigctld` (Hamlib 4.6.2 dummy rig), which found and fixed two bugs (PTT readback
+  is optional; a PL tone needs the TONE function). **Never run against a real radio.**
+
+### State of the live node
+- The live HenWen service runs from a checkout of THIS BRANCH at `/opt/HenWen` (not `main`). Treat `git checkout` /
+  `git reset` there as a production change. Rig control is **enabled on the Simulator backend**, so the kiosk shows a
+  fake 146.520 MHz radio; nothing real is being tuned.
+- Node 643931's `rxchannel` is now `SimpleUSB/643931` (was `Local/pseudo`), ASL3 upgraded 3.9.3 -> 3.10.5 in the
+  Proxmox LXC, DRA-50 passed through; Asterisk holds the ALSA + USB devices open and the node is registered.
+  `simpleusb.conf` `[643931]` has `carrierfrom = no` / `ctcssfrom = no` on purpose: with no radio attached a floating
+  COS line could read as a carrier and send noise to every link. **The node cannot hear or key until those are set.**
+- Timestamped backups of the files that were edited sit beside them (`rpt.conf.bak-*`, `simpleusb.conf.bak-*`) and in
+  `/var/backups/henwen-asterisk/`.
+
+### Next steps, in order
+1. Connect the D710 (DATA port -> DRA-50, PC port -> serial adapter). Use the cable/jumper/menu notes above.
+2. Serial adapter: pass it through (add its USB vendor id to the host udev rule and restart the container; a bound
+   single node like `/dev/ttyUSB0` goes stale on replug). Prefer a `/dev/serial/by-id/...` path.
+3. Install Hamlib on the node (apt has 4.6.2; the Kenwood D710 terminator fix is in 4.6.4+), run
+   `rigctld -m 2034 -r <serial> -s <PC-port baud> -t 4532`, then switch Manager > Rig Control from Simulator to rigctld.
+4. Work the "First-connection checklist" below. Then set `carrierfrom`/`ctcssfrom` using the COS/tone notes, and tune
+   audio levels (`susb tune`-style: DRA-50 R14, `txmixa`, `rxmixerset`).
+5. Only after real-hardware verification: take the PR out of draft and merge.
+
+### Lessons worth keeping
+- `rpt restart` SEGFAULTED Asterisk once (right after a `rxchannel` change); HenWen's own reload uses it. A plain
+  `systemctl restart asterisk` was clean. Not yet root-caused.
+- ASL3 3.9.x needs OSS emulation (`/dev/dsp*`); a stock Proxmox kernel doesn't have it. 3.10.x uses ALSA and works in an
+  unprivileged LXC with `/dev/snd` + `/dev/bus/usb` bind-mounted and a host udev rule for the USB vendor.
+- Unprivileged-LXC backups: `vzdump` needs a traversable scratch dir and a normal umask (see the host's backup scripts).
+
+### Where the details live
+- Host-specific facts (addresses, container/VM ids, the backup system, what is pending) are in the **private** file
+  `/root/.backup/HANDOFF.md` on the Proxmox host. Ask the owner for access; credentials are intentionally not recorded.
