@@ -736,6 +736,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     <button class="nav-item" id="nav-meshtastic" onclick="showPage('meshtastic')">Meshtastic</button>
     <button class="nav-item" id="nav-discord-relay" onclick="showPage('discord-relay')">Discord Relay</button>
     <button class="nav-item" id="nav-irc-relay" onclick="showPage('irc-relay')">IRC Relay</button>
+    <button class="nav-item" id="nav-rig-control" onclick="showPage('rig-control')">Rig Control</button>
 
     <div class="nav-section">Kiosk</div>
     <a class="nav-item" href="/" target="_blank" style="text-decoration:none">Kiosk &#8599;</a>
@@ -2019,6 +2020,66 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     </div>
     <button class="btn btn-primary" onclick="ircRelaySave()">Save</button>
     <div id="irc-relay-status" style="margin-top:8px;font-size:0.82rem"></div>
+  </section>
+
+  <!-- Rig Control (owner only) -->
+  <section class="page" id="page-rig-control">
+    <div class="page-title">Rig Control</div>
+    <div class="page-sub">Owner-only. Lets the Status Board's VFO card change the radio's frequency, mode and CTCSS tone through Hamlib's <code>rigctld</code>. HenWen only tunes &mdash; it never keys the transmitter; PTT stays with the node.</div>
+    <div class="card" style="max-width:620px">
+      <div class="card-body">
+        <div style="display:grid;grid-template-columns:1fr;gap:14px">
+          <div>
+            <label class="toggle-label" style="display:flex;align-items:center;gap:8px">
+              <input type="checkbox" id="rig-enabled"> Enable rig control
+            </label>
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Backend</label>
+            <select id="rig-backend" class="val-input" style="width:100%">
+              <option value="rigctld">Hamlib rigctld (real radio)</option>
+              <option value="sim">Simulator (no radio; for trying the VFO card)</option>
+            </select>
+          </div>
+          <div style="display:flex;gap:14px">
+            <div style="flex:2">
+              <label class="toggle-label" style="display:block;margin-bottom:3px">rigctld host</label>
+              <input type="text" id="rig-host" class="val-input" placeholder="127.0.0.1" style="width:100%">
+            </div>
+            <div style="flex:1">
+              <label class="toggle-label" style="display:block;margin-bottom:3px">Port</label>
+              <input type="number" id="rig-port" class="val-input" placeholder="4532" style="width:100%">
+            </div>
+          </div>
+          <div style="font-size:0.75rem;color:var(--text2)">HenWen does not start <code>rigctld</code> for you. For a Kenwood TM-D710G on a serial cable, something like <code>rigctld -m 2034 -r /dev/serial/by-id/&lt;your-cable&gt; -s 57600 -t 4532</code> &mdash; check the radio's PC-port baud menu setting and your Hamlib version. Untested against real hardware.</div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Radio's node number</label>
+            <input type="text" id="rig-node" class="val-input" placeholder="643931" style="width:100%">
+            <div style="font-size:0.75rem;color:var(--text2);margin-top:3px">Used to refuse a frequency change while this node is keyed or linked.</div>
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Allowed TX bands (MHz)</label>
+            <input type="text" id="rig-bands" class="val-input" placeholder="144.0-148.0, 420.0-450.0" style="width:100%">
+            <div style="font-size:0.75rem;color:var(--text2);margin-top:3px">Comma-separated LOW-HIGH. Anything outside is refused, for every role. Keep these inside your license privileges.</div>
+          </div>
+          <div style="display:flex;gap:18px;flex-wrap:wrap">
+            <label class="toggle-label" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="rig-block-keyed"> Refuse while node is keyed</label>
+            <label class="toggle-label" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="rig-block-linked"> Refuse while other nodes are linked</label>
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Kiosk step size (kHz)</label>
+            <select id="rig-step" class="val-input"></select>
+          </div>
+          <div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Memory channels</label>
+            <textarea id="rig-memories" class="val-input" rows="7" style="width:100%;font-family:monospace" placeholder="Local Rptr, 147.000, FM, 100.0, +, 0.600&#10;Simplex, 146.520, FM, 0"></textarea>
+            <div style="font-size:0.75rem;color:var(--text2);margin-top:3px">One per line: <code>label, MHz, mode, PL Hz, shift, offset MHz</code> &mdash; everything after the frequency is optional. Shift is <code>+</code>, <code>-</code> or blank for simplex; a shift needs an offset (<code>0.600</code> on 2m, <code>5.0</code> on 70cm). PL is the TX tone. The band limits above are checked against the <em>transmit</em> frequency (dial plus/minus offset) too. Any logged-in user can recall these from the kiosk; typing an arbitrary frequency needs an admin account.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <button class="btn btn-primary" onclick="rigControlSave()">Save</button>
+    <div id="rig-status" style="margin-top:8px;font-size:0.82rem"></div>
   </section>
 
   <!-- Chat Log (owner only) -->
@@ -3859,6 +3920,7 @@ function showPage(id) {
   else if (id === 'meshtastic')         meshtasticLoad();
   else if (id === 'discord-relay')      discordRelayLoad();
   else if (id === 'irc-relay')          ircRelayLoad();
+  else if (id === 'rig-control')        rigControlLoad();
   else if (id === 'chat-log')           chatLogLoad();
   else if (id === 'dtmf')             { populateDtmfNodeSelect(); }
   else if (id === 'node-id')          { loadIdConfigs(); populateIdNodeSelect(); }
@@ -7772,6 +7834,72 @@ async function ircRelaySave() {
   setTimeout(function(){ st.textContent = ''; }, 3000);
 }
 
+/* ── Rig Control ───────────────────────────────────────────────────────────── */
+function rigMemoriesToText(mems) {
+  return (mems || []).map(function(m) {
+    var shift = (m.shift && m.shift !== 'None') ? m.shift : '';
+    return [m.label, m.freq, m.mode || 'FM', m.ctcss || 0, shift, shift ? m.offset : ''].join(', ');
+  }).join('\n');
+}
+
+function rigMemoriesFromText(text) {
+  var out = [];
+  text.split('\n').forEach(function(line) {
+    line = line.trim();
+    if (!line) return;
+    var p = line.split(',').map(function(x) { return x.trim(); });
+    out.push({label: p[0], freq: p[1], mode: p[2] || 'FM', ctcss: p[3] || 0, shift: p[4] || '', offset: p[5] || 0});
+  });
+  return out;
+}
+
+async function rigControlLoad() {
+  var r = await api('/api/rig/config');
+  if (!r.ok) return;
+  var d = r.data;
+  document.getElementById('rig-enabled').checked = !!d.enabled;
+  document.getElementById('rig-backend').value   = d.backend || 'rigctld';
+  document.getElementById('rig-host').value      = d.host || '127.0.0.1';
+  document.getElementById('rig-port').value      = d.port || 4532;
+  document.getElementById('rig-node').value      = d.node || '';
+  document.getElementById('rig-bands').value     = d.tx_bands || '';
+  document.getElementById('rig-block-keyed').checked  = !!d.block_when_keyed;
+  document.getElementById('rig-block-linked').checked = !!d.block_when_linked;
+  var step = document.getElementById('rig-step');
+  step.innerHTML = '';
+  (d.steps_khz || [5]).forEach(function(v) {
+    var o = document.createElement('option');
+    o.value = v; o.textContent = v + ' kHz';
+    if (Number(v) === Number(d.step_khz)) o.selected = true;
+    step.appendChild(o);
+  });
+  document.getElementById('rig-memories').value = rigMemoriesToText(d.memories);
+}
+
+async function rigControlSave() {
+  var st = document.getElementById('rig-status');
+  var payload = {
+    enabled:           document.getElementById('rig-enabled').checked,
+    backend:           document.getElementById('rig-backend').value,
+    host:              document.getElementById('rig-host').value.trim(),
+    port:              document.getElementById('rig-port').value,
+    node:              document.getElementById('rig-node').value.trim(),
+    tx_bands:          document.getElementById('rig-bands').value.trim(),
+    block_when_keyed:  document.getElementById('rig-block-keyed').checked,
+    block_when_linked: document.getElementById('rig-block-linked').checked,
+    step_khz:          document.getElementById('rig-step').value,
+    memories:          rigMemoriesFromText(document.getElementById('rig-memories').value),
+  };
+  var r = await api('/api/rig/config', {
+    method:  'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body:    JSON.stringify(payload),
+  });
+  if (r.ok) { st.textContent = 'Saved.'; st.style.color = 'var(--success)'; }
+  else       { st.textContent = (r.data && r.data.error) || 'Error'; st.style.color = 'var(--danger)'; }
+  setTimeout(function(){ st.textContent = ''; }, 4000);
+}
+
 /* ── Role-based nav visibility ─────────────────────────────────────────────── */
 window._henwenRole = '';
 async function applyRoleNav() {
@@ -7827,6 +7955,8 @@ async function applyRoleNav() {
   if (discordRelayNavBtn) discordRelayNavBtn.style.display = isOwnerRole ? '' : 'none';
   var ircRelayNavBtn = document.getElementById('nav-irc-relay');
   if (ircRelayNavBtn) ircRelayNavBtn.style.display = isOwnerRole ? '' : 'none';
+  var rigNavBtn = document.getElementById('nav-rig-control');
+  if (rigNavBtn) rigNavBtn.style.display = isOwnerRole ? '' : 'none';
   /* DVSwitch is owner-only too — matches the backend's explicit
      role==='owner' check on every /api/dvswitch/* route. */
   var dvswitchNavBtn = document.getElementById('nav-dvswitch');
