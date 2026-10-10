@@ -56,27 +56,35 @@ An LXC container only sees devices the host passes through, and this one is
 parts: expose the device nodes, then make them usable by the container's
 `asterisk` user.
 
-**Blocker found in practice: OSS sound emulation.** `chan_simpleusb` as shipped
-in ASL3 opens its sound card through OSS (`/dev/dsp<N>`), not ALSA -- ASL3
-ships `/etc/modules-load.d/asl3-oss.conf` to load the `snd_pcm_oss` kernel
-module on a normal install. A container cannot load kernel modules, so the
-**host kernel must provide `snd_pcm_oss`** and the `/dev/dsp*` nodes must then
-be passed through. Tested on Proxmox VE with kernel `7.0.14-5-pve`: it is built
-with `CONFIG_SND_PCM_OSS` not set, so `/dev/dsp*` cannot exist at all, and
-`chan_simpleusb` logs `Unable to open DSP device 1: No such file or directory`
-every 20 ms (a log flood -- roll back the `rxchannel` change if you see it).
-USB (libusb, for the PTT/COS lines) and ALSA both worked through the
-passthrough; the missing OSS emulation is the only failure.
+**ASL3 version matters: OSS emulation (3.9.x) vs ALSA (3.10.x).** `chan_simpleusb`
+in ASL3 **3.9.3** opens its sound card through OSS (`/dev/dsp<N>`), and that
+package ships `/etc/modules-load.d/asl3-oss.conf` to load `snd_pcm_oss`. A
+container cannot load kernel modules, and a stock Proxmox kernel
+(`7.0.14-5-pve`) is built with `CONFIG_SND_PCM_OSS` not set, so on 3.9.3 inside
+an LXC there is no `/dev/dsp*` at all and the channel logs
+`Unable to open DSP device 1: No such file or directory` every 20 ms (a log
+flood -- roll back the `rxchannel` change if you see it).
 
-So with a stock PVE kernel, **`SimpleUSB` cannot run inside an LXC container**.
-Options: run the node in a **VM** (own kernel; USB passthrough is native in
-Proxmox -- Debian's stock kernel ships `snd_pcm_oss`), use a host kernel that
-has it, or put the radio on a separate machine. Everything below that applies
-to the device nodes is still correct, but it is not sufficient on its own.
+ASL3 **3.10.5** (`22.10.1+asl3-3.10.5`) no longer needs OSS: it ships no
+`asl3-oss.conf`, links `libusb-1.0`, and the node holds the ALSA devices
+(`/dev/snd/pcmC0D0c|p`) and the USB node open directly -- verified on a Debian
+13 VM with the DRA-50 passed through, `snd_pcm_oss` not loaded, node registered.
+**Not tested:** 3.10.5 inside an LXC container. It may well work with just the
+ALSA/USB passthrough below, so upgrading ASL3 may be a simpler fix than a VM;
+the original 3.9.3 container was moved to a VM instead and was never retried.
+
+If you do use a VM: the Debian *cloud* image boots a minimal cloud kernel with
+no USB or sound support -- install the standard `linux-image-amd64` and make it
+the GRUB default. Proxmox passes USB devices through natively
+(`qm set <vmid> --usb0 host=<vendor>:<product>`), and ASL3's udev rule
+(`90-asl3.rules`, group `plugdev`) only applies to a device at plug time, so run
+`udevadm trigger` once if the device was attached before the package installed
+(symptom: `Cannot open device 1-1:1.0` on the first start).
 
 What else the node needs, checked against the installed modules:
-`chan_simpleusb` uses **libusb-0.1** (`/dev/bus/usb`) for the dongle's PTT/COS
-lines; `res_usbradio` uses **ALSA** only for the mixer controls. The rig
+`chan_simpleusb` uses **libusb** (`/dev/bus/usb`; 0.1 on 3.9.x, 1.0 on 3.10.x) for
+the dongle's PTT/COS lines; `res_usbradio` uses **ALSA** for the mixer controls
+(and, on 3.10.x, for the audio itself). The rig
 control serial adapter needs `/dev/ttyUSB*` or `/dev/ttyACM*` (use a
 `/dev/serial/by-id/...` path).
 
