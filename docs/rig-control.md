@@ -51,10 +51,30 @@ rigctld -m 2034 -r /dev/serial/by-id/<your-cable> -s 57600 -t 4532
 
 ## Proxmox LXC
 
-An LXC container only sees devices the host passes through. You need the
-serial adapter (`/dev/ttyUSB*` or `/dev/serial/by-id/...`) in the container,
-plus `/dev/snd` and `/dev/hidraw*` for the audio interface (e.g. a DRA-50) that
-the node itself uses. Use a stable `by-id` path for the serial device.
+An LXC container only sees devices the host passes through, and this one is
+**unprivileged** (`/proc/self/uid_map` is `0 100000 65536`), so there are two
+parts: expose the device nodes, then make them usable by the container's
+`asterisk` user.
+
+What the node needs, checked against the installed modules: `chan_simpleusb`
+links **ALSA** (`/dev/snd`) for audio and **libusb-0.1** (`/dev/bus/usb`) for
+the dongle's PTT/COS lines -- it does *not* use `/dev/hidraw*`. The rig
+control serial adapter needs `/dev/ttyUSB*` or `/dev/ttyACM*` (use a
+`/dev/serial/by-id/...` path).
+
+| Device | Char major | Passed as |
+|---|---|---|
+| ALSA | 116 | bind `/dev/snd` |
+| USB (libusb) | 189 | bind the directory `/dev/bus/usb` (survives replug) |
+| ttyUSB / ttyACM | 188 / 166 | bind the node, or `/dev/serial` |
+
+via `lxc.cgroup2.devices.allow` and `lxc.mount.entry` in
+`/etc/pve/lxc/<id>.conf`. Applying them needs a container restart.
+
+Unprivileged: bind-mounted nodes keep their *host* numeric owner, which the
+container sees as `nobody`. Give the specific devices (by vendor/product ID)
+a host udev `MODE`/`GROUP` the mapped container user can use. Confirm numbers
+on your own host rather than copying the table.
 
 ## Audio / PTT is separate
 
