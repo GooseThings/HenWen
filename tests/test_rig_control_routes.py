@@ -349,7 +349,7 @@ class TestErrorMessagesDontLeak:
         for path in ("/api/rig/tune", "/api/rig/memories", "/api/rig/config"):
             assert client.post(path, json=[1, 2]).status_code == 400, path
 
-    def test_radio_failure_detail_is_owner_only(self, client, rig, monkeypatch):
+    def test_radio_failure_detail_stays_out_of_the_response(self, client, rig, monkeypatch):
         def boom(hz):
             raise rig_control.RigError("Cannot reach rigctld at 10.9.8.7:4532 (refused)")
         monkeypatch.setattr(rig, "set_freq", boom)
@@ -358,7 +358,7 @@ class TestErrorMessagesDontLeak:
         assert r.status_code == 502 and "10.9.8.7" not in r.get_data(as_text=True)
         _login(client, "owner1")
         r = client.post("/api/rig/tune", json={"freq": "146.94"})
-        assert r.status_code == 502 and "10.9.8.7" in r.get_json()["error"]
+        assert r.status_code == 502 and "10.9.8.7" not in r.get_data(as_text=True)
 
 
 class TestTemplates:
@@ -386,8 +386,28 @@ class TestTemplates:
         node = shutil.which("node")
         if not node:
             pytest.skip("node not installed")
-        html = re.sub(r"<!--.*?-->", "", self._render(client, path), flags=re.S)
-        for i, body in enumerate(re.findall(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", html, re.S | re.I)):
+        from html.parser import HTMLParser
+
+        class _Scripts(HTMLParser):
+            """Collects inline <script> bodies. A real parser, so comments that
+            merely mention a script tag and odd end tags like </script > are
+            handled the way a browser would."""
+            def __init__(self):
+                super().__init__(convert_charrefs=False)
+                self.found, self._buf = [], None
+            def handle_starttag(self, tag, attrs):
+                if tag == "script" and not any(k == "src" for k, _ in attrs):
+                    self._buf = []
+            def handle_endtag(self, tag):
+                if tag == "script" and self._buf is not None:
+                    self.found.append("".join(self._buf)); self._buf = None
+            def handle_data(self, data):
+                if self._buf is not None:
+                    self._buf.append(data)
+
+        parser = _Scripts()
+        parser.feed(self._render(client, path))
+        for i, body in enumerate(parser.found):
             if len(body) < 500:
                 continue
             f = tmp_path / f"s{i}.js"

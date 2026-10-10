@@ -16940,11 +16940,10 @@ def api_rig_tune():
         st = client.read_state()
     except rig_control.RigError as e:
         log("WARN", f"[RIG] Tune to {hz} Hz by {session.get('username', '')} failed: {e}")
-        # RigError text can name the rigctld host:port / OS error, so only
-        # the owner sees it (same rule as /api/rig/status's error_detail).
-        msg = (f"The radio did not accept the change ({e})" if role == "owner"
-               else "The radio did not accept the change")
-        return jsonify({"error": msg}), 502
+        # RigError text can name the rigctld host:port / OS error, so it stays
+        # in the journal above (and, for the owner, on Manager > Rig Control's
+        # live status line) -- never in this response.
+        return jsonify({"error": "The radio did not accept the change"}), 502
     with _rig_lock:
         _rig_state.update(state=st, error=None, ts=time.time())
     log("INFO", f"[RIG] {session.get('username', '')} tuned to {rig_control.format_mhz(hz)} MHz"
