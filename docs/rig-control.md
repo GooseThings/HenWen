@@ -76,12 +76,95 @@ container sees as `nobody`. Give the specific devices (by vendor/product ID)
 a host udev `MODE`/`GROUP` the mapped container user can use. Confirm numbers
 on your own host rather than copying the table.
 
-## Audio / PTT is separate
+## Audio / PTT: DRA-50 to the D710 DATA port
 
-Audio and PTT are the Asterisk node's business (e.g. DRA-50 on the D710's
-DATA port with `chan_simpleusb`). This feature only changes frequency. DRA-50
-jumper settings and the D710's data-port menu options are not covered here and
-were not verified.
+Audio and PTT are the Asterisk node's business (`chan_simpleusb`); this feature
+only changes frequency. This section records the research for wiring a Masters
+Communications **DRA-50** to a **Kenwood TM-D710G**. It comes from the
+manufacturers' documents, **not a bench test** -- the items under "Not verified"
+need checking on the real hardware.
+
+### Cable
+
+Kenwood's manual lists the DATA terminal pins as a-f; reading them as pins 1-6
+in order (the manual doesn't state that outright), they line up with the
+DRA-50's mini-DIN-6 by function:
+
+| Pin | D710 DATA terminal | DRA-50 mini-DIN-6 |
+|---|---|---|
+| 1 | PKD -- transmit audio in | TX audio (JU5 selects left/right channel) |
+| 2 | ground | ground |
+| 3 | PKS -- transmit control; low = transmit, mic muted | PTT |
+| 4 | PR9 -- detected 9600 bps data out | RX audio, 9600 position (JU7 = B) |
+| 5 | PR1 -- detected 1200 bps data out | RX audio, 1200 position (JU7 = A) |
+| 6 | SQC -- squelch control; closed = low, open = high | COS |
+
+Digirig's forum reports the D710's data port matches the Yaesu FT-8xx pinout, so
+FT-8xx-style audio/PTT cables fit. The D710 DATA port is a 6-pin mini-DIN (no
+10-pin adapter). A plain mini-DIN-6 cable works **only if all six pins are wired
+straight through** -- check continuity on every pin; without pin 6 the node
+gets no carrier-detect (COS).
+
+The older TM-V7A was measured with its 1200 and 9600 outputs on pins 4 and 5
+the opposite way round from the D710 manual, so confirm which JU7 position
+sounds right.
+
+### DRA-50 jumpers (per Masters' jumper text -- check against your board's silkscreen)
+
+| Jumper | Setting | Why |
+|---|---|---|
+| JU7 | B (9600 pin, default); try A if audio is quiet or wrong | picks pin 4 vs pin 5 |
+| JU3 | **installed** (off by default) | AllStar COS: routes the SQC line (pin 6) to the node |
+| JU4 | removed | CTCSS input -- not on the mini-DIN-6 connector |
+| JU5 | A (default) | TX audio channel |
+| JU2 | A (default) | amps on USB 5 V; the D710 needs ~2 Vp-p at 9600 |
+| JU6 | removed (default) | PTT LED protection |
+| H1/H2 | shunt over the center two pins | as shipped |
+
+Masters' own pages disagree slightly on what JU1-JU4 do, and the jumper text
+mentioned a "DRA-45" (a different board), so treat the table as a starting point.
+Masters generally recommends the DRA-50M for Kenwood radios; a DRA-50 should work.
+
+### D710 menu settings (Kenwood manual)
+
+- **Menu 918, External Data Band** -- the band the node uses (A, B, TX:A RX:B,
+  RX:A TX:B). **HenWen's rig control must tune this same band.**
+- **Menu 919, Data Speed** -- 1200 or 9600 bps. Transmit input sensitivity is
+  ~40 mVp-p at 1200 and ~2 Vp-p at 9600. 9600 is the likely choice for voice;
+  the audio bandwidth in each mode is unverified.
+- **Menu 921, SQC Output** -- what the COS line means: OFF, BUSY (signal on the
+  data band), SQL (CTCSS/DCS must match; carrier if no tone is set), TX,
+  BUSY.TX, SQL.TX. The activation logic can also be inverted with Kenwood's
+  MCP-6A software.
+- **Menu 920, PC Port Speed** -- 9600 / 19200 / 38400 / 57600; must match
+  `rigctld -s`. Power-cycle the radio after changing it.
+
+### Node side (`/etc/asterisk/simpleusb.conf`)
+
+- `carrierfrom`: `usb` (active high) or `usbinvert` (active low, the default).
+  The SQC line is high when squelch is open, but whether the DRA-50 inverts it
+  is unknown -- pick by testing.
+- `ctcssfrom`: `simpleusb` only offers `no` / `usb` / `usbinvert`, and the DRA-50
+  has no CTCSS pin on the mini-DIN-6, so use `no` and let the D710 do tone
+  squelch (Menu 921 = SQL).
+- `deemphasis`: the data-port outputs are probably flat discriminator audio, so
+  try `yes`. `preemphasis` on the transmit side may be needed too.
+
+### Not verified
+
+The a-f to pin 1-6 order; which output is flat vs de-emphasized; the COS
+polarity through the DRA-50; the best TX level and whether the 9600 TX path
+needs pre-emphasis; and the DRA-50 jumper meanings above. A first session:
+`susb tune` on the node, adjusting the DRA-50's R14 trimmer, `txmixa` and
+`rxmixerset` while watching deviation.
+
+Sources: Masters Communications
+([pinout](https://www.masterscommunications.com/products/radio-adapter/dra/txt/dra50-DIN-pinout.txt),
+[jumpers](https://www.masterscommunications.com/products/radio-adapter/dra/txt/dra50-jumpers.txt),
+[DRA-50 vs 50M](https://masterscommunications.com/products/radio-adapter/dra/dra50-vs-dra50m.html)),
+[Kenwood TM-D710G manual](https://kasc.kenwood.com/files/prod/2681/5/TM-D710GE_GA_Instruction_Manual_CD-ROM_V1.01.pdf),
+[Febo TM-V7A measurements](https://www.febo.com/packet/layer-one/kenwood-tmv7a.html),
+[Digirig forum](https://forum.digirig.net/t/cables-for-kenwood-tm-d710/136).
 
 ## Adding another radio
 
