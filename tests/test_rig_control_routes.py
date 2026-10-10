@@ -73,6 +73,24 @@ class TestConfig:
         assert client.post("/api/rig/config", json={**GOOD, **patch}).status_code == 400
 
 
+class TestPublicStatusLeaks:
+    def test_error_text_hides_rigctld_address_from_the_public(self, client, rig, monkeypatch):
+        monkeypatch.setitem(app._rig_state, "state", None)
+        monkeypatch.setitem(app._rig_state, "error", "Cannot reach rigctld at 10.9.8.7:4532 (refused)")
+        _logout(client)
+        body = client.get("/api/rig/status").get_json()
+        assert body["error"] == "Radio not responding" and "error_detail" not in body
+        assert "10.9.8.7" not in client.get("/api/rig/status").get_data(as_text=True)
+
+    def test_owner_gets_the_detail(self, client, rig, monkeypatch):
+        monkeypatch.setitem(app._rig_state, "state", None)
+        monkeypatch.setitem(app._rig_state, "error", "Cannot reach rigctld at 10.9.8.7:4532 (refused)")
+        _login(client, "owner1")
+        assert "10.9.8.7" in client.get("/api/rig/status").get_json()["error_detail"]
+        _login(client, "admin1")
+        assert "error_detail" not in client.get("/api/rig/status").get_json()
+
+
 class TestStatus:
     def test_public_and_hides_connection_details(self, client, rig):
         _logout(client)

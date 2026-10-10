@@ -78,6 +78,9 @@ class FakeRigctld:
         self.shift = "None"
         self.offs = 0
         self.fail_set_freq = False
+        self.tone_func = 1
+        self.ptt_unsupported = False
+        self.func_unsupported = False
         self.received = []
         self.drop_next = False
         self._srv = socket.socket()
@@ -117,7 +120,14 @@ class FakeRigctld:
         if cmd == "m":
             return f"{self.mode}\n15000\n"
         if cmd == "t":
-            return f"{self.ptt}\n"
+            return "RPRT -11\n" if self.ptt_unsupported else f"{self.ptt}\n"
+        if cmd == "\\get_func":
+            return "RPRT -11\n" if self.func_unsupported else f"{self.tone_func}\n"
+        if cmd == "\\set_func":
+            if self.func_unsupported:
+                return "RPRT -11\n"
+            self.tone_func = int(arg.split()[1])
+            return "RPRT 0\n"
         if cmd == "\\get_ctcss_tone":
             return f"{self.tone}\n"
         if cmd == "\\get_rptr_shift":
@@ -265,3 +275,62 @@ def test_missing_backend_support_degrades_to_simplex(client, fake):
     fake._reply = lambda line: ("RPRT -11\n" if "rptr" in line else FakeRigctld._reply(fake, line))
     st = client.read_state()
     assert st["shift"] == "None" and st["offset_hz"] == 0
+
+
+# ── found against a real rigctld (dummy rig) ──────────────────────────────
+
+def test_state_survives_a_backend_without_ptt_readback(client, fake):
+    fake.ptt_unsupported = True
+    st = client.read_state()
+    assert st["freq_hz"] == 146_520_000
+    assert st["ptt"] is False and st["ptt_known"] is False
+
+
+def test_set_pl_turns_the_tone_function_on_and_off(client, fake):
+    fake.tone_func = 0
+    client.set_pl(885)
+    assert (fake.tone, fake.tone_func) == (885, 1)
+    client.set_pl(0)
+    assert fake.tone_func == 0
+    assert fake.tone == 885                      # no 0 Hz tone written
+
+
+def test_pl_reads_as_off_when_function_is_off(client, fake):
+    fake.tone, fake.tone_func = 1000, 0
+    assert client.read_state()["ctcss_tenths"] == 0
+    fake.tone_func = 1
+    assert client.read_state()["ctcss_tenths"] == 1000
+
+
+def test_backend_without_tone_function_still_works(client, fake):
+    fake.func_unsupported = True
+    client.set_pl(1000)                          # must not raise
+    assert fake.tone == 1000
+    assert client.read_state()["ctcss_tenths"] == 1000
+
+
+import shutil, subprocess, time as _time
+
+
+@pytest.mark.skipif(not shutil.which("rigctld"), reason="Hamlib rigctld not installed")
+def test_against_real_rigctld_dummy_rig():
+    """Optional: only runs where Hamlib is installed. Uses rigctld's built-in
+    dummy radio, so it exercises the real protocol without hardware."""
+    sock = socket.socket(); sock.bind(("127.0.0.1", 0)); port = sock.getsockname()[1]; sock.close()
+    proc = subprocess.Popen(["rigctld", "-m", "1", "-t", str(port), "-T", "127.0.0.1"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        c = rc.RigctldClient("127.0.0.1", port, timeout=3)
+        for _ in range(30):
+            try:
+                c.get_freq(); break
+            except rc.RigError:
+                _time.sleep(0.1)
+        c.set_freq(147_000_000); c.set_mode("FM"); c.set_pl(1000)
+        c.set_rptr_offs(600_000); c.set_rptr_shift("+")
+        st = c.read_state()
+        assert (st["freq_hz"], st["shift"], st["offset_hz"], st["ctcss_tenths"]) == \
+            (147_000_000, "+", 600_000, 1000)
+        c.close()
+    finally:
+        proc.terminate()

@@ -290,6 +290,33 @@ class RigctldClient:
         except IndexError:
             raise RigError("Unreadable PTT reply")
 
+    def get_func(self, name):
+        """True/False for a Hamlib function (e.g. 'TONE'), None if the backend
+        doesn't implement it."""
+        try:
+            return self._command(f"\\get_func {name}", 1)[0].strip() not in ("0", "")
+        except (RigError, IndexError):
+            return None
+
+    def set_func(self, name, on):
+        self._command(f"\\set_func {name} {1 if on else 0}", 1)
+
+    def set_pl(self, tenths):
+        """Set the TX PL tone AND switch tone encoding on (or off for 0).
+
+        Found against a real rigctld (dummy rig): writing the tone frequency
+        alone leaves the TONE function off, so nothing is actually encoded --
+        a repeater would never hear it. The function toggle is best-effort
+        (a backend that encodes implicitly may not implement it), and 0 turns
+        the function off rather than writing a 0 Hz tone, which radios tend
+        to reject."""
+        if tenths:
+            self.set_ctcss_tone(tenths)
+        try:
+            self.set_func("TONE", bool(tenths))
+        except RigError as e:
+            self._log(f"set_func TONE not applied ({e})")
+
     def get_ctcss_tone(self):
         """Tenths of a Hz, 0 = off/unsupported. Not every Hamlib backend
         implements this; an error here is not fatal to a status read."""
@@ -332,15 +359,26 @@ class RigctldClient:
         """One consistent snapshot for the kiosk. Frequency + PTT are the
         load-bearing reads; mode/tone are best-effort (a backend that lacks
         one still yields a usable VFO display)."""
-        state = {"freq_hz": self.get_freq(), "ptt": self.get_ptt()}
+        state = {"freq_hz": self.get_freq()}
+        # PTT readback is NOT universal (a real rigctld dummy rig answers it
+        # with error -11), so a backend without it must not make the whole
+        # radio look dead. Unknown reads as "not transmitting".
+        try:
+            state["ptt"], state["ptt_known"] = self.get_ptt(), True
+        except RigError:
+            state["ptt"], state["ptt_known"] = False, False
         try:
             state["mode"] = self.get_mode()
         except RigError:
             state["mode"] = ""
         try:
-            state["ctcss_tenths"] = self.get_ctcss_tone()
+            tone = self.get_ctcss_tone()
         except RigError:
-            state["ctcss_tenths"] = 0
+            tone = 0
+        # A tone frequency with the TONE function off isn't being sent; show
+        # "no PL" then. A backend lacking the function (None) is taken at its
+        # word.
+        state["ctcss_tenths"] = tone if self.get_func("TONE") is not False else 0
         try:
             state["shift"] = self.get_rptr_shift()
             state["offset_hz"] = self.get_rptr_offs()
@@ -392,6 +430,13 @@ class SimRig:
         self.calls.append(("set_ctcss_tone", tenths))
         self.ctcss_tenths = int(tenths)
 
+    def set_pl(self, tenths):
+        self.calls.append(("set_pl", tenths))
+        self.ctcss_tenths = int(tenths)
+
+    def get_func(self, name):
+        return self.ctcss_tenths > 0 if name == "TONE" else None
+
     def get_rptr_shift(self):
         return self.shift
 
@@ -407,6 +452,7 @@ class SimRig:
         self.offset_hz = int(offset_hz)
 
     def read_state(self):
-        return {"freq_hz": self.freq_hz, "ptt": self.ptt, "mode": self.mode,
+        return {"freq_hz": self.freq_hz, "ptt": self.ptt, "ptt_known": True,
+                "mode": self.mode,
                 "ctcss_tenths": self.ctcss_tenths, "shift": self.shift,
                 "offset_hz": self.offset_hz, "ts": time.time()}

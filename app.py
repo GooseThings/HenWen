@@ -16802,15 +16802,17 @@ def _rig_matching_memory(st, mems):
     return None
 
 
-def _rig_public_state(cfg):
+def _rig_public_state(cfg, include_detail=False):
     """What /api/rig/status serves. No host/port/serial details -- the board
-    is public; the frequency itself is what a repeater publishes anyway."""
+    is public; the frequency itself is what a repeater publishes anyway. The
+    raw error text (which names the rigctld host:port) is therefore replaced
+    with a generic one unless the caller is the owner."""
     with _rig_lock:
         st, err = _rig_state["state"], _rig_state["error"]
     out = {
         "enabled": bool(cfg and cfg.get("enabled")),
         "connected": bool(st) and not err,
-        "error": err,
+        "error": ("Radio not responding" if err else None),
         "step_khz": (cfg or {}).get("step_khz", 5),
         "memories": [{"label": m["label"], "freq_hz": m["freq_hz"],
                       "mode": m["mode"], "ctcss_tenths": m["ctcss_tenths"],
@@ -16818,6 +16820,8 @@ def _rig_public_state(cfg):
                       "offset_hz": m.get("offset_hz", 0)}
                      for m in _rig_memories(cfg)] if cfg else [],
     }
+    if include_detail and err:
+        out["error_detail"] = err
     if st and not err:
         shift, offs = st.get("shift", "None"), st.get("offset_hz", 0)
         out.update(freq_hz=st["freq_hz"], mode=st["mode"],
@@ -16831,7 +16835,7 @@ def _rig_public_state(cfg):
 @app.route("/api/rig/status")
 def api_rig_status():
     cfg = _get_rig_control_config()
-    resp = jsonify(_rig_public_state(cfg))
+    resp = jsonify(_rig_public_state(cfg, include_detail=session.get("role") == "owner"))
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -16921,7 +16925,7 @@ def api_rig_tune():
         if mode:
             client.set_mode(mode)
         if tone is not None:
-            client.set_ctcss_tone(tone)
+            client.set_pl(tone)
         if offset is not None:
             client.set_rptr_offs(offset)
         if shift is not None:

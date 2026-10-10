@@ -2078,6 +2078,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
         </div>
       </div>
     </div>
+    <div id="rig-live" style="max-width:620px;margin-bottom:12px;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg3);font-size:0.82rem;color:var(--text2)">Radio status: &hellip;</div>
     <button class="btn btn-primary" onclick="rigControlSave()">Save</button>
     <div id="rig-status" style="margin-top:8px;font-size:0.82rem"></div>
   </section>
@@ -3885,6 +3886,7 @@ function showPage(id) {
   stopDiagPolling();
   stopRelayStatusPolling();
   stopIrcRelayStatusPolling();
+  stopRigLivePolling();
   stopStressTestPolling();
   stopAslUpdatePolling();
 
@@ -7874,7 +7876,36 @@ async function rigControlLoad() {
     step.appendChild(o);
   });
   document.getElementById('rig-memories').value = rigMemoriesToText(d.memories);
+  rigControlLoadLive();
 }
+
+var _rigLiveTimer = null;
+/* Live connection status for first-time hookup: the owner-only error_detail
+   (which names the rigctld host:port) is shown here and nowhere public. */
+async function rigControlLoadLive() {
+  var el = document.getElementById('rig-live');
+  var r = await api('/api/rig/status');
+  if (r.ok) {
+    var d = r.data, txt, color = 'var(--text2)';
+    if (!d.enabled)        { txt = 'Rig control is disabled.'; }
+    else if (d.connected)  {
+      color = 'var(--success)';
+      txt = 'Connected \u2014 ' + (d.freq_hz / 1e6).toFixed(4) + ' MHz ' + (d.mode || '') +
+            (d.ctcss_tenths ? ', PL ' + (d.ctcss_tenths / 10).toFixed(1) : ', no PL') +
+            (d.shift && d.shift !== 'None' ? ', ' + d.shift + (d.offset_hz / 1e6).toFixed(3) : ', simplex');
+    } else {
+      color = 'var(--danger)';
+      txt = 'Not connected: ' + (d.error_detail || d.error || 'waiting for the first reading\u2026');
+    }
+    el.textContent = 'Radio status: ' + txt;
+    el.style.color = color;
+  }
+  if (_rigLiveTimer) clearTimeout(_rigLiveTimer);
+  if (document.getElementById('page-rig-control').classList.contains('active')) {
+    _rigLiveTimer = setTimeout(rigControlLoadLive, 3000);
+  }
+}
+function stopRigLivePolling() { if (_rigLiveTimer) { clearTimeout(_rigLiveTimer); _rigLiveTimer = null; } }
 
 async function rigControlSave() {
   var st = document.getElementById('rig-status');

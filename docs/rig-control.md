@@ -72,7 +72,7 @@ rather than an error.
 
 ## Repeater shift, offset and PL
 
-Uses rigctld's `\set_rptr_shift` / `\set_rptr_offs` / `\set_ctcss_tone`. Whether
+Uses rigctld's `\set_rptr_shift` / `\set_rptr_offs` / `\set_ctcss_tone` plus `\set_func TONE` (setting a tone frequency alone does not switch encoding on -- seen against rigctld's dummy rig; "No PL" turns the function off instead of writing a 0 Hz tone). Whether
 the TM-D710G backend implements all three is **unverified**; a backend that
 lacks one reads back as simplex / 0 / no PL, and a set against it will return
 an error you'll see in the kiosk. "No PL" sends tone 0, which a radio may also
@@ -81,3 +81,22 @@ reject. Memory-channel format in Manager:
 Leaving shift/offset out of a free-form tune keeps whatever the radio has now
 (and the band check uses that), and a tune is refused until HenWen has read the
 radio's state at least once.
+
+## What has been checked against real Hamlib
+
+`tests/test_rig_control.py` includes a test against a real `rigctld -m 1` (the
+dummy radio) that runs automatically wherever Hamlib is installed. It confirmed
+the wire format and found two bugs that a hand-written fake had hidden (PTT
+readback is not universal; a PL tone needs the TONE function). Hamlib 4.6.2
+lists model 2034 as `TM-D710(G)`. The dummy rig is not a D710, so none of this
+says how the D710 backend itself behaves.
+
+## First-connection checklist
+
+1. `rigctl -m 2034 -r /dev/serial/by-id/<cable> -s <baud> f` should print the
+   frequency. Try `m`, `t`, `\get_rptr_shift`, `\get_rptr_offs`,
+   `\get_ctcss_tone`, `\get_func TONE` and note which ones error.
+2. Put the radio in VFO mode (not memory recall) on the band the node uses.
+3. Start `rigctld`, then watch **Manager > Rig Control**: the status line shows
+   the connection state and, for the owner, the exact error.
+4. Try a tune with the transmitter disconnected or on a dummy load first.
