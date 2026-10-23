@@ -872,6 +872,30 @@ svg.kiosk-login-icon { display: none; }
 .act-badge.local  { background: rgba(63,185,80,.15); color: var(--green); }
 .act-badge.global { background: rgba(88,166,255,.12); color: var(--accent); }
 
+/* RF row in the Node card: the "RF ENABLED" badge plus a VFO button, shown
+   whenever rig control is enabled so it's obvious this node is wired to a
+   real radio even with nothing linked. align-items:stretch makes the button
+   exactly as tall as the badge, and the button takes the same tinted
+   treatment as the Listen/Rec/TX buttons (those rules are scoped to
+   .node-controls, so they're repeated here for this row). */
+.rig-row { display: none; align-items: stretch; gap: 6px; margin: 8px 0 0; flex-shrink: 0; }
+.rig-badge { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 6px;
+  flex-wrap: wrap; box-sizing: border-box; padding: 4px 9px;
+  background: rgba(63,185,80,.10); border: 1px solid rgba(63,185,80,.35);
+  border-radius: 6px; color: var(--text); font-size: 0.78rem; text-align: left; }
+.rig-badge .rig-tag { font-size: 0.65rem; font-weight: 700; letter-spacing: .06em; white-space: nowrap;
+  padding: 1px 6px; border-radius: 3px; background: var(--green); color: #0d1117; }
+.rig-badge .rig-freq { font-family: var(--mono); font-weight: 700; }
+.rig-badge .rig-mem  { color: var(--text2); }
+.rig-badge.rig-down { background: rgba(210,153,34,.10); border-color: rgba(210,153,34,.4); }
+.rig-badge.rig-down .rig-tag { background: var(--warn, #d29922); }
+#rig-btn { --btn-tint: var(--accent); }
+.rig-row .btn-icon {
+  justify-content: center; flex: 0 0 auto;
+  background: color-mix(in srgb, var(--btn-tint) 8%, var(--bg3));
+  border-color: color-mix(in srgb, var(--btn-tint) 38%, var(--border));
+}
+
 /* ── Meshtastic panel: split off under Activity, same column. Hidden by
    default (DASH_DEFAULT_HIDDEN) — these coordinates only ever apply if it's
    unhidden, and dashUnhide() calls dashEnsureCustom() first, so in practice
@@ -1971,6 +1995,14 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
         <div id="node-info">
           <div style="color:var(--text2);font-size:.9rem">Loading&hellip;</div>
         </div>
+        <!-- RF row: hidden unless Manager > Rig Control is enabled. A direct
+             child of #node-body (not inside #node-info, which refreshBoard()
+             rewrites every 2s) so dashNodeContentMinPx() measures it, and
+             renderRigBadge() calls dashFitNodeCard() when it appears. -->
+        <div class="rig-row" id="rig-row">
+          <div class="rig-badge" id="rig-badge"></div>
+          <button type="button" class="btn-icon" id="rig-btn" onclick="openRigModal()" title="Open the VFO -- change the radio's frequency, PL and offset"><svg class="icon"><use href="#icon-radio-tower"></use></svg> VFO</button>
+        </div>
         <!-- Node-wide audio controls: these act on the node itself (listen to
              it, record it, transmit through it), not on any one connected
              peer, which is why they live here rather than in the Connected
@@ -2337,6 +2369,52 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
         </div>
         <div id="kl-2fa-error" style="margin-top:8px;font-size:0.8rem;color:var(--red);min-height:1em"></div>
       </div>
+    </div>
+  </div>
+
+  <!-- VFO modal: backed by /api/rig/status + /api/rig/tune, config is Manager > Rig Control (owner-only) -->
+  <div id="rig-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;align-items:center;justify-content:center">
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:22px 26px;width:460px;max-width:92vw;max-height:86vh;overflow-y:auto">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+        <div style="font-size:0.95rem;font-weight:700"><svg class="icon"><use href="#icon-radio-tower"></use></svg> VFO</div>
+        <button onclick="closeRigModal()" style="background:none;border:none;color:var(--text2);font-size:1.1rem;cursor:pointer;line-height:1;padding:2px 6px"><svg class="icon"><use href="#icon-x"></use></svg></button>
+      </div>
+      <div style="background:var(--bg3);border:1px solid var(--border);border-radius:7px;padding:14px;text-align:center;margin-bottom:12px">
+        <div id="rig-freq" style="font-family:var(--mono);font-size:2rem;font-weight:700;letter-spacing:.02em">&mdash;</div>
+        <div id="rig-sub" style="font-size:0.78rem;color:var(--text2);margin-top:2px"></div>
+      </div>
+      <div id="rig-step-row" style="display:none;gap:8px;margin-bottom:10px">
+        <button class="btn-icon" style="flex:1;justify-content:center" onclick="rigStep(-1)" id="rig-step-down">&minus; <span id="rig-step-lbl-d"></span></button>
+        <button class="btn-icon" style="flex:1;justify-content:center" onclick="rigStep(1)" id="rig-step-up">+ <span id="rig-step-lbl-u"></span></button>
+      </div>
+      <div id="rig-entry-row" style="display:none;flex-direction:column;gap:8px;margin-bottom:12px">
+        <input id="rig-entry" type="text" inputmode="decimal" placeholder="Frequency, MHz (e.g. 146.520)" maxlength="12"
+               style="padding:6px 9px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-size:0.85rem"
+               onkeydown="if(event.key==='Enter')rigGo()">
+        <div style="display:flex;gap:8px">
+          <select id="rig-shift" onchange="rigShiftChanged()" title="Repeater shift"
+                  style="flex:1;padding:6px 9px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-size:0.85rem">
+            <option value="None">Simplex</option>
+            <option value="+">Shift +</option>
+            <option value="-">Shift &minus;</option>
+          </select>
+          <input id="rig-offset" type="text" inputmode="decimal" placeholder="Offset MHz" maxlength="8" title="Repeater offset in MHz"
+                 style="flex:1;min-width:0;padding:6px 9px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-size:0.85rem"
+                 onkeydown="if(event.key==='Enter')rigGo()">
+          <select id="rig-pl" title="PL (CTCSS) tone sent when transmitting"
+                  style="flex:1;padding:6px 9px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-size:0.85rem"></select>
+        </div>
+        <button class="btn-icon" style="justify-content:center" onclick="rigGo()">Apply</button>
+        <div style="display:flex;gap:8px">
+          <input id="rig-save-name" type="text" placeholder="Name to save current setup as" maxlength="24"
+                 style="flex:1;min-width:0;padding:6px 9px;border:1px solid var(--border);border-radius:5px;background:var(--bg3);color:var(--text);font-size:0.85rem"
+                 onkeydown="if(event.key==='Enter')rigSaveMemory()">
+          <button class="btn-icon" onclick="rigSaveMemory()" title="Save the radio's current frequency, PL, shift and offset as a memory channel">Save to memory</button>
+        </div>
+      </div>
+      <div style="font-size:0.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--text2);margin-bottom:6px">Memory channels</div>
+      <div id="rig-mems" style="display:flex;flex-direction:column;gap:6px"></div>
+      <div id="rig-note" style="font-size:0.75rem;color:var(--text2);margin-top:10px"></div>
     </div>
   </div>
 
@@ -4364,6 +4442,196 @@ function renderNetList() {
       '<div style="flex-shrink:0;white-space:nowrap">' + actions + '</div>' +
     '</div>';
   }).join('');
+}
+
+/* ── VFO (rig control) ─────────────────────────────────────────────────────
+   State comes from the shared server-side cache via /api/rig/status (public,
+   like the rest of the board); tuning goes through /api/rig/tune, which does
+   all the real gating (role, TX bands, keyed/linked refusal). The checks
+   here only decide which controls to show -- never trust them for safety. */
+var _rig = {enabled: false};
+
+function _rigIsAdmin() {
+  var r = window._kioskRole;
+  return r === 'admin' || r === 'superuser' || r === 'owner';
+}
+
+async function loadRigStatus() {
+  try {
+    var r = await apiFetch('/api/rig/status', {cache: 'no-store'});
+    if (!r.ok) return;
+    _rig = await r.json();
+  } catch (e) { return; }
+  if (document.getElementById('rig-modal-overlay').style.display !== 'none') renderRig();
+  renderRigBadge();
+}
+
+/* Node-card badge: "RF ENABLED  147.0000 MHz  Local Rptr". Memory name only when the
+   radio is still set exactly to a saved channel (the server decides that). */
+var _rigBadgeSig = '';
+function renderRigBadge() {
+  var el = document.getElementById('rig-badge'), row = document.getElementById('rig-row');
+  if (!el || !row) return;
+  var sig = '', live = _rig.enabled && _rig.connected && _rig.freq_hz;
+  if (_rig.enabled) {
+    el.className = 'rig-badge' + (live ? '' : ' rig-down');
+    row.style.display = 'flex';
+    var html = '<span class="rig-tag">RF ENABLED</span>';
+    if (live) {
+      html += '<span class="rig-freq">' + (_rig.freq_hz / 1e6).toFixed(4) + ' MHz</span>';
+      if (_rig.memory) html += '<span class="rig-mem">' + esc(_rig.memory) + '</span>';
+      if (_rig.ptt) html += '<span class="rig-tx" style="color:var(--red,#f85149);font-weight:700">TX</span>';
+      var tip = [_rig.mode || '', _rig.ctcss_tenths ? 'PL ' + (_rig.ctcss_tenths / 10).toFixed(1) : 'no PL'];
+      if (_rig.shift && _rig.shift !== 'None' && _rig.offset_hz) {
+        tip.push((_rig.shift === '-' ? '\u2212' : '+') + (_rig.offset_hz / 1e6).toFixed(3) + ' MHz');
+      }
+      el.title = 'Connected to an RF radio \u2014 ' + tip.filter(Boolean).join(' \u00b7 ');
+    } else {
+      html += '<span class="rig-mem">radio not responding</span>';
+      el.title = 'Rig control is enabled but the radio is not responding.';
+    }
+    sig = html;
+    if (sig !== _rigBadgeSig) el.innerHTML = html;
+  } else {
+    row.style.display = 'none';
+  }
+  if (sig !== _rigBadgeSig) { _rigBadgeSig = sig; dashFitNodeCard(); }
+}
+
+function renderRig() {
+  var f = document.getElementById('rig-freq'), sub = document.getElementById('rig-sub');
+  var note = document.getElementById('rig-note');
+  var live = _rig.connected && _rig.freq_hz;
+  f.textContent = live ? (_rig.freq_hz / 1e6).toFixed(4) + ' MHz' : '\u2014';
+  var bits = [];
+  if (live) {
+    if (_rig.mode) bits.push(_rig.mode);
+    bits.push(_rig.ctcss_tenths ? 'PL ' + (_rig.ctcss_tenths / 10).toFixed(1) : 'no PL');
+    if (_rig.shift && _rig.shift !== 'None' && _rig.offset_hz) {
+      bits.push((_rig.shift === '-' ? '\u2212' : '+') + (_rig.offset_hz / 1e6).toFixed(3) +
+                ' (TX ' + (_rig.tx_freq_hz / 1e6).toFixed(4) + ')');
+    }
+    if (_rig.ptt) bits.push('TX');
+  } else {
+    bits.push(_rig.error ? 'Radio not responding' : 'Connecting\u2026');
+  }
+  sub.textContent = bits.join(' \u00b7 ');
+  var loggedIn = !!window._kioskRole, admin = _rigIsAdmin();
+  document.getElementById('rig-step-row').style.display = admin ? 'flex' : 'none';
+  document.getElementById('rig-entry-row').style.display = admin ? 'flex' : 'none';
+  var st = (_rig.step_khz || 5) + ' kHz';
+  document.getElementById('rig-step-lbl-d').textContent = st;
+  document.getElementById('rig-step-lbl-u').textContent = st;
+  var box = document.getElementById('rig-mems');
+  box.innerHTML = (_rig.memories || []).map(function(m, i) {
+    var pl = m.ctcss_tenths ? ' \u00b7 PL ' + (m.ctcss_tenths / 10).toFixed(1) : '';
+    if (m.shift && m.shift !== 'None' && m.offset_hz) pl += ' \u00b7 ' + (m.shift === '-' ? '\u2212' : '+') + (m.offset_hz / 1e6).toFixed(3);
+    return '<button class="btn-icon" style="justify-content:space-between;width:100%"' +
+      (loggedIn && live ? '' : ' disabled') + ' onclick="rigRecall(' + i + ')">' +
+      '<span>' + esc(m.label) + '</span><span style="color:var(--text2);font-family:var(--mono);font-size:0.75rem">' +
+      (m.freq_hz / 1e6).toFixed(4) + ' ' + esc(m.mode) + pl + '</span></button>';
+  }).join('') || '<div style="font-size:0.8rem;color:var(--text2)">No memory channels configured.</div>';
+  note.textContent = !loggedIn ? 'Log in to change frequency.'
+    : (admin ? '' : 'Your account can recall memory channels. Free tuning needs an admin account.');
+}
+
+async function _rigTune(body) {
+  var r = await apiFetch('/api/rig/tune', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  var d = {};
+  try { d = await r.json(); } catch (e) {}
+  if (r.ok) { _rig = d; sbToast('Tuned to ' + (d.freq_hz / 1e6).toFixed(4) + ' MHz', true); rigFillForm(); renderRig(); renderRigBadge(); loadRigStatus(); }
+  else { sbToast(d.error || 'Could not change frequency', false); }
+}
+
+/* CTCSS tones the PL picker offers (Hz). The server only range-checks, so
+   this list is a convenience, not a gate. */
+var RIG_PL_TONES = [67.0, 69.3, 71.9, 74.4, 77.0, 79.7, 82.5, 85.4, 88.5, 91.5, 94.8, 97.4,
+  100.0, 103.5, 107.2, 110.9, 114.8, 118.8, 123.0, 127.3, 131.8, 136.5, 141.3, 146.2, 151.4,
+  156.7, 162.2, 167.9, 173.8, 179.9, 186.2, 192.8, 203.5, 210.7, 218.1, 225.7, 233.6, 241.8, 250.3];
+
+/* Fill the admin form from the radio's current state. Called on open and
+   after a successful tune -- never from the 5s poll, which would clobber
+   whatever the operator is in the middle of typing. */
+function rigFillForm() {
+  var pl = document.getElementById('rig-pl');
+  if (!pl.options.length) {
+    pl.innerHTML = '<option value="0">No PL</option>' + RIG_PL_TONES.map(function(t) {
+      return '<option value="' + t.toFixed(1) + '">PL ' + t.toFixed(1) + '</option>'; }).join('');
+  }
+  pl.value = _rig.ctcss_tenths ? (_rig.ctcss_tenths / 10).toFixed(1) : '0';
+  if (_rig.ctcss_tenths && pl.value !== (_rig.ctcss_tenths / 10).toFixed(1)) {
+    /* a tone off the standard list: show it rather than silently mislabeling */
+    var o = document.createElement('option');
+    o.value = (_rig.ctcss_tenths / 10).toFixed(1); o.textContent = 'PL ' + o.value;
+    pl.appendChild(o); pl.value = o.value;
+  }
+  document.getElementById('rig-shift').value = _rig.shift || 'None';
+  document.getElementById('rig-offset').value = (_rig.shift && _rig.shift !== 'None' && _rig.offset_hz)
+    ? (_rig.offset_hz / 1e6).toFixed(3) : '';
+  document.getElementById('rig-entry').value = '';
+}
+
+/* Picking +/- with no offset yet prefills the usual one for the band. */
+function rigShiftChanged() {
+  var sh = document.getElementById('rig-shift').value, off = document.getElementById('rig-offset');
+  if (sh === 'None') { off.value = ''; return; }
+  if (off.value.trim()) return;
+  var typed = parseFloat(document.getElementById('rig-entry').value);
+  var mhz = isFinite(typed) && typed > 0 ? typed : (_rig.freq_hz || 0) / 1e6;
+  if (mhz >= 144 && mhz <= 148) off.value = '0.600';
+  else if (mhz >= 420 && mhz <= 450) off.value = '5.000';
+}
+
+/* Saves what the RADIO is set to right now (the server reads its own cached
+   state; nothing here is sent but the name). Apply first if you've edited
+   the form -- unsaved form edits are not what gets stored. */
+async function rigSaveMemory(overwrite) {
+  var inp = document.getElementById('rig-save-name'), label = inp.value.trim();
+  if (!label) { sbToast('Enter a name for the memory first', false); return; }
+  var r = await apiFetch('/api/rig/memories', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({label: label, overwrite: !!overwrite})});
+  var d = {};
+  try { d = await r.json(); } catch (e) {}
+  if (r.ok) {
+    _rig = d; inp.value = '';
+    sbToast((d.replaced ? 'Updated memory ' : 'Saved memory ') + label, true);
+    renderRig();
+    renderRigBadge();
+  } else if (r.status === 409 && d.exists) {
+    if (confirm(d.error + '. Replace it with the radio\'s current setup?')) rigSaveMemory(true);
+  } else {
+    sbToast(d.error || 'Could not save memory', false);
+  }
+}
+
+function rigRecall(i) { _rigTune({memory: i}); }
+function rigStep(dir) {
+  if (!_rig.freq_hz) return;
+  var hz = _rig.freq_hz + dir * Math.round((_rig.step_khz || 5) * 1000);
+  _rigTune({freq: String(hz)});
+}
+function rigGo() {
+  var v = document.getElementById('rig-entry').value.trim();
+  if (!v && !_rig.freq_hz) return;
+  var shift = document.getElementById('rig-shift').value;
+  var body = {
+    freq:   v || String(_rig.freq_hz),     /* blank = re-apply on the current frequency */
+    ctcss:  document.getElementById('rig-pl').value,
+    shift:  shift,
+    offset: shift === 'None' ? '0' : document.getElementById('rig-offset').value.trim(),
+  };
+  _rigTune(body);
+}
+function openRigModal() {
+  document.getElementById('rig-modal-overlay').style.display = 'flex';
+  rigFillForm();
+  renderRig();
+  loadRigStatus().then(rigFillForm);
+}
+function closeRigModal() {
+  document.getElementById('rig-modal-overlay').style.display = 'none';
 }
 
 function openNetModal() {
@@ -6414,6 +6682,7 @@ function _kioskLoginComplete(d) {
   _searchUpdateBtn();
   _recordUpdateBtn();
   _chatUpdateVisibility();
+  loadRigStatus();        /* memory buttons' enabled state follows login */
   loadDvswitchStatus();   /* re-render TG buttons' enabled/disabled state immediately on login/logout, not just on the next 20s poll */
   _managerUpdateBtn();
   updateActiveUsersToggle();
@@ -6555,6 +6824,7 @@ async function checkKioskSession() {
   _searchUpdateBtn();
   _recordUpdateBtn();
   _chatUpdateVisibility();
+  loadRigStatus();        /* memory buttons' enabled state follows login */
   loadDvswitchStatus();   /* re-render TG buttons' enabled/disabled state immediately on login/logout, not just on the next 20s poll */
   _managerUpdateBtn();
 
@@ -9903,6 +10173,7 @@ refreshNwsAlerts();
 refreshActivity();
 loadMeshtasticMessages();
 loadDvswitchStatus();
+loadRigStatus();
 initFavSort();
 loadFavorites();
 loadFavStatus();
@@ -9918,6 +10189,7 @@ setInterval(boardWatchdog,   2000);    /* catches a refreshBoard() request that 
                                           comment above markServerUnreachable() */
 setInterval(refreshActivity, 15000);   /* activity every 15s */
 setInterval(loadMeshtasticMessages, 20000);   /* meshtastic panel every 20s */
+setInterval(loadRigStatus, 5000);              /* VFO readout/button every 5s -- one cached read server-side */
 setInterval(loadDvswitchStatus, 15000);       /* DVSwitch TG/status panel every 15s */
 setInterval(refreshWeather,  600000);  /* weather every 10min */
 setInterval(refreshNwsAlerts, 60000);  /* NWS alert ticker every 60s — well under the
