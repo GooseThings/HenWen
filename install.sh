@@ -95,7 +95,7 @@ chmod +x "$INSTALL_DIR/"*.sh 2>/dev/null || true
 echo "[3/11] Creating Python virtual environment..."
 python3 -m venv "$INSTALL_DIR/venv"
 "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
-"$INSTALL_DIR/venv/bin/pip" install --quiet flask gunicorn flask-wtf flask-limiter piper-tts
+"$INSTALL_DIR/venv/bin/pip" install --quiet -r "$INSTALL_DIR/requirements.txt"
 
 # ── rpt_backups directory ─────────────────────────────────
 echo "[4/11] Creating backup directory..."
