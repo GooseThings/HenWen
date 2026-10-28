@@ -489,6 +489,16 @@ if [ "$LAN" = "1" ]; then
     apache2ctl configtest
     henwen_apache_reload_or_start || exit 1
 
+    # ASL3 ships firewalld with only 80/443 open, so a non-443 port is
+    # unreachable from the LAN until it's opened here -- same as install.sh
+    # does for HenWen's own port.
+    echo "[LAN] Opening firewall port ${HTTPS_PORT}/tcp..."
+    if command -v firewall-cmd &>/dev/null; then
+        firewall-cmd --permanent --add-port=${HTTPS_PORT}/tcp 2>/dev/null && firewall-cmd --reload 2>/dev/null || true
+    elif command -v ufw &>/dev/null; then
+        ufw allow ${HTTPS_PORT}/tcp 2>/dev/null || true
+    fi
+
     echo "$HTTPS_PORT"    > /etc/asterisk/henwen-https-port
     echo "lan"            > /etc/asterisk/henwen-https-mode
     echo "${LAN_IPS[0]}"  > /etc/asterisk/henwen-https-hostname

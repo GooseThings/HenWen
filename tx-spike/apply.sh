@@ -145,6 +145,20 @@ else
   grep -qE "^rtpend=10100" /etc/asterisk/rtp.conf || echo "   NOTE: rtpend was not 20000; narrow it manually if desired"
 fi
 
+# The host firewall has to pass the RTP range too, not just the router --
+# ASL3's stock firewalld zone doesn't, which leaves TX with signaling but
+# no audio, even from the same LAN.
+RTP_LO=$(grep -E "^rtpstart=" /etc/asterisk/rtp.conf | head -1 | cut -d= -f2 | awk '{print $1}')
+RTP_HI=$(grep -E "^rtpend=" /etc/asterisk/rtp.conf | head -1 | cut -d= -f2 | awk '{print $1}')
+if [[ "${RTP_LO:-}" =~ ^[0-9]+$ ]] && [[ "${RTP_HI:-}" =~ ^[0-9]+$ ]]; then
+  echo "== Opening host firewall for RTP ${RTP_LO}-${RTP_HI}/udp"
+  if command -v firewall-cmd &>/dev/null; then
+    firewall-cmd --permanent --add-port=${RTP_LO}-${RTP_HI}/udp >/dev/null 2>&1 && firewall-cmd --reload >/dev/null 2>&1 || true
+  elif command -v ufw &>/dev/null; then
+    ufw allow ${RTP_LO}:${RTP_HI}/udp >/dev/null 2>&1 || true
+  fi
+fi
+
 echo "== Loading Asterisk modules (live, no restart)"
 grep -E "^load = " "$SPIKE_DIR/modules.snippet" | awk '{print $3}' | while read -r m; do
   out=$(asterisk -rx "module load $m" 2>&1) || true
