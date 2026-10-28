@@ -2573,6 +2573,8 @@ sudo bash /opt/HenWen/tx-spike/setup-https.sh --http-only              # frontin
       <strong>Playback mode (below) decides where your ID actually goes.</strong> <strong>Local only</strong> reaches other connected AllStarLink nodes, but never this node's own local RF-attached repeater/controller — if this node's purpose is to <em>be</em> your repeater's controller, that mode alone will never put the ID out over your own RF at all. <strong>All connected links</strong> reaches your own RF equipment too, which most repeater-controller nodes need for a valid FCC ID — but it also plays out on every currently-linked node and their own equipment, which may itself be RF-connected. If another repeater happens to be linked when your ID fires, your ID goes out on their RF too, identifying a station that isn't theirs on a system they don't control. Know which mode you actually need before enabling this.
     </div>
 
+    <datalist id="nid-sounds"></datalist>
+
     <div class="card">
       <div class="card-header"><h2>Add ID Monitor</h2></div>
       <div class="card-body">
@@ -2586,14 +2588,15 @@ sudo bash /opt/HenWen/tx-spike/setup-https.sh --http-only              # frontin
             <select id="nid-node" class="val-input" style="width:100%"></select>
           </div>
           <div style="grid-column:1/-1">
-            <label class="toggle-label" style="display:block;margin-bottom:3px">Sound File Path <span class="muted">(Asterisk path under /usr/share/asterisk/sounds, no extension — e.g. <code>henwen/my-id</code>. For a Morse/CW ID, use rpt.conf's <code>idrecording = |iCALLSIGN</code> instead.)</span></label>
-            <div style="display:flex;gap:8px;align-items:center">
-              <input type="text" id="nid-path" class="val-input" placeholder="henwen/my-id" style="flex:1">
-              <span class="muted" style="font-size:0.82rem;white-space:nowrap">or upload:</span>
+            <label class="toggle-label" style="display:block;margin-bottom:3px" for="nid-path">ID Sound <span class="muted">— start typing to search the sounds on this node (yours are listed first), upload a recording, or generate a Morse code ID</span></label>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <input type="text" id="nid-path" class="val-input" list="nid-sounds" placeholder="Search sounds, e.g. WSCK466" autocomplete="off" style="flex:1;min-width:12rem">
               <input type="file" id="nid-file" accept=".mp3,.wav,.ogg,.flac,.m4a" style="display:none" onchange="idUploadFile()">
               <button class="btn btn-sm" type="button" onclick="document.getElementById('nid-file').click()">Upload File</button>
+              <button class="btn btn-sm" type="button" onclick="nidMorseToggle('nid-path')">Morse Code ID</button>
             </div>
             <div id="nid-upload-status" style="font-size:0.82rem;margin-top:4px"></div>
+            <div id="nidm-wrap-nid-path"></div>
           </div>
           <div>
             <label class="toggle-label" style="display:block;margin-bottom:3px">Playback</label>
@@ -3861,7 +3864,7 @@ function showPage(id) {
   else if (id === 'irc-relay')          ircRelayLoad();
   else if (id === 'chat-log')           chatLogLoad();
   else if (id === 'dtmf')             { populateDtmfNodeSelect(); }
-  else if (id === 'node-id')          { loadIdConfigs(); populateIdNodeSelect(); }
+  else if (id === 'node-id')          { loadIdConfigs(); populateIdNodeSelect(); loadIdSounds(); }
   else if (id === 'announcements')    { loadAnnouncements(); populateAnnNodeSelect(); loadTtsVoices(); }
   else if (id === 'smart-connector') { loadConnectors(); populateConnNodeSelects(); }
   else if (id === 'general')        loadGeneralEditor();
@@ -8679,6 +8682,73 @@ async function idUploadFile() {
   }
 }
 
+// Morse defaults come from rpt.conf's [morse] stanza via /api/id/sounds, so a
+// generated ID matches the node's own built-in CW ID unless changed here.
+var _nidMorseDefaults = {wpm: 20, freq: 1065};
+
+async function loadIdSounds() {
+  try {
+    var r = await apiFetch('/api/id/sounds');
+    if (!r.ok) return;
+    var d = await r.json();
+    _nidMorseDefaults = d.morse_defaults || _nidMorseDefaults;
+    var dl = document.getElementById('nid-sounds');
+    if (!dl) return;
+    dl.innerHTML = (d.sounds || []).map(function(s) {
+      return '<option value="' + esc(s.path) + '"' + (s.custom ? ' label="Your sound"' : '') + '></option>';
+    }).join('');
+  } catch(e) { /* picker is a convenience; typing a path still works */ }
+}
+
+function nidMorseToggle(target) {
+  var wrap = document.getElementById('nidm-wrap-' + target);
+  if (!wrap) return;
+  if (wrap.innerHTML) { wrap.innerHTML = ''; return; }
+  var t = esc(target);
+  wrap.innerHTML =
+    '<div style="margin-top:8px;padding:10px 12px;border:1px solid var(--border);border-radius:6px">' +
+      '<div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">' +
+        '<div style="flex:1;min-width:10rem"><label class="toggle-label" style="display:block;margin-bottom:3px" for="nidm-text-' + t + '">Callsign or text</label>' +
+          '<input type="text" id="nidm-text-' + t + '" class="val-input" maxlength="40" placeholder="e.g. WSCK466" autocomplete="off" style="width:100%;text-transform:uppercase"' +
+          ' onkeydown="if(event.key===\'Enter\'){event.preventDefault();nidMorseGenerate(\'' + t + '\')}"></div>' +
+        '<div><label class="toggle-label" style="display:block;margin-bottom:3px" for="nidm-wpm-' + t + '">Speed (WPM)</label>' +
+          '<input type="number" id="nidm-wpm-' + t + '" class="val-input" min="5" max="40" value="' + _nidMorseDefaults.wpm + '" style="width:6rem"></div>' +
+        '<div><label class="toggle-label" style="display:block;margin-bottom:3px" for="nidm-freq-' + t + '">Tone (Hz)</label>' +
+          '<input type="number" id="nidm-freq-' + t + '" class="val-input" min="300" max="3000" step="5" value="' + _nidMorseDefaults.freq + '" style="width:6rem"></div>' +
+        '<button class="btn btn-sm btn-primary" type="button" onclick="nidMorseGenerate(\'' + t + '\')">Generate</button>' +
+      '</div>' +
+      '<div class="muted" style="font-size:0.8rem;margin-top:6px">Speed and tone default to your rpt.conf [morse] settings, so it sounds like the node\'s own CW ID. Letters, digits, spaces and / ? . , - = only.</div>' +
+      '<div id="nidm-status-' + t + '" style="font-size:0.82rem;margin-top:4px"></div>' +
+    '</div>';
+  document.getElementById('nidm-text-' + target).focus();
+}
+
+async function nidMorseGenerate(target) {
+  var status = document.getElementById('nidm-status-' + target);
+  var text = document.getElementById('nidm-text-' + target).value.trim().toUpperCase();
+  if (!text) { status.innerHTML = '<span style="color:var(--danger)">Enter a callsign first.</span>'; return; }
+  status.innerHTML = '<span class="muted">Generating...</span>';
+  try {
+    var r = await apiFetch('/api/id/morse', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        text: text,
+        wpm:  parseInt(document.getElementById('nidm-wpm-'  + target).value, 10),
+        freq: parseInt(document.getElementById('nidm-freq-' + target).value, 10),
+      })
+    });
+    var d = await r.json();
+    if (!r.ok) { status.innerHTML = '<span style="color:var(--danger)">' + esc(d.error || 'Generation failed') + '</span>'; return; }
+    document.getElementById(target).value = d.path;
+    var nameEl = target === 'nid-path' ? document.getElementById('nid-name') : null;
+    if (nameEl && !nameEl.value.trim()) nameEl.value = 'Morse ID (' + text + ')';
+    status.innerHTML = '<span style="color:var(--green)">Generated a ' + esc(String(d.seconds)) + 's Morse ID — sound filled in above. Save to use it.</span>';
+    loadIdSounds();
+  } catch(e) {
+    status.innerHTML = '<span style="color:var(--danger)">Error: ' + esc(String(e)) + '</span>';
+  }
+}
+
 function nidStateLabel(c) {
   var s = c.runtime_state || 'idle';
   if (s === 'idle')         return '<span style="color:var(--text2)">Idle</span>';
@@ -8746,8 +8816,12 @@ function nidEditForm(c) {
       '<input type="text" id="nide-name-' + c.id + '" class="val-input" value="' + esc(c.name) + '" style="width:100%"></div>' +
     '<div><label class="toggle-label" style="display:block;margin-bottom:3px">Node</label>' +
       '<input type="text" id="nide-node-' + c.id + '" class="val-input" value="' + esc(c.node) + '" style="width:100%"></div>' +
-    '<div style="grid-column:1/-1"><label class="toggle-label" style="display:block;margin-bottom:3px">Sound path</label>' +
-      '<input type="text" id="nide-path-' + c.id + '" class="val-input" value="' + esc(c.sound_path) + '" style="width:100%"></div>' +
+    '<div style="grid-column:1/-1"><label class="toggle-label" style="display:block;margin-bottom:3px" for="nide-path-' + c.id + '">ID Sound</label>' +
+      '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+        '<input type="text" id="nide-path-' + c.id + '" class="val-input" list="nid-sounds" autocomplete="off" value="' + esc(c.sound_path) + '" style="flex:1;min-width:12rem">' +
+        '<button class="btn btn-sm" type="button" onclick="nidMorseToggle(\'nide-path-' + c.id + '\')">Morse Code ID</button>' +
+      '</div>' +
+      '<div id="nidm-wrap-nide-path-' + c.id + '"></div></div>' +
     '<div style="grid-column:1/-1"><label class="toggle-label" style="display:block;margin-bottom:3px">Playback</label>' +
       '<select id="nide-cmd-' + c.id + '" class="val-input" style="width:100%">' +
         '<option value="localplay"' + (c.play_cmd!=='playback'?' selected':'') + '>Local only (localplay) — other connected nodes, not this node\'s own RF</option>' +

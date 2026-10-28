@@ -52,6 +52,7 @@ import base64
 import traceback
 import select
 import uuid
+import wave
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for, send_file, Response, stream_with_context
@@ -18053,6 +18054,140 @@ def _asterisk_sound_exists(sound_path: str) -> bool:
     return any(os.path.isfile(f) for f in glob.glob(glob.escape(base) + ".*"))
 
 
+# Where dpkg records each installed package's files. Used only to tell the
+# stock Asterisk prompts (en/digits/..., en/rpt/...) apart from sounds the
+# operator added, so the Node ID picker can list theirs first.
+DPKG_INFO_DIR = os.environ.get("DPKG_INFO_DIR", "/var/lib/dpkg/info")
+
+
+@_ttl_cached(3600)
+def _packaged_sound_files() -> frozenset:
+    """Absolute paths of every packaged file under ASTERISK_SOUNDS_ROOT.
+    Plain text reads of dpkg's *.list files, no subprocess; cached an hour
+    since it only changes when a package is installed. Empty if dpkg's
+    info dir isn't there, which just means every sound reads as custom."""
+    prefix = ASTERISK_SOUNDS_ROOT.rstrip("/") + "/"
+    found = set()
+    for lst in glob.glob(os.path.join(DPKG_INFO_DIR, "*.list")):
+        try:
+            with open(lst, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if line.startswith(prefix):
+                        found.add(line.rstrip("\n"))
+        except OSError:
+            continue
+    return frozenset(found)
+
+
+def _list_asterisk_sounds() -> list:
+    """Every sound under ASTERISK_SOUNDS_ROOT as Asterisk would name it
+    (relative, no extension, one entry per sound even when it exists in
+    several formats), the operator's own sounds first, then stock ones,
+    each alphabetical. ~650 entries on a stock ASL3 box."""
+    root = ASTERISK_SOUNDS_ROOT.rstrip("/")
+    packaged = _packaged_sound_files()
+    sounds = {}
+    for dirpath, _dirs, files in os.walk(root):
+        for fn in files:
+            stem, ext = os.path.splitext(fn)
+            if not ext or stem.startswith("."):
+                continue
+            full = os.path.join(dirpath, fn)
+            rel  = os.path.relpath(os.path.join(dirpath, stem), root)
+            # The create/update routes only accept [a-zA-Z0-9/_-]; listing
+            # anything else would offer a choice that can't be saved.
+            if not re.match(r'^[a-zA-Z0-9/_\-]{1,256}$', rel):
+                continue
+            custom = full not in packaged
+            sounds[rel] = sounds.get(rel, False) or custom
+    return [{"path": p, "custom": c}
+            for p, c in sorted(sounds.items(), key=lambda kv: (not kv[1], kv[0].lower()))]
+
+
+_MORSE_CODE = {
+    "A": ".-", "B": "-...", "C": "-.-.", "D": "-..", "E": ".", "F": "..-.",
+    "G": "--.", "H": "....", "I": "..", "J": ".---", "K": "-.-", "L": ".-..",
+    "M": "--", "N": "-.", "O": "---", "P": ".--.", "Q": "--.-", "R": ".-.",
+    "S": "...", "T": "-", "U": "..-", "V": "...-", "W": ".--", "X": "-..-",
+    "Y": "-.--", "Z": "--..",
+    "0": "-----", "1": ".----", "2": "..---", "3": "...--", "4": "....-",
+    "5": ".....", "6": "-....", "7": "--...", "8": "---..", "9": "----.",
+    "/": "-..-.", "?": "..--..", ".": ".-.-.-", ",": "--..--", "-": "-....-",
+    "=": "-...-",
+}
+MORSE_TEXT_RE  = re.compile(r'^[A-Z0-9/?.,=\- ]{1,40}$')
+MORSE_WPM_RANGE  = (5, 40)
+MORSE_FREQ_RANGE = (300, 3000)
+
+
+def _morse_defaults() -> dict:
+    """Speed/tone/level app_rpt itself uses for its CW ID (rpt.conf
+    [morse]: speed, idfrequency, idamplitude), so a generated Node ID
+    sounds like the node's own built-in one. Falls back to app_rpt's
+    stock values when rpt.conf or the stanza can't be read."""
+    out = {"wpm": 20, "freq": 1065, "amplitude": 4096}
+    content = read_conf_file(RPT_CONF_PATH)
+    if not content:
+        return out
+    try:
+        cfg = parse_stanza_settings(content, "morse")
+    except Exception:
+        return out
+    for key, conf_key, (lo, hi) in (("wpm", "speed", MORSE_WPM_RANGE),
+                                    ("freq", "idfrequency", MORSE_FREQ_RANGE),
+                                    ("amplitude", "idamplitude", (1, 32767))):
+        entry = cfg.get(conf_key)
+        if not entry or entry.get("commented"):
+            continue
+        try:
+            v = int(str(entry.get("value", "")).split(";")[0].strip())
+        except ValueError:
+            continue
+        if lo <= v <= hi:
+            out[key] = v
+    return out
+
+
+def _morse_pcm(text: str, wpm: int, freq: int, amplitude: int, rate: int = 8000) -> bytes:
+    """Render `text` as CW: signed 16-bit little-endian mono PCM. Standard
+    PARIS timing (one unit = 1.2/wpm s; dah 3, gaps 1/3/7 units), with a
+    5ms raised-cosine ramp on every element so keying doesn't click, and
+    100ms of silence at each end. Unknown characters are skipped."""
+    unit = int(rate * 1.2 / wpm)
+    ramp = min(int(rate * 0.005), unit // 2)
+    out  = bytearray()
+
+    def silence(units):
+        out.extend(b"\x00\x00" * (unit * units))
+
+    def tone(units):
+        n = unit * units
+        for i in range(n):
+            env = 1.0
+            if i < ramp:
+                env = 0.5 - 0.5 * math.cos(math.pi * i / ramp)
+            elif i >= n - ramp:
+                env = 0.5 - 0.5 * math.cos(math.pi * (n - i) / ramp)
+            v = int(amplitude * env * math.sin(2 * math.pi * freq * i / rate))
+            out.extend(v.to_bytes(2, "little", signed=True))
+
+    out.extend(b"\x00\x00" * int(rate * 0.1))
+    words = [w for w in text.upper().split() if w]
+    for wi, word in enumerate(words):
+        if wi:
+            silence(7)
+        chars = [c for c in word if c in _MORSE_CODE]
+        for ci, ch in enumerate(chars):
+            if ci:
+                silence(3)
+            for ei, el in enumerate(_MORSE_CODE[ch]):
+                if ei:
+                    silence(1)
+                tone(3 if el == "-" else 1)
+    out.extend(b"\x00\x00" * int(rate * 0.1))
+    return bytes(out)
+
+
 def _play_id_sound(row):
     node = row["node"]
     path = row["sound_path"].strip()
@@ -18346,6 +18481,79 @@ def api_id_upload():
 
     log("INFO", f"[ID] Uploaded ID sound '{name}' → {dest}")
     return jsonify({"path": f"{SOUNDS_SUBDIR}/{slug}", "slug": slug})
+
+
+@app.route("/api/id/sounds")
+def api_id_sounds():
+    """Every sound Asterisk can play on this box, for the Node ID page's
+    type-ahead picker, plus the [morse] defaults its Morse generator uses."""
+    if session.get('role') not in ('superuser', 'owner'):
+        return jsonify({"error": "Superuser access required"}), 403
+    return jsonify({"sounds": _list_asterisk_sounds(), "morse_defaults": _morse_defaults()})
+
+
+@app.route("/api/id/morse", methods=["POST"])
+def api_id_morse():
+    """Generate a CW ID sound file from typed text; returns its sound_path
+    exactly like /api/id/upload does. The file name is derived from the
+    text/speed/tone, so generating the same ID twice reuses one file
+    instead of piling up copies."""
+    if session.get('role') not in ('superuser', 'owner'):
+        return jsonify({"error": "Superuser access required"}), 403
+    data = request.json or {}
+    text = re.sub(r'\s+', ' ', str(data.get("text", "")).strip().upper())
+    if not MORSE_TEXT_RE.match(text):
+        return jsonify({"error": "Use 1-40 letters, digits, spaces or / ? . , - ="}), 400
+    defaults = _morse_defaults()
+    try:
+        wpm  = int(data.get("wpm",  defaults["wpm"]))
+        freq = int(data.get("freq", defaults["freq"]))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Speed and tone must be whole numbers"}), 400
+    if not MORSE_WPM_RANGE[0] <= wpm <= MORSE_WPM_RANGE[1]:
+        return jsonify({"error": f"Speed must be {MORSE_WPM_RANGE[0]}-{MORSE_WPM_RANGE[1]} WPM"}), 400
+    if not MORSE_FREQ_RANGE[0] <= freq <= MORSE_FREQ_RANGE[1]:
+        return jsonify({"error": f"Tone must be {MORSE_FREQ_RANGE[0]}-{MORSE_FREQ_RANGE[1]} Hz"}), 400
+
+    slug = _ann_slug(f"morse-{text}-{wpm}wpm-{freq}hz")
+    dest = _ann_sound_path(slug)
+    err = _ensure_sounds_dir()
+    if err:
+        return err
+    pcm = _morse_pcm(text, wpm, freq, defaults["amplitude"])
+    fd, tmp_wav = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    fd, tmp_ulaw = tempfile.mkstemp(suffix=".ulaw", dir=SOUNDS_DIR)
+    os.close(fd)
+    try:
+        with wave.open(tmp_wav, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(8000)
+            w.writeframes(pcm)
+        _convert_to_ulaw(tmp_wav, tmp_ulaw)
+        try:
+            shutil.chown(tmp_ulaw, user="asterisk", group="asterisk")
+        except Exception:
+            pass
+        # Atomic, so an ID already pointing at this exact file never sees
+        # it missing or half-written mid-regeneration.
+        os.replace(tmp_ulaw, dest)
+    except Exception as e:
+        try:
+            os.unlink(tmp_ulaw)
+        except OSError:
+            pass
+        return jsonify({"error": f"Conversion failed: {e}"}), 500
+    finally:
+        try:
+            os.unlink(tmp_wav)
+        except OSError:
+            pass
+
+    secs = len(pcm) / 2 / 8000
+    log("INFO", f"[ID] Generated Morse ID '{text}' ({wpm} WPM, {freq} Hz, {secs:.1f}s) -> {dest}")
+    return jsonify({"path": f"{SOUNDS_SUBDIR}/{slug}", "seconds": round(secs, 1)})
 
 
 # ---------------------------------------------------------------------------

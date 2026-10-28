@@ -9,6 +9,8 @@ Manager UI and README.md for the full explanation. These tests cover
 the create/update routes' validation and _play_id_sound()'s command
 construction; they don't touch real AMI.
 """
+import shutil
+
 import pytest
 
 import app
@@ -19,10 +21,11 @@ def _sounds_root(tmp_path, monkeypatch):
     """Point ASTERISK_SOUNDS_ROOT at a temp dir holding the one sound file
     these tests reference, since create/update now refuse a path Asterisk
     couldn't find."""
-    (tmp_path / "henwen").mkdir()
-    (tmp_path / "henwen" / "my-id.ulaw").write_bytes(b"\xff" * 160)
-    monkeypatch.setattr(app, "ASTERISK_SOUNDS_ROOT", str(tmp_path))
-    return tmp_path
+    root = tmp_path / "sounds-root"
+    (root / "henwen").mkdir(parents=True)
+    (root / "henwen" / "my-id.ulaw").write_bytes(b"\xff" * 160)
+    monkeypatch.setattr(app, "ASTERISK_SOUNDS_ROOT", str(root))
+    return root
 
 
 def _login(client, username, password=None):
@@ -170,3 +173,88 @@ class TestSoundPathMustExist:
         # a directory with the right name is not a sound file
         (_sounds_root / "en" / "dir.ulaw").mkdir()
         assert not app._asterisk_sound_exists("en/dir")
+
+
+class TestSoundPicker:
+    def test_custom_sounds_listed_first_and_deduped(self, client, create_user, _sounds_root, tmp_path, monkeypatch):
+        (_sounds_root / "en" / "digits").mkdir(parents=True)
+        stock = _sounds_root / "en" / "digits" / "1.ulaw"
+        stock.write_bytes(b"x")
+        (_sounds_root / "en" / "WSCK466_ID.ulaw").write_bytes(b"x")
+        (_sounds_root / "en" / "WSCK466_ID.gsm").write_bytes(b"x")   # same sound, 2nd format
+        (_sounds_root / "en" / "bad name.ulaw").write_bytes(b"x")    # unsaveable path, hidden
+        dpkg = tmp_path / "dpkg"
+        dpkg.mkdir()
+        (dpkg / "asl3-asterisk.list").write_text(f"{_sounds_root}\n{stock}\n")
+        monkeypatch.setattr(app, "DPKG_INFO_DIR", str(dpkg))
+        app._packaged_sound_files.cache_clear()
+        try:
+            create_user("owner1", role="owner")
+            _login(client, "owner1")
+            sounds = client.get("/api/id/sounds").get_json()["sounds"]
+        finally:
+            app._packaged_sound_files.cache_clear()
+        assert sounds == [
+            {"path": "en/WSCK466_ID", "custom": True},
+            {"path": "henwen/my-id", "custom": True},
+            {"path": "en/digits/1", "custom": False},
+        ]
+
+    def test_morse_defaults_come_from_rpt_conf(self, tmp_path, monkeypatch):
+        conf = tmp_path / "rpt.conf"
+        conf.write_text("[morse-main](!)\nspeed = 15 ; WPM\nidfrequency = 750\nidamplitude = 512\n\n"
+                        "[morse](morse-main)\nspeed = 18\n")
+        monkeypatch.setattr(app, "RPT_CONF_PATH", str(conf))
+        assert app._morse_defaults() == {"wpm": 18, "freq": 750, "amplitude": 512}
+
+    def test_morse_defaults_fall_back_without_rpt_conf(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(app, "RPT_CONF_PATH", str(tmp_path / "missing.conf"))
+        assert app._morse_defaults() == {"wpm": 20, "freq": 1065, "amplitude": 4096}
+
+
+class TestMorseGeneration:
+    def test_paris_timing(self):
+        # "E" is one dit: 100ms lead + 1 unit + 100ms tail. At 20 WPM one
+        # unit is 60ms -> 480 samples at 8kHz.
+        pcm = app._morse_pcm("E", 20, 800, 4096)
+        assert len(pcm) // 2 == 800 + 480 + 800
+        # "EE" adds a 3-unit letter gap and another dit; "E E" a 7-unit word gap.
+        assert len(app._morse_pcm("EE", 20, 800, 4096)) // 2 == 800 + 480 * 5 + 800
+        assert len(app._morse_pcm("E E", 20, 800, 4096)) // 2 == 800 + 480 * 9 + 800
+
+    def test_amplitude_and_click_free_edges(self):
+        pcm = app._morse_pcm("T", 20, 800, 4096)
+        samples = [int.from_bytes(pcm[i:i + 2], "little", signed=True) for i in range(0, len(pcm), 2)]
+        assert max(abs(s) for s in samples) <= 4096
+        # 800Hz at 8kHz never samples the exact crest; sin(2pi/5) of it.
+        assert max(abs(s) for s in samples) > 3800
+        first_tone = 800   # right after the 100ms lead-in
+        assert abs(samples[first_tone + 1]) < 50   # ramped in, not a hard step
+
+    def test_route_generates_file_and_reuses_name(self, client, create_user, tmp_path, monkeypatch):
+        sounds = tmp_path / "henwen-sounds"
+        monkeypatch.setattr(app, "SOUNDS_DIR", str(sounds))
+        monkeypatch.setattr(app, "_convert_to_ulaw", lambda src, dest: shutil.copyfile(src, dest))
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        body = {"text": " wsck466 ", "wpm": 20, "freq": 1065}
+        d1 = client.post("/api/id/morse", json=body).get_json()
+        d2 = client.post("/api/id/morse", json=body).get_json()
+        assert d1["path"] == d2["path"] == "henwen/morse-wsck466-20wpm-1065hz"
+        assert d1["seconds"] > 1
+        assert [p.name for p in sounds.iterdir()] == ["morse-wsck466-20wpm-1065hz.ulaw"]
+
+    def test_route_rejects_bad_input(self, client, create_user):
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        for body in ({"text": ""}, {"text": "W8ABC!"}, {"text": "X" * 41},
+                     {"text": "W8ABC", "wpm": 100}, {"text": "W8ABC", "freq": 50},
+                     {"text": "W8ABC", "wpm": "fast"}):
+            assert client.post("/api/id/morse", json=body).status_code == 400, body
+
+    def test_routes_need_superuser(self, client, create_user):
+        create_user("owner1", role="owner")   # leaves first-run setup mode
+        create_user("admin1", role="admin")
+        _login(client, "admin1")
+        assert client.get("/api/id/sounds").status_code == 403
+        assert client.post("/api/id/morse", json={"text": "W8ABC"}).status_code == 403
