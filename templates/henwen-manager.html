@@ -2586,7 +2586,7 @@ sudo bash /opt/HenWen/tx-spike/setup-https.sh --http-only              # frontin
             <select id="nid-node" class="val-input" style="width:100%"></select>
           </div>
           <div style="grid-column:1/-1">
-            <label class="toggle-label" style="display:block;margin-bottom:3px">Sound File Path <span class="muted">(Asterisk path, no extension — e.g. <code>henwen/my-id</code> or <code>en/morse/n8gmz</code>)</span></label>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Sound File Path <span class="muted">(Asterisk path under /usr/share/asterisk/sounds, no extension — e.g. <code>henwen/my-id</code>. For a Morse/CW ID, use rpt.conf's <code>idrecording = |iCALLSIGN</code> instead.)</span></label>
             <div style="display:flex;gap:8px;align-items:center">
               <input type="text" id="nid-path" class="val-input" placeholder="henwen/my-id" style="flex:1">
               <span class="muted" style="font-size:0.82rem;white-space:nowrap">or upload:</span>

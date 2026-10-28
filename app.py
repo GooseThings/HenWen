@@ -146,6 +146,10 @@ SERVICE_NAME    = os.environ.get("SERVICE_NAME",     "HenWen")
 # file, so the two can never silently drift out of sync with each other.
 SOUNDS_SUBDIR   = "henwen"
 SOUNDS_DIR      = os.environ.get("SOUNDS_DIR",       f"/usr/share/asterisk/sounds/{SOUNDS_SUBDIR}")
+# Asterisk's own sounds root, which a relative path like "en/WSCK466_ID" in
+# `rpt playback` resolves against. Only used to check that a typed Node ID
+# path actually exists before saving it -- see _asterisk_sound_exists().
+ASTERISK_SOUNDS_ROOT = os.environ.get("ASTERISK_SOUNDS_ROOT", "/usr/share/asterisk/sounds")
 # Piper voice models (.onnx/.onnx.json) — NOT under SOUNDS_DIR: these are
 # Piper's own assets, not Asterisk sound files, and don't need asterisk's
 # sound-format/ownership conventions. Also NOT under /opt/HenWen: that
@@ -17122,7 +17126,7 @@ def api_nws_alerts_test():
     if not cfg or not cfg["node"]:
         return jsonify({"error": "Configure and save a node before testing"}), 400
     test_alert = {
-        "vtec_key": "TEST.WX.W.0000",
+        "vtec_key": _NWS_TEST_VTEC_KEY,
         "event":    "Test Severe Weather Alert",
         "headline": "This is a test of the severe weather alert system.",
         "areaDesc": cfg.get("zone_area_name") or "your area",
@@ -17138,6 +17142,13 @@ def api_nws_alerts_test():
 
 
 _NWS_POLL_INTERVAL   = 120.0   # base interval between fetches, single zone — well within NWS's rate expectations
+_NWS_TEST_VTEC_KEY   = "TEST.WX.W.0000"
+# How long a played test alert survives before the poller prunes it.
+# `rpt playback`/`localplay` only queue the file; app_rpt opens it a moment
+# later, so deleting it in the same breath as the scheduler fires (the
+# poller and scheduler run independently) left Asterisk with "does not
+# exist in any format" and nothing went out over RF.
+_NWS_TEST_PRUNE_AFTER_PLAY_SEC = 60
 _NWS_MAX_SLEEP       = 1200.0  # cap backoff at 20 minutes between cycles
 _NWS_EXPIRE_GRACE_SEC = 30 * 60  # local safety ceiling: prune a tracked alert this long past its own expiry
                                  # even if NWS can't be reached to confirm — see _nws_alert_poll_loop().
@@ -17192,6 +17203,26 @@ def _nws_prune_expired_locally(db, now):
                         f"({age_sec/60:.0f} min past expiry)")
 
 
+def _nws_should_prune_inactive(row, current_keys, now) -> bool:
+    """Whether a tracked nws_alert row should be pruned because NWS no
+    longer lists it as active. The manual test alert is never in NWS's
+    active set, so pruning it on that basis deleted it on the very next
+    poll -- often before the scheduler had played it, or moments after,
+    while app_rpt was still about to open the file. Instead it stays until
+    it has played and _NWS_TEST_PRUNE_AFTER_PLAY_SEC has passed."""
+    if row["external_id"] in current_keys:
+        return False
+    if row["external_id"] != _NWS_TEST_VTEC_KEY:
+        return True
+    if not row["last_played"]:
+        return False
+    try:
+        played = datetime.strptime(row["last_played"], "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return True
+    return (now - played).total_seconds() >= _NWS_TEST_PRUNE_AFTER_PLAY_SEC
+
+
 def _nws_alert_poll_loop():
     global _nws_backoff_level
     log("INFO", f"[NWS-POLL] Background poller started (interval={_NWS_POLL_INTERVAL}s)")
@@ -17237,10 +17268,10 @@ def _nws_alert_poll_loop():
 
                 current_keys = {a["vtec_key"] for a in alerts}
                 tracked = db.execute(
-                    "SELECT id, slug, name, external_id FROM announcements WHERE source_type='nws_alert'"
+                    "SELECT id, slug, name, external_id, last_played FROM announcements WHERE source_type='nws_alert'"
                 ).fetchall()
                 for row in tracked:
-                    if row["external_id"] not in current_keys:
+                    if _nws_should_prune_inactive(row, current_keys, now):
                         sound = _ann_sound_path(row["slug"])
                         try:
                             if os.path.exists(sound):
@@ -18009,6 +18040,19 @@ _id_runtime      = {}             # {config_id: {"state", "last_id_ts", "idle_st
 _id_runtime_lock = threading.Lock()
 
 
+def _asterisk_sound_exists(sound_path: str) -> bool:
+    """Whether Asterisk would find `sound_path` (no extension, as typed in
+    a Node ID) in any format. Relative paths resolve under
+    ASTERISK_SOUNDS_ROOT, absolute ones as-is -- same as Asterisk itself.
+    The route regex already rules out '.', so no traversal is possible.
+    Without this check a typo, or following the old form hint's
+    "en/morse/<call>" example (no such directory ships with ASL3), saved
+    fine and then failed silently on air: Asterisk just logs "does not
+    exist in any format" and the radio never keys."""
+    base = sound_path if sound_path.startswith("/") else os.path.join(ASTERISK_SOUNDS_ROOT, sound_path)
+    return any(os.path.isfile(f) for f in glob.glob(glob.escape(base) + ".*"))
+
+
 def _play_id_sound(row):
     node = row["node"]
     path = row["sound_path"].strip()
@@ -18149,6 +18193,9 @@ def api_id_create():
         return jsonify({"error": "Sound path is required"}), 400
     if not re.match(r'^[a-zA-Z0-9/_\-]{1,256}$', sound_path):
         return jsonify({"error": "sound_path contains invalid characters"}), 400
+    if not _asterisk_sound_exists(sound_path):
+        return jsonify({"error": f"No sound file found for '{sound_path}' under "
+                                 f"{ASTERISK_SOUNDS_ROOT} -- upload one, or check the path"}), 400
 
     db = get_db()
     db.execute(
@@ -18188,6 +18235,11 @@ def api_id_update(iid):
         return jsonify({"error": "Sound path is required"}), 400
     if not re.match(r'^[a-zA-Z0-9/_\-]{1,256}$', sound_path):
         return jsonify({"error": "sound_path contains invalid characters"}), 400
+    # Only when the path changes, so an ID whose file was removed later
+    # can still be renamed/disabled instead of being stuck uneditable.
+    if sound_path != row["sound_path"] and not _asterisk_sound_exists(sound_path):
+        return jsonify({"error": f"No sound file found for '{sound_path}' under "
+                                 f"{ASTERISK_SOUNDS_ROOT} -- upload one, or check the path"}), 400
 
     db.execute(
         "UPDATE id_configs SET name=?, node=?, sound_path=?, interval_sec=?, "

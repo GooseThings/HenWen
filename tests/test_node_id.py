@@ -9,7 +9,20 @@ Manager UI and README.md for the full explanation. These tests cover
 the create/update routes' validation and _play_id_sound()'s command
 construction; they don't touch real AMI.
 """
+import pytest
+
 import app
+
+
+@pytest.fixture(autouse=True)
+def _sounds_root(tmp_path, monkeypatch):
+    """Point ASTERISK_SOUNDS_ROOT at a temp dir holding the one sound file
+    these tests reference, since create/update now refuse a path Asterisk
+    couldn't find."""
+    (tmp_path / "henwen").mkdir()
+    (tmp_path / "henwen" / "my-id.ulaw").write_bytes(b"\xff" * 160)
+    monkeypatch.setattr(app, "ASTERISK_SOUNDS_ROOT", str(tmp_path))
+    return tmp_path
 
 
 def _login(client, username, password=None):
@@ -115,3 +128,45 @@ class TestPlayIdSoundCommand:
         app._play_id_sound({"node": "546054", "sound_path": "henwen/my-id",
                              "name": "Repeater ID", "play_cmd": "playback"})
         assert sent["cmd"] == "rpt playback 546054 henwen/my-id"
+
+
+class TestSoundPathMustExist:
+    def test_create_rejects_missing_file(self, client, create_user):
+        # en/morse/<call> was the form's own example, but ASL3 ships no
+        # such directory -- this used to save fine and then never key up.
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        resp = client.post("/api/id", json={
+            "name": "Morse ID", "node": "546054", "sound_path": "en/morse/WSCK466",
+        })
+        assert resp.status_code == 400
+        assert "No sound file found" in resp.get_json()["error"]
+
+    def test_update_rejects_changing_to_missing_file(self, client, create_user):
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        iid = client.post("/api/id", json={
+            "name": "Main ID", "node": "546054", "sound_path": "henwen/my-id",
+        }).get_json()["id"]
+        resp = client.patch(f"/api/id/{iid}", json={"sound_path": "henwen/nope"})
+        assert resp.status_code == 400
+
+    def test_update_of_other_fields_allowed_after_file_removed(self, client, create_user, _sounds_root):
+        create_user("owner1", role="owner")
+        _login(client, "owner1")
+        iid = client.post("/api/id", json={
+            "name": "Main ID", "node": "546054", "sound_path": "henwen/my-id",
+        }).get_json()["id"]
+        (_sounds_root / "henwen" / "my-id.ulaw").unlink()
+        resp = client.patch(f"/api/id/{iid}", json={"name": "Renamed"})
+        assert resp.status_code == 200
+
+    def test_exists_helper_any_format_and_absolute(self, _sounds_root):
+        (_sounds_root / "en").mkdir()
+        (_sounds_root / "en" / "WSCK466_ID.gsm").write_bytes(b"x")
+        assert app._asterisk_sound_exists("en/WSCK466_ID")
+        assert app._asterisk_sound_exists(str(_sounds_root / "en" / "WSCK466_ID"))
+        assert not app._asterisk_sound_exists("en/WSCK466")
+        # a directory with the right name is not a sound file
+        (_sounds_root / "en" / "dir.ulaw").mkdir()
+        assert not app._asterisk_sound_exists("en/dir")

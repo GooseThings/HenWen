@@ -124,3 +124,30 @@ class TestNwsAlertSpokenText:
         alert = {"event": "Flood Advisory", "areaDesc": "Kenosha, WI", "expires": "not-a-date"}
         text = app._nws_alert_spoken_text(alert)
         assert "until" not in text
+
+
+class TestShouldPruneInactive:
+    """The manual test alert is never in NWS's active set; pruning it on
+    that basis deleted its sound file before (or just as) app_rpt opened
+    it, so the test never went out over RF."""
+    NOW = datetime(2026, 10, 28, 17, 35, 0)
+
+    def _row(self, ext, last_played=None):
+        return {"external_id": ext, "last_played": last_played}
+
+    def test_real_alert_still_active_kept(self):
+        assert not app._nws_should_prune_inactive(self._row("KMKX.TO.W.0075"), {"KMKX.TO.W.0075"}, self.NOW)
+
+    def test_real_alert_gone_pruned(self):
+        assert app._nws_should_prune_inactive(self._row("KMKX.TO.W.0075"), set(), self.NOW)
+
+    def test_test_alert_kept_until_played(self):
+        assert not app._nws_should_prune_inactive(self._row(app._NWS_TEST_VTEC_KEY), set(), self.NOW)
+
+    def test_test_alert_kept_just_after_play(self):
+        row = self._row(app._NWS_TEST_VTEC_KEY, "2026-10-28 17:34:59")
+        assert not app._nws_should_prune_inactive(row, set(), self.NOW)
+
+    def test_test_alert_pruned_after_grace(self):
+        row = self._row(app._NWS_TEST_VTEC_KEY, "2026-10-28 17:33:00")
+        assert app._nws_should_prune_inactive(row, set(), self.NOW)
