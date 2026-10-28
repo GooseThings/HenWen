@@ -34,6 +34,51 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+# ── Pre-rename ASL3-EZ install ────────────────────────────
+# HenWen was called ASL3-EZ until 2026-07 (see CLAUDE.md "Service
+# identity"). A box that ran that version still has ASL3-EZ.service
+# enabled, bound to the same port 5000 -- so HenWen crash-loops on
+# "Address already in use" while the browser silently shows the old app's
+# manager, which has no login and fewer pages. Stop and disable it, but
+# leave its files alone: /opt/ASL3-EZ and its database may hold something
+# the operator wants, and that's their call to delete, not ours.
+if [ -f /etc/systemd/system/ASL3-EZ.service ] || systemctl is-active --quiet ASL3-EZ 2>/dev/null; then
+    echo "Found an old ASL3-EZ install (HenWen's previous name) -- stopping and disabling it."
+    systemctl disable --now ASL3-EZ 2>/dev/null || true
+    echo "  Its files were left in place. Once HenWen is working you can remove:"
+    echo "    /opt/ASL3-EZ  and  /etc/systemd/system/ASL3-EZ.service"
+    echo ""
+fi
+
+# ── Port conflict check ───────────────────────────────────
+# Fail before touching the system if something other than HenWen itself
+# already listens on $PORT: gunicorn would otherwise crash-loop on bind
+# with nothing pointing at the cause except the journal, and whatever does
+# own the port keeps answering the URL this script prints at the end.
+# HenWen's own process is allowed (reinstall over a running service --
+# step [11/11] restarts it). Skipped without ss (iproute2), which every
+# supported Debian ships.
+if command -v ss &>/dev/null; then
+    PORT_CONFLICT=""
+    for _pid in $(ss -Hltnp "sport = :$PORT" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u); do
+        _unit=$(sed -n 's|^0::.*/\([^/]*\.service\)$|\1|p' "/proc/$_pid/cgroup" 2>/dev/null)
+        [ "$_unit" = "${SERVICE_NAME}.service" ] && continue
+        _cmd=$(tr '\0' ' ' < "/proc/$_pid/cmdline" 2>/dev/null | cut -c1-100)
+        PORT_CONFLICT+="    pid $_pid  ${_unit:-(no systemd unit)}  $_cmd"$'\n'
+    done
+    if [ -n "$PORT_CONFLICT" ]; then
+        echo "ERROR: port $PORT is already in use by another program:"
+        echo ""
+        printf '%s' "$PORT_CONFLICT"
+        echo ""
+        echo "  HenWen needs this port. Stop that program, then re-run this installer."
+        echo "  If it's a systemd service:  systemctl disable --now <unit>"
+        echo ""
+        echo "  Nothing has been changed yet."
+        exit 1
+    fi
+fi
+
 # ── Required system packages ──────────────────────────────
 # python3 itself, plus the venv module (python3-venv/python3-full) needed
 # to create the app's virtualenv -- Debian/Ubuntu ship python3 without
