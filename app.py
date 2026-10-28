@@ -837,6 +837,11 @@ def get_db():
     _id_cols = {r[1] for r in conn.execute("PRAGMA table_info(id_configs)").fetchall()}
     if 'play_cmd' not in _id_cols:
         conn.execute("ALTER TABLE id_configs ADD COLUMN play_cmd TEXT NOT NULL DEFAULT 'localplay'")
+    # Optional periodic ID while in use. Off doesn't mean "never": the
+    # monitor still forces one every ID_REQUIRED_SEC of continuous use.
+    # Existing rows keep the interval ID they already had.
+    if 'interval_enabled' not in _id_cols:
+        conn.execute("ALTER TABLE id_configs ADD COLUMN interval_enabled INTEGER NOT NULL DEFAULT 1")
     conn.execute("""CREATE TABLE IF NOT EXISTS connection_history (
         id                INTEGER PRIMARY KEY AUTOINCREMENT,
         local_node        TEXT    NOT NULL,
@@ -18059,8 +18064,87 @@ def api_conn_diagnose():
 # Node ID Monitor — FCC-compliant repeater identification
 # ---------------------------------------------------------------------------
 
-_id_runtime      = {}             # {config_id: {"state", "last_id_ts", "idle_start_ts"}}
+_id_runtime      = {}             # {config_id: {"state", "last_id_ts", "idle_start_ts", "guard_*"}}
 _id_runtime_lock = threading.Lock()
+
+# The ID's own playback reads as node activity: on a node whose receiver
+# hears its own transmitter, or whose playback keys a link, the very next
+# monitor tick sees "keyed", fires an initial ID, and 120s after that a
+# final ID -- which then retriggers itself forever (confirmed live: two IDs
+# 2s apart every ~2m20s). So after every ID, activity is ignored until the
+# node is seen unkeyed again (not before ID_GUARD_MIN_SEC, so a key that
+# hasn't reached the 1s AMI cache yet can't clear it early), or until the
+# sound's own length plus ID_GUARD_GRACE_SEC has passed, whichever is first
+# -- the ceiling stops someone keying straight off the tail from being
+# ignored indefinitely.
+ID_GUARD_MIN_SEC      = 4.0
+ID_GUARD_GRACE_SEC    = 15.0
+ID_GUARD_FALLBACK_SEC = 60.0      # sound length when it can't be measured
+
+# Longest a node may go in use without an ID. It bounds the interval ID
+# (forced even when the optional interval ID is off), and an initial ID is
+# skipped when the node already ID'd within this window -- the final ID
+# after the exchange still plays.
+ID_REQUIRED_SEC = 600         # 47 CFR 97.119(a): at least every 10 minutes
+
+
+def _id_interval_sec(row) -> int:
+    """Seconds between IDs while the node stays in use."""
+    if row["interval_enabled"]:
+        return max(1, min(int(row["interval_sec"]), ID_REQUIRED_SEC))
+    return ID_REQUIRED_SEC
+
+
+def _id_clock_start(rt: dict) -> float:
+    """When the in-use ID clock started: the last ID if it was recent
+    enough to stand in for an initial ID at key-up, otherwise key-up."""
+    last, since = rt["last_id_ts"], rt.get("active_since", 0.0)
+    if last > 0 and (not since or last >= since - ID_REQUIRED_SEC):
+        return last
+    return since
+
+
+def _id_new_runtime(row) -> dict:
+    """Fresh runtime state, seeded with the last ID recorded in the DB so a
+    HenWen restart doesn't forget a recent ID and play a redundant one."""
+    last = 0.0
+    if row["last_id_time"]:
+        try:
+            last = datetime.strptime(row["last_id_time"], "%Y-%m-%d %H:%M:%S").timestamp()
+        except ValueError:
+            pass
+    return {"state": "idle", "last_id_ts": last, "idle_start_ts": 0.0, "active_since": 0.0}
+
+
+def _id_mark_played(rt: dict, row, now: float):
+    """Record an ID in runtime state `rt`, and start the guard that keeps
+    the ID's own transmission from reading as activity."""
+    dur = _sound_duration_sec(row["sound_path"].strip())
+    rt["last_id_ts"]      = now
+    rt["guard_min_until"] = now + ID_GUARD_MIN_SEC
+    rt["guard_max_until"] = now + max(ID_GUARD_MIN_SEC,
+        (ID_GUARD_FALLBACK_SEC if dur is None else dur) + ID_GUARD_GRACE_SEC)
+
+# Bytes per second of the headerless formats Asterisk plays.
+_SOUND_BYTE_RATES = {"ulaw": 8000, "ul": 8000, "alaw": 8000, "al": 8000,
+                     "sln": 16000, "raw": 16000, "gsm": 1650, "g722": 8000}
+
+
+def _sound_duration_sec(sound_path: str):
+    """Length in seconds of `sound_path` (resolved like
+    _asterisk_sound_exists()), or None if no measurable format is there."""
+    base = sound_path if sound_path.startswith("/") else os.path.join(ASTERISK_SOUNDS_ROOT, sound_path)
+    for f in sorted(glob.glob(glob.escape(base) + ".*")):
+        ext = f.rsplit(".", 1)[-1].lower()
+        try:
+            if ext in _SOUND_BYTE_RATES:
+                return os.path.getsize(f) / _SOUND_BYTE_RATES[ext]
+            if ext == "wav":
+                with wave.open(f, "rb") as w:
+                    return w.getnframes() / float(w.getframerate())
+        except (OSError, wave.Error, ZeroDivisionError):
+            continue
+    return None
 
 
 def _asterisk_sound_exists(sound_path: str) -> bool:
@@ -18231,30 +18315,38 @@ def _run_id_monitors():
         cid = row["id"]
         with _id_runtime_lock:
             if cid not in _id_runtime:
-                _id_runtime[cid] = {"state": "idle", "last_id_ts": 0.0, "idle_start_ts": 0.0}
+                _id_runtime[cid] = _id_new_runtime(row)
             rt = dict(_id_runtime[cid])
 
         active  = _node_active(row["node"])
         new_rt  = dict(rt)
         played  = False
 
+        guard_max = rt.get("guard_max_until", 0.0)
+        if now < guard_max:
+            if now < rt.get("guard_min_until", 0.0) or active:
+                continue            # still our own ID on the air
+            new_rt["guard_max_until"] = 0.0
+
         if active:
             new_rt["idle_start_ts"] = 0.0
             if rt["state"] == "idle":
-                new_rt["state"] = "active"
-                if row["initial_id"]:
+                new_rt["state"]        = "active"
+                new_rt["active_since"] = now
+                recent = rt["last_id_ts"] > 0 and (now - rt["last_id_ts"]) < ID_REQUIRED_SEC
+                if row["initial_id"] and not recent:
                     try:
                         _play_id_sound(row)
-                        new_rt["last_id_ts"] = now
                         played = True
                     except Exception as e:
                         log("ERROR", f"[ID] Initial ID failed for '{row['name']}': {e}")
             else:
                 new_rt["state"] = "active"
-                if rt["last_id_ts"] > 0 and (now - rt["last_id_ts"]) >= row["interval_sec"]:
+                if not rt.get("active_since"):
+                    new_rt["active_since"] = now
+                if (now - (_id_clock_start(new_rt) or now)) >= _id_interval_sec(row):
                     try:
                         _play_id_sound(row)
-                        new_rt["last_id_ts"] = now
                         played = True
                     except Exception as e:
                         log("ERROR", f"[ID] Interval ID failed for '{row['name']}': {e}")
@@ -18266,12 +18358,15 @@ def _run_id_monitors():
                 if (now - rt["idle_start_ts"]) >= row["idle_delay_sec"]:
                     try:
                         _play_id_sound(row)
-                        new_rt["last_id_ts"]    = now
                         new_rt["state"]         = "idle"
                         new_rt["idle_start_ts"] = 0.0
+                        new_rt["active_since"]  = 0.0
                         played = True
                     except Exception as e:
                         log("ERROR", f"[ID] Final ID failed for '{row['name']}': {e}")
+
+        if played:
+            _id_mark_played(new_rt, row, now)
 
         with _id_runtime_lock:
             _id_runtime[cid] = new_rt
@@ -18311,12 +18406,14 @@ def api_id_list():
     for row in rows:
         d = dict(row)
         with _id_runtime_lock:
-            rt = dict(_id_runtime.get(row["id"], {"state": "idle", "last_id_ts": 0.0, "idle_start_ts": 0.0}))
+            rt = dict(_id_runtime.get(row["id"]) or _id_new_runtime(row))
         d["runtime_state"]  = rt["state"]
         d["last_id_ts"]     = rt["last_id_ts"]
         d["idle_start_ts"]  = rt["idle_start_ts"]
-        if rt["state"] == "active" and rt["last_id_ts"] > 0:
-            d["next_id_sec"] = max(0, row["interval_sec"] - int(now - rt["last_id_ts"]))
+        d["required_sec"]   = ID_REQUIRED_SEC
+        since = _id_clock_start(rt)
+        if rt["state"] == "active" and since > 0:
+            d["next_id_sec"] = max(0, _id_interval_sec(row) - int(now - since))
         else:
             d["next_id_sec"] = None
         if rt["state"] == "pending_idle" and rt["idle_start_ts"] > 0:
@@ -18338,6 +18435,7 @@ def api_id_create():
     interval_sec   = int(data.get("interval_sec",   600))
     idle_delay_sec = int(data.get("idle_delay_sec", 120))
     initial_id     = 1 if data.get("initial_id", True) else 0
+    interval_on    = 1 if data.get("interval_enabled", False) else 0
     play_cmd       = str(data.get("play_cmd",       "localplay")).strip()
     if play_cmd not in ("localplay", "playback"):
         play_cmd = "localplay"
@@ -18356,9 +18454,9 @@ def api_id_create():
 
     db = get_db()
     db.execute(
-        "INSERT INTO id_configs (name, node, sound_path, interval_sec, idle_delay_sec, initial_id, play_cmd) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (name, node, sound_path, interval_sec, idle_delay_sec, initial_id, play_cmd)
+        "INSERT INTO id_configs (name, node, sound_path, interval_sec, idle_delay_sec, initial_id, "
+        "interval_enabled, play_cmd) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (name, node, sound_path, interval_sec, idle_delay_sec, initial_id, interval_on, play_cmd)
     )
     db.commit()
     row = db.execute("SELECT * FROM id_configs WHERE rowid=last_insert_rowid()").fetchone()
@@ -18382,6 +18480,7 @@ def api_id_update(iid):
     interval_sec   = int(data.get("interval_sec",   row["interval_sec"]))
     idle_delay_sec = int(data.get("idle_delay_sec", row["idle_delay_sec"]))
     initial_id     = 1 if data.get("initial_id", bool(row["initial_id"])) else 0
+    interval_on    = 1 if data.get("interval_enabled", bool(row["interval_enabled"])) else 0
     play_cmd       = str(data.get("play_cmd",       row["play_cmd"])).strip()
     if play_cmd not in ("localplay", "playback"):
         play_cmd = "localplay"
@@ -18400,8 +18499,8 @@ def api_id_update(iid):
 
     db.execute(
         "UPDATE id_configs SET name=?, node=?, sound_path=?, interval_sec=?, "
-        "idle_delay_sec=?, initial_id=?, play_cmd=? WHERE id=?",
-        (name, node, sound_path, interval_sec, idle_delay_sec, initial_id, play_cmd, iid)
+        "idle_delay_sec=?, initial_id=?, interval_enabled=?, play_cmd=? WHERE id=?",
+        (name, node, sound_path, interval_sec, idle_delay_sec, initial_id, interval_on, play_cmd, iid)
     )
     db.commit()
     updated = db.execute("SELECT * FROM id_configs WHERE id=?", (iid,)).fetchone()
@@ -18452,6 +18551,9 @@ def api_id_play(iid):
         return jsonify({"error": "Not found"}), 404
     try:
         _play_id_sound(row)
+        with _id_runtime_lock:
+            rt = _id_runtime.setdefault(iid, _id_new_runtime(row))
+            _id_mark_played(rt, row, time.time())
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         db.execute("UPDATE id_configs SET last_id_time=? WHERE id=?", (now_str, iid))
         db.commit()

@@ -2619,8 +2619,18 @@ sudo bash /opt/HenWen/tx-spike/setup-https.sh --http-only              # frontin
             </div>
           </div>
           <div style="display:flex;align-items:center;gap:10px">
-            <label class="toggle-label">Play ID on initial key-up</label>
+            <label class="toggle-label" for="nid-interval-on">Interval ID while in use</label>
+            <input type="checkbox" id="nid-interval-on" style="width:18px;height:18px;accent-color:var(--accent)">
+          </div>
+          <div style="display:flex;align-items:center;gap:10px">
+            <label class="toggle-label" for="nid-initial">Play ID on initial key-up</label>
             <input type="checkbox" id="nid-initial" checked style="width:18px;height:18px;accent-color:var(--accent)">
+          </div>
+          <div class="muted" style="font-size:0.82rem">
+            Whatever these are set to, the node always IDs after every
+            10 minutes of continuous use, and once after use ends. The
+            initial ID is skipped when the node already ID'd within the
+            last 10 minutes (FCC 97.119(a)).
           </div>
         </div>
         <div id="nid-create-result" style="margin-top:10px"></div>
@@ -8774,7 +8784,7 @@ function nidStateLabel(c) {
     return '<span style="color:#e3b341">Final ID in ' + secs + 's</span>';
   }
   if (s === 'active') {
-    var next = c.next_id_sec !== null ? ' — next interval ID in ' + c.next_id_sec + 's' : '';
+    var next = c.next_id_sec !== null ? ' — next ID in ' + c.next_id_sec + 's' : '';
     return '<span style="color:var(--green)">Active' + esc(next) + '</span>';
   }
   return '<span class="muted">' + esc(s) + '</span>';
@@ -8809,7 +8819,7 @@ function nidCard(c) {
       '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:4px 18px;margin-bottom:10px">' +
         '<div><span class="muted">Sound path:</span> <code>' + esc(c.sound_path) + '</code></div>' +
         '<div><span class="muted">Playback:</span> ' + (c.play_cmd === 'playback' ? 'All connected links' : 'Local only') + '</div>' +
-        '<div><span class="muted">Interval ID:</span> every ' + esc(String(c.interval_sec)) + 's</div>' +
+        '<div><span class="muted">Interval ID:</span> ' + (c.interval_enabled ? 'every ' + esc(String(Math.min(c.interval_sec, c.required_sec || c.interval_sec))) + 's' : 'Off (forced every ' + esc(String(c.required_sec || 600)) + 's in use)') + '</div>' +
         '<div><span class="muted">Final ID delay:</span> ' + esc(String(c.idle_delay_sec)) + 's after going idle</div>' +
         '<div><span class="muted">Initial ID:</span> ' + (c.initial_id ? 'Yes' : 'No') + '</div>' +
         '<div><span class="muted">Last ID:</span> ' + esc(last) + '</div>' +
@@ -8848,6 +8858,8 @@ function nidEditForm(c) {
       '<input type="number" id="nide-int-' + c.id + '" class="val-input" value="' + c.interval_sec + '" min="60" style="width:100%"></div>' +
     '<div><label class="toggle-label" style="display:block;margin-bottom:3px">Final ID delay (sec)</label>' +
       '<input type="number" id="nide-idle-' + c.id + '" class="val-input" value="' + c.idle_delay_sec + '" min="0" style="width:100%"></div>' +
+    '<div style="display:flex;align-items:center;gap:8px"><label class="toggle-label" for="nide-inton-' + c.id + '">Interval ID while in use</label>' +
+      '<input type="checkbox" id="nide-inton-' + c.id + '"' + (c.interval_enabled ? ' checked' : '') + ' style="width:18px;height:18px;accent-color:var(--accent)"></div>' +
     '<div style="display:flex;align-items:center;gap:8px"><label class="toggle-label">Initial ID on key-up</label>' +
       '<input type="checkbox" id="nide-init-' + c.id + '"' + (c.initial_id ? ' checked' : '') + ' style="width:18px;height:18px;accent-color:var(--accent)"></div>' +
   '</div>' +
@@ -8889,6 +8901,7 @@ async function nidSaveEdit(id) {
     interval_sec:   parseInt(document.getElementById('nide-int-'  + id).value, 10),
     idle_delay_sec: parseInt(document.getElementById('nide-idle-' + id).value, 10),
     initial_id:     document.getElementById('nide-init-' + id).checked,
+    interval_enabled: document.getElementById('nide-inton-' + id).checked,
     play_cmd:       document.getElementById('nide-cmd-' + id).value,
   };
   var r = await apiFetch('/api/id/' + id, {
@@ -8908,6 +8921,7 @@ async function createIdConfig() {
     interval_sec:   parseInt(document.getElementById('nid-interval').value, 10),
     idle_delay_sec: parseInt(document.getElementById('nid-idle').value, 10),
     initial_id:     document.getElementById('nid-initial').checked,
+    interval_enabled: document.getElementById('nid-interval-on').checked,
     play_cmd:       document.getElementById('nid-play-cmd').value,
   };
   if (!body.name)       { res.innerHTML = '<span style="color:var(--danger)">Name is required.</span>'; return; }
