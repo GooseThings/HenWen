@@ -9138,7 +9138,9 @@ def api_tx_diagnostics():
     add("This page loaded over HTTPS", is_https,
         "Secure context confirmed" if is_https else
         "You're viewing the Manager over plain HTTP — the TX button needs "
-        "https:// (or localhost) to get microphone access at all",
+        "https:// (or localhost) to get microphone access at all. For use on "
+        "your own network only (no public hostname or port forwards): "
+        "sudo bash /opt/HenWen/tx-spike/setup-https.sh --lan",
         warn=not is_https)
 
     try:

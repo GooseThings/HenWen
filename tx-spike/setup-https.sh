@@ -21,6 +21,7 @@
 # README's Browser TX section and ws-audio/README.md respectively).
 #
 # Usage: sudo bash setup-https.sh [--port N] [--dns-manual] [hostname] [email]
+#        sudo bash setup-https.sh --lan [--port N]
 #        sudo bash setup-https.sh --http-only
 #
 #   --port N       Serve HTTPS on port N instead of 443. Useful when your
@@ -50,6 +51,20 @@
 #                   for installs that don't want/need full HTTPS. Re-running
 #                   this script later without --http-only, with a real
 #                   hostname/email, upgrades this same vhost to HTTPS.
+#   --lan          HTTPS for use on your own network only: no hostname,
+#                   no email, no Let's Encrypt, no router forwards. A
+#                   self-signed certificate covering this box's LAN IP(s)
+#                   and hostname is generated instead, and served from a
+#                   separate henwen-ssl.conf vhost -- the existing
+#                   plain-HTTP vhost (and the proxy lines apply.sh added to
+#                   it) is left untouched. Browsers show a certificate
+#                   warning on first visit; accept it once per device and
+#                   the page is a secure context, which is all the TX
+#                   button (and low-latency RX) need. Defaults to port 443,
+#                   or 8443 if another enabled vhost (e.g. the stock
+#                   default-ssl.conf ASL3 ships) already owns 443. Re-run
+#                   it after this box's LAN IP changes; the certificate is
+#                   regenerated whenever it no longer covers a current IP.
 #
 # Requires (full flow only, not --http-only): a DNS name that already
 # resolves to this box's public IP. Without --dns-manual, also requires
@@ -91,21 +106,47 @@ FLASK_PORT="${PORT:-5000}"   # HenWen's own port — distinct from --port (the H
 HTTPS_PORT=443
 DNS_MANUAL=0
 HTTP_ONLY=0
+LAN=0
+PORT_EXPLICIT=0
 ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
-        --port)       HTTPS_PORT="${2:-}"; shift 2 ;;
-        --port=*)     HTTPS_PORT="${1#*=}"; shift ;;
+        --port)       HTTPS_PORT="${2:-}"; PORT_EXPLICIT=1; shift 2 ;;
+        --port=*)     HTTPS_PORT="${1#*=}"; PORT_EXPLICIT=1; shift ;;
         --dns-manual) DNS_MANUAL=1; shift ;;
         --http-only)  HTTP_ONLY=1; shift ;;
+        --lan)        LAN=1; shift ;;
         -h|--help)
             echo "Usage: sudo bash $0 [--port N] [--dns-manual] [hostname] [email]"
+            echo "       sudo bash $0 --lan [--port N]"
             echo "       sudo bash $0 --http-only"
             exit 0 ;;
         *) ARGS+=("$1"); shift ;;
     esac
 done
 set -- "${ARGS[@]+"${ARGS[@]}"}"
+
+if [ "$LAN" = "1" ] && { [ "$HTTP_ONLY" = "1" ] || [ "$DNS_MANUAL" = "1" ] || [ $# -gt 0 ]; }; then
+    echo "--lan takes only --port (no hostname/email, --dns-manual or --http-only)."
+    exit 1
+fi
+
+# --lan with no explicit --port: don't land on a port some other enabled
+# vhost already serves. Two ServerName-less vhosts on one port means the
+# alphabetically-first one wins every request -- on a stock ASL3 box that's
+# default-ssl.conf on 443, which would leave HenWen's vhost unreachable.
+if [ "$LAN" = "1" ] && [ "$PORT_EXPLICIT" = "0" ]; then
+    for _conf in /etc/apache2/sites-enabled/*.conf; do
+        [ -f "$_conf" ] || continue
+        [ "$(basename "$(readlink -f "$_conf")")" = "henwen-ssl.conf" ] && continue
+        if grep -qiE '^[[:space:]]*<VirtualHost[^>]*:443>' "$_conf"; then
+            echo "Port 443 is already served by $(basename "$_conf") -- using 8443 instead"
+            echo "(pass --port N to choose another)."
+            HTTPS_PORT=8443
+            break
+        fi
+    done
+fi
 
 if [ "$HTTP_ONLY" = "1" ]; then
     if [ "$DNS_MANUAL" = "1" ] || [ "$HTTPS_PORT" != "443" ]; then
@@ -130,6 +171,8 @@ echo ""
 echo "============================================"
 if [ "$HTTP_ONLY" = "1" ]; then
     echo "  HenWen Apache Setup (plain HTTP)"
+elif [ "$LAN" = "1" ]; then
+    echo "  HenWen HTTPS Setup (LAN only, self-signed)"
 else
     echo "  HenWen HTTPS Setup (for Browser TX)"
 fi
@@ -138,7 +181,7 @@ echo ""
 
 HOSTNAME_ARG=""
 EMAIL_ARG=""
-if [ "$HTTP_ONLY" != "1" ]; then
+if [ "$HTTP_ONLY" != "1" ] && [ "$LAN" != "1" ]; then
     HOSTNAME_ARG="${1:-}"
     if [ -z "$HOSTNAME_ARG" ]; then
         read -p "Public hostname for this box (must already resolve here, e.g. mynode.ddns.net): " HOSTNAME_ARG
@@ -172,6 +215,9 @@ fi
 if [ "$HTTP_ONLY" = "1" ]; then
     echo "[HTTP-only] Checking for Apache..."
     HTTPS_PKGS=(apache2)
+elif [ "$LAN" = "1" ]; then
+    echo "[LAN] Checking for Apache and openssl..."
+    HTTPS_PKGS=(apache2 openssl)
 else
     echo "[2/7] Checking for Apache and certbot..."
     HTTPS_PKGS=(apache2 certbot python3-certbot-apache)
@@ -202,7 +248,11 @@ if [ ${#NEED_HTTPS_PKGS[@]} -gt 0 ]; then
         [[ "$REPLY" =~ ^[Nn] ]] && DO_HTTPS_INSTALL=0
     fi
     if [ "$DO_HTTPS_INSTALL" -ne 1 ]; then
-        if [ "$HTTP_ONLY" = "1" ]; then
+        if [ "$LAN" = "1" ]; then
+            echo "      Skipped — HTTPS is not set up. To do it yourself later:"
+            echo "        sudo apt-get update && sudo apt-get install -y ${NEED_HTTPS_PKGS[*]}"
+            echo "        sudo bash $0 --lan"
+        elif [ "$HTTP_ONLY" = "1" ]; then
             echo "      Skipped — the low-latency RX audio path's Apache proxy will not"
             echo "      be set up. Listen keeps working over the legacy path regardless."
             echo "      To do it yourself later:"
@@ -359,6 +409,107 @@ inject_exclusions() {
     # diagnostics pages' own applied-or-not checks.
     chmod 644 "$conf"
 }
+
+# ── LAN-only: self-signed cert + its own SSL vhost, then done ──
+# Deliberately never rewrites the port-80 vhost: that file is regenerated
+# from scratch below, which would silently drop the /asterisk-ws and
+# /ws-audio lines apply.sh added to it, and LAN mode has no reason to
+# touch plain-HTTP access at all.
+if [ "$LAN" = "1" ]; then
+    CERT_DIR=/etc/ssl/henwen
+    CERT="$CERT_DIR/henwen-lan.crt"
+    KEY="$CERT_DIR/henwen-lan.key"
+    SHORT_HOST=$(hostname -s 2>/dev/null || hostname)
+    # IPv4 only: hostname -I can include IPv6 addresses, and anyone typing an
+    # address into a browser on a LAN is typing the v4 one.
+    mapfile -t LAN_IPS < <(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+(\.[0-9]+){3}$')
+    [ "${#LAN_IPS[@]}" -gt 0 ] || { echo "Could not determine this box's LAN IP (hostname -I)."; exit 1; }
+
+    NEED_CERT=1
+    if [ -f "$CERT" ] && [ -f "$KEY" ]; then
+        SAN_NOW=$(openssl x509 -in "$CERT" -noout -ext subjectAltName 2>/dev/null || true)
+        NEED_CERT=0
+        for ip in "${LAN_IPS[@]}"; do
+            grep -qF "IP Address:${ip}" <<< "$SAN_NOW" || NEED_CERT=1
+        done
+        openssl x509 -in "$CERT" -noout -checkend 2592000 >/dev/null 2>&1 || NEED_CERT=1
+    fi
+    if [ "$NEED_CERT" = "1" ]; then
+        echo "[LAN] Generating a self-signed certificate for: ${LAN_IPS[*]} ${SHORT_HOST} ${SHORT_HOST}.local"
+        SAN="DNS:${SHORT_HOST},DNS:${SHORT_HOST}.local,DNS:localhost,IP:127.0.0.1"
+        for ip in "${LAN_IPS[@]}"; do SAN="${SAN},IP:${ip}"; done
+        mkdir -p "$CERT_DIR"
+        chmod 755 "$CERT_DIR"
+        # 825 days: the longest validity Apple platforms accept for a TLS
+        # server cert, even a self-signed one a user has chosen to trust.
+        openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 825 \
+            -keyout "$KEY" -out "$CERT" -subj "/CN=${SHORT_HOST}" \
+            -addext "subjectAltName=${SAN}" \
+            -addext "basicConstraints=critical,CA:FALSE" \
+            -addext "extendedKeyUsage=serverAuth" >/dev/null 2>&1
+        chmod 600 "$KEY"
+        chmod 644 "$CERT"
+    else
+        echo "[LAN] Existing certificate already covers ${LAN_IPS[*]}, keeping it."
+    fi
+
+    a2enmod ssl proxy proxy_http proxy_wstunnel headers >/dev/null
+    if [ "$HTTPS_PORT" != "443" ]; then
+        grep -qxF "Listen ${HTTPS_PORT}" /etc/apache2/ports.conf 2>/dev/null || \
+            echo "Listen ${HTTPS_PORT}" >> /etc/apache2/ports.conf
+    fi
+
+    # Carry over the WSS proxy lines if this vhost is being rewritten (a
+    # re-run after an IP change), so TX/low-latency RX don't silently break
+    # until apply.sh is re-run.
+    CARRY=""
+    if [ -f "$SSL_AVAIL" ]; then
+        # Each feature's marker comment line plus its ProxyPass line -- the
+        # two things apply.sh / ws-audio/apply.sh grep for to stay idempotent.
+        CARRY=$(grep -E 'HenWen (browser transmitter|low-latency RX audio):|^[[:space:]]*ProxyPass /(asterisk-ws|ws-audio) ' "$SSL_AVAIL" || true)
+    fi
+    echo "[LAN] Writing $SSL_AVAIL (port ${HTTPS_PORT})..."
+    {
+        echo "<VirtualHost *:${HTTPS_PORT}>"
+        echo "    # HenWen LAN-only HTTPS (setup-https.sh --lan): self-signed certificate"
+        echo "    SSLEngine on"
+        echo "    SSLCertificateFile    ${CERT}"
+        echo "    SSLCertificateKeyFile ${KEY}"
+        echo "    ProxyPreserveHost On"
+        echo "    RequestHeader set X-Forwarded-Proto \"https\""
+        [ -n "$CARRY" ] && printf '%s\n' "$CARRY"
+        echo "    ProxyPass        / http://127.0.0.1:${FLASK_PORT}/ retry=0 timeout=120"
+        echo "    ProxyPassReverse / http://127.0.0.1:${FLASK_PORT}/"
+        echo "</VirtualHost>"
+    } > "$SSL_AVAIL"
+    chmod 644 "$SSL_AVAIL"
+    inject_exclusions "$SSL_AVAIL"
+    a2ensite "${CONF_NAME}-ssl.conf" >/dev/null
+
+    apache2ctl configtest
+    henwen_apache_reload_or_start || exit 1
+
+    echo "$HTTPS_PORT"    > /etc/asterisk/henwen-https-port
+    echo "lan"            > /etc/asterisk/henwen-https-mode
+    echo "${LAN_IPS[0]}"  > /etc/asterisk/henwen-https-hostname
+    chmod 644 /etc/asterisk/henwen-https-port /etc/asterisk/henwen-https-mode /etc/asterisk/henwen-https-hostname
+
+    PORT_SUFFIX=""
+    [ "$HTTPS_PORT" != "443" ] && PORT_SUFFIX=":${HTTPS_PORT}"
+    echo ""
+    echo "Done (LAN only). On any device on this network, open:"
+    for ip in "${LAN_IPS[@]}"; do echo "    https://${ip}${PORT_SUFFIX}/"; done
+    echo "    https://${SHORT_HOST}.local${PORT_SUFFIX}/   (if your devices resolve mDNS names)"
+    echo ""
+    echo "  The browser will warn that the certificate isn't trusted -- that's"
+    echo "  expected for a self-signed cert. Accept it once per device. No router"
+    echo "  port forwards are needed; plain http:// access keeps working as before."
+    echo ""
+    echo "  Next (safe to re-run; adds the TX and low-latency RX proxies to this vhost):"
+    echo "    sudo bash $(dirname "$0")/apply.sh"
+    echo "    sudo bash $(dirname "$0")/../ws-audio/apply.sh"
+    exit 0
+fi
 
 # ── Base HTTP vhost (port 80) ──────────────────────────────
 if [ "$HTTP_ONLY" = "1" ]; then

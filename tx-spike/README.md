@@ -117,7 +117,14 @@ install time**:
 
 Asterisk's builtin HTTP server (8088) stays loopback-only and must **not**
 be forwarded. LAN-only operators need none of the inbound forwards — ICE
-host candidates connect directly.
+host candidates connect directly. For that case, `sudo bash
+tx-spike/setup-https.sh --lan` provisions HTTPS with a self-signed
+certificate covering this box's LAN IP(s) and hostname (no hostname, email
+or Let's Encrypt; port 443, or 8443 if another vhost already owns 443),
+then re-run `apply.sh` and `ws-audio/apply.sh` to add their proxies to it.
+Each device shows a certificate warning once; accept it and the page is a
+secure context. `check-ports.sh` reads the recorded mode and skips the
+STUN/forward checks.
 
 Run `sudo bash tx-spike/check-ports.sh` to verify all of the above from
 the box itself (it also STUN-probes from inside the RTP range and reports

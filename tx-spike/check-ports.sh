@@ -21,6 +21,12 @@
 #   UDP out  → STUN (stun.l.google.com) for both sides' ICE candidates
 # Asterisk's builtin HTTP server (8088) must be loopback-ONLY — it is checked
 # as a negative requirement.
+#
+# LAN-only installs (setup-https.sh --lan, recorded as henwen-https-mode=lan)
+# need none of the router forwards or STUN: browsers on the same network
+# reach Asterisk through ICE host candidates directly. In that mode the
+# NAT/STUN section is skipped, and the WSS probe goes to this box's own
+# self-signed vhost (curl -k) instead of a public hostname.
 set -u
 SPIKE_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=../apache-common.sh
@@ -31,6 +37,7 @@ bad()  { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 warn() { echo "  WARN  $1"; WARN=$((WARN+1)); }
 
 FLASK_PORT="$(henwen_flask_port)"
+HTTPS_MODE=$(cat /etc/asterisk/henwen-https-mode 2>/dev/null || echo public)
 mapfile -t APACHE_CONFS < <(henwen_discover_vhosts "$FLASK_PORT")
 HOSTPORTS=()
 for conf in "${APACHE_CONFS[@]}"; do
@@ -40,7 +47,10 @@ for conf in "${APACHE_CONFS[@]}"; do
 done
 mapfile -t HOSTPORTS < <(printf '%s\n' "${HOSTPORTS[@]:-}" | sort -u)
 
-if [ "${#HOSTPORTS[@]}" -eq 0 ] || [ -z "${HOSTPORTS[0]:-}" ]; then
+if [ "$HTTPS_MODE" = "lan" ]; then
+  # The LAN vhost has no ServerName, so discovery above can't see it.
+  HOSTPORTS=("127.0.0.1:$(cat /etc/asterisk/henwen-https-port 2>/dev/null || echo 443)")
+elif [ "${#HOSTPORTS[@]}" -eq 0 ] || [ -z "${HOSTPORTS[0]:-}" ]; then
   # Fallback for a vhost patched before this discovery mechanism existed,
   # or one missing a ServerName line entirely.
   LEGACY_PORT=$(cat /etc/asterisk/henwen-https-port 2>/dev/null || echo 443)
@@ -52,6 +62,9 @@ if [ "${#HOSTPORTS[@]}" -eq 0 ] || [ -z "${HOSTPORTS[0]:-}" ]; then
 fi
 
 echo "== Configuration"
+if [ "$HTTPS_MODE" = "lan" ]; then
+  ok "LAN-only mode (setup-https.sh --lan): no router forwards or STUN needed"
+fi
 echo "        found ${#APACHE_CONFS[@]} Apache vhost(s) fronting HenWen, ${#HOSTPORTS[@]} host:port pair(s) to check:"
 for hp in "${HOSTPORTS[@]}"; do echo "          $hp"; done
 
@@ -84,14 +97,16 @@ echo "== Asterisk RTP/ICE config"
 RTPSTART=$(grep -E "^rtpstart=" /etc/asterisk/rtp.conf | head -1 | cut -d= -f2 | awk '{print $1}')
 RTPEND=$(grep -E "^rtpend=" /etc/asterisk/rtp.conf | head -1 | cut -d= -f2 | awk '{print $1}')
 echo "        RTP range: ${RTPSTART:-?}-${RTPEND:-?} udp"
-if [ -n "${RTPEND:-}" ] && [ "$RTPEND" -le 10200 ] 2>/dev/null; then
+if [ "$HTTPS_MODE" = "lan" ]; then
+  : # range only matters for what gets forwarded on the router
+elif [ -n "${RTPEND:-}" ] && [ "$RTPEND" -le 10200 ] 2>/dev/null; then
   ok "RTP range is narrowed (forward only ${RTPSTART}-${RTPEND}/udp on the router)"
 else
   warn "RTP range is wide (${RTPSTART:-?}-${RTPEND:-?}) — apply.sh narrows it to 10000-10100"
 fi
 if grep -qE "^stunaddr" /etc/asterisk/rtp.conf; then
   ok "stunaddr set ($(grep -E '^stunaddr' /etc/asterisk/rtp.conf | cut -d= -f2))"
-else
+elif [ "$HTTPS_MODE" != "lan" ]; then
   bad "stunaddr not set in rtp.conf — remote operators will get no audio"
 fi
 
@@ -104,7 +119,9 @@ for hp in "${HOSTPORTS[@]}"; do
     continue
   fi
   WSKEY=$(head -c16 /dev/urandom | base64)
-  CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 \
+  CURL_K=()
+  [ "$HTTPS_MODE" = "lan" ] && CURL_K=(-k)
+  CODE=$(curl -s "${CURL_K[@]}" -o /dev/null -w '%{http_code}' --max-time 6 \
     -H "Connection: Upgrade" -H "Upgrade: websocket" \
     -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: $WSKEY" \
     -H "Sec-WebSocket-Protocol: sip" "https://${WSHOST}:${WSPORT}/asterisk-ws" 2>/dev/null)
@@ -115,6 +132,9 @@ for hp in "${HOSTPORTS[@]}"; do
   fi
 done
 
+if [ "$HTTPS_MODE" = "lan" ]; then
+  STUN_OUT=""
+else
 echo "== NAT / router forward (STUN probe from inside the RTP range)"
 STUN_OUT=$(python3 - <<'EOF'
 import socket, os, struct, sys
@@ -171,6 +191,7 @@ if tried == 0:
 EOF
 )
 echo "$STUN_OUT"
+fi
 # Fold the embedded probe's own PASS/FAIL/WARN lines into this script's
 # running totals so the final summary below actually reflects them.
 while IFS= read -r line; do
@@ -182,9 +203,25 @@ while IFS= read -r line; do
 done <<< "$STUN_OUT"
 
 echo "== Existing AllStarLink ports (unchanged by browser TX, for reference)"
-if ss -uln 2>/dev/null | grep -q ":4569 "; then ok "IAX2 on UDP 4569 listening (needs its existing router forward)"; else warn "IAX2 4569 not listening"; fi
+# The IAX2 port is whatever iax.conf's [general] bindport says -- plenty of
+# nodes run a non-default one (e.g. two nodes behind one public IP).
+IAX_PORT=$(awk '
+    /^[[:space:]]*\[/ { in_gen = ($0 ~ /^[[:space:]]*\[general\]/); next }
+    in_gen && /^[[:space:]]*bindport[[:space:]]*=/ {
+        sub(/;.*/, ""); sub(/^[^=]*=[[:space:]]*/, ""); gsub(/[[:space:]]/, ""); print; exit
+    }' /etc/asterisk/iax.conf 2>/dev/null)
+[[ "${IAX_PORT:-}" =~ ^[0-9]+$ ]] || IAX_PORT=4569
+if ss -uln 2>/dev/null | grep -q ":${IAX_PORT} "; then
+  ok "IAX2 on UDP ${IAX_PORT} listening (needs its existing router forward)"
+else
+  warn "IAX2 not listening on UDP ${IAX_PORT} (iax.conf bindport)"
+fi
 
 echo
 echo "Summary: $PASS pass, $FAIL fail, $WARN warn"
-echo "Router forwards required for browser TX:  TCP ${UNIQUE_PORTS[*]},  UDP ${RTPSTART:-10000}-${RTPEND:-10100}"
+if [ "$HTTPS_MODE" = "lan" ]; then
+  echo "Router forwards required for browser TX:  none (LAN-only mode)"
+else
+  echo "Router forwards required for browser TX:  TCP ${UNIQUE_PORTS[*]},  UDP ${RTPSTART:-10000}-${RTPEND:-10100}"
+fi
 [ "$FAIL" -eq 0 ]

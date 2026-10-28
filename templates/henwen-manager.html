@@ -2137,13 +2137,15 @@ sudo asterisk -rx "module reload manager"</pre>
         <div id="tx-apply-prereq" style="display:none">
           <p style="margin-bottom:10px">No Apache vhost found yet — provision one first:</p>
           <pre class="codeblock">sudo bash /opt/HenWen/tx-spike/setup-https.sh &lt;hostname&gt; &lt;email&gt;   # full HTTPS via Let's Encrypt
+sudo bash /opt/HenWen/tx-spike/setup-https.sh --lan                    # your own network only, self-signed
 sudo bash /opt/HenWen/tx-spike/setup-https.sh --http-only              # fronting HTTPS yourself</pre>
           <p style="margin-bottom:10px;color:var(--text2);font-size:0.9rem">
             <span class="mono">setup-https.sh</span> requires a public hostname already pointed at this box
             and port 80 forwarded (plus your chosen HTTPS port — <span class="mono">--port N</span> if not
             443; <span class="mono">--dns-manual</span> if your ISP blocks port 80 too). No public hostname
             to point here? A third-party service that can front HTTPS for you (Tailscale Serve/Funnel,
-            Cloudflare Tunnel, etc.) works too, with <span class="mono">--http-only</span> — see
+            Cloudflare Tunnel, etc.) works too, with <span class="mono">--http-only</span>. Only need TX
+            from your own network? <span class="mono">--lan</span> needs no hostname or forwards at all — see
             <span class="mono">tx-spike/README.md</span> for what it needs to proxy. Once either has run,
             reload this page and Apply becomes available above.
           </p>
