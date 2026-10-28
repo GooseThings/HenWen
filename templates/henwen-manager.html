@@ -744,6 +744,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
 
     <div class="nav-section">Administration</div>
     <button class="nav-item" onclick="showPage('user-mgmt')">User Management</button>
+    <button class="nav-item" id="nav-node-access" onclick="showPage('node-access')">Node Access</button>
     <button class="nav-item" id="nav-asl-update" onclick="showPage('asl-update')">Asterisk Updates<span class="nav-dot" id="asl-update-dot" style="display:none" title="An Asterisk update is available"></span></button>
     <button class="nav-item" onclick="showPage('settings')">System Settings</button>
   </nav>
@@ -2636,6 +2637,16 @@ sudo bash /opt/HenWen/tx-spike/setup-https.sh --http-only              # frontin
     </div>
   </section>
 
+  <!-- Node Access -->
+  <section class="page" id="page-node-access">
+    <div class="page-title">Node Access</div>
+    <div class="page-sub">Choose which nodes may connect <em>to</em> this node. Outgoing connections you make are never affected, and links that are already up stay up when you change a list.</div>
+    <div id="na-dialplan-warn" style="display:none;border:1px solid var(--danger);border-radius:6px;padding:10px 12px;margin-bottom:14px;font-size:0.85rem;color:var(--danger);max-width:820px">
+      Your <code>/etc/asterisk/extensions.conf</code> doesn't check these lists, so entries saved here will have <strong>no effect</strong>. The stock ASL3 <code>[radio-secure]</code> context does — restore it to enable this.
+    </div>
+    <div id="na-body"><span class="muted">Loading...</span></div>
+  </section>
+
   <!-- Smart Connector -->
   <section class="page" id="page-smart-connector">
     <div class="page-title">Smart Connector</div>
@@ -3865,6 +3876,7 @@ function showPage(id) {
   else if (id === 'chat-log')           chatLogLoad();
   else if (id === 'dtmf')             { populateDtmfNodeSelect(); }
   else if (id === 'node-id')          { loadIdConfigs(); populateIdNodeSelect(); loadIdSounds(); }
+  else if (id === 'node-access')      { loadNodeAccess(); }
   else if (id === 'announcements')    { loadAnnouncements(); populateAnnNodeSelect(); loadTtsVoices(); }
   else if (id === 'smart-connector') { loadConnectors(); populateConnNodeSelects(); }
   else if (id === 'general')        loadGeneralEditor();
@@ -7795,6 +7807,9 @@ async function applyRoleNav() {
      or disabling it is a compliance concern, not just an operational one. */
   var nodeIdBtn = document.getElementById('nav-node-id');
   if (nodeIdBtn) nodeIdBtn.style.display = isSuper ? '' : 'none';
+  /* Who may link to this node is a security control — same gate as the backend. */
+  var accessBtn = document.getElementById('nav-node-access');
+  if (accessBtn) accessBtn.style.display = isSuper ? '' : 'none';
   /* Only superuser/owner can trigger an update (shell/deploy access, and the
      backend enforces this too) — matches checkForUpdate()'s own gate. */
   var updateCard = document.getElementById('update-settings-card');
@@ -8905,6 +8920,99 @@ async function createIdConfig() {
   document.getElementById('nid-name').value = '';
   document.getElementById('nid-path').value = '';
   loadIdConfigs();
+}
+
+// ---------------------------------------------------------------------------
+// Node Access (allowlist / denylist)
+// ---------------------------------------------------------------------------
+
+var _naData = null;
+
+var NA_MODE_TEXT = {
+  open:      ['Open', 'var(--green)', 'Any node can connect.'],
+  denylist:  ['Open, except the denylist', 'var(--green)', 'Any node can connect except the ones on the denylist below.'],
+  allowlist: ['Allowlist only', 'var(--warn)', 'Only the nodes on the allowlist below can connect. Everyone else is refused. The denylist is ignored while the allowlist has entries — remove every allowlist entry to open the node again.']
+};
+
+async function loadNodeAccess() {
+  var body = document.getElementById('na-body');
+  try {
+    var r = await apiFetch('/api/node-access');
+    var d = await r.json();
+    if (!r.ok) { body.innerHTML = '<span style="color:var(--danger)">' + esc(d.error || 'Error') + '</span>'; return; }
+    _naData = d;
+    document.getElementById('na-dialplan-warn').style.display = d.dialplan_ok ? 'none' : '';
+    var locals = Object.keys(d.nodes);
+    if (!locals.length) { body.innerHTML = '<span class="muted">No nodes found in rpt.conf.</span>'; return; }
+    body.innerHTML = locals.map(naNodeCard).join('');
+  } catch(e) {
+    body.innerHTML = '<span style="color:var(--danger)">Error: ' + esc(String(e)) + '</span>';
+  }
+}
+
+function naNodeCard(local) {
+  var n = _naData.nodes[local];
+  var m = NA_MODE_TEXT[n.mode];
+  return '<div class="card" style="margin-bottom:14px">' +
+    '<div class="card-header"><h2>Node ' + esc(local) + '</h2></div>' +
+    '<div class="card-body">' +
+      '<div style="margin-bottom:12px;font-size:0.9rem"><strong style="color:' + m[1] + '">' + esc(m[0]) + '</strong> — ' + esc(m[2]) + '</div>' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px">' +
+        naListBlock(local, 'allowlist', n) + naListBlock(local, 'denylist', n) +
+      '</div>' +
+    '</div></div>';
+}
+
+function naListBlock(local, list, n) {
+  var entries = n[list];
+  var title = list === 'allowlist' ? 'Allowlist' : 'Denylist';
+  var dim = (list === 'denylist' && n.mode === 'allowlist');
+  var key = esc(list) + '-' + esc(local);
+  var rows = entries.length ? entries.map(function(e) {
+    var who = [e.callsign, e.location].filter(Boolean).join(' — ');
+    return '<tr>' +
+      '<td style="padding:4px 8px 4px 0;font-weight:600">' + esc(e.node) + '</td>' +
+      '<td style="padding:4px 8px">' + (who ? esc(who) : '<span class="muted">unknown node</span>') +
+        (e.note && e.note !== '-' ? '<div class="muted" style="font-size:0.8rem">' + esc(e.note) + '</div>' : '') + '</td>' +
+      '<td style="padding:4px 0;text-align:right"><button class="btn btn-sm" type="button" onclick="naRemove(\'' + esc(list) + '\',\'' + esc(local) + '\',\'' + esc(e.node) + '\')">Remove</button></td>' +
+    '</tr>';
+  }).join('') : '<tr><td class="muted" style="padding:4px 0">Empty</td></tr>';
+  return '<div style="' + (dim ? 'opacity:0.55' : '') + '">' +
+    '<div style="font-weight:600;margin-bottom:6px">' + title + (dim ? ' <span class="muted" style="font-weight:normal">(ignored while the allowlist is in use)</span>' : '') + '</div>' +
+    '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:0.88rem">' + rows + '</table></div>' +
+    '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">' +
+      '<input type="text" id="na-node-' + key + '" class="val-input" inputmode="numeric" maxlength="7" placeholder="Node #" style="width:7rem" aria-label="Node number to add to the ' + title + '">' +
+      '<input type="text" id="na-note-' + key + '" class="val-input" maxlength="80" placeholder="Note (optional)" style="flex:1;min-width:8rem" aria-label="Note">' +
+      '<button class="btn btn-sm btn-primary" type="button" onclick="naAdd(\'' + esc(list) + '\',\'' + esc(local) + '\')">Add</button>' +
+    '</div>' +
+    '<div id="na-res-' + key + '" style="font-size:0.82rem;margin-top:4px"></div>' +
+  '</div>';
+}
+
+async function naAdd(list, local) {
+  var key  = list + '-' + local;
+  var res  = document.getElementById('na-res-' + key);
+  var node = document.getElementById('na-node-' + key).value.trim();
+  var note = document.getElementById('na-note-' + key).value.trim();
+  if (!/^\d{1,7}$/.test(node)) { res.innerHTML = '<span style="color:var(--danger)">Enter a node number (digits only).</span>'; return; }
+  if (list === 'allowlist' && !_naData.nodes[local].allowlist.length &&
+      !confirm('Adding the first allowlist entry switches node ' + local + ' to allowlist-only: every node not on the list (except ' + node + ') will be refused. Continue?')) return;
+  res.innerHTML = '<span class="muted">Saving...</span>';
+  var r = await apiFetch('/api/node-access', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({list: list, local: local, node: node, note: note})
+  });
+  var d = await r.json();
+  if (!r.ok) { res.innerHTML = '<span style="color:var(--danger)">' + esc(d.error || 'Error') + '</span>'; return; }
+  loadNodeAccess();
+}
+
+async function naRemove(list, local, node) {
+  if (list === 'allowlist' && _naData.nodes[local].allowlist.length === 1 &&
+      !confirm('This is the last allowlist entry. Removing it opens node ' + local + ' to every node again (except any on the denylist). Continue?')) return;
+  var r = await apiFetch('/api/node-access/' + encodeURIComponent(list) + '/' + encodeURIComponent(local) + '/' + encodeURIComponent(node), { method: 'DELETE' });
+  if (!r.ok) { var d = await r.json(); alert('Error: ' + (d.error || r.status)); return; }
+  loadNodeAccess();
 }
 
 // ---------------------------------------------------------------------------

@@ -2649,6 +2649,26 @@ class AMIClient:
             log("WARN", f"[AMI] ModuleLoad failed for {module!r}: {pkt.get('Message', raw[:200])}")
         return ok
 
+    def db_action(self, action: str, family: str, key: str = None, val: str = None) -> bool:
+        """DBPut / DBDel / DBDelTree via their own AMI actions rather than a
+        `database put ...` CLI string through Command: the value travels as
+        its own header, so a note never needs CLI quoting. Callers must
+        still keep CR/LF out of every field -- a newline would end the AMI
+        header and start a new one."""
+        params = {'Action': action, 'Family': family}
+        if key is not None:
+            params['Key'] = key
+        if val is not None:
+            params['Val'] = val
+        log("INFO", f"[AMI] {action}: {family}/{key or ''}")
+        self._send_action(params)
+        raw = self._recv_until('\r\n\r\n', timeout=self.timeout)
+        pkt = self._parse_packet(raw)
+        ok  = pkt.get('Response') == 'Success'
+        if not ok:
+            log("WARN", f"[AMI] {action} failed for {family}/{key or ''}: {pkt.get('Message', raw[:200])}")
+        return ok
+
     # ── app_rpt helpers ───────────────────────────────────────────────────────
 
     def rpt_cmd(self, node: str, subcmd: str) -> dict:
@@ -18554,6 +18574,136 @@ def api_id_morse():
     secs = len(pcm) / 2 / 8000
     log("INFO", f"[ID] Generated Morse ID '{text}' ({wpm} WPM, {freq} Hz, {secs:.1f}s) -> {dest}")
     return jsonify({"path": f"{SOUNDS_SUBDIR}/{slug}", "seconds": round(secs, 1)})
+
+
+# ---------------------------------------------------------------------------
+# Node access (incoming-connection allowlist / denylist)
+# ---------------------------------------------------------------------------
+# ASL3's stock extensions.conf [radio-secure] context already enforces this,
+# per local node, from Asterisk's own AstDB: if allowlist/<local> has any
+# keys, only those remote node numbers (plus localhost) may connect;
+# otherwise anyone may except denylist/<local> keys. HenWen only edits those
+# AstDB keys -- the dialplan does the enforcing, so nothing here can lock
+# out a connection Asterisk would otherwise allow, and links already up are
+# not dropped by a change. The family/key layout must match that dialplan
+# exactly: allowlist/<local node>/<remote node> = note.
+
+NODE_ACCESS_LISTS     = ("allowlist", "denylist")
+NODE_ACCESS_REMOTE_RE = re.compile(r'^\d{1,7}$')   # private, AllStar and EchoLink (3xxxxxx)
+NODE_ACCESS_NOTE_MAX  = 80
+_NODE_ACCESS_SHOW_RE  = re.compile(r'^/(allowlist|denylist)/(\d+)/(\d+)\s*:\s?(.*)$')
+EXTENSIONS_CONF_PATH  = os.environ.get("EXTENSIONS_CONF_PATH", "/etc/asterisk/extensions.conf")
+
+
+def _parse_node_access_show(lines) -> dict:
+    """`database show <family>` output -> {local: {list: [{node, note}]}}."""
+    out = {}
+    for line in lines:
+        m = _NODE_ACCESS_SHOW_RE.match(line.strip())
+        if not m:
+            continue
+        lst, local, remote, note = m.groups()
+        out.setdefault(local, {"allowlist": [], "denylist": []})[lst].append(
+            {"node": remote, "note": note.strip()})
+    for lists in out.values():
+        for entries in lists.values():
+            entries.sort(key=lambda e: int(e["node"]))
+    return out
+
+
+def _node_access_mode(lists: dict) -> str:
+    """Which rule the [radio-secure] dialplan applies: any allowlist entry
+    makes it allowlist-only and the denylist is then never consulted."""
+    if lists.get("allowlist"):
+        return "allowlist"
+    if lists.get("denylist"):
+        return "denylist"
+    return "open"
+
+
+def _node_access_dialplan_ok() -> bool:
+    """Whether extensions.conf actually checks these AstDB families. A
+    hand-edited or pre-ASL3 dialplan may not, and then entries saved here
+    would look like they work while doing nothing."""
+    content = read_conf_file(EXTENSIONS_CONF_PATH) or ""
+    return "allowlist/${EXTEN}" in content and "denylist/${EXTEN}" in content
+
+
+def _clean_node_access_note(note) -> str:
+    # CR/LF would terminate the AMI header carrying it; other control
+    # characters have no business in a one-line note either.
+    note = re.sub(r'[\x00-\x1f\x7f]', ' ', str(note or "")).strip()
+    return note[:NODE_ACCESS_NOTE_MAX]
+
+
+@app.route("/api/node-access")
+def api_node_access():
+    if session.get('role') not in ('superuser', 'owner'):
+        return jsonify({"error": "Superuser access required"}), 403
+    content = read_conf_file(RPT_CONF_PATH)
+    local_nodes = get_node_numbers(content) if content else []
+    try:
+        lines = []
+        for lst in NODE_ACCESS_LISTS:
+            lines += ami_send_command(lambda ami, f=lst: ami.command(f"database show {f}", log_level="DEBUG"))
+    except Exception as e:
+        return jsonify({"error": f"Could not read the lists from Asterisk: {e}"}), 503
+    parsed = _parse_node_access_show(lines)
+    nodes = {}
+    for local in local_nodes:
+        lists = parsed.get(local, {"allowlist": [], "denylist": []})
+        for entries in lists.values():
+            for e in entries:
+                info = lookup_node(e["node"]) or {}
+                e["callsign"] = info.get("callsign", "")
+                e["location"] = info.get("location", "")
+        nodes[local] = {**lists, "mode": _node_access_mode(lists)}
+    return jsonify({"dialplan_ok": _node_access_dialplan_ok(), "nodes": nodes})
+
+
+@app.route("/api/node-access", methods=["POST"])
+def api_node_access_add():
+    if session.get('role') not in ('superuser', 'owner'):
+        return jsonify({"error": "Superuser access required"}), 403
+    data   = request.json or {}
+    lst    = str(data.get("list", "")).strip()
+    local  = str(data.get("local", "")).strip()
+    remote = str(data.get("node", "")).strip()
+    note   = _clean_node_access_note(data.get("note"))
+    if lst not in NODE_ACCESS_LISTS:
+        return jsonify({"error": "list must be allowlist or denylist"}), 400
+    content = read_conf_file(RPT_CONF_PATH)
+    if local not in (get_node_numbers(content) if content else []):
+        return jsonify({"error": "Not a node on this system"}), 400
+    if not NODE_ACCESS_REMOTE_RE.match(remote):
+        return jsonify({"error": "Node number must be 1-7 digits"}), 400
+    if remote == local:
+        return jsonify({"error": "A node can't be listed against itself"}), 400
+    try:
+        ok = ami_send_command(lambda ami: ami.db_action("DBPut", f"{lst}/{local}", remote, note or "-"))
+    except Exception as e:
+        return jsonify({"error": f"Asterisk unreachable: {e}"}), 503
+    if not ok:
+        return jsonify({"error": "Asterisk refused the change"}), 502
+    log("INFO", f"[ACCESS] {session.get('username')} added {remote} to {lst} for {local}")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/node-access/<lst>/<local>/<remote>", methods=["DELETE"])
+def api_node_access_delete(lst, local, remote):
+    if session.get('role') not in ('superuser', 'owner'):
+        return jsonify({"error": "Superuser access required"}), 403
+    if lst not in NODE_ACCESS_LISTS or not NODE_ACCESS_REMOTE_RE.match(remote) \
+            or not re.match(r'^\d{1,7}$', local):
+        return jsonify({"error": "Invalid entry"}), 400
+    try:
+        ok = ami_send_command(lambda ami: ami.db_action("DBDel", f"{lst}/{local}", remote))
+    except Exception as e:
+        return jsonify({"error": f"Asterisk unreachable: {e}"}), 503
+    if not ok:
+        return jsonify({"error": "No such entry"}), 404
+    log("INFO", f"[ACCESS] {session.get('username')} removed {remote} from {lst} for {local}")
+    return jsonify({"ok": True})
 
 
 # ---------------------------------------------------------------------------
