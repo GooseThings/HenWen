@@ -8872,19 +8872,37 @@ function nidStateLabel(c) {
   return '<span class="muted">' + esc(s) + '</span>';
 }
 
-async function loadIdConfigs() {
+// `live` marks a refresh nobody asked for: the 3s poll that keeps the state
+// label and countdowns moving while a node is in use, plus the refresh after
+// Toggle/Test Play. Those must not rebuild a card whose Edit form is open --
+// re-rendering replaced the form's inputs with freshly-rendered ones, so
+// whatever had been typed (and any Morse panel opened under a slot) was
+// silently thrown away every 3 seconds. A live refresh therefore patches the
+// few self-changing fields in place and leaves the markup alone; only a
+// deliberate action (opening the page, Refresh, Save, Delete) re-renders.
+// The tradeoff is that a monitor added or removed in another tab doesn't
+// appear while a form is open here -- the right call, since losing an edit
+// in progress is the worse of the two.
+async function loadIdConfigs(live) {
   var el = document.getElementById('nid-list');
   if (!el) return;
   clearTimeout(_nidPollTimer);
   try {
     var r = await apiFetch('/api/id');
     var list = await r.json();
-    if (!list.length) { el.innerHTML = '<span class="muted">No ID monitors yet. Add one above.</span>'; return; }
-    el.innerHTML = list.map(nidCard).join('');
+    var editing = live ? nidOpenEditors().length : 0;
+    if (!list.length) {
+      // Nothing to patch, and no form can be open on a card that's gone.
+      el.innerHTML = '<span class="muted">No ID monitors yet. Add one above.</span>';
+      return;
+    }
+    if (editing) list.forEach(nidPatchLive);
+    else         el.innerHTML = list.map(nidCard).join('');
     var needsPoll = list.some(function(c) { return c.runtime_state === 'active' || c.runtime_state === 'pending_idle'; });
-    if (needsPoll) _nidPollTimer = setTimeout(loadIdConfigs, 3000);
+    if (needsPoll) _nidPollTimer = setTimeout(function() { loadIdConfigs(true); }, 3000);
   } catch(e) {
-    el.innerHTML = '<span style="color:var(--danger)">Error loading ID monitors.</span>';
+    // Don't wipe the list (and any open form) over one failed poll.
+    if (!live) el.innerHTML = '<span style="color:var(--danger)">Error loading ID monitors.</span>';
   }
 }
 
@@ -8903,14 +8921,42 @@ function nidSoundSummary(c) {
   }).join('');
 }
 
+// The two pieces of a card that change on their own, so nidPatchLive() and
+// nidCard() render them identically.
+function nidEnabledLabel(c) {
+  return c.enabled ? '' : '<span style="color:var(--text2)">Disabled &nbsp;</span>';
+}
+function nidLastIdText(c) { return c.last_id_time ? c.last_id_time : 'Never'; }
+
+// Updates only what the monitor changes by itself -- the state label with
+// its countdown, and the last-ID time. Everything else on a card comes from
+// the saved row and can only change by a deliberate action, which
+// re-renders in full.
+function nidPatchLive(c) {
+  var st = document.getElementById('nid-status-' + c.id);
+  if (st) st.innerHTML = nidEnabledLabel(c) + nidStateLabel(c);
+  var last = document.getElementById('nid-last-' + c.id);
+  if (last) last.textContent = nidLastIdText(c);
+  var btn = document.getElementById('nid-toggle-' + c.id);
+  if (btn) btn.textContent = c.enabled ? 'Disable' : 'Enable';
+}
+
+// Ids of every monitor whose Edit form is currently open.
+function nidOpenEditors() {
+  return Array.prototype.filter.call(
+    document.querySelectorAll('[id^="nid-edit-"]'),
+    function(el) { return el.style.display === 'block'; }
+  ).map(function(el) { return el.id.replace('nid-edit-', ''); });
+}
+
 function nidCard(c) {
-  var enabled = c.enabled ? '' : '<span style="color:var(--text2)">Disabled &nbsp;</span>';
-  var last = c.last_id_time ? c.last_id_time : 'Never';
+  var enabled = nidEnabledLabel(c);
+  var last = nidLastIdText(c);
   return '<div class="card" style="margin-bottom:10px" id="nid-card-' + c.id + '">' +
     '<div class="card-header" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">' +
       '<span style="font-weight:600;flex:1">' + esc(c.name) + '</span>' +
       '<span class="muted" style="font-size:0.82rem">Node ' + esc(c.node) + '</span>' +
-      '<span style="font-size:0.82rem">' + enabled + nidStateLabel(c) + '</span>' +
+      '<span id="nid-status-' + c.id + '" style="font-size:0.82rem">' + enabled + nidStateLabel(c) + '</span>' +
     '</div>' +
     '<div class="card-body" style="font-size:0.88rem">' +
       '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:4px 18px;margin-bottom:10px">' +
@@ -8919,10 +8965,10 @@ function nidCard(c) {
         '<div><span class="muted">Interval ID:</span> ' + (c.interval_enabled ? 'every ' + esc(String(Math.min(c.interval_sec, c.required_sec || c.interval_sec))) + 's' : 'Off (forced every ' + esc(String(c.required_sec || 600)) + 's in use)') + '</div>' +
         '<div><span class="muted">Final ID delay:</span> ' + esc(String(c.idle_delay_sec)) + 's after going idle</div>' +
         '<div><span class="muted">Initial ID:</span> ' + (c.initial_id ? 'Yes' : 'No') + '</div>' +
-        '<div><span class="muted">Last ID:</span> ' + esc(last) + '</div>' +
+        '<div><span class="muted">Last ID:</span> <span id="nid-last-' + c.id + '">' + esc(last) + '</span></div>' +
       '</div>' +
       '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
-        '<button class="btn btn-sm" onclick="nidToggle(' + c.id + ')">' + (c.enabled ? 'Disable' : 'Enable') + '</button>' +
+        '<button class="btn btn-sm" id="nid-toggle-' + c.id + '" onclick="nidToggle(' + c.id + ')">' + (c.enabled ? 'Disable' : 'Enable') + '</button>' +
         NID_EVENTS.map(function(ev) {
           return '<button class="btn btn-sm" onclick="nidTestPlay(' + c.id + ',&quot;' +
                  ev.key.replace('_sound','') + '&quot;)">Test ' + esc(ev.label.replace(' ID','')) + '</button>';
@@ -8974,7 +9020,7 @@ function nidEditHide(id) { var el = document.getElementById('nid-edit-' + id); i
 
 async function nidToggle(id) {
   await apiFetch('/api/id/' + id + '/toggle', { method: 'POST' });
-  loadIdConfigs();
+  await loadIdConfigs(true);
 }
 
 async function nidTestPlay(id, event) {
@@ -8984,7 +9030,7 @@ async function nidTestPlay(id, event) {
   });
   var d = await r.json();
   if (!r.ok) alert('Playback error: ' + (d.error || r.status));
-  else loadIdConfigs();
+  else await loadIdConfigs(true);
 }
 
 async function nidDelete(id, name) {
