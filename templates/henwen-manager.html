@@ -8898,8 +8898,15 @@ async function loadIdConfigs(live) {
     }
     if (editing) list.forEach(nidPatchLive);
     else         el.innerHTML = list.map(nidCard).join('');
-    var needsPoll = list.some(function(c) { return c.runtime_state === 'active' || c.runtime_state === 'pending_idle'; });
-    if (needsPoll) _nidPollTimer = setTimeout(function() { loadIdConfigs(true); }, 3000);
+    // Poll even when every monitor is idle: polling only while one was
+    // already active meant a page opened during a quiet spell never polled
+    // at all, so the label sat on "Idle" through every key-up until a
+    // manual reload. Pages are only hidden, never removed, so the poll
+    // stops itself once another page is showing.
+    if (currentPage === 'node-id')
+      _nidPollTimer = setTimeout(function() {
+        if (currentPage === 'node-id') loadIdConfigs(true);
+      }, 3000);
   } catch(e) {
     // Don't wipe the list (and any open form) over one failed poll.
     if (!live) el.innerHTML = '<span style="color:var(--danger)">Error loading ID monitors.</span>';

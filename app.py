@@ -18383,13 +18383,17 @@ def _morse_pcm(text: str, wpm: int, freq: int, amplitude: int, rate: int = 8000)
     return bytes(out)
 
 
-def _play_id_sound(row, event: str = "final") -> str:
+def _play_id_sound(row, event: str = "final", test: bool = False) -> str:
     """Play the sound `event` is set to and return the path that went out,
-    so the caller can size _id_mark_played()'s guard off the right file."""
+    so the caller can size _id_mark_played()'s guard off the right file.
+    `test` marks a Manager Test Play, which otherwise logs exactly like the
+    monitor firing on its own -- three Test Plays in a row read as initial,
+    interval and final IDs seconds apart, which the monitor can't do."""
     node = row["node"]
     path = _id_sound_for(row, event)
     cmd  = f"rpt {row['play_cmd']} {node} {path}"
-    log("INFO", f"[ID] Playing {event} ID for '{row['name']}' on {node}: {cmd!r}")
+    verb = "Test-playing" if test else "Playing"
+    log("INFO", f"[ID] {verb} {event} ID for '{row['name']}' on {node}: {cmd!r}")
     def _play(ami, _cmd=cmd):
         return {"output": ami.command(_cmd)}
     ami_send_command(_play)
@@ -18691,7 +18695,7 @@ def api_id_play(iid):
     if event not in ID_SOUND_EVENTS:
         return jsonify({"error": "Invalid ID event"}), 400
     try:
-        played_path = _play_id_sound(row, event)
+        played_path = _play_id_sound(row, event, test=True)
         with _id_runtime_lock:
             rt = _id_runtime.setdefault(iid, _id_new_runtime(row))
             _id_mark_played(rt, row, time.time(), played_path)

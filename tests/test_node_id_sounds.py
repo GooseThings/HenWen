@@ -208,6 +208,18 @@ class TestPlayCommandUsesTheEventsSlot:
         app._play_id_sound(row)
         assert sent["cmd"] == "rpt localplay 546054 henwen/long"
 
+    @pytest.mark.parametrize("test,verb", [(False, "Playing"), (True, "Test-playing")])
+    def test_test_play_logs_distinctly(self, monkeypatch, test, verb):
+        """A Test Play must not log like the monitor firing on its own."""
+        lines = []
+        monkeypatch.setattr(app, "ami_send_command", lambda fn: fn(_FakeAmi({})))
+        monkeypatch.setattr(app, "log", lambda level, msg: lines.append(msg))
+        row = dict(ALL_THREE, node="546054", name="Main ID", play_cmd="playback",
+                   initial_sound="long", interval_sound="morse", final_sound="short")
+        app._play_id_sound(row, "initial", test=test)
+        assert lines == [f"[ID] {verb} initial ID for 'Main ID' on 546054: "
+                         "'rpt playback 546054 henwen/long'"]
+
 
 class TestGuardSizedOffThePlayedSound:
     def test_long_sound_extends_the_activity_guard(self, _sounds_root):
