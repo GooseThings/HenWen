@@ -29,9 +29,16 @@ def monitor(fresh_db, tmp_path, monkeypatch):
     clock = {"t": 1_000_000.0}
     keyed = {"v": False}
     plays = []
+    events = []
     monkeypatch.setattr(app.time, "time", lambda: clock["t"])
     monkeypatch.setattr(app, "_node_active", lambda node: keyed["v"])
-    monkeypatch.setattr(app, "_play_id_sound", lambda row: plays.append(clock["t"]))
+
+    def _fake_play(row, event="final"):
+        plays.append(clock["t"])
+        events.append(event)
+        return app._id_sound_for(row, event)
+
+    monkeypatch.setattr(app, "_play_id_sound", _fake_play)
 
     def step(seconds, is_keyed):
         """Advance in 2s monitor ticks with the node keyed or not."""
@@ -41,6 +48,7 @@ def monitor(fresh_db, tmp_path, monkeypatch):
             clock["t"] += 2
             app._run_id_monitors()
 
+    step.events = events
     yield step, plays
     app._id_runtime.clear()
 
@@ -124,6 +132,30 @@ def test_restart_remembers_recent_id(monitor):
     db.commit()
     step(4, True)
     assert plays == []
+
+
+def test_each_event_plays_its_own_slot(monitor, tmp_path):
+    """The three ID events each resolve their own sound slot, so an
+    operator can run a long voice ID on key-up and after the exchange with
+    a short CW ID on the in-use interval."""
+    step, plays = monitor
+    root = app.ASTERISK_SOUNDS_ROOT
+    for name in ("long", "cw"):
+        with open(app.os.path.join(root, "henwen", name + ".ulaw"), "wb") as fh:
+            fh.write(b"\xff" * 8000)
+    db = app.get_db()
+    db.execute("UPDATE id_configs SET sound_long='henwen/long', sound_morse='henwen/cw', "
+               "initial_sound='long', interval_sound='morse', final_sound='long', "
+               "interval_enabled=1, interval_sec=60")
+    db.commit()
+    app._id_runtime.clear()
+
+    step(4, True)                       # key up -> initial ID
+    step(70, True)                      # stay in use -> interval ID(s)
+    step(200, False)                    # go idle past the 120s delay -> final ID
+    assert step.events[0]     == "initial"
+    assert step.events[-1]    == "final"
+    assert set(step.events[1:-1]) == {"interval"}
 
 
 def test_sound_duration(tmp_path, monkeypatch):
