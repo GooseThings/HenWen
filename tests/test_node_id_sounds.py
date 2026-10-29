@@ -226,3 +226,61 @@ class TestGuardSizedOffThePlayedSound:
         rt = {}
         app._id_mark_played(rt, dict(ALL_THREE), 1000.0)
         assert rt["guard_max_until"] > 1000.0
+
+
+class TestUploadSlugsDoNotCollide:
+    """Every "create a sound" route shares one SOUNDS_DIR, but only
+    announcements get a row to collide against. Uniqueness therefore has to
+    consider the directory too: two different recordings that happen to
+    slug the same (an 'ID.wav' into the short slot and another into the
+    long slot) otherwise resolved to one path, ffmpeg -y overwrote the
+    first, and both slots played the second recording."""
+
+    def test_second_upload_of_the_same_name_gets_its_own_slug(self, fresh_db, tmp_path, monkeypatch):
+        sounds = tmp_path / "henwen"
+        sounds.mkdir()
+        monkeypatch.setattr(app, "SOUNDS_DIR", str(sounds))
+        first = app._ann_unique_slug(app._ann_slug("ID"))
+        (sounds / f"{first}.ulaw").write_bytes(b"FIRST")
+        second = app._ann_unique_slug(app._ann_slug("ID"))
+        assert second != first
+        assert not (sounds / f"{second}.ulaw").exists()
+        # The first recording is still intact behind its own slug.
+        assert (sounds / f"{first}.ulaw").read_bytes() == b"FIRST"
+
+    def test_any_extension_counts_as_taken(self, fresh_db, tmp_path, monkeypatch):
+        sounds = tmp_path / "henwen"
+        sounds.mkdir()
+        monkeypatch.setattr(app, "SOUNDS_DIR", str(sounds))
+        (sounds / "id.gsm").write_bytes(b"x")
+        assert app._ann_unique_slug(app._ann_slug("ID")) != "id"
+
+    def test_an_upload_cannot_steal_an_announcements_slug(self, fresh_db, tmp_path, monkeypatch):
+        sounds = tmp_path / "henwen"
+        sounds.mkdir()
+        monkeypatch.setattr(app, "SOUNDS_DIR", str(sounds))
+        db = app.get_db()
+        db.execute("INSERT INTO announcements (name, slug, node) "
+                   "VALUES ('Net reminder', 'id', '546054')")
+        db.commit()
+        assert app._ann_unique_slug(app._ann_slug("ID")) != "id"
+
+    def test_excluded_row_keeps_its_own_slug(self, fresh_db, tmp_path, monkeypatch):
+        """What lets a TTS edit re-synthesize over its existing path
+        atomically instead of drifting to a new filename."""
+        sounds = tmp_path / "henwen"
+        sounds.mkdir()
+        monkeypatch.setattr(app, "SOUNDS_DIR", str(sounds))
+        db = app.get_db()
+        db.execute("INSERT INTO announcements (name, slug, node) "
+                   "VALUES ('Net reminder', 'net-reminder', '546054')")
+        db.commit()
+        aid = db.execute("SELECT id FROM announcements WHERE slug='net-reminder'").fetchone()["id"]
+        (sounds / "net-reminder.ulaw").write_bytes(b"x")
+        assert app._ann_unique_slug("net-reminder", exclude_id=aid) == "net-reminder"
+
+    def test_a_free_slug_is_returned_unchanged(self, fresh_db, tmp_path, monkeypatch):
+        sounds = tmp_path / "henwen"
+        sounds.mkdir()
+        monkeypatch.setattr(app, "SOUNDS_DIR", str(sounds))
+        assert app._ann_unique_slug(app._ann_slug("My Repeater ID")) == "my_repeater_id"

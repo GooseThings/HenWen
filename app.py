@@ -14175,15 +14175,39 @@ def _ann_slug(name: str) -> str:
     return slug[:48]
 
 
+def _sound_slug_taken_on_disk(slug: str) -> bool:
+    """Whether a sound file already sits at this slug's path, in any format.
+    Globs SOUNDS_DIR itself rather than going through
+    _asterisk_sound_exists(), since SOUNDS_DIR is independently
+    env-overridable and need not live under ASTERISK_SOUNDS_ROOT."""
+    base = os.path.join(SOUNDS_DIR, os.path.basename(slug))
+    return bool(glob.glob(glob.escape(base) + ".*"))
+
+
 def _ann_unique_slug(base: str, exclude_id: int = None) -> str:
-    """Append a counter suffix until the slug is unique in the DB."""
+    """Append a counter suffix until the slug is free -- both in the
+    announcements table and on disk.
+
+    The disk half matters because every "create a sound" route shares one
+    SOUNDS_DIR but only announcements get a row to collide against: a Node
+    ID upload, a TTS announcement and an NWS announcement all land here.
+    Checking the table alone meant two uploads whose filenames slugged the
+    same (two different recordings both called 'ID.wav', one per Node ID
+    sound slot) returned one path, ffmpeg -y overwrote the first, and both
+    slots then played the second recording. The same collision could point
+    an existing announcement row at audio that had been replaced under it.
+    An excluded row's own slug is still returned untouched, so re-saving a
+    row keeps its path (what lets a TTS edit os.replace() atomically in
+    place)."""
     db = get_db()
     slug = base
     i = 1
     while True:
         q = "SELECT id FROM announcements WHERE slug=?"
         row = db.execute(q, (slug,)).fetchone()
-        if row is None or (exclude_id and row["id"] == exclude_id):
+        if row is not None and exclude_id and row["id"] == exclude_id:
+            return slug
+        if row is None and not _sound_slug_taken_on_disk(slug):
             return slug
         slug = f"{base}_{i}"
         i += 1

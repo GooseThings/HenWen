@@ -9086,6 +9086,15 @@ async function createIdConfig() {
     var el = document.getElementById(nidSlotField('nid', '', sl.key));
     if (el) el.value = '';
   });
+  // The event selects have to go back to 'short' alongside the paths they
+  // point at. Left as they were, a monitor saved with the final ID on the
+  // long sound meant the next one -- filled in with only the required
+  // short sound -- was rejected for aiming an event at an empty slot,
+  // with nothing on screen suggesting a leftover choice was the reason.
+  NID_EVENTS.forEach(function(ev) {
+    var el = document.getElementById(nidEventField('nid', '', ev.key));
+    if (el) el.value = 'short';
+  });
   loadIdConfigs();
 }
 
