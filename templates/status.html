@@ -6968,6 +6968,11 @@ function _txExpConstraints(withDevice) {
   if (withDevice && e.mic) c.deviceId = { exact: e.mic };
   return c;
 }
+/* Speaker selection needs setSinkId on #node-audio (legacy Listen) and on
+   AudioContext (low-latency Listen); either is enough to offer the picker. */
+function _txSinkSupported() {
+  return typeof HTMLMediaElement !== 'undefined' && typeof HTMLMediaElement.prototype.setSinkId === 'function';
+}
 function _txEffectiveAgc() { return _txExpTri(_txExp().agc, _txSavedAgc()); }
 
 function _txBuildMicChain() {
@@ -7938,21 +7943,47 @@ function _txUnkey() {
   function applySink() {
     var a = document.getElementById('node-audio');
     var id = _txExp().spk;
-    if (!a || typeof a.setSinkId !== 'function') return Promise.resolve(false);
-    return a.setSinkId(id || '').then(function() { return true; });
+    if (!_txSinkSupported()) return Promise.resolve(false);
+    /* Legacy Listen plays through #node-audio; low-latency Listen plays
+       through its own AudioContext and never touches the element, so both
+       need the sink set or the choice silently misses the live stream. */
+    var ps = [];
+    if (a && typeof a.setSinkId === 'function') ps.push(a.setSinkId(id || ''));
+    if (_listenAudioCtx && typeof _listenAudioCtx.setSinkId === 'function') {
+      ps.push(_listenAudioCtx.setSinkId(id || ''));
+    }
+    return Promise.all(ps).then(function() { return true; });
+  }
+  /* Before mic permission is granted, Chrome hides real devices behind one
+     placeholder per kind with an empty deviceId — every option would then
+     be "" (= System default) and picking one changes nothing. Open the mic
+     once to unlock the real list, then release it immediately. */
+  function enumerateWithPermission() {
+    var md = navigator.mediaDevices;
+    return md.enumerateDevices().then(function(ds) {
+      var hidden = ds.some(function(d) {
+        return (d.kind === 'audioinput' || d.kind === 'audiooutput') && !d.deviceId;
+      });
+      if (!hidden || !md.getUserMedia) return ds;
+      return md.getUserMedia({ audio: true, video: false }).then(function(s) {
+        s.getTracks().forEach(function(t) { t.stop(); });
+        return md.enumerateDevices();
+      }, function() { return ds; });
+    });
   }
   function expScan() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
       expLog('enumerateDevices not available in this browser.'); return Promise.resolve();
     }
-    return navigator.mediaDevices.enumerateDevices().then(function(ds) {
-      var ins  = ds.filter(function(d) { return d.kind === 'audioinput'; });
-      var outs = ds.filter(function(d) { return d.kind === 'audiooutput'; });
+    return enumerateWithPermission().then(function(ds) {
+      /* Drop any still-anonymous placeholder (permission denied) — an
+         empty-id option is indistinguishable from System default. */
+      var ins  = ds.filter(function(d) { return d.kind === 'audioinput' && d.deviceId; });
+      var outs = ds.filter(function(d) { return d.kind === 'audiooutput' && d.deviceId; });
       var e = _txExp();
       fillSelect(document.getElementById('tx-exp-mic'), ins, e.mic, 'System default');
       var spk = document.getElementById('tx-exp-spk');
-      var a = document.getElementById('node-audio');
-      if (!a || typeof a.setSinkId !== 'function') {
+      if (!_txSinkSupported()) {
         fillSelect(spk, [], '', 'Not supported by this browser');
         spk.disabled = true;
       } else {
@@ -8391,6 +8422,14 @@ function _doStartListenWS(audio, node) {
     return;
   }
   _listenAudioCtx = audioCtx;
+  /* Honor the experimental menu's speaker pick — this context outputs
+     straight to the default device otherwise, ignoring #node-audio's sink. */
+  var _spk = _txExp().spk;
+  if (_spk && typeof audioCtx.setSinkId === 'function') {
+    audioCtx.setSinkId(_spk).catch(function(err) {
+      console.warn('[listen] setSinkId failed, using default output:', err && err.name);
+    });
+  }
   /* Some browsers still start a freshly-constructed AudioContext suspended
      even inside a user-gesture call stack (the Listen button's own click
      handler, in this case) -- resume defensively rather than assuming. */
