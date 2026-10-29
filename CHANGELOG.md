@@ -1,5 +1,10 @@
 # Changelog
 
+## v2026.10.28.2
+
+- **Fixed: arming and disarming browser TX announced "HenWen-Web-P connected/disconnected" on the air.** app_rpt announces any link whose name starts with a letter, and the browser-TX dialplan named its link `HenWen-Web-P`. The link is now `0HenWen-Web`, which app_rpt never announces. **Existing installs:** run Manager > TX Diagnostics > "Apply Browser TX Setup" (or `sudo bash tx-spike/apply.sh`) once after updating; it rewrites the old dialplan line in place.
+- **Fixed: the experimental TX audio sources menu couldn't switch the mic or speaker.** Before the page had microphone permission, the browser listed every device with an empty ID, so every choice meant "System default". The menu now asks for mic access once to get the real list. The speaker choice also now applies to low-latency Listen (the default on HTTPS installs), which plays through its own audio engine and previously ignored it.
+
 ## v2026.10.28
 
 - **Fixed: Node ID played two IDs back to back, every ~2m20s, indefinitely.** The ID's own transmission was read as new activity, so each final ID set off an "initial" ID two seconds later, which in turn earned another final ID once the node went idle. After any ID (Test Play included), the monitor now ignores activity until the node unkeys, capped at the sound's own length plus 15s.
