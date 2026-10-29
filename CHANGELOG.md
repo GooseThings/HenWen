@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Added: three ID sounds per Node ID monitor, and a per-event choice of which one plays.** Each monitor can now hold a short voice ID, a long voice ID and a Morse (CW) ID, and the initial key-up ID, the in-use interval ID and the final ID each pick one of them independently — so, for example, a full voice ID on key-up and after the exchange with a short CW ID on the interval. Only the short slot is required; existing monitors keep their single sound on all three events and behave exactly as before. "Test Play" is now three buttons, one per event, and the activity guard that stops an ID's own transmission retriggering the clock is sized off the sound that actually went out rather than always the short one.
+
 ## v2026.10.28.2
 
 - **Fixed: arming and disarming browser TX announced "HenWen-Web-P connected/disconnected" on the air.** app_rpt announces any link whose name starts with a letter, and the browser-TX dialplan named its link `HenWen-Web-P`. The link is now `0HenWen-Web`, which app_rpt never announces. **Existing installs:** run Manager > TX Diagnostics > "Apply Browser TX Setup" (or `sudo bash tx-spike/apply.sh`) once after updating; it rewrites the old dialplan line in place.

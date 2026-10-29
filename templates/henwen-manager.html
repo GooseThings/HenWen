@@ -2591,15 +2591,12 @@ sudo bash /opt/HenWen/tx-spike/setup-https.sh --http-only              # frontin
             <select id="nid-node" class="val-input" style="width:100%"></select>
           </div>
           <div style="grid-column:1/-1">
-            <label class="toggle-label" style="display:block;margin-bottom:3px" for="nid-path">ID Sound <span class="muted">— start typing to search the sounds on this node (yours are listed first), upload a recording, or generate a Morse code ID</span></label>
-            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <input type="text" id="nid-path" class="val-input" list="nid-sounds" placeholder="Search sounds, e.g. WSCK466" autocomplete="off" style="flex:1;min-width:12rem">
-              <input type="file" id="nid-file" accept=".mp3,.wav,.ogg,.flac,.m4a" style="display:none" onchange="idUploadFile()">
-              <button class="btn btn-sm" type="button" onclick="document.getElementById('nid-file').click()">Upload File</button>
-              <button class="btn btn-sm" type="button" onclick="nidMorseToggle('nid-path')">Morse Code ID</button>
-            </div>
-            <div id="nid-upload-status" style="font-size:0.82rem;margin-top:4px"></div>
-            <div id="nidm-wrap-nid-path"></div>
+            <label class="toggle-label" style="display:block;margin-bottom:3px">ID Sounds <span class="muted">— start typing to search the sounds on this node (yours are listed first), upload a recording, or generate a Morse code ID. Only the short one is required; fill the others in if you want a different ID on the interval or final.</span></label>
+            <div id="nid-slots"></div>
+          </div>
+          <div style="grid-column:1/-1">
+            <label class="toggle-label" style="display:block;margin-bottom:3px">Which sound plays when</label>
+            <div id="nid-events" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px 14px"></div>
           </div>
           <div>
             <label class="toggle-label" style="display:block;margin-bottom:3px">Playback</label>
@@ -3887,7 +3884,7 @@ function showPage(id) {
   else if (id === 'irc-relay')          ircRelayLoad();
   else if (id === 'chat-log')           chatLogLoad();
   else if (id === 'dtmf')             { populateDtmfNodeSelect(); }
-  else if (id === 'node-id')          { loadIdConfigs(); populateIdNodeSelect(); loadIdSounds(); }
+  else if (id === 'node-id')          { nidRenderAddForm(); loadIdConfigs(); populateIdNodeSelect(); loadIdSounds(); }
   else if (id === 'node-access')      { loadNodeAccess(); }
   else if (id === 'announcements')    { loadAnnouncements(); populateAnnNodeSelect(); loadTtsVoices(); }
   else if (id === 'smart-connector') { loadConnectors(); populateConnNodeSelects(); }
@@ -8689,10 +8686,93 @@ function populateIdNodeSelect() {
   if (!nodes.length) { var o = document.createElement('option'); o.value=''; o.textContent='(none)'; sel.appendChild(o); }
 }
 
-async function idUploadFile() {
-  var fileEl = document.getElementById('nid-file');
-  var status = document.getElementById('nid-upload-status');
-  if (!fileEl.files[0]) return;
+// The three sound slots a monitor can hold, and the three ID events that
+// each pick one of them. Both lists mirror app.py's ID_SOUND_SLOTS /
+// ID_SOUND_EVENTS -- the slot keys are what the API stores, so they have to
+// match exactly.
+var NID_SLOTS = [
+  {key:'short', col:'sound_path',  label:'Short voice ID', ph:'Search sounds, e.g. wsck466-short'},
+  {key:'long',  col:'sound_long',  label:'Long voice ID',  ph:'Search sounds, e.g. wsck466-long'},
+  {key:'morse', col:'sound_morse', label:'Morse (CW) ID',  ph:'Use Morse Code ID to generate one'}
+];
+var NID_EVENTS = [
+  {key:'initial_sound',  label:'Initial key-up ID'},
+  {key:'interval_sound', label:'Interval ID'},
+  {key:'final_sound',    label:'Final ID'}
+];
+
+// Element id for one slot's text input. The short slot deliberately keeps
+// the original 'nid-path' / 'nide-path-<id>' ids: nidMorseToggle() builds
+// its panel id from the field id, so renaming it would orphan every
+// existing nidm-wrap-* container.
+function nidSlotField(prefix, suffix, key) {
+  var base = (key === 'short') ? 'path' : key;
+  return prefix + '-' + base + (suffix ? '-' + suffix : '');
+}
+function nidEventField(prefix, suffix, col) {
+  return prefix + '-ev-' + col + (suffix ? '-' + suffix : '');
+}
+
+function nidSlotRows(prefix, suffix, c) {
+  return NID_SLOTS.map(function(sl) {
+    var f = nidSlotField(prefix, suffix, sl.key);
+    var val = c ? (c[sl.col] || '') : '';
+    return '<div style="margin-bottom:10px">' +
+      '<label class="toggle-label" style="display:block;margin-bottom:3px;font-size:0.82rem" for="' + f + '">' +
+        esc(sl.label) + ' <span class="muted">' + (sl.key === 'short' ? '(required)' : '(optional)') + '</span></label>' +
+      '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+        '<input type="text" id="' + f + '" class="val-input" list="nid-sounds" placeholder="' + esc(sl.ph) + '"' +
+          ' autocomplete="off" value="' + esc(val) + '" style="flex:1;min-width:12rem">' +
+        '<input type="file" id="' + f + '-file" accept=".mp3,.wav,.ogg,.flac,.m4a" style="display:none"' +
+          ' onchange="idUploadFile(\'' + f + '\')">' +
+        '<button class="btn btn-sm" type="button" onclick="document.getElementById(\'' + f + '-file\').click()">Upload File</button>' +
+        '<button class="btn btn-sm" type="button" onclick="nidMorseToggle(\'' + f + '\')">Morse Code ID</button>' +
+      '</div>' +
+      '<div id="' + f + '-status" style="font-size:0.82rem;margin-top:4px"></div>' +
+      '<div id="nidm-wrap-' + f + '"></div>' +
+    '</div>';
+  }).join('');
+}
+
+function nidEventSelects(prefix, suffix, c) {
+  return NID_EVENTS.map(function(ev) {
+    var f   = nidEventField(prefix, suffix, ev.key);
+    var cur = (c && c[ev.key]) || 'short';
+    return '<div><label class="toggle-label" style="display:block;margin-bottom:3px;font-size:0.82rem" for="' + f + '">' +
+      esc(ev.label) + '</label><select id="' + f + '" class="val-input" style="width:100%">' +
+      NID_SLOTS.map(function(sl) {
+        return '<option value="' + sl.key + '"' + (cur === sl.key ? ' selected' : '') + '>' + esc(sl.label) + '</option>';
+      }).join('') + '</select></div>';
+  }).join('');
+}
+
+function nidRenderAddForm() {
+  var slots = document.getElementById('nid-slots');
+  var evs   = document.getElementById('nid-events');
+  // Only on first open -- re-rendering would wipe a part-filled form.
+  if (slots && !slots.innerHTML) slots.innerHTML = nidSlotRows('nid', '', null);
+  if (evs   && !evs.innerHTML)   evs.innerHTML   = nidEventSelects('nid', '', null);
+}
+
+// Reads the three slot paths / three event choices out of whichever form
+// (add or per-monitor edit) the prefix+suffix names, as the API field names.
+function nidReadSounds(prefix, suffix) {
+  var out = {};
+  NID_SLOTS.forEach(function(sl) {
+    var el = document.getElementById(nidSlotField(prefix, suffix, sl.key));
+    out[sl.col] = el ? el.value.trim() : '';
+  });
+  NID_EVENTS.forEach(function(ev) {
+    var el = document.getElementById(nidEventField(prefix, suffix, ev.key));
+    out[ev.key] = el ? el.value : 'short';
+  });
+  return out;
+}
+
+async function idUploadFile(target) {
+  var fileEl = document.getElementById(target + '-file');
+  var status = document.getElementById(target + '-status');
+  if (!fileEl || !fileEl.files[0]) return;
   status.innerHTML = '<span class="muted">Converting and uploading...</span>';
   var fd = new FormData();
   fd.append('file', fileEl.files[0]);
@@ -8701,9 +8781,10 @@ async function idUploadFile() {
     var r = await apiFetch('/api/id/upload', { method: 'POST', body: fd });
     var d = await r.json();
     if (!r.ok) { status.innerHTML = '<span style="color:var(--danger)">' + esc(d.error||'Upload failed') + '</span>'; return; }
-    document.getElementById('nid-path').value = d.path;
+    document.getElementById(target).value = d.path;
     status.innerHTML = '<span style="color:var(--green)">Converted and saved. Path auto-filled above.</span>';
     fileEl.value = '';
+    loadIdSounds();
   } catch(e) {
     status.innerHTML = '<span style="color:var(--danger)">Error: ' + esc(String(e)) + '</span>';
   }
@@ -8767,7 +8848,8 @@ async function nidMorseGenerate(target) {
     var d = await r.json();
     if (!r.ok) { status.innerHTML = '<span style="color:var(--danger)">' + esc(d.error || 'Generation failed') + '</span>'; return; }
     document.getElementById(target).value = d.path;
-    var nameEl = target === 'nid-path' ? document.getElementById('nid-name') : null;
+    // Only in the add form (ids 'nid-*', never a per-monitor 'nide-*' edit).
+    var nameEl = /^nid-(path|long|morse)$/.test(target) ? document.getElementById('nid-name') : null;
     if (nameEl && !nameEl.value.trim()) nameEl.value = 'Morse ID (' + text + ')';
     status.innerHTML = '<span style="color:var(--green)">Generated a ' + esc(String(d.seconds)) + 's Morse ID — sound filled in above. Save to use it.</span>';
     loadIdSounds();
@@ -8806,6 +8888,21 @@ async function loadIdConfigs() {
   }
 }
 
+// One line per ID event, naming the slot it's set to and the sound that
+// actually goes out. They differ when a slot the operator picked is empty
+// and the server fell back to the short one -- worth showing, since the
+// point of three slots is knowing which sound keys the radio when.
+function nidSoundSummary(c) {
+  var resolved = c.resolved_sounds || {};
+  return NID_EVENTS.map(function(ev) {
+    var slot = c[ev.key] || 'short';
+    var meta = NID_SLOTS.filter(function(sl) { return sl.key === slot; })[0];
+    var path = resolved[ev.key.replace('_sound', '')] || '';
+    return '<div><span class="muted">' + esc(ev.label) + ':</span> ' +
+      esc(meta ? meta.label : slot) + ' <code>' + esc(path || '(none)') + '</code></div>';
+  }).join('');
+}
+
 function nidCard(c) {
   var enabled = c.enabled ? '' : '<span style="color:var(--text2)">Disabled &nbsp;</span>';
   var last = c.last_id_time ? c.last_id_time : 'Never';
@@ -8817,7 +8914,7 @@ function nidCard(c) {
     '</div>' +
     '<div class="card-body" style="font-size:0.88rem">' +
       '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:4px 18px;margin-bottom:10px">' +
-        '<div><span class="muted">Sound path:</span> <code>' + esc(c.sound_path) + '</code></div>' +
+        nidSoundSummary(c) +
         '<div><span class="muted">Playback:</span> ' + (c.play_cmd === 'playback' ? 'All connected links' : 'Local only') + '</div>' +
         '<div><span class="muted">Interval ID:</span> ' + (c.interval_enabled ? 'every ' + esc(String(Math.min(c.interval_sec, c.required_sec || c.interval_sec))) + 's' : 'Off (forced every ' + esc(String(c.required_sec || 600)) + 's in use)') + '</div>' +
         '<div><span class="muted">Final ID delay:</span> ' + esc(String(c.idle_delay_sec)) + 's after going idle</div>' +
@@ -8826,7 +8923,10 @@ function nidCard(c) {
       '</div>' +
       '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
         '<button class="btn btn-sm" onclick="nidToggle(' + c.id + ')">' + (c.enabled ? 'Disable' : 'Enable') + '</button>' +
-        '<button class="btn btn-sm" onclick="nidTestPlay(' + c.id + ')">Test Play</button>' +
+        NID_EVENTS.map(function(ev) {
+          return '<button class="btn btn-sm" onclick="nidTestPlay(' + c.id + ',&quot;' +
+                 ev.key.replace('_sound','') + '&quot;)">Test ' + esc(ev.label.replace(' ID','')) + '</button>';
+        }).join('') +
         '<button class="btn btn-sm" onclick="nidEditShow(' + c.id + ')">Edit</button>' +
         '<button class="btn btn-sm" style="color:var(--danger);border-color:var(--danger)" onclick=\'nidDelete(' + c.id + ',' + esc(JSON.stringify(c.name)) + ')\'>Delete</button>' +
       '</div>' +
@@ -8843,12 +8943,11 @@ function nidEditForm(c) {
       '<input type="text" id="nide-name-' + c.id + '" class="val-input" value="' + esc(c.name) + '" style="width:100%"></div>' +
     '<div><label class="toggle-label" style="display:block;margin-bottom:3px">Node</label>' +
       '<input type="text" id="nide-node-' + c.id + '" class="val-input" value="' + esc(c.node) + '" style="width:100%"></div>' +
-    '<div style="grid-column:1/-1"><label class="toggle-label" style="display:block;margin-bottom:3px" for="nide-path-' + c.id + '">ID Sound</label>' +
-      '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
-        '<input type="text" id="nide-path-' + c.id + '" class="val-input" list="nid-sounds" autocomplete="off" value="' + esc(c.sound_path) + '" style="flex:1;min-width:12rem">' +
-        '<button class="btn btn-sm" type="button" onclick="nidMorseToggle(\'nide-path-' + c.id + '\')">Morse Code ID</button>' +
-      '</div>' +
-      '<div id="nidm-wrap-nide-path-' + c.id + '"></div></div>' +
+    '<div style="grid-column:1/-1"><label class="toggle-label" style="display:block;margin-bottom:3px">ID Sounds</label>' +
+      nidSlotRows('nide', c.id, c) + '</div>' +
+    '<div style="grid-column:1/-1"><label class="toggle-label" style="display:block;margin-bottom:3px">Which sound plays when</label>' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px 14px">' +
+        nidEventSelects('nide', c.id, c) + '</div></div>' +
     '<div style="grid-column:1/-1"><label class="toggle-label" style="display:block;margin-bottom:3px">Playback</label>' +
       '<select id="nide-cmd-' + c.id + '" class="val-input" style="width:100%">' +
         '<option value="localplay"' + (c.play_cmd!=='playback'?' selected':'') + '>Local only (localplay) — other connected nodes, not this node\'s own RF</option>' +
@@ -8878,8 +8977,11 @@ async function nidToggle(id) {
   loadIdConfigs();
 }
 
-async function nidTestPlay(id) {
-  var r = await apiFetch('/api/id/' + id + '/play', { method: 'POST' });
+async function nidTestPlay(id, event) {
+  var r = await apiFetch('/api/id/' + id + '/play', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ event: event || 'final' })
+  });
   var d = await r.json();
   if (!r.ok) alert('Playback error: ' + (d.error || r.status));
   else loadIdConfigs();
@@ -8897,13 +8999,13 @@ async function nidSaveEdit(id) {
   var body = {
     name:           document.getElementById('nide-name-' + id).value.trim(),
     node:           document.getElementById('nide-node-' + id).value.trim(),
-    sound_path:     document.getElementById('nide-path-' + id).value.trim(),
     interval_sec:   parseInt(document.getElementById('nide-int-'  + id).value, 10),
     idle_delay_sec: parseInt(document.getElementById('nide-idle-' + id).value, 10),
     initial_id:     document.getElementById('nide-init-' + id).checked,
     interval_enabled: document.getElementById('nide-inton-' + id).checked,
     play_cmd:       document.getElementById('nide-cmd-' + id).value,
   };
+  Object.assign(body, nidReadSounds('nide', id));
   var r = await apiFetch('/api/id/' + id, {
     method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
   });
@@ -8917,15 +9019,15 @@ async function createIdConfig() {
   var body = {
     name:           document.getElementById('nid-name').value.trim(),
     node:           document.getElementById('nid-node').value.trim(),
-    sound_path:     document.getElementById('nid-path').value.trim(),
     interval_sec:   parseInt(document.getElementById('nid-interval').value, 10),
     idle_delay_sec: parseInt(document.getElementById('nid-idle').value, 10),
     initial_id:     document.getElementById('nid-initial').checked,
     interval_enabled: document.getElementById('nid-interval-on').checked,
     play_cmd:       document.getElementById('nid-play-cmd').value,
   };
+  Object.assign(body, nidReadSounds('nid', ''));
   if (!body.name)       { res.innerHTML = '<span style="color:var(--danger)">Name is required.</span>'; return; }
-  if (!body.sound_path) { res.innerHTML = '<span style="color:var(--danger)">Sound path is required. Upload a file or enter a path.</span>'; return; }
+  if (!body.sound_path) { res.innerHTML = '<span style="color:var(--danger)">The short voice ID sound is required. Upload a file or enter a path.</span>'; return; }
   res.innerHTML = '<span class="muted">Saving...</span>';
   var r = await apiFetch('/api/id', {
     method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
@@ -8934,7 +9036,10 @@ async function createIdConfig() {
   if (!r.ok) { res.innerHTML = '<span style="color:var(--danger)">' + esc(d.error || 'Error') + '</span>'; return; }
   res.innerHTML = '<span style="color:var(--green)">Saved: ' + esc(d.name) + '</span>';
   document.getElementById('nid-name').value = '';
-  document.getElementById('nid-path').value = '';
+  NID_SLOTS.forEach(function(sl) {
+    var el = document.getElementById(nidSlotField('nid', '', sl.key));
+    if (el) el.value = '';
+  });
   loadIdConfigs();
 }
 

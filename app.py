@@ -825,7 +825,12 @@ def get_db():
         initial_id      INTEGER NOT NULL DEFAULT 1,
         last_id_time    TEXT,
         created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
-        play_cmd        TEXT    NOT NULL DEFAULT 'localplay'
+        play_cmd        TEXT    NOT NULL DEFAULT 'localplay',
+        sound_long      TEXT    NOT NULL DEFAULT '',
+        sound_morse     TEXT    NOT NULL DEFAULT '',
+        initial_sound   TEXT    NOT NULL DEFAULT 'short',
+        interval_sound  TEXT    NOT NULL DEFAULT 'short',
+        final_sound     TEXT    NOT NULL DEFAULT 'short'
     )""")
     # Same play_cmd convention as announcements/nws_alert_config -- 'localplay'
     # reaches only other connected ASL nodes, never this node's own local
@@ -842,6 +847,22 @@ def get_db():
     # Existing rows keep the interval ID they already had.
     if 'interval_enabled' not in _id_cols:
         conn.execute("ALTER TABLE id_configs ADD COLUMN interval_enabled INTEGER NOT NULL DEFAULT 1")
+    # Three sound slots per monitor, and a per-event choice of which one
+    # plays. `sound_path` IS the short slot -- deliberately not renamed, so
+    # existing rows, the API field name and every stored path keep working
+    # untouched. The two new slots start empty and each event starts on
+    # 'short', which is exactly the single-sound behaviour every existing
+    # row already had; _id_sound_for() also falls back to short whenever a
+    # selected slot is blank, so a half-filled row can't key the radio with
+    # nothing. Typical use is a long voice ID on key-up and after the
+    # exchange, with a short voice or CW ID on the in-use interval.
+    if 'sound_long' not in _id_cols:
+        conn.execute("ALTER TABLE id_configs ADD COLUMN sound_long TEXT NOT NULL DEFAULT ''")
+    if 'sound_morse' not in _id_cols:
+        conn.execute("ALTER TABLE id_configs ADD COLUMN sound_morse TEXT NOT NULL DEFAULT ''")
+    for _ev_col in ("initial_sound", "interval_sound", "final_sound"):
+        if _ev_col not in _id_cols:
+            conn.execute(f"ALTER TABLE id_configs ADD COLUMN {_ev_col} TEXT NOT NULL DEFAULT 'short'")
     conn.execute("""CREATE TABLE IF NOT EXISTS connection_history (
         id                INTEGER PRIMARY KEY AUTOINCREMENT,
         local_node        TEXT    NOT NULL,
@@ -18088,6 +18109,46 @@ ID_GUARD_FALLBACK_SEC = 60.0      # sound length when it can't be measured
 ID_REQUIRED_SEC = 600         # 47 CFR 97.119(a): at least every 10 minutes
 
 
+# The three sound slots a monitor can hold, and which column each ID event
+# reads its slot choice from. 'short' maps to `sound_path` (see the schema
+# note): that column is the short slot, not a separate fourth sound.
+ID_SOUND_SLOTS   = ("short", "long", "morse")
+_ID_SLOT_COLUMNS = {"short": "sound_path", "long": "sound_long", "morse": "sound_morse"}
+ID_SOUND_EVENTS  = {"initial": "initial_sound", "interval": "interval_sound",
+                    "final":   "final_sound"}
+# Only for error text -- these are what the Manager page calls each one.
+_ID_SLOT_LABELS  = {"short": "short voice", "long": "long voice", "morse": "Morse (CW)"}
+_ID_EVENT_LABELS = {"initial": "initial key-up", "interval": "interval", "final": "final"}
+
+
+def _id_slot_path(row, slot: str) -> str:
+    """The sound saved in one slot, or '' if that slot is unfilled. Tolerates
+    a row read before the slot columns existed (older sqlite3.Row, or a
+    plain dict built by a test) by treating a missing column as unfilled."""
+    col = _ID_SLOT_COLUMNS.get(slot)
+    if not col:
+        return ""
+    try:
+        return str(row[col] or "").strip()
+    except (KeyError, IndexError):
+        return ""
+
+
+def _id_sound_for(row, event: str) -> str:
+    """The sound `event` should play. Falls back to the short slot whenever
+    the chosen slot is blank or the choice isn't recognised -- an ID event
+    must never resolve to nothing, since `rpt localplay` with no file just
+    fails silently and the station goes unidentified."""
+    col = ID_SOUND_EVENTS.get(event)
+    slot = "short"
+    if col:
+        try:
+            slot = str(row[col] or "short").strip()
+        except (KeyError, IndexError):
+            slot = "short"
+    return _id_slot_path(row, slot) or _id_slot_path(row, "short")
+
+
 def _id_interval_sec(row) -> int:
     """Seconds between IDs while the node stays in use."""
     if row["interval_enabled"]:
@@ -18116,10 +18177,14 @@ def _id_new_runtime(row) -> dict:
     return {"state": "idle", "last_id_ts": last, "idle_start_ts": 0.0, "active_since": 0.0}
 
 
-def _id_mark_played(rt: dict, row, now: float):
+def _id_mark_played(rt: dict, row, now: float, sound_path: str = None):
     """Record an ID in runtime state `rt`, and start the guard that keeps
-    the ID's own transmission from reading as activity."""
-    dur = _sound_duration_sec(row["sound_path"].strip())
+    the ID's own transmission from reading as activity. `sound_path` is the
+    sound that actually went out, which matters now that the three events
+    can each play a different-length one -- sizing the guard off the short
+    slot while a long voice ID is still transmitting would let the ID's own
+    tail read as activity and retrigger the clock."""
+    dur = _sound_duration_sec((sound_path or _id_slot_path(row, "short")).strip())
     rt["last_id_ts"]      = now
     rt["guard_min_until"] = now + ID_GUARD_MIN_SEC
     rt["guard_max_until"] = now + max(ID_GUARD_MIN_SEC,
@@ -18294,14 +18359,17 @@ def _morse_pcm(text: str, wpm: int, freq: int, amplitude: int, rate: int = 8000)
     return bytes(out)
 
 
-def _play_id_sound(row):
+def _play_id_sound(row, event: str = "final") -> str:
+    """Play the sound `event` is set to and return the path that went out,
+    so the caller can size _id_mark_played()'s guard off the right file."""
     node = row["node"]
-    path = row["sound_path"].strip()
+    path = _id_sound_for(row, event)
     cmd  = f"rpt {row['play_cmd']} {node} {path}"
-    log("INFO", f"[ID] Playing ID for '{row['name']}' on {node}: {cmd!r}")
+    log("INFO", f"[ID] Playing {event} ID for '{row['name']}' on {node}: {cmd!r}")
     def _play(ami, _cmd=cmd):
         return {"output": ami.command(_cmd)}
     ami_send_command(_play)
+    return path
 
 
 def _run_id_monitors():
@@ -18321,6 +18389,7 @@ def _run_id_monitors():
         active  = _node_active(row["node"])
         new_rt  = dict(rt)
         played  = False
+        played_path = None
 
         guard_max = rt.get("guard_max_until", 0.0)
         if now < guard_max:
@@ -18336,7 +18405,7 @@ def _run_id_monitors():
                 recent = rt["last_id_ts"] > 0 and (now - rt["last_id_ts"]) < ID_REQUIRED_SEC
                 if row["initial_id"] and not recent:
                     try:
-                        _play_id_sound(row)
+                        played_path = _play_id_sound(row, "initial")
                         played = True
                     except Exception as e:
                         log("ERROR", f"[ID] Initial ID failed for '{row['name']}': {e}")
@@ -18346,7 +18415,7 @@ def _run_id_monitors():
                     new_rt["active_since"] = now
                 if (now - (_id_clock_start(new_rt) or now)) >= _id_interval_sec(row):
                     try:
-                        _play_id_sound(row)
+                        played_path = _play_id_sound(row, "interval")
                         played = True
                     except Exception as e:
                         log("ERROR", f"[ID] Interval ID failed for '{row['name']}': {e}")
@@ -18357,7 +18426,7 @@ def _run_id_monitors():
             elif rt["state"] == "pending_idle":
                 if (now - rt["idle_start_ts"]) >= row["idle_delay_sec"]:
                     try:
-                        _play_id_sound(row)
+                        played_path = _play_id_sound(row, "final")
                         new_rt["state"]         = "idle"
                         new_rt["idle_start_ts"] = 0.0
                         new_rt["active_since"]  = 0.0
@@ -18366,7 +18435,7 @@ def _run_id_monitors():
                         log("ERROR", f"[ID] Final ID failed for '{row['name']}': {e}")
 
         if played:
-            _id_mark_played(new_rt, row, now)
+            _id_mark_played(new_rt, row, now, played_path)
 
         with _id_runtime_lock:
             _id_runtime[cid] = new_rt
@@ -18411,6 +18480,10 @@ def api_id_list():
         d["last_id_ts"]     = rt["last_id_ts"]
         d["idle_start_ts"]  = rt["idle_start_ts"]
         d["required_sec"]   = ID_REQUIRED_SEC
+        # What each event would actually play, after _id_sound_for()'s
+        # fall back to the short slot -- so the card shows the real sound
+        # rather than just the slot name the operator picked.
+        d["resolved_sounds"] = {ev: _id_sound_for(row, ev) for ev in ID_SOUND_EVENTS}
         since = _id_clock_start(rt)
         if rt["state"] == "active" and since > 0:
             d["next_id_sec"] = max(0, _id_interval_sec(row) - int(now - since))
@@ -18424,6 +18497,39 @@ def api_id_list():
     return jsonify(out)
 
 
+def _validate_id_sounds(slots: dict, events: dict, previous: dict = None):
+    """Shared create/update validation for the three sound slots and the
+    three per-event slot choices. Returns an error string, or None.
+    `previous` holds the row's current slot paths: an existence check only
+    runs on a path that actually changed, so a monitor whose file was
+    removed later can still be renamed or disabled instead of being stuck
+    uneditable -- the same rule the single-sound route already had."""
+    previous = previous or {}
+    for slot, path in slots.items():
+        label = _ID_SLOT_LABELS.get(slot, slot)
+        if not path:
+            if slot == "short":
+                return "The short voice ID sound is required"
+            continue
+        if not re.match(r'^[a-zA-Z0-9/_\-]{1,256}$', path):
+            return f"The {label} ID sound path contains invalid characters"
+        if path != previous.get(slot) and not _asterisk_sound_exists(path):
+            return (f"No sound file found for '{path}' under {ASTERISK_SOUNDS_ROOT} "
+                    f"-- upload one, or check the path")
+    for event, slot in events.items():
+        event_label = _ID_EVENT_LABELS.get(event, event)
+        if slot not in ID_SOUND_SLOTS:
+            return f"Invalid sound choice for the {event_label} ID"
+        # Falling back to short silently would be a surprise on the air:
+        # someone pointing the final ID at an empty Morse slot means to use
+        # Morse, and should be told it isn't there rather than discovering
+        # the short one went out instead.
+        if not slots.get(slot):
+            return (f"The {event_label} ID is set to the "
+                    f"{_ID_SLOT_LABELS.get(slot, slot)} ID sound, but that one is empty")
+    return None
+
+
 @app.route("/api/id", methods=["POST"])
 def api_id_create():
     if session.get('role') not in ('superuser', 'owner'):
@@ -18431,7 +18537,6 @@ def api_id_create():
     data = request.json or {}
     name           = str(data.get("name",           "")).strip()
     node           = str(data.get("node",           "")).strip()
-    sound_path     = str(data.get("sound_path",     "")).strip()
     interval_sec   = int(data.get("interval_sec",   600))
     idle_delay_sec = int(data.get("idle_delay_sec", 120))
     initial_id     = 1 if data.get("initial_id", True) else 0
@@ -18439,28 +18544,32 @@ def api_id_create():
     play_cmd       = str(data.get("play_cmd",       "localplay")).strip()
     if play_cmd not in ("localplay", "playback"):
         play_cmd = "localplay"
+    slots  = {"short": str(data.get("sound_path",  "")).strip(),
+              "long":  str(data.get("sound_long",  "")).strip(),
+              "morse": str(data.get("sound_morse", "")).strip()}
+    events = {ev: str(data.get(col, "short")).strip() for ev, col in ID_SOUND_EVENTS.items()}
 
     if not name:
         return jsonify({"error": "Name is required"}), 400
     if not re.match(r'^\d{4,7}$', node):
         return jsonify({"error": "Invalid node number"}), 400
-    if not sound_path:
-        return jsonify({"error": "Sound path is required"}), 400
-    if not re.match(r'^[a-zA-Z0-9/_\-]{1,256}$', sound_path):
-        return jsonify({"error": "sound_path contains invalid characters"}), 400
-    if not _asterisk_sound_exists(sound_path):
-        return jsonify({"error": f"No sound file found for '{sound_path}' under "
-                                 f"{ASTERISK_SOUNDS_ROOT} -- upload one, or check the path"}), 400
+    err = _validate_id_sounds(slots, events)
+    if err:
+        return jsonify({"error": err}), 400
 
     db = get_db()
     db.execute(
-        "INSERT INTO id_configs (name, node, sound_path, interval_sec, idle_delay_sec, initial_id, "
-        "interval_enabled, play_cmd) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (name, node, sound_path, interval_sec, idle_delay_sec, initial_id, interval_on, play_cmd)
+        "INSERT INTO id_configs (name, node, sound_path, sound_long, sound_morse, "
+        "initial_sound, interval_sound, final_sound, interval_sec, idle_delay_sec, "
+        "initial_id, interval_enabled, play_cmd) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (name, node, slots["short"], slots["long"], slots["morse"],
+         events["initial"], events["interval"], events["final"],
+         interval_sec, idle_delay_sec, initial_id, interval_on, play_cmd)
     )
     db.commit()
     row = db.execute("SELECT * FROM id_configs WHERE rowid=last_insert_rowid()").fetchone()
-    log("INFO", f"[ID] Created '{name}' (node={node}, sound={sound_path})")
+    log("INFO", f"[ID] Created '{name}' (node={node}, sounds={slots}, events={events})")
     return jsonify(dict(row)), 201
 
 
@@ -18476,7 +18585,6 @@ def api_id_update(iid):
     data = request.json or {}
     name           = str(data.get("name",           row["name"])).strip()
     node           = str(data.get("node",           row["node"])).strip()
-    sound_path     = str(data.get("sound_path",     row["sound_path"])).strip()
     interval_sec   = int(data.get("interval_sec",   row["interval_sec"]))
     idle_delay_sec = int(data.get("idle_delay_sec", row["idle_delay_sec"]))
     initial_id     = 1 if data.get("initial_id", bool(row["initial_id"])) else 0
@@ -18484,23 +18592,26 @@ def api_id_update(iid):
     play_cmd       = str(data.get("play_cmd",       row["play_cmd"])).strip()
     if play_cmd not in ("localplay", "playback"):
         play_cmd = "localplay"
+    prev   = {slot: _id_slot_path(row, slot) for slot in ID_SOUND_SLOTS}
+    slots  = {"short": str(data.get("sound_path",  prev["short"])).strip(),
+              "long":  str(data.get("sound_long",  prev["long"])).strip(),
+              "morse": str(data.get("sound_morse", prev["morse"])).strip()}
+    events = {ev: str(data.get(col, (row[col] if col in row.keys() else "short")) or "short").strip()
+              for ev, col in ID_SOUND_EVENTS.items()}
 
     if not re.match(r'^\d{4,7}$', node):
         return jsonify({"error": "Invalid node number"}), 400
-    if not sound_path:
-        return jsonify({"error": "Sound path is required"}), 400
-    if not re.match(r'^[a-zA-Z0-9/_\-]{1,256}$', sound_path):
-        return jsonify({"error": "sound_path contains invalid characters"}), 400
-    # Only when the path changes, so an ID whose file was removed later
-    # can still be renamed/disabled instead of being stuck uneditable.
-    if sound_path != row["sound_path"] and not _asterisk_sound_exists(sound_path):
-        return jsonify({"error": f"No sound file found for '{sound_path}' under "
-                                 f"{ASTERISK_SOUNDS_ROOT} -- upload one, or check the path"}), 400
+    err = _validate_id_sounds(slots, events, prev)
+    if err:
+        return jsonify({"error": err}), 400
 
     db.execute(
-        "UPDATE id_configs SET name=?, node=?, sound_path=?, interval_sec=?, "
+        "UPDATE id_configs SET name=?, node=?, sound_path=?, sound_long=?, sound_morse=?, "
+        "initial_sound=?, interval_sound=?, final_sound=?, interval_sec=?, "
         "idle_delay_sec=?, initial_id=?, interval_enabled=?, play_cmd=? WHERE id=?",
-        (name, node, sound_path, interval_sec, idle_delay_sec, initial_id, interval_on, play_cmd, iid)
+        (name, node, slots["short"], slots["long"], slots["morse"],
+         events["initial"], events["interval"], events["final"],
+         interval_sec, idle_delay_sec, initial_id, interval_on, play_cmd, iid)
     )
     db.commit()
     updated = db.execute("SELECT * FROM id_configs WHERE id=?", (iid,)).fetchone()
@@ -18549,11 +18660,17 @@ def api_id_play(iid):
     row = db.execute("SELECT * FROM id_configs WHERE id=?", (iid,)).fetchone()
     if not row:
         return jsonify({"error": "Not found"}), 404
+    # Which event's sound to audition. Defaults to the final ID, which is
+    # 'short' on every row that predates the three slots -- the same sound
+    # this button has always played.
+    event = str((request.get_json(silent=True) or {}).get("event", "final")).strip()
+    if event not in ID_SOUND_EVENTS:
+        return jsonify({"error": "Invalid ID event"}), 400
     try:
-        _play_id_sound(row)
+        played_path = _play_id_sound(row, event)
         with _id_runtime_lock:
             rt = _id_runtime.setdefault(iid, _id_new_runtime(row))
-            _id_mark_played(rt, row, time.time())
+            _id_mark_played(rt, row, time.time(), played_path)
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         db.execute("UPDATE id_configs SET last_id_time=? WHERE id=?", (now_str, iid))
         db.commit()
