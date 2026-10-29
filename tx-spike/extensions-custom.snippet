@@ -5,6 +5,11 @@
 ; #tryinclude "custom/extensions.conf" already present in extensions.conf.
 [henwen-browser-tx]
 exten => 2__NODENUM__,1,Answer()
- same => n,Rpt(__NODENUM__,P,${CALLERID(name)}-P)
+; The third argument is app_rpt's name for this link. It must start with '0':
+; app_rpt announces "<name> connected" for any link name above '9' and
+; "<name> disconnected" for any not starting with '0', which keyed the
+; transmitter with a spelled-out "HenWen-Web-P" every arm/disarm. Not
+; all-digits either, or a second browser arming kicks the first off.
+ same => n,Rpt(__NODENUM__,P,0HenWen-Web)
  same => n,Hangup()
 ; ── end HenWen browser transmitter ────────────────────────────────────────

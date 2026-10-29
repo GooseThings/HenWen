@@ -119,7 +119,14 @@ fi
 echo "== custom/extensions.conf"
 mkdir -p /etc/asterisk/custom
 if [ -f /etc/asterisk/custom/extensions.conf ] && grep -q "$MARKER" /etc/asterisk/custom/extensions.conf; then
-  echo "   already patched, skipping"
+  # Installs patched before the link was renamed announce "HenWen-Web-P
+  # connected/disconnected" on the air every arm; migrate that one line.
+  if grep -qF 'P,${CALLERID(name)}-P)' /etc/asterisk/custom/extensions.conf; then
+    sed -i 's/,P,\${CALLERID(name)}-P)/,P,0HenWen-Web)/' /etc/asterisk/custom/extensions.conf
+    echo "   renamed browser-TX link to silence app_rpt connect/disconnect announcements"
+  else
+    echo "   already patched, skipping"
+  fi
 else
   sed "s/__NODENUM__/$NODENUM/g" "$SPIKE_DIR/extensions-custom.snippet" >> /etc/asterisk/custom/extensions.conf
   chown asterisk:asterisk /etc/asterisk/custom/extensions.conf
