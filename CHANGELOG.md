@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v2026.10.30
 
 - **Fixed: the Node ID page showed "Idle" while the node was keyed.** The page only refreshed itself while a monitor was already active, so one opened during a quiet spell never refreshed at all and missed every key-up until reloaded. It now refreshes every 3 seconds while the page is open.
 - **Changed: a Node ID "Test Play" now logs as `Test-playing … ID`.** It used to log exactly like the monitor firing, so testing the three sounds in a row looked like initial, interval and final IDs seconds apart.
