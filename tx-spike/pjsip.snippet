@@ -24,6 +24,19 @@ dtls_auto_generate_cert=yes
 auth=henwen-tx-auth
 aors=henwen-tx
 callerid="HenWen-Web" <__NODENUM__>
+; Tear the channel down when media stops. A browser that vanishes without
+; sending BYE (tab closed, laptop slept, WiFi dropped) otherwise leaves
+; Rpt(<node>,P) up forever -- confirmed live 2026-10-30 on a phone-mode
+; channel 27 HOURS old, still listed by `rpt nodes` as a transceive peer,
+; while res_pjsip retried an in-dialog request every 30s for ~3,200 log
+; lines. Session timers (timers=yes, 1800s) do NOT catch this. The browser
+; sends RTP continuously the whole time it is armed -- the mic track is
+; never disabled, PTT only sends DTMF (see _txKey() in status.html) -- so
+; no inbound RTP always means the session is dead or its media path never
+; came up, and both should hang up rather than linger. The sibling
+; henwen-oink-tx endpoint already did this; browser TX just never got it.
+rtp_timeout=60
+rtp_timeout_hold=60
 
 [henwen-tx-auth]
 type=auth

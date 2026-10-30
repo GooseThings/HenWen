@@ -108,6 +108,20 @@ if grep -q "$MARKER" /etc/asterisk/pjsip.conf; then
   else
     echo "   existing secret kept"
   fi
+
+  # rtp_timeout was added to pjsip.snippet after the first installs shipped
+  # (see that file for the zombie-channel it fixes). Appending the snippet is
+  # skipped on an already-patched install, so without this an existing box
+  # never picks the setting up no matter how often apply.sh is re-run.
+  if ! sed -n '/^\[henwen-tx\]$/,/^\[henwen-tx-auth\]$/p' /etc/asterisk/pjsip.conf \
+       | grep -q '^rtp_timeout='; then
+    echo "   adding rtp_timeout to existing [henwen-tx] endpoint (zombie-channel fix)"
+    cp -a /etc/asterisk/pjsip.conf "$BACKUP_DIR/pjsip.conf.pre-rtp-timeout"
+    sed -i '/^callerid="HenWen-Web" </a rtp_timeout=60\nrtp_timeout_hold=60' \
+      /etc/asterisk/pjsip.conf
+  else
+    echo "   rtp_timeout already set"
+  fi
 else
   TXSECRET=$(openssl rand -hex 16)
   sed -e "s/__TXSECRET__/$TXSECRET/" -e "s/__NODENUM__/$NODENUM/g" "$SPIKE_DIR/pjsip.snippet" >> /etc/asterisk/pjsip.conf
