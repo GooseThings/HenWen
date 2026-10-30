@@ -108,6 +108,32 @@ if grep -q "$MARKER" /etc/asterisk/pjsip.conf; then
   else
     echo "   existing secret kept"
   fi
+
+  # rtp_timeout was added to pjsip.snippet after the first installs shipped
+  # (see that file for the zombie-channel it fixes). Appending the snippet is
+  # skipped on an already-patched install, so without this an existing box
+  # never picks the setting up no matter how often apply.sh is re-run.
+  # Deliberately awk and not `sed -n '/^\[henwen-tx\]$/,/^\[henwen-tx-auth\]$/p'`:
+  # pjsip.snippet declares [henwen-tx] TWICE (the endpoint, then the aor after
+  # [henwen-tx-auth]), so a sed range re-triggers on that second header and,
+  # finding no further [henwen-tx-auth], runs to EOF -- swallowing every later
+  # endpoint in the file. On any box that also has the henwen-oink-tx endpoint
+  # (which carries its own rtp_timeout=30) the guard then saw that value and
+  # skipped the browser-TX migration entirely. Match the [henwen-tx] block that
+  # actually contains type=endpoint, and evaluate per block.
+  if ! awk '
+        /^\[/ { if (inb && ep && rt) found=1; inb = ($0 == "[henwen-tx]"); ep=0; rt=0; next }
+        inb && /^[[:space:]]*type[[:space:]]*=[[:space:]]*endpoint[[:space:]]*$/ { ep=1 }
+        inb && /^[[:space:]]*rtp_timeout[[:space:]]*=/ { rt=1 }
+        END { if (inb && ep && rt) found=1; exit (found ? 0 : 1) }
+      ' /etc/asterisk/pjsip.conf; then
+    echo "   adding rtp_timeout to existing [henwen-tx] endpoint (zombie-channel fix)"
+    cp -a /etc/asterisk/pjsip.conf "$BACKUP_DIR/pjsip.conf.pre-rtp-timeout"
+    sed -i '/^callerid="HenWen-Web" </a rtp_timeout=60\nrtp_timeout_hold=60' \
+      /etc/asterisk/pjsip.conf
+  else
+    echo "   rtp_timeout already set"
+  fi
 else
   TXSECRET=$(openssl rand -hex 16)
   sed -e "s/__TXSECRET__/$TXSECRET/" -e "s/__NODENUM__/$NODENUM/g" "$SPIKE_DIR/pjsip.snippet" >> /etc/asterisk/pjsip.conf
