@@ -1,0 +1,75 @@
+{#
+  Base-path adapter. Include this FIRST in <head>, before any other script.
+
+  HenWen's frontend hardcodes root-absolute URLs in about 300 places -- 274
+  in inline JS ("/api/...", "/static/...", "/login") plus 27 HTML attributes.
+  That is why the app could not be served under a URL path prefix.
+
+  Editing 300 call sites would be a huge, risky diff for a deployment option,
+  so the JS half is handled here instead: one adapter that prefixes
+  root-absolute app URLs as they are used. It patches fetch, XMLHttpRequest
+  and EventSource -- the three things the frontend uses to reach this app --
+  and exposes henwenUrl() for the handful of sites that build a URL without
+  going through any of them (an <audio> src, a location assignment, a
+  WebSocket URL); those are edited directly.
+
+  When HenWen is served at the root (every existing install), request.script_root
+  is "" and this whole block short-circuits to a no-op: no patching, no
+  wrappers, nothing to regress.
+
+  Deliberately NOT prefixed: /asterisk-ws and /ws-audio. Those are Apache-level
+  proxies to Asterisk's own WebSocket server and to audio_ws_relay.py, installed
+  at the vhost root by tx-spike/apply.sh and ws-audio/apply.sh. They are not
+  Flask routes and do not move when the app is mounted at a subpath.
+#}
+<script>
+window.HW_BASE = {{ request.script_root|tojson }};
+(function () {
+  var B = window.HW_BASE || '';
+
+  /* First path segment must be one of the app's own roots. Anything else --
+     an external URL, a protocol-relative //host/path, a fragment, a relative
+     path, /asterisk-ws, /ws-audio -- is returned untouched. */
+  var APP_ROOTS = /^\/(api|static|login|logout|henwen-manager|accessible|status|index\.html|forgot-password|reset-password|accept-invite|login\/2fa)(?=[\/?#]|$)/;
+
+  function henwenUrl(u) {
+    if (!B || typeof u !== 'string' || u.charAt(0) !== '/' || u.charAt(1) === '/') return u;
+    return APP_ROOTS.test(u) ? B + u : u;
+  }
+  window.henwenUrl = henwenUrl;
+
+  /* Same thing for an absolute ws:// or wss:// URL, whose path we have to
+     reach past the scheme and host to find. */
+  window.henwenWsUrl = function (u) {
+    if (!B || typeof u !== 'string') return u;
+    var m = /^(wss?:\/\/[^\/]+)(\/.*)$/.exec(u);
+    return m ? m[1] + henwenUrl(m[2]) : u;
+  };
+
+  if (!B) return;   /* served at the root: leave every global alone */
+
+  if (window.fetch) {
+    var _fetch = window.fetch;
+    window.fetch = function (input, init) {
+      return _fetch.call(this, typeof input === 'string' ? henwenUrl(input) : input, init);
+    };
+  }
+
+  if (window.XMLHttpRequest && XMLHttpRequest.prototype.open) {
+    var _open = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function (method, url) {
+      var args = Array.prototype.slice.call(arguments);
+      args[1] = henwenUrl(url);
+      return _open.apply(this, args);
+    };
+  }
+
+  if (window.EventSource) {
+    var _ES = window.EventSource;
+    var Patched = function (url, config) { return new _ES(henwenUrl(url), config); };
+    Patched.prototype = _ES.prototype;
+    ['CONNECTING', 'OPEN', 'CLOSED'].forEach(function (k, i) { Patched[k] = i; });
+    window.EventSource = Patched;
+  }
+})();
+</script>

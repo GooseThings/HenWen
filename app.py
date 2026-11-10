@@ -549,6 +549,78 @@ class _LocalProxyFix:
 
 
 app.wsgi_app = _LocalProxyFix(app.wsgi_app)
+# ---------------------------------------------------------------------------
+# Serving HenWen under a URL path prefix
+#
+# HenWen has always assumed it owns the root of whatever hostname serves it:
+# every template hardcodes root-absolute URLs ("/api/...", "/static/...",
+# "/login"), and nothing goes through url_for(). That makes it impossible to
+# front at a subpath -- https://example.com/henwen/ -- which is a reasonable
+# thing to want when one box serves several apps, or when two HenWen installs
+# run side by side.
+#
+# The prefix is taken from, in order:
+#   1. URL_PREFIX in the environment (explicit, for a fixed deployment), or
+#   2. the X-Forwarded-Prefix request header, which is the de-facto standard
+#      for this and what a reverse proxy can set per-request -- honored ONLY
+#      when the TCP peer is the local proxy, for the same reason
+#      _LocalProxyFix above only trusts X-Forwarded-For from there: otherwise
+#      any client could rewrite every URL this app generates.
+#
+# Both proxy shapes work. Apache may pass the prefix through
+# (ProxyPass /henwen http://127.0.0.1:5000/henwen) or strip it
+# (ProxyPass /henwen http://127.0.0.1:5000/), because this sets SCRIPT_NAME
+# either way and only trims PATH_INFO when the prefix is actually still on it.
+#
+# Setting SCRIPT_NAME is what makes Flask's own routing, url_for(),
+# redirects and the session cookie path correct. The frontend's hardcoded
+# URLs are handled on the client by the base-path adapter in
+# templates/_basepath.html -- see that file for why it is a runtime adapter
+# rather than ~300 edited call sites.
+# ---------------------------------------------------------------------------
+# Deliberately strict: a path prefix ends up in generated URLs and in the
+# session cookie path, so only simple path segments are accepted. Anything
+# else (a scheme, a host, "..", a query) is ignored rather than sanitized.
+_URL_PREFIX_RE = re.compile(r'^(?:/[A-Za-z0-9][A-Za-z0-9._~-]*)+$')
+
+
+def _normalize_url_prefix(value):
+    """'' for anything unusable, else the prefix with no trailing slash."""
+    v = str(value or '').strip()
+    if not v:
+        return ''
+    if not v.startswith('/'):
+        v = '/' + v
+    v = v.rstrip('/')
+    return v if _URL_PREFIX_RE.match(v) else ''
+
+
+URL_PREFIX = _normalize_url_prefix(os.environ.get('URL_PREFIX', ''))
+
+
+class _ScriptNamePrefixFix:
+    def __init__(self, wsgi_app):
+        self.wsgi_app = wsgi_app
+
+    def __call__(self, environ, start_response):
+        prefix = URL_PREFIX
+        if not prefix and environ.get('REMOTE_ADDR') in ('127.0.0.1', '::1'):
+            prefix = _normalize_url_prefix(environ.get('HTTP_X_FORWARDED_PREFIX', ''))
+        if prefix:
+            path = environ.get('PATH_INFO', '')
+            if path == prefix or path.startswith(prefix + '/'):
+                # Proxy passed the prefix through -- move it to SCRIPT_NAME.
+                environ['PATH_INFO'] = path[len(prefix):] or '/'
+            environ['SCRIPT_NAME'] = environ.get('SCRIPT_NAME', '') + prefix
+        return self.wsgi_app(environ, start_response)
+
+
+# Order matters. Applied after _LocalProxyFix, this becomes the OUTERMOST
+# layer, so it runs first and the REMOTE_ADDR check above still sees the
+# proxy's own address -- not the client address _LocalProxyFix restores from
+# X-Forwarded-For, which a client could otherwise set to 127.0.0.1 to make
+# its own X-Forwarded-Prefix trusted.
+app.wsgi_app = _ScriptNamePrefixFix(app.wsgi_app)
 
 
 class _SchemeAwareSessionInterface(SecureCookieSessionInterface):

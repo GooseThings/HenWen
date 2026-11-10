@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+{% include '_basepath.html' %}
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>HenWen | Accept Invite</title>
@@ -280,7 +281,7 @@ button[type=submit]:hover {
     {% if error %}
     <div class="error">{{ error }}</div>
     {% endif %}
-    <form method="POST" action="/accept-invite">
+    <form method="POST" action="{{ request.script_root }}/accept-invite">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <input type="hidden" name="token" value="{{ token }}">
       <div class="fg">
@@ -301,7 +302,7 @@ button[type=submit]:hover {
   {% elif stage == 'invalid' %}
     <h2>Invite Invalid or Expired</h2>
     <div class="error">This invite link is invalid, already used, revoked, or has expired. Ask whoever invited you to send a new one.</div>
-    <a class="back-link" href="/login">Back to sign in</a>
+    <a class="back-link" href="{{ request.script_root }}/login">Back to sign in</a>
   {% endif %}
 </div>
 </body>
