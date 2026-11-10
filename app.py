@@ -549,6 +549,119 @@ class _LocalProxyFix:
 
 
 app.wsgi_app = _LocalProxyFix(app.wsgi_app)
+# ---------------------------------------------------------------------------
+# Serving HenWen under a URL path prefix
+#
+# HenWen has always assumed it owns the root of whatever hostname serves it:
+# every template hardcodes root-absolute URLs ("/api/...", "/static/...",
+# "/login"), and nothing goes through url_for(). That makes it impossible to
+# front at a subpath -- https://example.com/henwen/ -- which is a reasonable
+# thing to want when one box serves several apps, or when two HenWen installs
+# run side by side.
+#
+# The prefix comes from URL_PREFIX in the environment. That is the only
+# source trusted by default, deliberately.
+#
+# X-Forwarded-Prefix is the de-facto standard header for this, and the first
+# version of this code honored it whenever the TCP peer was loopback, by
+# analogy with _LocalProxyFix's X-Forwarded-For handling above. That analogy
+# was wrong and the result was remotely exploitable: Apache *appends* to
+# X-Forwarded-For, so its last element is Apache's own view of the peer, but
+# it *forwards an arbitrary request header verbatim*. A client's own
+# X-Forwarded-Prefix therefore arrived at the backend with REMOTE_ADDR =
+# 127.0.0.1 and was trusted. Confirmed against the live install:
+#
+#   curl -H 'X-Forwarded-Prefix: /pwned' https://<host>/login
+#   -> action="/pwned/login"   window.HW_BASE = "/pwned"
+#
+# _normalize_url_prefix() keeps that same-origin (no scheme, host, CRLF or
+# traversal), so it is not an open redirect, but it still lets an attacker
+# control every URL in a page -- including the login form's action -- and is
+# the classic ingredient for web cache poisoning.
+#
+# So the header is now opt-in via TRUST_FORWARDED_PREFIX, for the deployment
+# whose proxy sets the header itself. Such a proxy MUST also drop whatever
+# the client sent:
+#
+#   RequestHeader unset X-Forwarded-Prefix
+#   RequestHeader set   X-Forwarded-Prefix /henwen
+#
+# in that order. Without the unset, enabling this re-opens exactly the hole
+# described above.
+#
+# Both proxy shapes work. Apache may pass the prefix through
+# (ProxyPass /henwen http://127.0.0.1:5000/henwen) or strip it
+# (ProxyPass /henwen http://127.0.0.1:5000/), because this sets SCRIPT_NAME
+# either way and only trims PATH_INFO when the prefix is actually still on it.
+#
+# Setting SCRIPT_NAME is what makes Flask's own routing, url_for(),
+# redirects and the session cookie path correct. The frontend's hardcoded
+# URLs are handled on the client by the base-path adapter in
+# templates/_basepath.html -- see that file for why it is a runtime adapter
+# rather than ~300 edited call sites.
+# ---------------------------------------------------------------------------
+# Deliberately strict: a path prefix ends up in generated URLs and in the
+# session cookie path, so only simple path segments are accepted. Anything
+# else (a scheme, a host, "..", a query) is ignored rather than sanitized.
+_URL_PREFIX_RE = re.compile(r'^(?:/[A-Za-z0-9][A-Za-z0-9._~-]*)+$')
+
+
+# A prefix whose first segment is also one of this app's own top-level route
+# roots is refused, because the two become indistinguishable when the proxy
+# strips the prefix: with URL_PREFIX=/api, an external /api/api/status/board
+# arrives as /api/status/board, and "does PATH_INFO still start with the
+# prefix?" answers yes for the app's own path, strips it again, and routes
+# /status/board -- which doesn't exist. Rather than guess, refuse the mount.
+_PREFIX_RESERVED_ROOTS = frozenset((
+    'api', 'static', 'login', 'logout', 'status', 'accessible', 'index.html',
+    'henwen-manager', 'forgot-password', 'reset-password', 'accept-invite',
+    'ws-audio', 'asterisk-ws',
+))
+
+
+def _normalize_url_prefix(value):
+    """'' for anything unusable, else the prefix with no trailing slash."""
+    v = str(value or '').strip()
+    if not v:
+        return ''
+    if not v.startswith('/'):
+        v = '/' + v
+    v = v.rstrip('/')
+    if not _URL_PREFIX_RE.match(v):
+        return ''
+    if v.split('/')[1].lower() in _PREFIX_RESERVED_ROOTS:
+        return ''
+    return v
+
+
+URL_PREFIX = _normalize_url_prefix(os.environ.get('URL_PREFIX', ''))
+# Read per request rather than captured at import, so a test can flip it.
+TRUST_FORWARDED_PREFIX = os.environ.get('TRUST_FORWARDED_PREFIX', '').lower() in ('1', 'true', 'yes', 'on')
+
+
+class _ScriptNamePrefixFix:
+    def __init__(self, wsgi_app):
+        self.wsgi_app = wsgi_app
+
+    def __call__(self, environ, start_response):
+        prefix = URL_PREFIX
+        if not prefix and TRUST_FORWARDED_PREFIX:
+            prefix = _normalize_url_prefix(environ.get('HTTP_X_FORWARDED_PREFIX', ''))
+        if prefix:
+            path = environ.get('PATH_INFO', '')
+            if path == prefix or path.startswith(prefix + '/'):
+                # Proxy passed the prefix through -- move it to SCRIPT_NAME.
+                environ['PATH_INFO'] = path[len(prefix):] or '/'
+            environ['SCRIPT_NAME'] = environ.get('SCRIPT_NAME', '') + prefix
+        return self.wsgi_app(environ, start_response)
+
+
+# Order matters. Applied after _LocalProxyFix, this becomes the OUTERMOST
+# layer, so it runs first and the REMOTE_ADDR check above still sees the
+# proxy's own address -- not the client address _LocalProxyFix restores from
+# X-Forwarded-For, which a client could otherwise set to 127.0.0.1 to make
+# its own X-Forwarded-Prefix trusted.
+app.wsgi_app = _ScriptNamePrefixFix(app.wsgi_app)
 
 
 class _SchemeAwareSessionInterface(SecureCookieSessionInterface):
@@ -562,6 +675,38 @@ class _SchemeAwareSessionInterface(SecureCookieSessionInterface):
         if SECURE_COOKIES:
             return True
         return request.is_secure
+
+    def get_cookie_name(self, app):
+        """Give each mount its own cookie NAME, and leave the path alone.
+
+        Two HenWen installs on one hostname is the reason prefix support
+        exists, and by default they would both write a cookie called
+        'session' at Path=/ -- so visiting one replaces the other's login.
+        A distinct name per mount fixes that without narrowing the path.
+
+        Scoping the *path* to script_root was tried first and is wrong: the
+        browser's low-latency audio connection opens /ws-audio/<node>, an
+        Apache-level proxy that lives at the hostname root by design (see
+        ws-audio/apply.sh), and audio_ws_relay.py authorizes it by forwarding
+        that very cookie to api_internal_audio_authorize_ws(). A cookie
+        scoped to /henwen is not sent to /ws-audio, so low-latency Listen
+        would silently fall back to the legacy path on every prefixed
+        install. Keeping Path=/ and separating by name keeps both properties.
+
+        Derived per request rather than from URL_PREFIX at import, so it is
+        consistent in TRUST_FORWARDED_PREFIX mode too, where the prefix is
+        only known per request."""
+        prefix = request.script_root
+        base   = app.config.get('SESSION_COOKIE_NAME') or 'session'
+        if not prefix:
+            return base
+        # '+' and not '_': '_' is itself legal inside a prefix
+        # (_URL_PREFIX_RE), so substituting it for '/' makes /apps/henwen and
+        # /apps_henwen produce the same cookie name -- two installs that would
+        # then overwrite each other's login, which is the whole thing this is
+        # here to prevent. '+' can't appear in a prefix and is a valid cookie
+        # name character (RFC 6265 tchar), so the mapping is unambiguous.
+        return base + prefix.replace('/', '+')
 
 
 app.session_interface = _SchemeAwareSessionInterface()
@@ -2061,6 +2206,11 @@ def logout():
     remove_active_session(session.get("sid"))
     session.clear()
     log("INFO", f"[AUTH] Logout: '{username}'")
+    # No cross-mount cookie cleanup here. An earlier version also expired
+    # 'session' at Path=/ to kill a cookie left behind by a previous mount,
+    # but with cookies separated by name (see get_cookie_name) that name
+    # belongs to the install at the *root* of this hostname -- so logging out
+    # of /henwen would have logged the user out of the other install too.
     return redirect(url_for('login'))
 
 

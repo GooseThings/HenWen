@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+{% include '_basepath.html' %}
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>HenWen | {% if mfa_stage %}Verification Code{% elif setup_mode %}Create Account{% else %}Sign In{% endif %}</title>
@@ -248,7 +249,7 @@ button[type=submit]:hover {
   <div class="error">{{ error }}</div>
   {% endif %}
 
-  <form method="POST" action="/login/2fa">
+  <form method="POST" action="{{ request.script_root }}/login/2fa">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="fg">
       <label for="code">Code</label>
@@ -258,7 +259,7 @@ button[type=submit]:hover {
     <button type="submit">Verify</button>
   </form>
   <div style="margin-top:14px;text-align:center">
-    <a href="/login" style="color:var(--accent);font-size:0.82rem;text-decoration:none">Back to sign in</a>
+    <a href="{{ request.script_root }}/login" style="color:var(--accent);font-size:0.82rem;text-decoration:none">Back to sign in</a>
   </div>
 
   {% else %}
@@ -272,7 +273,7 @@ button[type=submit]:hover {
   <div class="error">{{ error }}</div>
   {% endif %}
 
-  <form method="POST" action="/login">
+  <form method="POST" action="{{ request.script_root }}/login">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="fg">
       <label for="username">Username</label>
@@ -296,7 +297,7 @@ button[type=submit]:hover {
   </form>
   {% if not setup_mode %}
   <div style="margin-top:14px;text-align:center">
-    <a href="/forgot-password" style="color:var(--accent);font-size:0.82rem;text-decoration:none">Forgot password?</a>
+    <a href="{{ request.script_root }}/forgot-password" style="color:var(--accent);font-size:0.82rem;text-decoration:none">Forgot password?</a>
   </div>
   {% endif %}
   {% endif %}

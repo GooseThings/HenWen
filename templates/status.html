@@ -1,12 +1,13 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+{% include '_basepath.html' %}
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <title>HenWen Kiosk</title>
 <meta name="description" content="HenWen live status board — AllStarLink node status, connections, map, and repeater activity.">
-<link id="dyn-favicon" rel="icon" type="image/x-icon" href="/static/favicon{{ '-classic' if app_logo_classic else '' }}.ico">
+<link id="dyn-favicon" rel="icon" type="image/x-icon" href="{{ request.script_root }}/static/favicon{{ '-classic' if app_logo_classic else '' }}.ico">
 <script>(function(){var t=localStorage.getItem('henwen-theme')||localStorage.getItem('asl3ez-theme');if(t)document.documentElement.setAttribute('data-theme',t);if(t==='custom'){try{var c=JSON.parse(localStorage.getItem('henwen-custom-colors')||'{}'),r=document.documentElement.style,k;for(k in c){if(c[k])r.setProperty('--'+k,c[k]);}}catch(e){}}})();</script>
 <!-- Warms up the connection to both CDN origins as early as possible in
      <head> parsing — DNS/TCP/TLS handshake overlaps with the rest of the
@@ -1596,7 +1597,7 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
      the document so a sight-impaired visitor tabbing in from the address
      bar reaches it before anything else. Off-screen until focused, like a
      standard skip-link. -->
-<a href="/accessible" class="a11y-skip-link">Accessible View — larger text and screen-reader support</a>
+<a href="{{ request.script_root }}/accessible" class="a11y-skip-link">Accessible View — larger text and screen-reader support</a>
 
 <!-- ─────────────────────────────────────────────────────────────────────
      Icon sprite — Lucide icons (ISC license, https://lucide.dev), inlined
@@ -1823,7 +1824,7 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
            data or a connection exists) — .keyed-dot-logo and
            _drawFavicon()'s own 64px canvas draw already share this same
            asset, so nothing new is being fetched. -->
-      <img class="header-logo" src="/static/logo-128{{ '-classic' if app_logo_classic else '' }}.png" alt="HenWen">
+      <img class="header-logo" src="{{ request.script_root }}/static/logo-128{{ '-classic' if app_logo_classic else '' }}.png" alt="HenWen">
       <strong>HenWen</strong> <span class="header-brand-kiosk-label">KIOSK</span>
     </div>
     <img class="header-club-logo" id="club-logo-img" alt="" style="display:none">
@@ -1905,8 +1906,8 @@ button.idle-badge.idle-pressing { border-color: rgba(224,68,68,.5); }
         </div>
         <button class="btn-icon" id="dash-edit-btn" onclick="toggleDashEditMode()" title="Rearrange, resize, or hide the panels below"><svg class="icon"><use href="#icon-layout-dashboard"></use></svg></button>
         <button class="btn-icon" id="header-fs-menu-btn" onclick="toggleFS()" title="Fullscreen"><svg class="icon"><use href="#icon-maximize"></use></svg><span class="header-menu-label">Fullscreen</span></button>
-        <a class="btn-icon" href="/accessible" title="Accessible View — larger text and screen-reader support"><svg class="icon"><use href="#icon-eye"></use></svg><span class="header-menu-label">Accessible</span></a>
-        <a class="btn-icon" id="manager-link-btn" href="/henwen-manager" target="_blank" rel="noopener" title="Manager"><svg class="icon"><use href="#icon-book-open"></use></svg><span class="header-menu-label">Manager</span></a>
+        <a class="btn-icon" href="{{ request.script_root }}/accessible" title="Accessible View — larger text and screen-reader support"><svg class="icon"><use href="#icon-eye"></use></svg><span class="header-menu-label">Accessible</span></a>
+        <a class="btn-icon" id="manager-link-btn" href="{{ request.script_root }}/henwen-manager" target="_blank" rel="noopener" title="Manager"><svg class="icon"><use href="#icon-book-open"></use></svg><span class="header-menu-label">Manager</span></a>
       </div>
       <button type="button" class="btn-icon" id="header-menu-btn" onclick="toggleHeaderMenu(event)" title="Menu" aria-haspopup="true" aria-expanded="false" style="display:none"><svg class="icon"><use href="#icon-menu"></use></svg></button>
     </div>
@@ -2517,7 +2518,7 @@ function esc(s) {
    badge) render the same mark instead of silently mixing old/new. */
 var HENWEN_LOGO_CLASSIC = {{ 'true' if app_logo_classic else 'false' }};
 function henwenLogoSrc(size) {
-  return '/static/logo-' + size + (HENWEN_LOGO_CLASSIC ? '-classic' : '') + '.png';
+  return henwenUrl('/static/logo-' + size + (HENWEN_LOGO_CLASSIC ? '-classic' : '') + '.png');
 }
 
 /* AllStarLink reserves 3000000-3999999 as pseudo-node numbers for EchoLink
@@ -2597,7 +2598,7 @@ function callsignLink(callsign, cssClass, displayText) {
    missing file just hides the image rather than leaving a broken icon. */
 function countryFlag(iso) {
   if (!/^[A-Z]{2}$/.test(iso || '')) return '';
-  return '<img class="nr-flag" src="/static/vendor/flags/' + iso.toLowerCase() + '.svg" alt="' + esc(iso) +
+  return '<img class="nr-flag" src="{{ request.script_root }}/static/vendor/flags/' + iso.toLowerCase() + '.svg" alt="' + esc(iso) +
     '" title="' + esc(iso) + '" loading="lazy" onerror="this.style.display=\'none\'">';
 }
 
@@ -2699,7 +2700,7 @@ fetch('/api/kiosk/settings').then(function(r){ return r.ok ? r.json() : null; })
   if (d.timezone)     _clockTZ     = d.timezone;
   if (d.logo_url) {
     var logoImg = document.getElementById('club-logo-img');
-    logoImg.src = d.logo_url;
+    logoImg.src = henwenUrl(d.logo_url);
     logoImg.style.display = '';
   }
 }).catch(function(){});
@@ -7335,7 +7336,7 @@ function _stopRecord(auto) {
       var rec = (d.recordings || []).filter(function(x) { return x.id === rid; })[0];
       if (rec && rec.status === 'finished') {
         var a = document.createElement('a');
-        a.href = '/api/recording/' + rid + '/download';
+        a.href = henwenUrl('/api/recording/') + rid + '/download';
         a.download = '';
         document.body.appendChild(a); a.click(); a.remove();
         sbToast('Recording saved (' + Math.round(rec.duration_sec || 0) + 's)', true);
@@ -7417,7 +7418,7 @@ function renderMyRecordings(rows) {
     var actions = '';
     if (rec.status === 'finished') {
       actions += '<button class="sb-btn neutral" onclick="_myRecRename(' + rec.id + ')" title="Rename">Rename</button>';
-      actions += '<a class="sb-btn monitor" style="text-decoration:none" href="/api/recording/' + rec.id +
+      actions += '<a class="sb-btn monitor" style="text-decoration:none" href="{{ request.script_root }}/api/recording/' + rec.id +
         '/download" title="Download"><svg class="icon"><use href="#icon-download"></use></svg></a>';
     }
     if (rec.status !== 'recording') {
@@ -7639,7 +7640,7 @@ function _loadJsSIP() {
   if (_jssipPromise) return _jssipPromise;
   _jssipPromise = new Promise(function(resolve, reject) {
     var s = document.createElement('script');
-    s.src = '/static/vendor/jssip-3.13.8.min.js';
+    s.src = henwenUrl('/static/vendor/jssip-3.13.8.min.js');
     s.onload  = resolve;
     s.onerror = function() { _jssipPromise = null; reject(new Error('failed to load JsSIP')); };
     document.head.appendChild(s);
@@ -8603,7 +8604,7 @@ function _doStartListenWS(audio, node) {
      revalidation, but Chrome's in-memory cache can still satisfy a
      same-session reuse without any network request -- see
      _static_asset_ver() in app.py for the live case that showed this. */
-  var _workletUrl = '/static/audio-worklet-lowlatency.js?v=' +
+  var _workletUrl = henwenUrl('/static/audio-worklet-lowlatency.js') + '?v=' +
                     encodeURIComponent('{{ rx_worklet_ver }}');
   audioCtx.audioWorklet.addModule(_workletUrl).then(function() {
     if (ctrl.signal.aborted) return;
@@ -9138,7 +9139,7 @@ function _doStartListenFallback(audio, node) {
     _listenSetBtn('<svg class="icon"><use href="#icon-headphones"></use></svg> Listen', '', false);
     sbToast('Stream ended — click Listen to reconnect', false);
   };
-  audio.src = '/api/audio/stream/' + node;
+  audio.src = henwenUrl('/api/audio/stream/') + node;
   audio.load();
   audio.play().catch(function(e) {
     _listenActive = false;

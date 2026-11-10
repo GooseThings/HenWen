@@ -1,11 +1,12 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+{% include '_basepath.html' %}
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <title>HenWen | AllStarLink 3 Node Manager</title>
-<link rel="icon" type="image/x-icon" href="/static/favicon{{ '-classic' if app_logo_classic else '' }}.ico">
+<link rel="icon" type="image/x-icon" href="{{ request.script_root }}/static/favicon{{ '-classic' if app_logo_classic else '' }}.ico">
 <script>(function(){var t=localStorage.getItem('henwen-theme')||localStorage.getItem('asl3ez-theme');if(t)document.documentElement.setAttribute('data-theme',t);if(t==='custom'){try{var c=JSON.parse(localStorage.getItem('henwen-custom-colors')||'{}'),r=document.documentElement.style,k;for(k in c){if(c[k])r.setProperty('--'+k,c[k]);}}catch(e){}}})();</script>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -738,7 +739,7 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
     <button class="nav-item" id="nav-irc-relay" onclick="showPage('irc-relay')">IRC Relay</button>
 
     <div class="nav-section">Kiosk</div>
-    <a class="nav-item" href="/" target="_blank" style="text-decoration:none">Kiosk &#8599;</a>
+    <a class="nav-item" href="{{ request.script_root }}/" target="_blank" style="text-decoration:none">Kiosk &#8599;</a>
     <button class="nav-item" onclick="showPage('kiosk-settings')">Kiosk Settings</button>
     <button class="nav-item" id="nav-chat-log" onclick="showPage('chat-log')">Chat Log</button>
 
@@ -1504,12 +1505,12 @@ pre.codeblock { background: var(--bg3); padding: 12px; border-radius: 4px; font-
           <div style="display:flex;gap:22px;align-items:flex-start">
             <label style="cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:6px">
               <input type="radio" name="ks-app-logo" id="ks-app-logo-current" value="current">
-              <img src="/static/logo-96.png" alt="Current logo" style="height:48px;width:48px;object-fit:contain">
+              <img src="{{ request.script_root }}/static/logo-96.png" alt="Current logo" style="height:48px;width:48px;object-fit:contain">
               Current
             </label>
             <label style="cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:6px">
               <input type="radio" name="ks-app-logo" id="ks-app-logo-classic" value="classic">
-              <img src="/static/logo-96-classic.png" alt="Classic logo" style="height:48px;width:48px;object-fit:contain">
+              <img src="{{ request.script_root }}/static/logo-96-classic.png" alt="Classic logo" style="height:48px;width:48px;object-fit:contain">
               Classic
             </label>
             <span style="font-size:0.82rem;color:var(--text-muted);align-self:center">
@@ -3791,7 +3792,7 @@ async function doLogout() {
   try {
     await apiFetch('/logout', {method: 'POST'});
   } catch (e) { /* fall through to redirect regardless */ }
-  window.location.href = '/login';
+  window.location.href = henwenUrl('/login');
 }
 
 /* ── API ────────────────────────────────────────────────────────────────── */
@@ -4890,7 +4891,7 @@ async function backupDiff(name) {
 }
 
 function backupDownload(name) {
-  window.location.href = '/api/backups/' + encodeURIComponent(name) + '/download';
+  window.location.href = henwenUrl('/api/backups/') + encodeURIComponent(name) + '/download';
 }
 
 async function backupRestore(name) {
@@ -6844,7 +6845,7 @@ async function recordingsLoad() {
     var actions = '';
     if (rec.status === 'finished') {
       actions += '<button class="btn btn-sm" onclick="recordingRename(' + rec.id + ')">Rename</button> ';
-      actions += '<a class="btn btn-sm" href="/api/recording/' + rec.id + '/download" style="text-decoration:none">Download</a> ';
+      actions += '<a class="btn btn-sm" href="{{ request.script_root }}/api/recording/' + rec.id + '/download" style="text-decoration:none">Download</a> ';
     }
     if (rec.status !== 'recording') {
       actions += '<button class="btn btn-warn btn-sm" onclick="recordingDelete(' + rec.id + ')">Delete</button>';
