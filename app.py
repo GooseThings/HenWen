@@ -1580,7 +1580,7 @@ def check_auth():
     _USER_OR_ABOVE = {'api_status_connect', 'api_status_disconnect', 'api_dvswitch_tune',
                       'api_fav_add', 'api_fav_delete', 'api_fav_label',
                       'api_audio_stream', 'api_audio_check', 'api_audio_stop',
-                      'api_audio_client_log',
+                      'api_audio_client_log', 'api_audio_rx_latency',
                       'api_nets_create', 'api_nets_update', 'api_nets_delete',
                       'api_echolink_search', 'api_asl_search',
                       'api_status_reset_idle',
@@ -11648,6 +11648,84 @@ def api_audio_check(node):
         'channel':       channel,
         'node':          node,
         'rx_audio_path': rx_audio_path,
+    })
+
+
+# Rough capture->browser latency of the RX audio pipeline, by capture path.
+# Used only to size browser TX's post-unkey RX mute hold (the self-echo
+# guard — see api_audio_rx_latency() below and _txRxHoldMs() in
+# status.html), never to drive the audio pipeline itself.
+#   audiosocket: each 20ms frame leaves Asterisk as it is produced; what is
+#     left is audio_relay.py's own jitter buffer plus the Opus encode and
+#     the network hop.
+#   mixmonitor: the same, plus the ~2s of Asterisk stdio buffering that
+#     path cannot avoid (see the "Audio streaming" section of CLAUDE.md and
+#     audio_relay.py's jitter-buffer comment).
+# Deliberately erring long: an over-long hold costs a bit of the repeater
+# tail, an under-long one puts the operator's own voice back in their ears.
+RX_LATENCY_CAPTURE_MS = {'audiosocket': 400, 'mixmonitor': 2400}
+# The legacy WebM path emits ~200ms Clusters (-cluster_time_limit in
+# _start_broadcast()'s ffmpeg command), so nothing reaches a browser at a
+# finer granularity than that. The low-latency path has no container.
+RX_LATENCY_WEBM_CLUSTER_MS = 200
+
+
+def _rx_capture_mode(node):
+    """Which capture path is feeding this node *right now* —
+    'audiosocket' or 'mixmonitor' — or None when nothing is capturing it.
+
+    Deliberately reports only live sessions rather than predicting what the
+    next capture would choose: the choice depends on things this can't
+    cheaply confirm (whether audiosocket-tap/apply.sh was ever run, i.e.
+    whether the modules are loaded), and a wrong "audiosocket" guess would
+    under-size the TX mute hold and bring the self-echo back. Unknown is
+    handled as the worst case by the caller instead."""
+    with _audio_lock:
+        broadcast = _audio_active.get(node)
+    if broadcast is not None:
+        return getattr(broadcast, '_tap_mode', None) or 'mixmonitor'
+    with _capture_only_lock:
+        capture = _capture_only_active.get(node)
+    if capture is not None:
+        return getattr(capture, 'tap_mode', None) or 'mixmonitor'
+    return None
+
+
+def _rx_latency_estimate_ms(capture_mode, rx_audio_path):
+    """Estimated milliseconds between Asterisk capturing a sample and a
+    browser playing it, *excluding* the client's own buffer depth (which
+    only the client can measure — it adapts per link). capture_mode None
+    (nothing capturing yet) is treated as MixMonitor, the slower path."""
+    est = RX_LATENCY_CAPTURE_MS.get(capture_mode or 'mixmonitor',
+                                    RX_LATENCY_CAPTURE_MS['mixmonitor'])
+    if rx_audio_path != 'lowlatency':
+        est += RX_LATENCY_WEBM_CLUSTER_MS
+    return est
+
+
+@app.route('/api/audio/rx-latency/<node>')
+def api_audio_rx_latency(node):
+    """How far behind real time this node's RX audio currently is, for
+    browser TX's self-echo guard.
+
+    The kiosk mutes Listen while keyed, but everything still in the RX
+    pipeline at release is the operator's own transmission — unmuting the
+    instant the PTT comes up plays it straight back at them (reported by
+    users as "I hear myself after I stop talking"). The browser therefore
+    holds the mute for the pipeline's latency, and that number depends on
+    which capture path is actually running, which only this process knows.
+    Cheap on purpose (two dict lookups and a config read, no AMI command
+    and no subprocess), since it's called on every key-down."""
+    if not re.match(r'^\d{4,7}$', node):
+        return jsonify({'error': 'invalid node'}), 400
+    rx_audio_path = (_get_rx_audio_config() or RX_AUDIO_CONFIG_DEFAULTS)['path']
+    capture_mode  = _rx_capture_mode(str(int(node)))
+    return jsonify({
+        'node':            node,
+        'rx_audio_path':   rx_audio_path,
+        'capture_mode':    capture_mode,
+        'capture_known':   capture_mode is not None,
+        'est_latency_ms':  _rx_latency_estimate_ms(capture_mode, rx_audio_path),
     })
 
 

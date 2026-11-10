@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Fixed: you heard yourself on the Listen stream right after ending a transmission.** Listen is muted while the PTT is held, but it unmuted the instant the PTT came up — and everything still in the RX pipeline at that moment is your own transmission, so the last seconds of it played straight back at you. The mute is now held past the unkey for however far behind real time the RX path is actually running (the server reports that, since it depends on whether the AudioSocket tap or MixMonitor is capturing), so the audio that comes back is the repeater tail and whatever follows it, not your own voice. Re-keying inside that window cancels the hold, and disarming or losing the call always leaves Listen unmuted.
+
 ## v2026.10.30
 
 - **Fixed: the Node ID page showed "Idle" while the node was keyed.** The page only refreshed itself while a monitor was already active, so one opened during a quiet spell never refreshed at all and missed every key-up until reloaded. It now refreshes every 3 seconds while the page is open.
