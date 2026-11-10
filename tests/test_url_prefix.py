@@ -163,7 +163,22 @@ class TestSessionCookieIsolation:
         r = client.post(PREFIX + "/login",
                         data={"username": "owner1", "password": "password12345"},
                         headers={"X-Forwarded-Prefix": PREFIX})
-        assert "session_henwen=" in r.headers.get("Set-Cookie", ""), r.headers.get("Set-Cookie")
+        assert "session+henwen=" in r.headers.get("Set-Cookie", ""), r.headers.get("Set-Cookie")
+
+    def test_two_similar_prefixes_get_different_cookie_names(self, client, create_user):
+        """'_' is legal inside a prefix, so mapping '/' to '_' would give
+        /apps/henwen and /apps_henwen the same cookie name -- two installs
+        overwriting each other's login, the exact thing this prevents."""
+        create_user("owner1", role="owner")
+        names = []
+        for prefix in ("/apps/henwen", "/apps_henwen"):
+            app.limiter.reset()
+            r = client.post(prefix + "/login",
+                            data={"username": "owner1", "password": "password12345"},
+                            headers={"X-Forwarded-Prefix": prefix})
+            sc = r.headers.get("Set-Cookie", "")
+            names.append(sc.split("=")[0])
+        assert names[0] != names[1], names
 
     def test_the_cookie_path_stays_root(self, client, create_user):
         """Deliberate: the browser's low-latency audio connection opens

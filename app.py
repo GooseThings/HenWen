@@ -698,7 +698,15 @@ class _SchemeAwareSessionInterface(SecureCookieSessionInterface):
         only known per request."""
         prefix = request.script_root
         base   = app.config.get('SESSION_COOKIE_NAME') or 'session'
-        return base + prefix.replace('/', '_') if prefix else base
+        if not prefix:
+            return base
+        # '+' and not '_': '_' is itself legal inside a prefix
+        # (_URL_PREFIX_RE), so substituting it for '/' makes /apps/henwen and
+        # /apps_henwen produce the same cookie name -- two installs that would
+        # then overwrite each other's login, which is the whole thing this is
+        # here to prevent. '+' can't appear in a prefix and is a valid cookie
+        # name character (RFC 6265 tchar), so the mapping is unambiguous.
+        return base + prefix.replace('/', '+')
 
 
 app.session_interface = _SchemeAwareSessionInterface()
