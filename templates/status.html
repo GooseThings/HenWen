@@ -6900,17 +6900,50 @@ async function removeFavorite(node) {
 
    Monitoring stays Listen's job: the call's incoming audio is discarded
    (playing it alongside Listen would double the node audio ~1s apart),
-   Listen is auto-started when arming if it's off, and is muted only while
-   actually keyed — like a radio muting RX during TX, and so you don't hear
-   your own voice a second late. It unmutes on release, so your repeater
-   tail comes back as confirmation.
+   Listen is auto-started when arming if it's off, and is muted while
+   keyed — like a radio muting RX during TX, and so you don't hear your own
+   voice a second late.
+
+   That mute is then *held* past the unkey for however far behind real time
+   the RX path is running (_txRxHoldMs()), because everything still in the
+   pipeline at release is the operator's own transmission: unmuting the
+   instant the PTT comes up played it straight back at them, reported by
+   users as hearing themselves after ending a transmission. The hold costs
+   nothing audible — Listen is delayed by exactly that much, so the
+   repeater tail and courtesy tone captured after release arrive after the
+   hold ends and still come back as confirmation. Only overshooting the
+   real latency would eat live audio, so the estimate is sized to err
+   slightly long and every TX exit path (teardown, disarm, a failed call)
+   clears the hold immediately — a stuck-muted Listen would be worse than
+   the echo it guards against.
 
    Credentials come from /api/tx/config (admin/superuser only); the button
    is hidden unless that endpoint says the feature is configured AND the
    page is a secure context (mic capture requires HTTPS). */
 var _tx = { ua: null, session: null, keyed: false, armed: false,
             node: '', statsTimer: null,
+            muteHoldTimer: null, muteHoldUntil: 0,
+            rxLatencyMs: 0, rxLatencyKnown: false, rxLatencySeq: 0,
             audioCtx: null, gainNode: null, analyser: null, rawStream: null, meterTimer: null };
+
+/* Self-echo guard sizing (see the block comment above). The server half of
+   the estimate — how far behind real time the capture+encode stages are,
+   which depends on whether the AudioSocket tap or MixMonitor is running —
+   comes from /api/audio/rx-latency/<node>, re-read on every key-down; the
+   client adds its own measured buffer depth and the unkey signaling lag. */
+/* Tuning rule if this proves off on real traffic: still hearing yourself
+   after unkey means the hold is short (raise RX_LATENCY_CAPTURE_MS in
+   app.py for the capture path in use); losing the start of the repeater
+   tail or a fast reply means it's long (lower it). Both halves of the
+   estimate are deliberately sized to err long. */
+var _TX_UNKEY_LAG_MS      = 300;    // '#' DTMF duration + signaling transit before app_rpt drops PTT
+var _TX_RX_HOLD_DEFAULT_MS = 2600;  // used until the server answers: MixMonitor + WebM, the slowest path
+/* Ceiling, so a bad reading can't mute Listen for ages — but it has to
+   clear the slowest *legitimate* total, or it would silently cut a hold
+   that was correct: MixMonitor + WebM (2600) + the MSE cushion's own
+   documented ceiling (_LISTEN_TARGET_MAX_S, 4000) + the unkey lag (300). */
+var _TX_RX_HOLD_MAX_MS    = 7000;
+var _TX_WS_BUFFER_MS      = 350;    // low-latency worklet's own hard buffer cap (MAX_BUFFER_SAMPLES)
 
 /* Mic gain: the browser's autoGainControl drove a headset mic to hard
    clipping (media-source audioLevel pinned at 1.000, "much too loud" on a
@@ -7814,7 +7847,11 @@ function _txReleaseMic() {
 /* Drop the call/UA and disable the PTT, leaving the bar's last status
    readable. Listen is left exactly as the user has it (just unmuted). */
 function _txTeardown() {
-  _txUnkey();
+  /* Nothing is listening for our own echo once the call is gone, and a TX
+     teardown must never be what leaves Listen silently muted. */
+  _txUnkey({ noHold: true });
+  _txClearMuteHold(true);
+  _txApplyListenMute();
   clearTimeout(_tx.statsTimer);
   var pttEl = document.getElementById('tx-ptt');
   if (pttEl) pttEl.disabled = true;
@@ -7830,13 +7867,104 @@ function disarmTx() {
   document.getElementById('tx-bar').style.display = 'none';
 }
 
-/* Mute Listen only while keyed — the radio-style RX mute. Restored on
-   unkey so the operator hears their own repeater tail as confirmation. */
-/* Mute Listen only while keyed — the radio-style RX mute. Restored on
-   unkey so the operator hears their own repeater tail as confirmation. */
-function _txMuteListen(muted) {
+/* The one predicate for "RX should be silent right now": while keyed, and
+   then through the post-unkey hold that keeps the operator's own delayed
+   audio out of their ears. Every site that touches Listen's mute state —
+   including a Listen (re)start mid-transmission — goes through this rather
+   than reading _tx.keyed directly, or a reconnect inside the hold window
+   would unmute early and replay the self-audio the hold exists to swallow. */
+function _txRxShouldMute() {
+  if (!window._tx) return false;
+  if (_tx.keyed) return true;
+  return !!_tx.muteHoldUntil && Date.now() < _tx.muteHoldUntil;
+}
+
+/* #node-audio is the single mute point for both RX pipelines: the MSE path
+   plays through the element itself, and the low-latency path mirrors
+   .muted/.volume onto its GainNode via the element's 'volumechange' event
+   (see _doStartListenWS()). */
+function _txApplyListenMute() {
   var a = document.getElementById('node-audio');
-  if (a) a.muted = muted;
+  if (a) a.muted = _txRxShouldMute();
+}
+
+/* Drop any pending hold. Called on re-key (so a pending unmute can't fire
+   mid-transmission) and on every teardown path (so TX never leaves Listen
+   muted behind it). The hold's own countdown is the only thing that would
+   otherwise clear its status line, so cancelling one clears that text too —
+   except where the caller has something more important to say there (a
+   dropped call, an error), which is what keepStatus is for. */
+function _txClearMuteHold(keepStatus) {
+  var had = !!_tx.muteHoldTimer;
+  if (_tx.muteHoldTimer) { clearTimeout(_tx.muteHoldTimer); _tx.muteHoldTimer = null; }
+  _tx.muteHoldUntil = 0;
+  if (had && !keepStatus) _txStatus('');
+}
+
+/* How much audio the client itself is sitting on. MSE: the real measured
+   lag behind the live edge, which adapts per link (_listenTargetS can grow
+   to 4s on a bursty connection), read off the element's own buffered range
+   so this doesn't reach into the rate controller's closure. Low-latency:
+   the worklet's buffer is hard-capped, so its cap is the answer. */
+function _txListenBufferMs() {
+  if (!_listenActive) return 0;
+  if (_listenPath === 'ws' || _listenWorkletNode) return _TX_WS_BUFFER_MS;
+  /* The plain <audio src> fallback (_doStartListenFallback(), Safari and
+     anything else without MSE/WebM) buffers a progressive download, so
+     buffered.end says how far ahead it has *fetched*, not how far behind
+     it is playing — an unusable reading. Ask for the ceiling instead and
+     accept that a fallback listener lagging more than the clamp still
+     hears some echo; that path is documented as high-latency and nothing
+     here can measure it. */
+  if (_listenPath === 'fallback') return _TX_RX_HOLD_MAX_MS;
+  var a = document.getElementById('node-audio');
+  try {
+    if (a && a.buffered && a.buffered.length) {
+      var ahead = a.buffered.end(a.buffered.length - 1) - a.currentTime;
+      if (ahead > 0 && ahead < 30) return Math.round(ahead * 1000);
+    }
+  } catch (e) {}
+  return Math.round(_listenTargetS * 1000);   // no buffered range yet — use the cushion target
+}
+
+/* Total hold: server-side pipeline latency + the client's own buffer + the
+   unkey signaling lag, clamped. 0 when Listen isn't running at all, since
+   there's then nothing that could play back. */
+function _txRxHoldMs() {
+  if (!_listenActive) return 0;
+  var base = _tx.rxLatencyKnown ? _tx.rxLatencyMs : _TX_RX_HOLD_DEFAULT_MS;
+  var hold = base + _txListenBufferMs() + _TX_UNKEY_LAG_MS;
+  return Math.max(0, Math.min(hold, _TX_RX_HOLD_MAX_MS));
+}
+
+/* Refreshed on every key-down rather than once at arm time: which capture
+   path is running is only known while something is actually capturing, and
+   it can change under us (the AudioSocket tap's per-node circuit breaker
+   falls back to MixMonitor, which is ~2s slower). Fire-and-forget — the
+   answer is only needed by the time the operator unkeys, and until it
+   lands _txRxHoldMs() uses the slowest-path default. */
+function _txLearnRxLatency() {
+  /* The answer only ever described the capture that was running when it
+     was asked, and that can change between transmissions — the tap's
+     per-node circuit breaker falls back to MixMonitor, ~2s slower — so a
+     remembered "audiosocket" is not safe to carry forward. Forget it
+     before asking: an answer that doesn't arrive (or an error) then leaves
+     _txRxHoldMs() on the slow-path default rather than on a stale fast
+     estimate that would let the echo back through. seq makes a slow reply
+     from an earlier key-down lose to a later one. */
+  _tx.rxLatencyKnown = false;
+  var seq  = ++_tx.rxLatencySeq;
+  var node = _listenNode || _tx.node;
+  if (!node) return;
+  apiFetch('/api/audio/rx-latency/' + node)
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(d) {
+      if (seq !== _tx.rxLatencySeq) return;   // a later key-down already asked
+      if (!d || typeof d.est_latency_ms !== 'number') return;
+      _tx.rxLatencyMs    = d.est_latency_ms;
+      _tx.rxLatencyKnown = !!d.capture_known;
+    })
+    .catch(function() { /* keep the default — never block or fail a keyup */ });
 }
 
 function _txKey() {
@@ -7847,10 +7975,13 @@ function _txKey() {
   /* No _txStatus('TRANSMITTING') here — the PTT button's own color change
      (.tx class, added above) already says it; a text line repeating that
      right next to a button that's just turned red is redundant. */
-  _txMuteListen(true);
+  _txClearMuteHold();
+  _txApplyListenMute();
+  _txLearnRxLatency();
   try { _tx.session.sendDTMF('*99', { duration: 100, interToneGap: 70 }); }
   catch (e) {
-    _tx.keyed = false; b.classList.remove('tx'); _txMuteListen(false);
+    _tx.keyed = false; b.classList.remove('tx');
+    _txClearMuteHold(); _txApplyListenMute();
     _txDiag('dtmf-err', e.message);
   }
   /* Sample outbound audio 2s into the keydown — long enough for *99 to
@@ -7859,16 +7990,34 @@ function _txKey() {
   _tx.statsTimer = setTimeout(function() { if (_tx.keyed) _txStatsSample('keyed'); }, 2000);
 }
 
-function _txUnkey() {
+/* noHold: release without starting a self-echo hold at all — used by
+   _txTeardown(), where the call is going away and whatever status the
+   caller just set (e.g. "Call ended") must survive. */
+function _txUnkey(opts) {
   if (!_tx.keyed) return;
   _tx.keyed = false;
   var b = document.getElementById('tx-ptt');
   if (b) b.classList.remove('tx');
-  _txMuteListen(false);
   if (_tx.session && _tx.session.isEstablished()) {
     _txStatus('');
     try { _tx.session.sendDTMF('#', { duration: 100, interToneGap: 70 }); } catch (e) {}
   }
+  /* Hold the RX mute for the pipeline's own latency before letting Listen
+     back in — otherwise the tail of this transmission, still in flight,
+     comes back as self-echo. */
+  var hold = (opts && opts.noHold) ? 0 : _txRxHoldMs();
+  _txClearMuteHold(true);
+  if (hold > 0) {
+    _tx.muteHoldUntil  = Date.now() + hold;
+    _tx.muteHoldTimer  = setTimeout(function() {
+      _tx.muteHoldTimer = null;
+      _tx.muteHoldUntil = 0;
+      _txApplyListenMute();
+      _txStatus('');
+    }, hold);
+    _txStatus('RX held ' + (hold / 1000).toFixed(1) + 's (self-echo guard)');
+  }
+  _txApplyListenMute();
 }
 
 (function() {
@@ -8079,7 +8228,7 @@ function _txUnkey() {
   });
   /* Fail-safes: anything that takes focus/page away unkeys; leaving the page
      tears the whole call down (hangup is a guaranteed unkey server-side). */
-  window.addEventListener('blur', _txUnkey);
+  window.addEventListener('blur', function() { _txUnkey(); });
   document.addEventListener('visibilitychange', function() { if (document.hidden) _txUnkey(); });
   window.addEventListener('beforeunload', function() {
     if (_tx.session) { try { _tx.session.terminate(); } catch (e) {} }
@@ -8092,6 +8241,13 @@ var _listenNode      = '';
 var _listenFallbackNotice = '';  // set by _doStartListen(), consumed by the next connect toast
 var _listenCtrl      = null;   // AbortController for in-flight fetch
 var _listenObjURL    = null;   // MediaSource blob URL pending revoke
+/* Which pipeline is actually running: 'ws' | 'mse' | 'fallback' (''
+   when Listen is off). Set by each _doStartListen*() as it commits, and
+   read by _txListenBufferMs(), which has to measure the client's buffer
+   differently per path. Deliberately its own var: _listenObjURL looks like
+   it could stand in for "MSE is running", but it's revoked and nulled the
+   moment MediaSource opens, so it's null for every *live* MSE session. */
+var _listenPath      = '';
 var _listenRenewTimer= null;   // safety-valve reconnect (30 min)
 var _listenRateTimer = null;   // rate-control interval
 var _listenStartTimer= null;   // startup watchdog — abort if no stream within N seconds
@@ -8275,9 +8431,10 @@ function _startListen() {
   if (!node) { sbToast('No local node found', false); return; }
 
   var audio = document.getElementById('node-audio');
-  /* Honor the TX-keyed mute even across a Listen (re)start — an auto-
-     reconnect mid-transmission must not bring the delayed self-audio back. */
-  audio.muted = !!(window._tx && _tx.keyed);
+  /* Honor the TX mute (keyed, or inside the post-unkey hold) even across a
+     Listen (re)start — an auto-reconnect mid-transmission, or one landing
+     inside the hold window, must not bring the delayed self-audio back. */
+  audio.muted = _txRxShouldMute();
   _listenSetBtn('... Connecting', 'var(--text2)', true);
   audio.onloadstart = null;
   audio.onerror     = null;
@@ -8389,8 +8546,9 @@ function _doStartListen(audio, node, rxAudioPath) {
 function _doStartListenWS(audio, node) {
   var ctrl = new AbortController();
   _listenCtrl = ctrl;
+  _listenPath = 'ws';
 
-  audio.muted = !!(window._tx && _tx.keyed);
+  audio.muted = _txRxShouldMute();
 
   function _now() {
     return (window.performance && performance.now) ? performance.now() : Date.now();
@@ -8593,6 +8751,7 @@ function _doStartListenMSE(audio, node) {
   var ctrl = new AbortController();
   _listenCtrl = ctrl;
 
+  _listenPath = 'mse';
   var ms  = new MediaSource();
   var url = URL.createObjectURL(ms);
   _listenObjURL = url;
@@ -8957,6 +9116,7 @@ function _doStartListenMSE(audio, node) {
 function _doStartListenFallback(audio, node) {
   /* Plain <audio src> for browsers without MSE/WebM support (e.g., Safari).
      High-latency (browser buffers aggressively) but functional. */
+  _listenPath = 'fallback';
   audio.onloadstart = function() {
     _listenActive = true;
     if (_listenStartTimer) { clearTimeout(_listenStartTimer); _listenStartTimer = null; }
@@ -8994,6 +9154,7 @@ function _doStartListenFallback(audio, node) {
 }
 
 function _stopListen() {
+  _listenPath = '';
   if (_listenStartTimer) { clearTimeout(_listenStartTimer);  _listenStartTimer = null; }
   if (_listenRenewTimer) { clearTimeout(_listenRenewTimer);  _listenRenewTimer = null; }
   if (_listenRateTimer)  { clearInterval(_listenRateTimer);  _listenRateTimer  = null; }
