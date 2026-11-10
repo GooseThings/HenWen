@@ -9,9 +9,14 @@
   so the JS half is handled here instead: one adapter that prefixes
   root-absolute app URLs as they are used. It patches fetch, XMLHttpRequest
   and EventSource -- the three things the frontend uses to reach this app --
-  and exposes henwenUrl() for the handful of sites that build a URL without
-  going through any of them (an <audio> src, a location assignment, a
-  WebSocket URL); those are edited directly.
+  and exposes henwenUrl() for every site that reaches the network without
+  going through any of the three. Those are edited directly, and the list is
+  worth knowing because the failure mode is silent: an <audio> src, a
+  location assignment, a JS-built <a href> download link, an <img> src
+  (including a logo URL handed back by the server), and
+  AudioWorklet.addModule() -- that last one 404s the worklet on a prefixed
+  install, and low-latency Listen just falls back to legacy MSE without
+  saying why.
 
   When HenWen is served at the root (every existing install), request.script_root
   is "" and this whole block short-circuits to a no-op: no patching, no

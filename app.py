@@ -606,6 +606,19 @@ app.wsgi_app = _LocalProxyFix(app.wsgi_app)
 _URL_PREFIX_RE = re.compile(r'^(?:/[A-Za-z0-9][A-Za-z0-9._~-]*)+$')
 
 
+# A prefix whose first segment is also one of this app's own top-level route
+# roots is refused, because the two become indistinguishable when the proxy
+# strips the prefix: with URL_PREFIX=/api, an external /api/api/status/board
+# arrives as /api/status/board, and "does PATH_INFO still start with the
+# prefix?" answers yes for the app's own path, strips it again, and routes
+# /status/board -- which doesn't exist. Rather than guess, refuse the mount.
+_PREFIX_RESERVED_ROOTS = frozenset((
+    'api', 'static', 'login', 'logout', 'status', 'accessible', 'index.html',
+    'henwen-manager', 'forgot-password', 'reset-password', 'accept-invite',
+    'ws-audio', 'asterisk-ws',
+))
+
+
 def _normalize_url_prefix(value):
     """'' for anything unusable, else the prefix with no trailing slash."""
     v = str(value or '').strip()
@@ -614,7 +627,11 @@ def _normalize_url_prefix(value):
     if not v.startswith('/'):
         v = '/' + v
     v = v.rstrip('/')
-    return v if _URL_PREFIX_RE.match(v) else ''
+    if not _URL_PREFIX_RE.match(v):
+        return ''
+    if v.split('/')[1].lower() in _PREFIX_RESERVED_ROOTS:
+        return ''
+    return v
 
 
 URL_PREFIX = _normalize_url_prefix(os.environ.get('URL_PREFIX', ''))
@@ -659,30 +676,26 @@ class _SchemeAwareSessionInterface(SecureCookieSessionInterface):
             return True
         return request.is_secure
 
-    def get_cookie_path(self, app):
-        """Scope the session cookie to the mount, not to '/'.
-
-        Flask's default is SESSION_COOKIE_PATH or APPLICATION_ROOT, i.e. '/',
-        regardless of SCRIPT_NAME. Under a path prefix that means an install
-        at /henwen sets its cookie for the whole hostname -- so two HenWen
-        installs on one host (the exact reason prefix support exists) send
-        each other their session cookies and clobber each other's logins.
-        Scoping to script_root keeps each mount's cookie to itself."""
-        return request.script_root or app.config.get('SESSION_COOKIE_PATH') or '/'
-
     def get_cookie_name(self, app):
-        """Name the cookie after the mount as well as scoping its path.
+        """Give each mount its own cookie NAME, and leave the path alone.
 
-        Path alone leaves an ambiguity: a Path=/ cookie from an install at the
-        root is *also* sent on /henwen requests, so both arrive together and
-        the browser's ordering decides which one Flask reads. A distinct name
-        per mount removes that.
+        Two HenWen installs on one hostname is the reason prefix support
+        exists, and by default they would both write a cookie called
+        'session' at Path=/ -- so visiting one replaces the other's login.
+        A distinct name per mount fixes that without narrowing the path.
 
-        Derived per request rather than from URL_PREFIX at import, so it stays
-        consistent in TRUST_FORWARDED_PREFIX mode too, where the prefix is only
-        known per request -- an earlier version set it only for a fixed
-        URL_PREFIX, which left the header mode with a mount-scoped path and an
-        unscoped name."""
+        Scoping the *path* to script_root was tried first and is wrong: the
+        browser's low-latency audio connection opens /ws-audio/<node>, an
+        Apache-level proxy that lives at the hostname root by design (see
+        ws-audio/apply.sh), and audio_ws_relay.py authorizes it by forwarding
+        that very cookie to api_internal_audio_authorize_ws(). A cookie
+        scoped to /henwen is not sent to /ws-audio, so low-latency Listen
+        would silently fall back to the legacy path on every prefixed
+        install. Keeping Path=/ and separating by name keeps both properties.
+
+        Derived per request rather than from URL_PREFIX at import, so it is
+        consistent in TRUST_FORWARDED_PREFIX mode too, where the prefix is
+        only known per request."""
         prefix = request.script_root
         base   = app.config.get('SESSION_COOKIE_NAME') or 'session'
         return base + prefix.replace('/', '_') if prefix else base
@@ -2185,18 +2198,12 @@ def logout():
     remove_active_session(session.get("sid"))
     session.clear()
     log("INFO", f"[AUTH] Logout: '{username}'")
-    resp = redirect(url_for('login'))
-    # Sessions are stateless signed cookies, so logging out can only work by
-    # clearing cookies -- and session.clear() only clears the one at *this*
-    # mount's name/path. An install that used to be served at the root (or
-    # under a different prefix) can have left a still-validly-signed cookie
-    # behind at Path=/, which would come back to life if the mount ever moved
-    # back. Expire that one too, by name and at the root path, so a logout is
-    # a logout regardless of where this install has been mounted before.
-    if request.script_root:
-        legacy = app.config.get('SESSION_COOKIE_NAME') or 'session'
-        resp.delete_cookie(legacy, path='/')
-    return resp
+    # No cross-mount cookie cleanup here. An earlier version also expired
+    # 'session' at Path=/ to kill a cookie left behind by a previous mount,
+    # but with cookies separated by name (see get_cookie_name) that name
+    # belongs to the install at the *root* of this hostname -- so logging out
+    # of /henwen would have logged the user out of the other install too.
+    return redirect(url_for('login'))
 
 
 @app.route("/api/login", methods=["POST"])

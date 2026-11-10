@@ -63,6 +63,18 @@ class TestNormalizeUrlPrefix:
         assert app._normalize_url_prefix(None) == ''
         assert app._normalize_url_prefix('/') == ''
 
+    def test_rejects_a_prefix_that_collides_with_an_app_route_root(self):
+        """With URL_PREFIX=/api and a proxy that strips the mount, the app's
+        own /api/status/board arrives looking exactly like a still-prefixed
+        path, gets stripped again, and routes /status/board -- which doesn't
+        exist, so every API call 404s. Refuse the mount instead of guessing."""
+        for bad in ('/api', '/static', '/login', '/status', '/henwen-manager',
+                    '/ws-audio', '/API'):
+            assert app._normalize_url_prefix(bad) == '', bad
+        # A nested prefix under a reserved name is fine -- it can't be confused
+        # with the app's own first segment.
+        assert app._normalize_url_prefix('/apps/henwen') == '/apps/henwen'
+
     def test_rejects_anything_that_is_not_plain_path_segments(self):
         # A prefix lands in generated URLs and in the session cookie path, so
         # these are ignored rather than sanitized.
@@ -141,49 +153,44 @@ class TestUnprefixedIsUnchanged:
         assert '/pwned' not in body
 
 
-class TestSessionCookieScope:
+class TestSessionCookieIsolation:
     """Two installs on one hostname is the reason prefix support exists, so
-    their cookies must not reach each other."""
+    their sessions must not replace each other -- but the separation has to be
+    by cookie NAME, not by path. See get_cookie_name()."""
 
-    def test_cookie_is_scoped_to_the_mount(self, client, create_user):
-        create_user("owner1", role="owner")
-        r = client.post(PREFIX + "/login",
-                        data={"username": "owner1", "password": "password12345"},
-                        headers={"X-Forwarded-Prefix": PREFIX})
-        setcookie = r.headers.get("Set-Cookie", "")
-        assert setcookie, "login should set a session cookie"
-        assert f"Path={PREFIX}" in setcookie, setcookie
-
-    def test_cookie_name_follows_the_mount_too(self, client, create_user):
-        """Path alone isn't enough: a Path=/ 'session' cookie from a root
-        install is also sent on /henwen requests, so both arrive together and
-        the browser's ordering picks the winner. The name is derived per
-        request, so it stays consistent in header-prefix mode as well."""
+    def test_each_mount_gets_its_own_cookie_name(self, client, create_user):
         create_user("owner1", role="owner")
         r = client.post(PREFIX + "/login",
                         data={"username": "owner1", "password": "password12345"},
                         headers={"X-Forwarded-Prefix": PREFIX})
         assert "session_henwen=" in r.headers.get("Set-Cookie", ""), r.headers.get("Set-Cookie")
 
-    def test_logout_also_expires_a_legacy_root_path_cookie(self, client, create_user):
-        """Logout can only work by clearing cookies, and session.clear() only
-        clears this mount's one. An install previously served at the root can
-        have left a validly-signed cookie at Path=/ that would revive if the
-        mount moved back."""
+    def test_the_cookie_path_stays_root(self, client, create_user):
+        """Deliberate: the browser's low-latency audio connection opens
+        /ws-audio/<node>, an Apache-level proxy at the hostname root, and
+        audio_ws_relay.py authorizes it by forwarding this cookie. A cookie
+        scoped to /henwen never reaches it, so low-latency Listen would
+        silently fall back to legacy MSE on every prefixed install."""
+        create_user("owner1", role="owner")
+        r = client.post(PREFIX + "/login",
+                        data={"username": "owner1", "password": "password12345"},
+                        headers={"X-Forwarded-Prefix": PREFIX})
+        sc = r.headers.get("Set-Cookie", "")
+        assert "Path=/;" in sc or sc.rstrip().endswith("Path=/"), sc
+        assert f"Path={PREFIX}" not in sc, sc
+
+    def test_logout_does_not_touch_another_installs_cookie(self, client, create_user):
+        """A root-mounted install's cookie is named 'session' at Path=/.
+        Logging out of /henwen must not expire it."""
         create_user("owner1", role="owner")
         client.post(PREFIX + "/login",
                     data={"username": "owner1", "password": "password12345"},
                     headers={"X-Forwarded-Prefix": PREFIX})
         r = client.post(PREFIX + "/logout", headers={"X-Forwarded-Prefix": PREFIX})
-        cookies = r.headers.getlist("Set-Cookie")
-        expired_at_root = [c for c in cookies
-                           if c.startswith("session=")
-                           and ("Path=/;" in c or c.rstrip().endswith("Path=/"))
-                           and ("Expires=Thu, 01 Jan 1970" in c or "Max-Age=0" in c)]
-        assert expired_at_root, cookies
+        for c in r.headers.getlist("Set-Cookie"):
+            assert not c.startswith("session="), f"logout expired the root install's cookie: {c}"
 
-    def test_cookie_is_path_root_when_mounted_at_root(self, client, create_user):
+    def test_root_mount_is_unchanged(self, client, create_user):
         create_user("owner1", role="owner")
         r = client.post("/login", data={"username": "owner1", "password": "password12345"})
-        assert "Path=/;" in r.headers.get("Set-Cookie", "") or \
-               r.headers.get("Set-Cookie", "").rstrip().endswith("Path=/")
+        assert "session=" in r.headers.get("Set-Cookie", "")

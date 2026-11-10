@@ -2518,7 +2518,7 @@ function esc(s) {
    badge) render the same mark instead of silently mixing old/new. */
 var HENWEN_LOGO_CLASSIC = {{ 'true' if app_logo_classic else 'false' }};
 function henwenLogoSrc(size) {
-  return '/static/logo-' + size + (HENWEN_LOGO_CLASSIC ? '-classic' : '') + '.png';
+  return henwenUrl('/static/logo-' + size + (HENWEN_LOGO_CLASSIC ? '-classic' : '') + '.png');
 }
 
 /* AllStarLink reserves 3000000-3999999 as pseudo-node numbers for EchoLink
@@ -2700,7 +2700,7 @@ fetch('/api/kiosk/settings').then(function(r){ return r.ok ? r.json() : null; })
   if (d.timezone)     _clockTZ     = d.timezone;
   if (d.logo_url) {
     var logoImg = document.getElementById('club-logo-img');
-    logoImg.src = d.logo_url;
+    logoImg.src = henwenUrl(d.logo_url);
     logoImg.style.display = '';
   }
 }).catch(function(){});
@@ -7336,7 +7336,7 @@ function _stopRecord(auto) {
       var rec = (d.recordings || []).filter(function(x) { return x.id === rid; })[0];
       if (rec && rec.status === 'finished') {
         var a = document.createElement('a');
-        a.href = '/api/recording/' + rid + '/download';
+        a.href = henwenUrl('/api/recording/') + rid + '/download';
         a.download = '';
         document.body.appendChild(a); a.click(); a.remove();
         sbToast('Recording saved (' + Math.round(rec.duration_sec || 0) + 's)', true);
@@ -8604,7 +8604,7 @@ function _doStartListenWS(audio, node) {
      revalidation, but Chrome's in-memory cache can still satisfy a
      same-session reuse without any network request -- see
      _static_asset_ver() in app.py for the live case that showed this. */
-  var _workletUrl = '/static/audio-worklet-lowlatency.js?v=' +
+  var _workletUrl = henwenUrl('/static/audio-worklet-lowlatency.js') + '?v=' +
                     encodeURIComponent('{{ rx_worklet_ver }}');
   audioCtx.audioWorklet.addModule(_workletUrl).then(function() {
     if (ctrl.signal.aborted) return;
