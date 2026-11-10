@@ -559,13 +559,35 @@ app.wsgi_app = _LocalProxyFix(app.wsgi_app)
 # thing to want when one box serves several apps, or when two HenWen installs
 # run side by side.
 #
-# The prefix is taken from, in order:
-#   1. URL_PREFIX in the environment (explicit, for a fixed deployment), or
-#   2. the X-Forwarded-Prefix request header, which is the de-facto standard
-#      for this and what a reverse proxy can set per-request -- honored ONLY
-#      when the TCP peer is the local proxy, for the same reason
-#      _LocalProxyFix above only trusts X-Forwarded-For from there: otherwise
-#      any client could rewrite every URL this app generates.
+# The prefix comes from URL_PREFIX in the environment. That is the only
+# source trusted by default, deliberately.
+#
+# X-Forwarded-Prefix is the de-facto standard header for this, and the first
+# version of this code honored it whenever the TCP peer was loopback, by
+# analogy with _LocalProxyFix's X-Forwarded-For handling above. That analogy
+# was wrong and the result was remotely exploitable: Apache *appends* to
+# X-Forwarded-For, so its last element is Apache's own view of the peer, but
+# it *forwards an arbitrary request header verbatim*. A client's own
+# X-Forwarded-Prefix therefore arrived at the backend with REMOTE_ADDR =
+# 127.0.0.1 and was trusted. Confirmed against the live install:
+#
+#   curl -H 'X-Forwarded-Prefix: /pwned' https://<host>/login
+#   -> action="/pwned/login"   window.HW_BASE = "/pwned"
+#
+# _normalize_url_prefix() keeps that same-origin (no scheme, host, CRLF or
+# traversal), so it is not an open redirect, but it still lets an attacker
+# control every URL in a page -- including the login form's action -- and is
+# the classic ingredient for web cache poisoning.
+#
+# So the header is now opt-in via TRUST_FORWARDED_PREFIX, for the deployment
+# whose proxy sets the header itself. Such a proxy MUST also drop whatever
+# the client sent:
+#
+#   RequestHeader unset X-Forwarded-Prefix
+#   RequestHeader set   X-Forwarded-Prefix /henwen
+#
+# in that order. Without the unset, enabling this re-opens exactly the hole
+# described above.
 #
 # Both proxy shapes work. Apache may pass the prefix through
 # (ProxyPass /henwen http://127.0.0.1:5000/henwen) or strip it
@@ -596,6 +618,8 @@ def _normalize_url_prefix(value):
 
 
 URL_PREFIX = _normalize_url_prefix(os.environ.get('URL_PREFIX', ''))
+# Read per request rather than captured at import, so a test can flip it.
+TRUST_FORWARDED_PREFIX = os.environ.get('TRUST_FORWARDED_PREFIX', '').lower() in ('1', 'true', 'yes', 'on')
 
 
 class _ScriptNamePrefixFix:
@@ -604,7 +628,7 @@ class _ScriptNamePrefixFix:
 
     def __call__(self, environ, start_response):
         prefix = URL_PREFIX
-        if not prefix and environ.get('REMOTE_ADDR') in ('127.0.0.1', '::1'):
+        if not prefix and TRUST_FORWARDED_PREFIX:
             prefix = _normalize_url_prefix(environ.get('HTTP_X_FORWARDED_PREFIX', ''))
         if prefix:
             path = environ.get('PATH_INFO', '')
@@ -635,8 +659,26 @@ class _SchemeAwareSessionInterface(SecureCookieSessionInterface):
             return True
         return request.is_secure
 
+    def get_cookie_path(self, app):
+        """Scope the session cookie to the mount, not to '/'.
+
+        Flask's default is SESSION_COOKIE_PATH or APPLICATION_ROOT, i.e. '/',
+        regardless of SCRIPT_NAME. Under a path prefix that means an install
+        at /henwen sets its cookie for the whole hostname -- so two HenWen
+        installs on one host (the exact reason prefix support exists) send
+        each other their session cookies and clobber each other's logins.
+        Scoping to script_root keeps each mount's cookie to itself."""
+        return request.script_root or app.config.get('SESSION_COOKIE_PATH') or '/'
+
 
 app.session_interface = _SchemeAwareSessionInterface()
+
+# Belt to that suspenders: when the mount is fixed at startup, give the cookie
+# its own name too. Paths alone leave an ambiguity -- a Path=/ cookie from an
+# install at the root is also sent to /henwen, so both arrive on the same
+# request and the browser's ordering decides which one Flask reads.
+if URL_PREFIX:
+    app.config['SESSION_COOKIE_NAME'] = 'session' + URL_PREFIX.replace('/', '_')
 
 # ---------------------------------------------------------------------------
 # Logging  (verbose, timestamp-prefixed, written to stdout for journald)

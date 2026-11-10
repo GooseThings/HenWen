@@ -20,6 +20,15 @@ import app
 
 
 @pytest.fixture(autouse=True)
+def _trust_forwarded_prefix(monkeypatch):
+    """The X-Forwarded-Prefix header is opt-in (TRUST_FORWARDED_PREFIX) because
+    Apache forwards a client-supplied one verbatim -- see the long comment on
+    _ScriptNamePrefixFix. These tests drive the prefix through the header
+    because URL_PREFIX is read at import, so they have to opt in explicitly."""
+    monkeypatch.setattr(app, "TRUST_FORWARDED_PREFIX", True)
+
+
+@pytest.fixture(autouse=True)
 def _reset_rate_limits():
     """/login carries a real per-minute limit and app.limiter's in-memory
     storage persists for the whole session, so this file's several GETs of
@@ -109,11 +118,44 @@ class TestUnprefixedIsUnchanged:
         assert 'window.HW_BASE = ""' in body
         assert 'action="/login"' in body
 
-    def test_the_header_is_ignored_from_a_non_local_peer(self, client, create_user):
-        """Otherwise any client could rewrite every URL the app generates."""
+    def test_the_header_is_ignored_unless_the_deployment_opts_in(self, client, create_user, monkeypatch):
+        """The regression guard for a remotely exploitable bug: the header used
+        to be trusted whenever the TCP peer was loopback, which is *every*
+        proxied request, because Apache forwards a client's own
+        X-Forwarded-Prefix verbatim. Confirmed live against the public
+        hostname before the fix:
+
+            curl -H 'X-Forwarded-Prefix: /pwned' https://<host>/login
+            -> action="/pwned/login"
+
+        An attacker-controlled prefix rewrites every URL on the page,
+        including the login form's action, and is the standard ingredient for
+        web cache poisoning. Default must be: header ignored."""
+        monkeypatch.setattr(app, "TRUST_FORWARDED_PREFIX", False)
         create_user("owner1", role="owner")
-        r = client.get("/login", headers={"X-Forwarded-Prefix": PREFIX},
-                       environ_overrides={"REMOTE_ADDR": "203.0.113.7"})
+        r = client.get("/login", headers={"X-Forwarded-Prefix": "/pwned"})
+        body = r.get_data(as_text=True)
         assert r.status_code == 200
-        assert 'window.HW_BASE = ""' in r.get_data(as_text=True)
-        assert 'action="/login"' in r.get_data(as_text=True)
+        assert 'window.HW_BASE = ""' in body
+        assert 'action="/login"' in body
+        assert '/pwned' not in body
+
+
+class TestSessionCookieScope:
+    """Two installs on one hostname is the reason prefix support exists, so
+    their cookies must not reach each other."""
+
+    def test_cookie_is_scoped_to_the_mount(self, client, create_user):
+        create_user("owner1", role="owner")
+        r = client.post(PREFIX + "/login",
+                        data={"username": "owner1", "password": "password12345"},
+                        headers={"X-Forwarded-Prefix": PREFIX})
+        setcookie = r.headers.get("Set-Cookie", "")
+        assert setcookie, "login should set a session cookie"
+        assert f"Path={PREFIX}" in setcookie, setcookie
+
+    def test_cookie_is_path_root_when_mounted_at_root(self, client, create_user):
+        create_user("owner1", role="owner")
+        r = client.post("/login", data={"username": "owner1", "password": "password12345"})
+        assert "Path=/;" in r.headers.get("Set-Cookie", "") or \
+               r.headers.get("Set-Cookie", "").rstrip().endswith("Path=/")
