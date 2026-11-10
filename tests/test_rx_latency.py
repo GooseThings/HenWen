@@ -64,6 +64,21 @@ class TestRxCaptureMode:
         monkeypatch.setitem(app._capture_only_active, "546054", FakeCapture("mixmonitor"))
         assert app._rx_capture_mode("546054") == "mixmonitor"
 
+    def test_the_slower_of_two_live_captures_wins(self, monkeypatch):
+        """A legacy broadcast and a capture-only relay can both be up for one
+        node and disagree about the capture path. Which one feeds a given
+        listener isn't knowable from here, so the slow one has to win: an
+        over-estimate costs a little repeater tail, an under-estimate puts
+        the operator's own voice back in their ears."""
+        monkeypatch.setitem(app._audio_active, "546054", FakeBroadcast("audiosocket"))
+        monkeypatch.setitem(app._capture_only_active, "546054", FakeCapture("mixmonitor"))
+        assert app._rx_capture_mode("546054") == "mixmonitor"
+
+        monkeypatch.setitem(app._audio_active, "546055", FakeBroadcast("mixmonitor"))
+        monkeypatch.setitem(app._capture_only_active, "546055", FakeCapture("audiosocket"))
+        assert app._rx_capture_mode("546055") == "mixmonitor", (
+            "order of the two lookups must not decide the answer")
+
 
 class TestRxLatencyRoute:
     def test_requires_a_login(self, client, create_user):

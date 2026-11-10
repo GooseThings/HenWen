@@ -6923,7 +6923,7 @@ async function removeFavorite(node) {
 var _tx = { ua: null, session: null, keyed: false, armed: false,
             node: '', statsTimer: null,
             muteHoldTimer: null, muteHoldUntil: 0,
-            rxLatencyMs: 0, rxLatencyKnown: false,
+            rxLatencyMs: 0, rxLatencyKnown: false, rxLatencySeq: 0,
             audioCtx: null, gainNode: null, analyser: null, rawStream: null, meterTimer: null };
 
 /* Self-echo guard sizing (see the block comment above). The server half of
@@ -6938,7 +6938,11 @@ var _tx = { ua: null, session: null, keyed: false, armed: false,
    estimate are deliberately sized to err long. */
 var _TX_UNKEY_LAG_MS      = 300;    // '#' DTMF duration + signaling transit before app_rpt drops PTT
 var _TX_RX_HOLD_DEFAULT_MS = 2600;  // used until the server answers: MixMonitor + WebM, the slowest path
-var _TX_RX_HOLD_MAX_MS    = 5000;   // ceiling, so a bad reading can't mute Listen for ages
+/* Ceiling, so a bad reading can't mute Listen for ages — but it has to
+   clear the slowest *legitimate* total, or it would silently cut a hold
+   that was correct: MixMonitor + WebM (2600) + the MSE cushion's own
+   documented ceiling (_LISTEN_TARGET_MAX_S, 4000) + the unkey lag (300). */
+var _TX_RX_HOLD_MAX_MS    = 7000;
 var _TX_WS_BUFFER_MS      = 350;    // low-latency worklet's own hard buffer cap (MAX_BUFFER_SAMPLES)
 
 /* Mic gain: the browser's autoGainControl drove a headset mic to hard
@@ -7904,16 +7908,15 @@ function _txClearMuteHold(keepStatus) {
    the worklet's buffer is hard-capped, so its cap is the answer. */
 function _txListenBufferMs() {
   if (!_listenActive) return 0;
-  if (_listenWorkletNode) return _TX_WS_BUFFER_MS;
-  /* No blob URL means neither MSE nor the worklet: the plain <audio src>
-     fallback (_doStartListenFallback(), Safari and anything else without
-     MSE/WebM). Its buffer is a progressive download, so buffered.end tells
-     us how far ahead it has *fetched*, not how far behind it is playing —
-     an unusable reading. Ask for the ceiling instead and accept that a
-     fallback listener lagging more than the clamp still hears some echo;
-     that path is documented as high-latency and there's nothing here that
-     can measure it. */
-  if (!_listenObjURL) return _TX_RX_HOLD_MAX_MS;
+  if (_listenPath === 'ws' || _listenWorkletNode) return _TX_WS_BUFFER_MS;
+  /* The plain <audio src> fallback (_doStartListenFallback(), Safari and
+     anything else without MSE/WebM) buffers a progressive download, so
+     buffered.end says how far ahead it has *fetched*, not how far behind
+     it is playing — an unusable reading. Ask for the ceiling instead and
+     accept that a fallback listener lagging more than the clamp still
+     hears some echo; that path is documented as high-latency and nothing
+     here can measure it. */
+  if (_listenPath === 'fallback') return _TX_RX_HOLD_MAX_MS;
   var a = document.getElementById('node-audio');
   try {
     if (a && a.buffered && a.buffered.length) {
@@ -7941,11 +7944,22 @@ function _txRxHoldMs() {
    answer is only needed by the time the operator unkeys, and until it
    lands _txRxHoldMs() uses the slowest-path default. */
 function _txLearnRxLatency() {
+  /* The answer only ever described the capture that was running when it
+     was asked, and that can change between transmissions — the tap's
+     per-node circuit breaker falls back to MixMonitor, ~2s slower — so a
+     remembered "audiosocket" is not safe to carry forward. Forget it
+     before asking: an answer that doesn't arrive (or an error) then leaves
+     _txRxHoldMs() on the slow-path default rather than on a stale fast
+     estimate that would let the echo back through. seq makes a slow reply
+     from an earlier key-down lose to a later one. */
+  _tx.rxLatencyKnown = false;
+  var seq  = ++_tx.rxLatencySeq;
   var node = _listenNode || _tx.node;
   if (!node) return;
   apiFetch('/api/audio/rx-latency/' + node)
     .then(function(r) { return r.ok ? r.json() : null; })
     .then(function(d) {
+      if (seq !== _tx.rxLatencySeq) return;   // a later key-down already asked
       if (!d || typeof d.est_latency_ms !== 'number') return;
       _tx.rxLatencyMs    = d.est_latency_ms;
       _tx.rxLatencyKnown = !!d.capture_known;
@@ -8227,6 +8241,13 @@ var _listenNode      = '';
 var _listenFallbackNotice = '';  // set by _doStartListen(), consumed by the next connect toast
 var _listenCtrl      = null;   // AbortController for in-flight fetch
 var _listenObjURL    = null;   // MediaSource blob URL pending revoke
+/* Which pipeline is actually running: 'ws' | 'mse' | 'fallback' (''
+   when Listen is off). Set by each _doStartListen*() as it commits, and
+   read by _txListenBufferMs(), which has to measure the client's buffer
+   differently per path. Deliberately its own var: _listenObjURL looks like
+   it could stand in for "MSE is running", but it's revoked and nulled the
+   moment MediaSource opens, so it's null for every *live* MSE session. */
+var _listenPath      = '';
 var _listenRenewTimer= null;   // safety-valve reconnect (30 min)
 var _listenRateTimer = null;   // rate-control interval
 var _listenStartTimer= null;   // startup watchdog — abort if no stream within N seconds
@@ -8525,6 +8546,7 @@ function _doStartListen(audio, node, rxAudioPath) {
 function _doStartListenWS(audio, node) {
   var ctrl = new AbortController();
   _listenCtrl = ctrl;
+  _listenPath = 'ws';
 
   audio.muted = _txRxShouldMute();
 
@@ -8729,6 +8751,7 @@ function _doStartListenMSE(audio, node) {
   var ctrl = new AbortController();
   _listenCtrl = ctrl;
 
+  _listenPath = 'mse';
   var ms  = new MediaSource();
   var url = URL.createObjectURL(ms);
   _listenObjURL = url;
@@ -9093,6 +9116,7 @@ function _doStartListenMSE(audio, node) {
 function _doStartListenFallback(audio, node) {
   /* Plain <audio src> for browsers without MSE/WebM support (e.g., Safari).
      High-latency (browser buffers aggressively) but functional. */
+  _listenPath = 'fallback';
   audio.onloadstart = function() {
     _listenActive = true;
     if (_listenStartTimer) { clearTimeout(_listenStartTimer); _listenStartTimer = null; }
@@ -9130,6 +9154,7 @@ function _doStartListenFallback(audio, node) {
 }
 
 function _stopListen() {
+  _listenPath = '';
   if (_listenStartTimer) { clearTimeout(_listenStartTimer);  _listenStartTimer = null; }
   if (_listenRenewTimer) { clearTimeout(_listenRenewTimer);  _listenRenewTimer = null; }
   if (_listenRateTimer)  { clearInterval(_listenRateTimer);  _listenRateTimer  = null; }

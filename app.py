@@ -11686,16 +11686,27 @@ def _rx_capture_mode(node):
     cheaply confirm (whether audiosocket-tap/apply.sh was ever run, i.e.
     whether the modules are loaded), and a wrong "audiosocket" guess would
     under-size the TX mute hold and bring the self-echo back. Unknown is
-    handled as the worst case by the caller instead."""
+    handled as the worst case by the caller instead.
+
+    A legacy broadcast and a capture-only relay can both be up for one node
+    (a recording or the stream relay holding a broadcast while a
+    low-latency listener has its own capture), and the two can disagree —
+    one may have fallen back to MixMonitor while the other got the tap. The
+    slower of the two wins, since which one feeds a given listener isn't
+    knowable from here and only an over-estimate is harmless."""
+    modes = []
     with _audio_lock:
         broadcast = _audio_active.get(node)
     if broadcast is not None:
-        return getattr(broadcast, '_tap_mode', None) or 'mixmonitor'
+        modes.append(getattr(broadcast, '_tap_mode', None) or 'mixmonitor')
     with _capture_only_lock:
         capture = _capture_only_active.get(node)
     if capture is not None:
-        return getattr(capture, 'tap_mode', None) or 'mixmonitor'
-    return None
+        modes.append(getattr(capture, 'tap_mode', None) or 'mixmonitor')
+    if not modes:
+        return None
+    return max(modes, key=lambda m: RX_LATENCY_CAPTURE_MS.get(
+        m, RX_LATENCY_CAPTURE_MS['mixmonitor']))
 
 
 def _rx_latency_estimate_ms(capture_mode, rx_audio_path):
