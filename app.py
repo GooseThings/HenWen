@@ -670,15 +670,25 @@ class _SchemeAwareSessionInterface(SecureCookieSessionInterface):
         Scoping to script_root keeps each mount's cookie to itself."""
         return request.script_root or app.config.get('SESSION_COOKIE_PATH') or '/'
 
+    def get_cookie_name(self, app):
+        """Name the cookie after the mount as well as scoping its path.
+
+        Path alone leaves an ambiguity: a Path=/ cookie from an install at the
+        root is *also* sent on /henwen requests, so both arrive together and
+        the browser's ordering decides which one Flask reads. A distinct name
+        per mount removes that.
+
+        Derived per request rather than from URL_PREFIX at import, so it stays
+        consistent in TRUST_FORWARDED_PREFIX mode too, where the prefix is only
+        known per request -- an earlier version set it only for a fixed
+        URL_PREFIX, which left the header mode with a mount-scoped path and an
+        unscoped name."""
+        prefix = request.script_root
+        base   = app.config.get('SESSION_COOKIE_NAME') or 'session'
+        return base + prefix.replace('/', '_') if prefix else base
+
 
 app.session_interface = _SchemeAwareSessionInterface()
-
-# Belt to that suspenders: when the mount is fixed at startup, give the cookie
-# its own name too. Paths alone leave an ambiguity -- a Path=/ cookie from an
-# install at the root is also sent to /henwen, so both arrive on the same
-# request and the browser's ordering decides which one Flask reads.
-if URL_PREFIX:
-    app.config['SESSION_COOKIE_NAME'] = 'session' + URL_PREFIX.replace('/', '_')
 
 # ---------------------------------------------------------------------------
 # Logging  (verbose, timestamp-prefixed, written to stdout for journald)
@@ -2175,7 +2185,18 @@ def logout():
     remove_active_session(session.get("sid"))
     session.clear()
     log("INFO", f"[AUTH] Logout: '{username}'")
-    return redirect(url_for('login'))
+    resp = redirect(url_for('login'))
+    # Sessions are stateless signed cookies, so logging out can only work by
+    # clearing cookies -- and session.clear() only clears the one at *this*
+    # mount's name/path. An install that used to be served at the root (or
+    # under a different prefix) can have left a still-validly-signed cookie
+    # behind at Path=/, which would come back to life if the mount ever moved
+    # back. Expire that one too, by name and at the root path, so a logout is
+    # a logout regardless of where this install has been mounted before.
+    if request.script_root:
+        legacy = app.config.get('SESSION_COOKIE_NAME') or 'session'
+        resp.delete_cookie(legacy, path='/')
+    return resp
 
 
 @app.route("/api/login", methods=["POST"])

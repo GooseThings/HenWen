@@ -154,6 +154,34 @@ class TestSessionCookieScope:
         assert setcookie, "login should set a session cookie"
         assert f"Path={PREFIX}" in setcookie, setcookie
 
+    def test_cookie_name_follows_the_mount_too(self, client, create_user):
+        """Path alone isn't enough: a Path=/ 'session' cookie from a root
+        install is also sent on /henwen requests, so both arrive together and
+        the browser's ordering picks the winner. The name is derived per
+        request, so it stays consistent in header-prefix mode as well."""
+        create_user("owner1", role="owner")
+        r = client.post(PREFIX + "/login",
+                        data={"username": "owner1", "password": "password12345"},
+                        headers={"X-Forwarded-Prefix": PREFIX})
+        assert "session_henwen=" in r.headers.get("Set-Cookie", ""), r.headers.get("Set-Cookie")
+
+    def test_logout_also_expires_a_legacy_root_path_cookie(self, client, create_user):
+        """Logout can only work by clearing cookies, and session.clear() only
+        clears this mount's one. An install previously served at the root can
+        have left a validly-signed cookie at Path=/ that would revive if the
+        mount moved back."""
+        create_user("owner1", role="owner")
+        client.post(PREFIX + "/login",
+                    data={"username": "owner1", "password": "password12345"},
+                    headers={"X-Forwarded-Prefix": PREFIX})
+        r = client.post(PREFIX + "/logout", headers={"X-Forwarded-Prefix": PREFIX})
+        cookies = r.headers.getlist("Set-Cookie")
+        expired_at_root = [c for c in cookies
+                           if c.startswith("session=")
+                           and ("Path=/;" in c or c.rstrip().endswith("Path=/"))
+                           and ("Expires=Thu, 01 Jan 1970" in c or "Max-Age=0" in c)]
+        assert expired_at_root, cookies
+
     def test_cookie_is_path_root_when_mounted_at_root(self, client, create_user):
         create_user("owner1", role="owner")
         r = client.post("/login", data={"username": "owner1", "password": "password12345"})
