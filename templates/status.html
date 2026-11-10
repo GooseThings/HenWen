@@ -6931,6 +6931,11 @@ var _tx = { ua: null, session: null, keyed: false, armed: false,
    which depends on whether the AudioSocket tap or MixMonitor is running —
    comes from /api/audio/rx-latency/<node>, re-read on every key-down; the
    client adds its own measured buffer depth and the unkey signaling lag. */
+/* Tuning rule if this proves off on real traffic: still hearing yourself
+   after unkey means the hold is short (raise RX_LATENCY_CAPTURE_MS in
+   app.py for the capture path in use); losing the start of the repeater
+   tail or a fast reply means it's long (lower it). Both halves of the
+   estimate are deliberately sized to err long. */
 var _TX_UNKEY_LAG_MS      = 300;    // '#' DTMF duration + signaling transit before app_rpt drops PTT
 var _TX_RX_HOLD_DEFAULT_MS = 2600;  // used until the server answers: MixMonitor + WebM, the slowest path
 var _TX_RX_HOLD_MAX_MS    = 5000;   // ceiling, so a bad reading can't mute Listen for ages
@@ -7838,10 +7843,10 @@ function _txReleaseMic() {
 /* Drop the call/UA and disable the PTT, leaving the bar's last status
    readable. Listen is left exactly as the user has it (just unmuted). */
 function _txTeardown() {
-  _txUnkey();
   /* Nothing is listening for our own echo once the call is gone, and a TX
      teardown must never be what leaves Listen silently muted. */
-  _txClearMuteHold();
+  _txUnkey({ noHold: true });
+  _txClearMuteHold(true);
   _txApplyListenMute();
   clearTimeout(_tx.statsTimer);
   var pttEl = document.getElementById('tx-ptt');
@@ -7881,10 +7886,15 @@ function _txApplyListenMute() {
 
 /* Drop any pending hold. Called on re-key (so a pending unmute can't fire
    mid-transmission) and on every teardown path (so TX never leaves Listen
-   muted behind it). */
-function _txClearMuteHold() {
+   muted behind it). The hold's own countdown is the only thing that would
+   otherwise clear its status line, so cancelling one clears that text too —
+   except where the caller has something more important to say there (a
+   dropped call, an error), which is what keepStatus is for. */
+function _txClearMuteHold(keepStatus) {
+  var had = !!_tx.muteHoldTimer;
   if (_tx.muteHoldTimer) { clearTimeout(_tx.muteHoldTimer); _tx.muteHoldTimer = null; }
   _tx.muteHoldUntil = 0;
+  if (had && !keepStatus) _txStatus('');
 }
 
 /* How much audio the client itself is sitting on. MSE: the real measured
@@ -7895,6 +7905,15 @@ function _txClearMuteHold() {
 function _txListenBufferMs() {
   if (!_listenActive) return 0;
   if (_listenWorkletNode) return _TX_WS_BUFFER_MS;
+  /* No blob URL means neither MSE nor the worklet: the plain <audio src>
+     fallback (_doStartListenFallback(), Safari and anything else without
+     MSE/WebM). Its buffer is a progressive download, so buffered.end tells
+     us how far ahead it has *fetched*, not how far behind it is playing —
+     an unusable reading. Ask for the ceiling instead and accept that a
+     fallback listener lagging more than the clamp still hears some echo;
+     that path is documented as high-latency and there's nothing here that
+     can measure it. */
+  if (!_listenObjURL) return _TX_RX_HOLD_MAX_MS;
   var a = document.getElementById('node-audio');
   try {
     if (a && a.buffered && a.buffered.length) {
@@ -7957,7 +7976,10 @@ function _txKey() {
   _tx.statsTimer = setTimeout(function() { if (_tx.keyed) _txStatsSample('keyed'); }, 2000);
 }
 
-function _txUnkey() {
+/* noHold: release without starting a self-echo hold at all — used by
+   _txTeardown(), where the call is going away and whatever status the
+   caller just set (e.g. "Call ended") must survive. */
+function _txUnkey(opts) {
   if (!_tx.keyed) return;
   _tx.keyed = false;
   var b = document.getElementById('tx-ptt');
@@ -7969,8 +7991,8 @@ function _txUnkey() {
   /* Hold the RX mute for the pipeline's own latency before letting Listen
      back in — otherwise the tail of this transmission, still in flight,
      comes back as self-echo. */
-  var hold = _txRxHoldMs();
-  _txClearMuteHold();
+  var hold = (opts && opts.noHold) ? 0 : _txRxHoldMs();
+  _txClearMuteHold(true);
   if (hold > 0) {
     _tx.muteHoldUntil  = Date.now() + hold;
     _tx.muteHoldTimer  = setTimeout(function() {
@@ -8192,7 +8214,7 @@ function _txUnkey() {
   });
   /* Fail-safes: anything that takes focus/page away unkeys; leaving the page
      tears the whole call down (hangup is a guaranteed unkey server-side). */
-  window.addEventListener('blur', _txUnkey);
+  window.addEventListener('blur', function() { _txUnkey(); });
   document.addEventListener('visibilitychange', function() { if (document.hidden) _txUnkey(); });
   window.addEventListener('beforeunload', function() {
     if (_tx.session) { try { _tx.session.terminate(); } catch (e) {} }

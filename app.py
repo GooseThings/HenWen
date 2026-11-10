@@ -11661,8 +11661,15 @@ def api_audio_check(node):
 #   mixmonitor: the same, plus the ~2s of Asterisk stdio buffering that
 #     path cannot avoid (see the "Audio streaming" section of CLAUDE.md and
 #     audio_relay.py's jitter-buffer comment).
-# Deliberately erring long: an over-long hold costs a bit of the repeater
-# tail, an under-long one puts the operator's own voice back in their ears.
+# Both figures are reasoned estimates from the pipeline's own documented
+# stages, not an end-to-end measurement (that needs a live keyed node and a
+# browser): the relay holds roughly one frame on the AudioSocket path and up
+# to a MixMonitor lump on the other, and the encode stage measured ~120ms
+# time-to-first-byte with the AGC chain adding nothing (it is the
+# zero-lookahead RX_AGC_FILTER now, not the old ~0.4s dynaudnorm). They are
+# deliberately sized to err long: an over-long hold costs a bit of the
+# repeater tail, an under-long one puts the operator's own voice back in
+# their ears. See _txRxHoldMs() in status.html for the tuning rule.
 RX_LATENCY_CAPTURE_MS = {'audiosocket': 400, 'mixmonitor': 2400}
 # The legacy WebM path emits ~200ms Clusters (-cluster_time_limit in
 # _start_broadcast()'s ffmpeg command), so nothing reaches a browser at a
