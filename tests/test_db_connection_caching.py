@@ -72,40 +72,43 @@ class TestGetDbThreadLocalCaching:
         assert row is None, "got db-a's data through db-b's connection -- cache wasn't reset"
 
 
+def _other_writer_can_write():
+    """Whether a separate connection on another thread can write right now --
+    what every other writer in the app needs to be true."""
+    result = {}
+
+    def worker():
+        conn = sqlite3.connect(app.DB_PATH, timeout=0.2)
+        try:
+            conn.execute("INSERT INTO settings (key, value) VALUES ('other', 'x')")
+            conn.commit()
+            result["ok"] = True
+        except sqlite3.OperationalError as e:
+            result["ok"] = str(e)
+        finally:
+            conn.close()
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+    return result["ok"]
+
+
 class TestRequestTeardownReleasesTransaction:
     """get_db()'s connections live as long as their thread, so a request that
     raised between a write and its commit() used to keep the write lock
     forever, and every other writer in the app failed with "database is
     locked" until a restart. Seen live from a duplicate-slug INSERT."""
 
-    def _other_writer_can_write(self):
-        result = {}
-
-        def worker():
-            conn = sqlite3.connect(app.DB_PATH, timeout=0.2)
-            try:
-                conn.execute("INSERT INTO settings (key, value) VALUES ('other', 'x')")
-                conn.commit()
-                result["ok"] = True
-            except sqlite3.OperationalError as e:
-                result["ok"] = str(e)
-            finally:
-                conn.close()
-
-        t = threading.Thread(target=worker)
-        t.start()
-        t.join()
-        return result["ok"]
-
     def test_a_failed_request_rolls_back_and_releases_the_write_lock(self, fresh_db):
         with app.app.test_request_context("/"):
             conn = app.get_db()
             conn.execute("INSERT INTO settings (key, value) VALUES ('half', 'done')")
             assert conn.in_transaction
-            assert self._other_writer_can_write() == "database is locked"
+            assert _other_writer_can_write() == "database is locked"
             app.app.do_teardown_request(RuntimeError("route blew up"))
         assert not conn.in_transaction
-        assert self._other_writer_can_write() is True
+        assert _other_writer_can_write() is True
         assert conn.execute("SELECT 1 FROM settings WHERE key='half'").fetchone() is None
 
     def test_a_successful_request_that_forgot_commit_is_committed(self, fresh_db):
@@ -115,3 +118,58 @@ class TestRequestTeardownReleasesTransaction:
             app.app.do_teardown_request(None)
         assert not conn.in_transaction
         assert conn.execute("SELECT value FROM settings WHERE key='kept'").fetchone()[0] == "yes"
+
+
+class TestBackgroundThreadsReleaseLeakedTransactions:
+    """Pollers' cached connections never close either, and most of their
+    write paths catch the error and carry on, so a failed write used to
+    leave the transaction open: that thread's next write failed too, or it
+    held the write lock and every other writer in the app failed with it."""
+
+    def test_helper_rolls_back_and_releases_the_lock(self, fresh_db):
+        conn = app.get_db()
+        conn.execute("INSERT INTO settings (key, value) VALUES ('half', 'done')")
+        assert _other_writer_can_write() == "database is locked"
+        app._rollback_leaked_db_transaction("test")
+        assert not conn.in_transaction
+        assert _other_writer_can_write() is True
+        assert conn.execute("SELECT 1 FROM settings WHERE key='half'").fetchone() is None
+
+    def test_helper_is_a_no_op_without_an_open_transaction(self, fresh_db, monkeypatch):
+        logged = []
+        monkeypatch.setattr(app, "log", lambda *a, **k: logged.append(a))
+        app._rollback_leaked_db_transaction("test")
+        assert logged == []
+
+    def test_a_failed_irc_inbound_save_does_not_hold_the_lock(self, fresh_db):
+        # The IRC callback runs on the relay's own thread and swallows its
+        # errors; message=None trips chat_messages' NOT NULL mid-transaction.
+        conn = app.get_db()
+        conn.execute("INSERT INTO settings (key, value) VALUES ('earlier', 'write')")
+        app._irc_relay_on_message("nick", None)
+        assert not conn.in_transaction
+        assert _other_writer_can_write() is True
+
+    def test_a_loop_iteration_that_failed_mid_write_is_rolled_back(self, fresh_db, monkeypatch):
+        class Stop(Exception):
+            pass
+
+        sleeps = []
+
+        def fake_sleep(_s):
+            sleeps.append(_s)
+            if len(sleeps) > 1:
+                raise Stop
+
+        def failing_run():
+            app.get_db().execute("INSERT INTO settings (key, value) VALUES ('half', 'done')")
+            raise RuntimeError("write path blew up before commit")
+
+        monkeypatch.setattr(app.time, "sleep", fake_sleep)
+        monkeypatch.setattr(app, "_run_due_announcements", failing_run)
+        try:
+            app._announce_loop()
+        except Stop:
+            pass
+        assert not app.get_db().in_transaction
+        assert _other_writer_can_write() is True
