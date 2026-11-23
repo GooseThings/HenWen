@@ -64,6 +64,8 @@ def fresh_db(tmp_path, monkeypatch):
     monkeypatch.setattr(henwen_app, "DB_PATH", str(db_path))
     monkeypatch.setattr(henwen_app, "_db_ready", False)
     monkeypatch.setattr(henwen_app._db_local, "conn", None, raising=False)
+    # Slug reservations are process-wide; one test's must not leak into the next.
+    monkeypatch.setattr(henwen_app, "_slug_reservations", {})
     conn = henwen_app.get_db()
     yield conn
     conn.close()

@@ -291,6 +291,25 @@ class TestUploadSlugsDoNotCollide:
         (sounds / "net-reminder.ulaw").write_bytes(b"x")
         assert app._ann_unique_slug("net-reminder", exclude_id=aid) == "net-reminder"
 
+    def test_a_slug_still_being_converted_is_not_handed_out_twice(self, fresh_db, tmp_path, monkeypatch):
+        """No row or file exists yet while audio is converting/synthesizing,
+        so only the reservation stops a second create taking the same slug
+        (seen live: two TTS saves, one overwritten file, one UNIQUE failure)."""
+        sounds = tmp_path / "henwen"
+        sounds.mkdir()
+        monkeypatch.setattr(app, "SOUNDS_DIR", str(sounds))
+        first = app._ann_unique_slug(app._ann_slug("General Repeater info"))
+        second = app._ann_unique_slug(app._ann_slug("General Repeater info"))
+        assert first == "general_repeater_info"
+        assert second != first
+
+    def test_an_expired_reservation_frees_the_slug(self, fresh_db, tmp_path, monkeypatch):
+        sounds = tmp_path / "henwen"
+        sounds.mkdir()
+        monkeypatch.setattr(app, "SOUNDS_DIR", str(sounds))
+        app._slug_reservations["net"] = app.time.time() - app.SLUG_RESERVATION_SEC - 1
+        assert app._ann_unique_slug("net") == "net"
+
     def test_a_free_slug_is_returned_unchanged(self, fresh_db, tmp_path, monkeypatch):
         sounds = tmp_path / "henwen"
         sounds.mkdir()
