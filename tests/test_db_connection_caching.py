@@ -4,6 +4,7 @@ across app.py, some (the AMI poll loop) hit every second. See get_db()'s own
 comment for why thread-local (not a single shared connection, not
 flask.g-per-request) is the right cache scope for this app's threading model.
 """
+import sqlite3
 import threading
 
 import app
@@ -69,3 +70,48 @@ class TestGetDbThreadLocalCaching:
         assert conn_b is not conn_a
         row = conn_b.execute("SELECT value FROM settings WHERE key='marker'").fetchone()
         assert row is None, "got db-a's data through db-b's connection -- cache wasn't reset"
+
+
+class TestRequestTeardownReleasesTransaction:
+    """get_db()'s connections live as long as their thread, so a request that
+    raised between a write and its commit() used to keep the write lock
+    forever, and every other writer in the app failed with "database is
+    locked" until a restart. Seen live from a duplicate-slug INSERT."""
+
+    def _other_writer_can_write(self):
+        result = {}
+
+        def worker():
+            conn = sqlite3.connect(app.DB_PATH, timeout=0.2)
+            try:
+                conn.execute("INSERT INTO settings (key, value) VALUES ('other', 'x')")
+                conn.commit()
+                result["ok"] = True
+            except sqlite3.OperationalError as e:
+                result["ok"] = str(e)
+            finally:
+                conn.close()
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        return result["ok"]
+
+    def test_a_failed_request_rolls_back_and_releases_the_write_lock(self, fresh_db):
+        with app.app.test_request_context("/"):
+            conn = app.get_db()
+            conn.execute("INSERT INTO settings (key, value) VALUES ('half', 'done')")
+            assert conn.in_transaction
+            assert self._other_writer_can_write() == "database is locked"
+            app.app.do_teardown_request(RuntimeError("route blew up"))
+        assert not conn.in_transaction
+        assert self._other_writer_can_write() is True
+        assert conn.execute("SELECT 1 FROM settings WHERE key='half'").fetchone() is None
+
+    def test_a_successful_request_that_forgot_commit_is_committed(self, fresh_db):
+        with app.app.test_request_context("/"):
+            conn = app.get_db()
+            conn.execute("INSERT INTO settings (key, value) VALUES ('kept', 'yes')")
+            app.app.do_teardown_request(None)
+        assert not conn.in_transaction
+        assert conn.execute("SELECT value FROM settings WHERE key='kept'").fetchone()[0] == "yes"

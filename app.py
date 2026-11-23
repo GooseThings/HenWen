@@ -1878,6 +1878,33 @@ def check_auth():
     return None
 
 
+@app.teardown_request
+def _release_open_db_transaction(exc):
+    """A request must never leave its thread's cached connection (see
+    get_db()) inside a transaction. sqlite3 opens one implicitly before the
+    first INSERT/UPDATE/DELETE, and a route that raises before its commit()
+    -- an IntegrityError, say -- used to leave it open with the write lock
+    held for the life of the process, since that connection is never
+    closed. Every other writer then failed with "database is locked" until
+    a restart (seen live: one duplicate-slug TTS create locked the whole
+    app). Roll back on an exception; on a normal return, commit whatever a
+    route forgot to, since a later commit() on this thread would have
+    persisted it anyway, and log it so the missing commit gets fixed."""
+    conn = getattr(_db_local, 'conn', None)
+    if conn is None or not conn.in_transaction:
+        return
+    try:
+        if exc is not None:
+            conn.rollback()
+        else:
+            conn.commit()
+            log("WARN", f"[DB] {request.endpoint} returned with an uncommitted "
+                        "transaction; committed it in teardown")
+    except sqlite3.Error as e:
+        log("ERROR", f"[DB] Could not release open transaction after "
+                     f"{request.endpoint}: {e}")
+
+
 @app.after_request
 def _no_cache_auth_pages(resp):
     """
@@ -14430,6 +14457,11 @@ def _sound_slug_taken_on_disk(slug: str) -> bool:
     return bool(glob.glob(glob.escape(base) + ".*"))
 
 
+SLUG_RESERVATION_SEC   = 300   # outlasts the slowest convert/synthesize step
+_slug_reservations      = {}    # slug -> time handed out by _ann_unique_slug()
+_slug_reservations_lock = threading.Lock()
+
+
 def _ann_unique_slug(base: str, exclude_id: int = None) -> str:
     """Append a counter suffix until the slug is free -- both in the
     announcements table and on disk.
@@ -14444,19 +14476,33 @@ def _ann_unique_slug(base: str, exclude_id: int = None) -> str:
     an existing announcement row at audio that had been replaced under it.
     An excluded row's own slug is still returned untouched, so re-saving a
     row keeps its path (what lets a TTS edit os.replace() atomically in
-    place)."""
+    place).
+
+    Neither the row nor the file exists until the caller has finished
+    converting/synthesizing audio -- tens of seconds for Piper on a Pi -- so
+    every slug handed out is also reserved in-process for
+    SLUG_RESERVATION_SEC. Without that, two creates of the same name in
+    that window both got the same slug: the second ffmpeg overwrote the
+    first's audio and its INSERT failed on the UNIQUE constraint."""
     db = get_db()
-    slug = base
-    i = 1
-    while True:
-        q = "SELECT id FROM announcements WHERE slug=?"
-        row = db.execute(q, (slug,)).fetchone()
-        if row is not None and exclude_id and row["id"] == exclude_id:
-            return slug
-        if row is None and not _sound_slug_taken_on_disk(slug):
-            return slug
-        slug = f"{base}_{i}"
-        i += 1
+    with _slug_reservations_lock:
+        now = time.time()
+        for s, t in list(_slug_reservations.items()):
+            if now - t > SLUG_RESERVATION_SEC:
+                del _slug_reservations[s]
+        slug = base
+        i = 1
+        while True:
+            q = "SELECT id FROM announcements WHERE slug=?"
+            row = db.execute(q, (slug,)).fetchone()
+            if row is not None and exclude_id and row["id"] == exclude_id:
+                return slug
+            if (row is None and slug not in _slug_reservations
+                    and not _sound_slug_taken_on_disk(slug)):
+                _slug_reservations[slug] = now
+                return slug
+            slug = f"{base}_{i}"
+            i += 1
 
 
 def _convert_to_ulaw(src: str, dest: str) -> None:
@@ -14944,15 +14990,17 @@ def api_ann_delete(ann_id):
     if not row:
         return jsonify({"error": "Not found"}), 404
 
+    # Row first: if the DELETE fails, the announcement must still have its
+    # audio, rather than staying scheduled against a file already removed.
+    db.execute("DELETE FROM announcements WHERE id=?", (ann_id,))
+    db.commit()
+
     sound = _ann_sound_path(row["slug"])
     try:
         if os.path.exists(sound):
             os.unlink(sound)
     except Exception as e:
         log("WARN", f"[ANNOUNCE] Could not delete sound file {sound}: {e}")
-
-    db.execute("DELETE FROM announcements WHERE id=?", (ann_id,))
-    db.commit()
     log("INFO", f"[ANNOUNCE] Deleted announcement id={ann_id} '{row['name']}'")
     return jsonify({"ok": True})
 
