@@ -1905,6 +1905,29 @@ def _release_open_db_transaction(exc):
                      f"{request.endpoint}: {e}")
 
 
+def _rollback_leaked_db_transaction(where):
+    """Background-thread counterpart of _release_open_db_transaction(). A
+    poller's cached connection lives as long as the thread, and most of
+    their write paths sit inside a try/except that logs and carries on, so a
+    failed write (a busy timeout, a constraint error) left its implicit
+    transaction open: the next write on that connection then failed too, or
+    the thread held the write lock and failed every other writer as well.
+    Called once per loop iteration, after the work and before the sleep, and
+    in the except of callbacks that run on a library's thread rather than
+    one of ours (paho-mqtt, the IRC read loop). By then every write path has
+    already committed, so anything still open is leftover from a failure
+    and is rolled back, not committed -- committing could persist half of
+    an aborted multi-statement write."""
+    conn = getattr(_db_local, 'conn', None)
+    if conn is None or not conn.in_transaction:
+        return
+    try:
+        conn.rollback()
+        log("WARN", f"[DB] {where} left a transaction open; rolled it back")
+    except sqlite3.Error as e:
+        log("ERROR", f"[DB] Could not roll back {where}'s open transaction: {e}")
+
+
 @app.after_request
 def _no_cache_auth_pages(resp):
     """
@@ -3342,6 +3365,7 @@ def _poll_loop():
 
         except Exception as outer:
             log("ERROR", f"[AMI-POLL] Unexpected outer error: {outer}")
+        _rollback_leaked_db_transaction("AMI poller")
 
         # A cycle that *raises* is logged above; a cycle that merely takes too
         # long is just as damaging and used to be invisible. Everything after
@@ -4822,6 +4846,7 @@ def _remember_meshtastic_node_name(nodeinfo):
         db.commit()
     except Exception as e:
         log("WARN", f"[MESHTASTIC] Failed to persist node name (not fatal): {e}")
+        _rollback_leaked_db_transaction("Meshtastic node-name save")
 
 
 def _meshtastic_on_message(psk, msg):
@@ -4898,6 +4923,7 @@ def _meshtastic_on_message(psk, msg):
         db.commit()
     except Exception as e:
         log("WARN", f"[MESHTASTIC] Failed to persist message (not fatal): {e}")
+        _rollback_leaked_db_transaction("Meshtastic message save")
 
 
 # Meshtastic Discord relay -- one-way mirror of decoded Meshtastic text
@@ -12322,6 +12348,7 @@ def _irc_relay_on_message(nick, text):
         db.commit()
     except Exception as e:
         log("WARN", f"[IRC-RELAY] Failed to persist inbound message (not fatal): {e}")
+        _rollback_leaked_db_transaction("IRC inbound message save")
 
 
 def _irc_relay_send_worker():
@@ -12572,6 +12599,8 @@ def _chat_janitor_loop():
                 log('INFO', f"[CHAT] janitor pruned {aged} aged + {over_cap} over-cap message(s)")
         except Exception as e:
             log('WARN', f"[CHAT] janitor sweep failed: {e}")
+        finally:
+            _rollback_leaked_db_transaction("chat janitor")
 
 
 def start_chat_janitor():
@@ -12634,6 +12663,8 @@ def _recording_janitor_loop():
             log('INFO', f'[RECORDING] janitor purged {len(to_delete)} recording(s)')
         except Exception as e:
             log('ERROR', f'[RECORDING] janitor loop error: {e}\n{traceback.format_exc()}')
+        finally:
+            _rollback_leaked_db_transaction("recording janitor")
 
 
 def start_recording_janitor():
@@ -13162,6 +13193,7 @@ def _asl_update_poll_loop():
         except Exception as e:
             log("WARN", f"[ASL-UPDATE] weekly check failed: {e}")
             state = None
+        _rollback_leaked_db_transaction("Asterisk update check")
         if state is None or state.get("refresh_ok") is False:
             time.sleep(ASL_UPDATE_RETRY_INTERVAL)
 
@@ -14662,6 +14694,8 @@ def _announce_loop():
             _run_due_announcements()
         except Exception as e:
             log("ERROR", f"[ANNOUNCE] Scheduler error: {e}")
+        finally:
+            _rollback_leaked_db_transaction("announcer")
 
 
 def start_announcer():
@@ -17663,6 +17697,7 @@ def _nws_alert_poll_loop():
             db.commit()
         except Exception as e:
             log("WARN", f"[NWS-POLL] Cycle error: {e}")
+            _rollback_leaked_db_transaction("NWS poller")
             try:
                 db = get_db()
                 db.execute(
@@ -17672,6 +17707,7 @@ def _nws_alert_poll_loop():
                 db.commit()
             except Exception:
                 pass
+        _rollback_leaked_db_transaction("NWS poller")
 
         _nws_backoff_level = 0 if success else min(_nws_backoff_level + 1, 6)
         sleep_time = min(_NWS_POLL_INTERVAL * (2 ** _nws_backoff_level), _NWS_MAX_SLEEP)
@@ -18076,6 +18112,8 @@ def _connector_loop():
             _run_connectors()
         except Exception as e:
             log("ERROR", f"[CONNECTOR] Scheduler error: {e}")
+        finally:
+            _rollback_leaked_db_transaction("Smart Connector scheduler")
 
 
 def start_connector_scheduler():
@@ -18775,6 +18813,8 @@ def _id_monitor_loop():
             _run_id_monitors()
         except Exception as e:
             log("ERROR", f"[ID] Monitor error: {e}")
+        finally:
+            _rollback_leaked_db_transaction("ID monitor")
 
 
 def start_id_monitor():
